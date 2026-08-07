@@ -147,6 +147,14 @@ if(SKATE3_EFFECTIVE_TITLE_UPDATE_PACKAGE STREQUAL "")
         set(SKATE3_EFFECTIVE_TITLE_UPDATE_PACKAGE "${SKATE3_LOCAL_TITLE_UPDATE_PACKAGE}")
     endif()
 endif()
+set(SKATE3_HAS_LOOSE_TITLE_UPDATE OFF)
+if(SKATE3_EFFECTIVE_TITLE_UPDATE_PACKAGE STREQUAL ""
+   AND EXISTS "${SKATE3_GAME_DATA_ROOT}/default.xexp"
+   AND EXISTS "${SKATE3_GAME_DATA_ROOT}/data/webkit/EAWebkit.xexp")
+    set(SKATE3_HAS_LOOSE_TITLE_UPDATE ON)
+    message(STATUS
+        "Skate 3 loose title update detected in ${SKATE3_GAME_DATA_ROOT}")
+endif()
 
 set(SKATE3_PATCHED_DEFAULT_XEX_LINE "")
 set(SKATE3_PATCHED_EAWEBKIT_XEX_LINE "")
@@ -242,9 +250,20 @@ include(cmake/CodegenTargets.cmake)
 set(SKATE3_COMMON_SOURCES
     src/exception_compat.cpp
     src/skate3_app_common.cpp
+    src/skate3_cac_gesture.cpp
+    src/skate3_dlc_runtime.cpp
+    src/skate3_custom_trick.cpp
     src/skate3_demo_path.cpp
     src/skate3_draw_distance.cpp
     src/skate3_fov.cpp
+    src/skate3_function_coverage.cpp
+    src/skate3_input_history_watch.cpp
+    src/skate3_input_lab.cpp
+    src/skate3_mechanics_sandbox.cpp
+    src/skate3_mechanics_sandbox_map.cpp
+    src/skate3_target_trace.cpp
+    src/skate3_trick_overrides.cpp
+    src/skate3_trick_pipeline.cpp
     src/skate3_iso_installer.cpp
     src/native/skate3_native_diagnostics.cpp
     src/native/skate3_native_entity.cpp
@@ -252,6 +271,7 @@ set(SKATE3_COMMON_SOURCES
     src/native/skate3_native_lw.cpp
     src/native/skate3_native_palette.cpp
     src/skate3_native_debug_dialog.cpp
+    src/skate3_scoring.cpp
     src/skate3_native_render.cpp
     src/skate3_native_scene.cpp
     src/skate3_native_scene_gpu.cpp
@@ -329,7 +349,8 @@ add_custom_command(
     VERBATIM)
 target_sources(skate3 PRIVATE ${SKATE3_NATIVE_SHADER_HEADER})
 target_compile_definitions(skate3 PRIVATE SKATE3_BUILD_CONFIG="$<CONFIG>")
-if(NOT SKATE3_EFFECTIVE_TITLE_UPDATE_PACKAGE STREQUAL "")
+if(NOT SKATE3_EFFECTIVE_TITLE_UPDATE_PACKAGE STREQUAL ""
+   OR SKATE3_HAS_LOOSE_TITLE_UPDATE)
     target_compile_definitions(skate3 PRIVATE SKATE3_HAS_TITLE_UPDATE=1)
 else()
     target_compile_definitions(skate3 PRIVATE SKATE3_HAS_TITLE_UPDATE=0)
@@ -366,12 +387,17 @@ if(WIN32)
     target_link_libraries(skate3 PRIVATE comdlg32 winhttp d3dcompiler gdiplus)
 endif()
 
+set(SKATE3_REXRUNTIME_TARGET rexruntime)
+if(NOT TARGET rexruntime AND TARGET rex::runtime)
+    set(SKATE3_REXRUNTIME_TARGET rex::runtime)
+endif()
+
 add_custom_target(skate3_stage_runtime_library
     COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:skate3>"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "$<TARGET_FILE:rexruntime>"
+        "$<TARGET_FILE:${SKATE3_REXRUNTIME_TARGET}>"
         "$<TARGET_FILE_DIR:skate3>"
-    DEPENDS rexruntime
+    DEPENDS ${SKATE3_REXRUNTIME_TARGET}
     VERBATIM
 )
 add_dependencies(skate3 skate3_stage_runtime_library)
@@ -387,6 +413,19 @@ if(NOT SKATE3_EFFECTIVE_TITLE_UPDATE_PACKAGE STREQUAL "")
             "${SKATE3_TITLE_UPDATE_EAWEBKIT_XEXP}"
             "$<TARGET_FILE_DIR:skate3>/game/data/webkit/EAWebkit.xexp"
         DEPENDS skate3-title-update-codegen-inputs
+        VERBATIM
+    )
+    add_dependencies(skate3 skate3_stage_title_update_patches)
+elseif(SKATE3_HAS_LOOSE_TITLE_UPDATE)
+    add_custom_target(skate3_stage_title_update_patches
+        COMMAND ${CMAKE_COMMAND} -E make_directory
+            "$<TARGET_FILE_DIR:skate3>/game/data/webkit"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${SKATE3_GAME_DATA_ROOT}/default.xexp"
+            "$<TARGET_FILE_DIR:skate3>/game/default.xexp"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${SKATE3_GAME_DATA_ROOT}/data/webkit/EAWebkit.xexp"
+            "$<TARGET_FILE_DIR:skate3>/game/data/webkit/EAWebkit.xexp"
         VERBATIM
     )
     add_dependencies(skate3 skate3_stage_title_update_patches)

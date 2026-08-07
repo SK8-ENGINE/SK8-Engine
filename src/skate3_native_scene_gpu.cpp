@@ -4,6 +4,7 @@
 // cross-thread state lives in skate3_native_scene_state.h.
 
 #include "skate3_native_debug_dialog.h"
+#include "skate3_demo_path.h"
 #include "skate3_native_scene.h"
 
 #include "generated/skate3_init.h"
@@ -58,6 +59,8 @@
 #endif
 #include "skate3_native_scene_state.h"
 #include "skate3_native_scene_gpu_internal.h"
+#include "skate3_mechanics_sandbox.h"
+#include "skate3_mechanics_sandbox_map.h"
 
 // Cvars defined in skate3_native_scene.cpp (and SDK cvars re-declared there).
 REXCVAR_DECLARE(bool, async_shader_compilation);
@@ -726,6 +729,71 @@ nrhi::Buffer* AcquireMeshUploadBuffer(nrhi::Device* device, size_t size) {
     }
   }
   return CreateUploadBuffer(device, size, nrhi::BufferBindClass::kVertexIndex);
+}
+
+constexpr uint32_t kSandboxMapMesh = 0xF00D0001u;
+
+bool EnsureSandboxMapMesh(nrhi::Device* device) {
+  if (g_r.meshes.find(kSandboxMapMesh) != g_r.meshes.end()) {
+    return true;
+  }
+  const mechanics_sandbox::map::VisualMesh& mesh =
+      mechanics_sandbox::map::TestVisualMesh();
+  if (mesh.vertices.empty() || mesh.indices.empty() ||
+      mesh.vertices.size() > 0xFFFFu) {
+    static std::atomic<uint32_t> s_invalid_map_log{0};
+    if (s_invalid_map_log.fetch_add(1, std::memory_order_relaxed) == 0) {
+      REXLOG_ERROR("native-scene: sandbox map geometry is empty or too large");
+    }
+    return false;
+  }
+  static_assert(sizeof(mechanics_sandbox::map::VisualVertex) == 56);
+  nrhi::Buffer* vb = AcquireMeshUploadBuffer(
+      device, mesh.vertices.size() * sizeof(mechanics_sandbox::map::VisualVertex));
+  nrhi::Buffer* ib = AcquireMeshUploadBuffer(device,
+                                              mesh.indices.size() * sizeof(uint16_t));
+  if (vb == nullptr || ib == nullptr) {
+    static std::atomic<uint32_t> s_buffer_map_log{0};
+    if (s_buffer_map_log.fetch_add(1, std::memory_order_relaxed) == 0) {
+      REXLOG_ERROR("native-scene: sandbox map buffer allocation failed (vb={} ib={})",
+                   vb != nullptr ? 1 : 0, ib != nullptr ? 1 : 0);
+    }
+    PoolMeshBuffer(device, vb);
+    PoolMeshBuffer(device, ib);
+    return false;
+  }
+  void* vb_ptr = device->Map(vb);
+  void* ib_ptr = device->Map(ib);
+  if (vb_ptr == nullptr || ib_ptr == nullptr) {
+    static std::atomic<uint32_t> s_map_map_log{0};
+    if (s_map_map_log.fetch_add(1, std::memory_order_relaxed) == 0) {
+      REXLOG_ERROR("native-scene: sandbox map buffer mapping failed (vb={} ib={})",
+                   vb_ptr != nullptr ? 1 : 0, ib_ptr != nullptr ? 1 : 0);
+    }
+    if (vb_ptr != nullptr) device->Unmap(vb);
+    if (ib_ptr != nullptr) device->Unmap(ib);
+    PoolMeshBuffer(device, vb);
+    PoolMeshBuffer(device, ib);
+    return false;
+  }
+  std::memcpy(vb_ptr, mesh.vertices.data(),
+              mesh.vertices.size() * sizeof(mechanics_sandbox::map::VisualVertex));
+  std::memcpy(ib_ptr, mesh.indices.data(), mesh.indices.size() * sizeof(uint16_t));
+  device->Unmap(vb);
+  device->Unmap(ib);
+  MeshBuffers buffers;
+  buffers.vb = vb;
+  buffers.ib = ib;
+  buffers.vb_view = {vb, 0,
+                     uint32_t(mesh.vertices.size() * sizeof(mechanics_sandbox::map::VisualVertex)),
+                     uint32_t(sizeof(mechanics_sandbox::map::VisualVertex))};
+  buffers.ib_view = {ib, 0, uint32_t(mesh.indices.size() * sizeof(uint16_t))};
+  buffers.fingerprint = 1;
+  buffers.last_used_frame = 0;
+  g_r.meshes.emplace(kSandboxMapMesh, std::move(buffers));
+  REXLOG_INFO("native-scene: sandbox map mesh ready (vertices={} indices={})",
+              mesh.vertices.size(), mesh.indices.size());
+  return true;
 }
 
 uint16_t SwapU16(uint16_t v) { return uint16_t((v >> 8) | (v << 8)); }
@@ -5086,7 +5154,11 @@ bool YieldForMenus(const NativeGuestOutputRenderContext& context) {
   static bool s_in_loading = false;
   static bool s_seen_gameplay = false;
   static bool s_pause_native = false;
-  const bool in_menus = rex::kernel::guest_presence::GameplayContextValue() == 0;
+  const uint32_t gameplay_context =
+      rex::kernel::guest_presence::GameplayContextValue();
+  const bool direct_boot_loading =
+      skate3::demo_path::DirectBootLoadingVisualActive();
+  const bool in_menus = gameplay_context == 0 || direct_boot_loading;
   // Render-thread mirror for the 2D texture resolver: menu screens shorten
   // the content-liveness recheck cadence (see resolve_2d_texture) so
   // in-place rewrites of UI textures (the one-shot skater-portrait resolves)
@@ -5106,7 +5178,9 @@ bool YieldForMenus(const NativeGuestOutputRenderContext& context) {
   // boot_native lifts the first-gameplay prerequisite from both native menu
   // modes: a boot-frontend 3D backdrop renders like a pause backdrop, and
   // everything else (videos, menus, the first load) renders as 2D-over-black.
-  const bool boot_native = REXCVAR_GET(skate3_native_render_scene_boot_native);
+  const bool boot_native =
+      direct_boot_loading ||
+      REXCVAR_GET(skate3_native_render_scene_boot_native);
   bool pause_native = false;
   if (in_menus && (s_seen_gameplay || boot_native) &&
       REXCVAR_GET(skate3_native_render_scene_pause_native)) {
@@ -7534,12 +7608,119 @@ void AddGuestOcclSkipped(uint32_t n) {
 
 namespace {
 
+bool SandboxShouldDrawItem(const DrawItem& item) {
+  if (!mechanics_sandbox::Active()) {
+    return true;
+  }
+  switch (mechanics_sandbox::CurrentDiagnosticMode()) {
+    case mechanics_sandbox::DiagnosticMode::BackgroundOnly:
+      return false;
+    case mechanics_sandbox::DiagnosticMode::CandidateWorldOn:
+      return true;
+    case mechanics_sandbox::DiagnosticMode::AllDynamic:
+    case mechanics_sandbox::DiagnosticMode::CandidateOnly:
+      // World sort-list contexts are non-zero too. Use the existing capture
+      // provenance bit: dynamic presentation items are marked at their
+      // verified capture seams, while static world items remain in the scene
+      // only to preserve camera/frame state.
+      return item.dyn_entity;
+  }
+  return false;
+}
+
+void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
+                    nrhi::Cmd* cmd, const FrameScene& scene,
+                    uint64_t frame_number, bool use_depth) {
+  if (!mechanics_sandbox::VisualMapEnabled() || cmd == nullptr ||
+      !EnsureSandboxMapMesh(context.device)) {
+    return;
+  }
+  mechanics_sandbox::ObserveSandboxCamera(scene.cam_pos);
+  float origin[3] = {};
+  if (!mechanics_sandbox::SandboxMapOrigin(origin)) {
+    static std::atomic<uint32_t> s_origin_log{0};
+    if (s_origin_log.fetch_add(1, std::memory_order_relaxed) == 0) {
+      REXLOG_WARN("native-scene: sandbox map draw skipped; origin unavailable");
+    }
+    return;
+  }
+  static std::atomic<uint32_t> s_map_transform_log{0};
+  if (s_map_transform_log.fetch_add(1, std::memory_order_relaxed) == 0) {
+    REXLOG_INFO("native-scene: sandbox map draw transform origin=({:.3f},{:.3f},{:.3f}) "
+                "camera=({:.3f},{:.3f},{:.3f})",
+                origin[0], origin[1], origin[2], scene.cam_pos[0],
+                scene.cam_pos[1], scene.cam_pos[2]);
+  }
+  const auto it = g_r.meshes.find(kSandboxMapMesh);
+  if (it == g_r.meshes.end()) {
+    return;
+  }
+  it->second.last_used_frame = frame_number;
+
+  // The native scene's published view is camera-relative: its captured
+  // camera position is the stable presentation origin, while the verified
+  // board-position seam is retained separately for collision telemetry. Use
+  // the camera frame here so the authored visual stays in the visible scene
+  // even when the guest board coordinates are in the retail map's offset
+  // frame.
+  float constants[52] = {};
+  constants[0] = 1.0f;
+  constants[5] = 1.0f;
+  constants[10] = 1.0f;
+  constants[15] = 1.0f;
+  constants[12] = scene.cam_pos[0];
+  constants[13] = scene.cam_pos[1];
+  constants[14] = scene.cam_pos[2];
+  for (int r = 0; r < 4; ++r) {
+    for (int c = 0; c < 4; ++c) {
+      float sum = 0.0f;
+      for (int k = 0; k < 4; ++k) {
+        sum += constants[r * 4 + k] * scene.view_proj[k * 4 + c];
+      }
+      constants[16 + r * 4 + c] = sum;
+    }
+  }
+  // tint.a > 0 selects the scene shader's flat-color path, avoiding guest
+  // material/lightmap state while still exercising the real scene PSO.
+  constants[40] = 0.14f;
+  constants[41] = 0.28f;
+  constants[42] = 0.36f;
+  constants[43] = 1.0f;
+  constants[36] = scene.cam_pos[0];
+  constants[37] = scene.cam_pos[1];
+  constants[38] = scene.cam_pos[2];
+
+  cmd->SetBindingLayout(g_r.layout);
+  cmd->SetPipeline(use_depth ? g_r.pso : g_r.pso_nodepth);
+  cmd->SetRootConstants(0, 52, constants, 0);
+  cmd->SetBufferSrv(3, g_r.bone_ring, 0);
+  cmd->SetTexture(1, g_r.white.srv);
+  cmd->SetTexture(2, g_r.white.srv);
+  cmd->SetTexture(4, g_r.white.srv);
+  cmd->SetTexture(5, g_r.white.srv);
+  cmd->SetTexturePair(7, g_r.white_cube.srv, g_r.white.srv);
+  nrhi::TextureView* t8_default[3] = {g_r.white.srv, g_r.white.srv,
+                                       g_r.white.srv};
+  cmd->SetTextures(8, t8_default, 3);
+  cmd->SetVertexBuffer(it->second.vb_view.buffer, it->second.vb_view.offset,
+                       it->second.vb_view.size_bytes,
+                       it->second.vb_view.stride);
+  cmd->SetIndexBuffer(it->second.ib_view.buffer, it->second.ib_view.offset,
+                      it->second.ib_view.size_bytes);
+  cmd->SetPrimitiveTopology(nrhi::PrimitiveTopology::kTriangleList);
+  cmd->DrawIndexed(uint32_t(mechanics_sandbox::map::TestVisualMesh().indices.size()),
+                   0, 0);
+  mechanics_sandbox::RecordMapDraw(true);
+}
+
 bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_data*/) {
   if (!SceneEnabled() ||
       (context.backend != NativeGuestOutputBackend::kD3D12 &&
        context.backend != NativeGuestOutputBackend::kVulkan)) {
     return false;
   }
+  skate3::mechanics_sandbox::RecordRenderStage(
+      skate3::mechanics_sandbox::RenderStage::Entered);
   {
     // Debug stress driver (skate3_native_render_scene_maxq_cycle): cycles
     // the max-quality toggle to exercise the hot rebuild path.
@@ -7566,18 +7747,26 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
     UpdatePhotoGrabWindow(base);
   }
   if (YieldForMenus(context)) {
+    skate3::mechanics_sandbox::RecordRenderStage(
+        skate3::mechanics_sandbox::RenderStage::YieldedForMenus);
     return false;
   }
   if (base == nullptr) {
     return false;
   }
   if (YieldForPhotoDisplay()) {
+    skate3::mechanics_sandbox::RecordRenderStage(
+        skate3::mechanics_sandbox::RenderStage::YieldedForPhoto);
     return false;
   }
   if (YieldForPhotoEditor(base)) {
+    skate3::mechanics_sandbox::RecordRenderStage(
+        skate3::mechanics_sandbox::RenderStage::YieldedForPhoto);
     return false;
   }
   if (YieldForCasEditor(base)) {
+    skate3::mechanics_sandbox::RecordRenderStage(
+        skate3::mechanics_sandbox::RenderStage::YieldedForPhoto);
     return false;
   }
 
@@ -7629,16 +7818,21 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
     scene_ptr = s_loading_scene;
   } else {
     std::lock_guard<std::mutex> lock(g_scene_mutex);
-    if (!g_scene || g_scene->items.empty()) {
+    if (!g_scene ||
+        (g_scene->items.empty() && !skate3::mechanics_sandbox::Active())) {
       return false;
     }
     scene_ptr = g_scene;
   }
   const FrameScene& scene = *scene_ptr;
+  skate3::mechanics_sandbox::RecordRenderStage(
+      skate3::mechanics_sandbox::RenderStage::SceneReady);
 
   if (!EnsurePipeline(context)) {
     return false;
   }
+  skate3::mechanics_sandbox::RecordRenderStage(
+      skate3::mechanics_sandbox::RenderStage::PipelineReady);
   // Flush any barriers pushed by lazy resource creation (white texture).
   context.cmd->FlushBarriers();
 
@@ -7899,9 +8093,11 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
   // Loading frames clear to black (the game's loading UI composes over
   // black); real scenes keep the sky-ish debug clear that shows through
   // undecoded holes.
-  float clear_color[4] = {loading_native ? 0.0f : 0.25f,
-                          loading_native ? 0.0f : 0.35f,
-                          loading_native ? 0.0f : 0.55f, 1.0f};
+  const bool sandbox = skate3::mechanics_sandbox::Active();
+  float clear_color[4] = {
+      loading_native ? 0.0f : (sandbox ? 0.075f : 0.25f),
+      loading_native ? 0.0f : (sandbox ? 0.105f : 0.35f),
+      loading_native ? 0.0f : (sandbox ? 0.145f : 0.55f), 1.0f};
   if (hdr_on) {
     // The clear is authored in the final gamma space; the HDR plane holds
     // pre-tonemap values, so encode through the tone chain's inverse (the
@@ -7935,6 +8131,8 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
   cmd->SetScissor(scissor);
   cmd->SetBindingLayout(g_r.layout);
   cmd->SetPipeline(use_depth ? g_r.pso : g_r.pso_nodepth);
+  skate3::mechanics_sandbox::RecordRenderStage(
+      skate3::mechanics_sandbox::RenderStage::BackgroundCleared);
   // Per-item PSO tracking for the opaque pass: two_sided_sheet meshes swap
   // to the backface-culling variant (see MeshBuffers), everything else uses
   // the pass PSO. Only meaningful while use_depth; the transparent sub-pass
@@ -9702,9 +9900,20 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
   // occlusion-proven-hidden items cost CPU here but can never contribute
   // pixels; a large share in either class is a visibility-culling gap, not
   // a scene-density cost.
+  const auto record_item_draws = [&](const DrawItem& item,
+                                     uint32_t before_draws) {
+    native_entity::CtxInfo identity;
+    if (item.ctx != 0 &&
+        native_entity::LookupCtx(item.ctx, &identity)) {
+      skate3::mechanics_sandbox::RecordRenderedPresentation(
+          identity.entity, drawn - before_draws);
+    }
+  };
   const auto timed_draw = [&](const DrawItem& item) {
     if (!prof_items) {
+      const uint32_t before_draws = drawn;
       draw_item(item);
+      record_item_draws(item, before_draws);
       return;
     }
     // Statics only (same gate as the retention pass): a skinned/ropa item's
@@ -9721,7 +9930,9 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
       indices += e.index_count;
     }
     const auto t0 = PerfClock::now();
+    const uint32_t before_draws = drawn;
     draw_item(item);
+    record_item_draws(item, before_draws);
     const uint64_t total_ns = perf_ns_since(t0);
     if (off) {
       g_pw_di_out.Add(total_ns);
@@ -9810,6 +10021,9 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
     }
     if (debug_mode == 3 && index >= 20) {
       break;
+    }
+    if (!SandboxShouldDrawItem(item)) {
+      continue;
     }
     if (ring_frame != nullptr) {
       SceneRingItem ri{};
@@ -10113,6 +10327,13 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
       timed_draw(*item);
     }
   }
+  // The authored graybox is an independent native presentation layer. It is
+  // drawn after the retained local skater pass with depth testing enabled, so
+  // it cannot hide the player while still showing geometry around them.
+  DrawSandboxMap(context, cmd, scene, frame_number, use_depth);
+  skate3::mechanics_sandbox::RecordRenderedItems(drawn);
+  skate3::mechanics_sandbox::RecordRenderStage(
+      skate3::mechanics_sandbox::RenderStage::MainPassComplete);
   g_pw_items.Add(perf_ns_since(items_t0));
   g_pw_pre.Add(uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
                    items_t0 - render_t0)
@@ -10539,6 +10760,8 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
     ApplyHdrPost(context, cmd, viewport, scissor, loading_native,
                  frame_number);
     post_ran = true;
+    skate3::mechanics_sandbox::RecordRenderStage(
+        skate3::mechanics_sandbox::RenderStage::HdrPostComplete);
   }
 
   if (post_ran) {
@@ -11255,7 +11478,11 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
   // them here IS the composite the (suppressed) emulated pass used to do.
   const auto twod_t0 = PerfClock::now();
   uint32_t drawn_2d = 0;
-  if (REXCVAR_GET(skate3_native_render_scene_2d) && g_r.pso_2d != nullptr &&
+  const bool suppress_direct_boot_frontend_overlay =
+      skate3::demo_path::DirectBootLoadingVisualActive() &&
+      rex::kernel::guest_presence::GameplayContextValue() != 0;
+  if (!suppress_direct_boot_frontend_overlay &&
+      REXCVAR_GET(skate3_native_render_scene_2d) && g_r.pso_2d != nullptr &&
       g_r.ui_ring_cpu != nullptr) {
     std::vector<Draw2d> scene_2d;
     {
@@ -11547,6 +11774,8 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
                nrhi::ResourceState::kGuestOutput);
   cmd->FlushBarriers();
   cmd->ProfileRegion(nrhi::ProfileStage::kTail);
+  skate3::mechanics_sandbox::RecordRenderStage(
+      skate3::mechanics_sandbox::RenderStage::Presented);
 
   g_pw_2d.Add(perf_ns_since(twod_t0));
   g_pw_tail.Add(uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -11597,4 +11826,3 @@ void ResetSceneFailure() {}
 }  // namespace skate3::native_scene
 
 #endif  // REX_HAS_D3D12 || REX_HAS_VULKAN
-

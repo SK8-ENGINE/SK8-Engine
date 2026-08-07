@@ -1,10 +1,13 @@
 #include "skate3_app_common.h"
 
 #include "skate3_demo_path.h"
+#include "skate3_custom_trick.h"
 #include "skate3_fov.h"
+#include "skate3_input_lab.h"
 #include "skate3_iso_installer.h"
 #include "skate3_native_render.h"
 #include "skate3_native_scene.h"
+#include "skate3_scoring.h"
 #include "skate3_screenshot.h"
 #include "skate3_shader_disasm.h"
 #include "skate3_win_icon.h"
@@ -109,6 +112,15 @@ REXCVAR_DEFINE_DOUBLE(skate3_ultrawide_target_aspect, 0.0, "Skate 3",
 namespace {
 
 void ApplyDemoPathProfileOverride() {
+  if (rex::cvar::Query<bool>("skate3_direct_boot")) {
+    // Direct boot must resume a local profile and its save. An install with
+    // no persisted profiles file uses an ephemeral default profile, so make
+    // its offline sign-in state explicit before XAM initializes. This is a
+    // local profile session, not an Xbox Live sign-in.
+    rex::cvar::SetFlagByName("user_profile_signed_in", "true");
+    rex::cvar::SetFlagByName("user_live_signed_in", "false");
+    return;
+  }
   if (!rex::cvar::Query<bool>("skate3_demo_path") &&
       !rex::cvar::Query<bool>("skate3_demo_path_probe")) {
     return;
@@ -793,11 +805,17 @@ void Skate3BaseApp::OnPostSetup() {
   auto* dispatcher = runtime()->function_dispatcher();
   skate3::native_render::Install();
   skate3::demo_path::InstallHooks(dispatcher);
+  skate3::custom_trick::InstallHooks(dispatcher);
+  skate3::scoring::InstallHooks(dispatcher);
+  skate3::input_lab::InstallHooks(dispatcher);
+  skate3::input_lab::Install();
   // User-facing intro-movie skip (independent of the demo path): the movie
   // completion override polls the merged UI pad state through this provider.
   skate3::demo_path::SetUiInputProvider([this]() {
     return static_cast<rex::input::InputSystem*>(runtime()->input_system());
   });
+  skate3::custom_trick::InstallInputDriver(
+      static_cast<rex::input::InputSystem*>(runtime()->input_system()));
   if (dispatcher->InitializeFunctionTable(eawebkit_PPCImageConfig.code_base,
                                           eawebkit_PPCImageConfig.code_size,
                                           eawebkit_PPCImageConfig.image_base,
@@ -1348,5 +1366,14 @@ void Skate3BaseApp::InstallDlcPackages() {
   } else {
     REXLOG_INFO("No Skate 3 DLC packages found. Drop legally obtained DLC package files in {}",
                 user_dlc_root.string());
+  }
+
+  const auto installed_marketplace = runtime()->kernel_state()->content_manager()->ListContent(
+      static_cast<uint32_t>(rex::system::xam::DummyDeviceId::HDD), 0,
+      rex::system::XContentType::kMarketplaceContent, title_id);
+  REXLOG_INFO("Skate 3 installed Marketplace content audit: {} package(s) under {}",
+              installed_marketplace.size(), runtime()->user_data_root().string());
+  for (const auto& content : installed_marketplace) {
+    REXLOG_INFO("Skate 3 installed Marketplace package: {}", content.file_name());
   }
 }

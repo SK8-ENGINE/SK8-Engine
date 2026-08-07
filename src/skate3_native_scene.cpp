@@ -5,6 +5,7 @@
 // skate3_native_scene_state.h.
 
 #include "skate3_native_scene.h"
+#include "skate3_mechanics_sandbox.h"
 
 #include "generated/skate3_init.h"
 
@@ -8296,6 +8297,7 @@ void BuildFrameScene(uint8_t* base, const SubmitRecord* records, size_t count) {
   if (!SceneEnabled()) {
     return;
   }
+  mechanics_sandbox::BeginPresentationFrame();
   // The frame-end walks below chase captured pointers whose ranges world
   // streaming may have revoked during the frame; recover raw-load read
   // faults for the whole build (POSIX; no-op on Windows).
@@ -8554,6 +8556,23 @@ void BuildFrameScene(uint8_t* base, const SubmitRecord* records, size_t count) {
         continue;
       }
       const DrawItem& cand = dynitems[r.c - 1];
+      if (mechanics_sandbox::Active()) {
+        native_entity::CtxInfo identity;
+        const bool mapped = cand.ctx != 0 &&
+                            native_entity::LookupCtx(cand.ctx, &identity);
+        if (mapped) {
+          mechanics_sandbox::RecordPresentationIdentity(
+              identity.entity, identity.instance,
+              static_cast<uint8_t>(identity.cls));
+        }
+        const auto decision = mechanics_sandbox::ClassifyPresentationEntity(
+            mapped ? identity.entity : 0,
+            mapped ? static_cast<uint8_t>(identity.cls) : 0);
+        mechanics_sandbox::RecordPresentation(decision);
+        if (decision != mechanics_sandbox::PresentationDecision::Keep) {
+          continue;
+        }
+      }
       if (cand.pending) {
         // Deferred mesh whose draw never came, or a capture the palette
         // acceptance gates refused. Remember it: if the instance does not
@@ -10487,4 +10506,3 @@ extern "C" REX_FUNC(sub_82802A00) {
   }
   __imp__sub_82802A00(ctx, base);
 }
-
