@@ -76,9 +76,11 @@ guest heap cannot leave a second multi-gigabyte process running.
 Install `tools/blender_owned_map/owned_world_material_addon.zip` through
 Blender's **Edit > Preferences > Get Extensions > Install from Disk**.
 The addon contains the complete exporter. Open **3D View > Sidebar >
-Skate 3 Map** to prepare a scene, assign selected objects as visual,
-collision, or grind data, place the spawn, edit world lighting, validate,
-and export without running Python scripts.
+Skate 3 Map**, place the player spawn, and export. An ordinary unconfigured
+`.blend` is prepared automatically: visible meshes, Principled materials and
+textures, UV channels, genuine Blender lights, and sensible static collision
+are adopted without scripts. Manual visual, collision, grind, material, door,
+and experimental NPC controls remain available as overrides.
 
 Full UI guidance, scene conventions, and optional command-line automation are
 documented in `tools/blender_owned_map/README.md`; the binary specification

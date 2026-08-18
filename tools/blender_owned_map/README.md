@@ -38,7 +38,41 @@ The zip contains the complete SKATE exporter. End users do not need the
 repository's Python files and do not need to use Blender's scripting
 workspace.
 
-## First map: UI workflow
+## Existing Blender map: one-click workflow
+
+An ordinary `.blend` file does not need to be rebuilt around SKATE
+collections before export:
+
+1. Open the map and save a working copy.
+2. Put the 3D cursor at the desired player start and select
+   **Set Spawn at 3D Cursor**.
+3. Choose **Export As...**.
+
+Validate and Export automatically adopts visible mesh objects, reads normal
+Principled BSDF base-colour, normal, emission, roughness, metallic and alpha
+inputs, copies existing UVs into the required map channels, assigns sensible
+Skate contact defaults from material names, and generates static collision
+from solid visible geometry. Existing collider conventions such as
+`Collider`, `Collision`, `UCX_`, `UBX_`, `USP_`, and `UCP_` are recognised as
+collision-only proxies. Common foliage, decal, backdrop, probe, and shadow-
+helper names remain presentation-only or are omitted as appropriate.
+
+Point, Spot, Area, and Sun objects that are genuine Blender lights export
+automatically. Empties merely named `Point Light`, `Spot Light`, or similar
+are not converted into invented lights. Existing `OW_*` authoring metadata is
+never replaced by automatic defaults.
+
+**Auto Prepare Blender Map** exposes the same conversion before export so its
+choices can be inspected and overridden. Automatic preparation is
+non-destructive: objects remain in their original collections, source meshes
+are not dissolved, and existing UVs and shader nodes are preserved. A mesh
+with no source UVs receives empty required layers and is reported for normal
+Blender unwrapping.
+
+Grind splines and experimental NPC paths remain deliberate authoring inputs;
+they cannot be inferred reliably from arbitrary visual geometry.
+
+## New authored map: detailed UI workflow
 
 1. Select **Prepare Scene**. This creates the required visual/collision and
    spawn structure, plus optional grind and NPC-path collections.
@@ -66,13 +100,23 @@ workspace.
    their colour, power, range, softness, direction, and spot cone export
    automatically. A normal Blender Sun controls the world sunlight.
 10. Choose **Validate Map**. Every blocking problem is shown directly in the
-   panel with the object name and suggested correction. Collision validation
-   scans the whole map in one pass rather than stopping at the first mesh.
+    panel with the object name and suggested correction. Collision validation
+    scans the whole map in one pass rather than stopping at the first mesh.
 11. Choose **Quick Export**, or **Export As...** to select another
     destination.
 
 The same exporter is also available through **File > Export > Skate 3 Custom
 Engine Map (.skate)**.
+
+During export, Blender's status bar and the map panel show a live percentage
+and the current collision, visual, texture, write, or cache stage. Large-map
+geometry is packed in bulk with Blender's bundled NumPy rather than serialized
+one Python vertex at a time. This keeps the same float32 SKATE records and is
+byte-checked against the scalar fallback; it does not simplify meshes, reduce
+texture resolution, or remove materials. GPU compute is not used because this
+work is Blender data extraction and binary file packing, where avoiding Python
+scalar overhead is substantially more useful than transferring the data to a
+graphics device.
 
 Maps can contain any number of local lights. The renderer dynamically keeps
 the lights relevant to the current view active instead of evaluating every

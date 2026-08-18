@@ -10,6 +10,9 @@ This is an experimental preview rather than a finished standalone game engine.
 - Very large maps currently load complete visual and collision packages.
   Collision streaming, HLOD generation, asynchronous asset I/O, and a formal
   memory budget are future work.
+- Automatic Blender-scene import favours immediate playability and may create
+  more detailed collision than a shipping map needs. Authors can replace it
+  with simpler collision proxies for performance and cleaner contact.
 - DXR mirrors require compatible D3D12 ray-tracing hardware. Raster fallback
   behavior is intentionally limited.
 - Map changes restart the process so static collision, grind, door, renderer,

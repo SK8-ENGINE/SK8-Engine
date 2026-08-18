@@ -69,6 +69,24 @@ def main() -> None:
             "UV layer helper failed",
         )
 
+        # Old add-on versions could leave imported scale-reference meshes in
+        # both export collections. Existing scenes must ignore them without
+        # requiring the author to repair collection membership manually.
+        helper_mesh = bpy.data.meshes.new("character_size_mesh")
+        helper_mesh.from_pydata(
+            [(0.0, 0.0, 0.0), (0.0, 0.0, 2.0), (0.25, 0.0, 0.0)],
+            [],
+            [(0, 1, 2)],
+        )
+        helper_mesh.update()
+        helper = bpy.data.objects.new("character_size", helper_mesh)
+        bpy.data.collections[
+            addon.exporter.VISUAL_COLLECTION
+        ].objects.link(helper)
+        bpy.data.collections[
+            addon.exporter.COLLISION_COLLECTION
+        ].objects.link(helper)
+
         cleanup_proxy = collision_object(
             "CollisionCleanupRegression",
             [

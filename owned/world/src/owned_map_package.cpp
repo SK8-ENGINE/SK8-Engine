@@ -38,6 +38,8 @@ constexpr std::array<char, 8> kMagicV8 = {
 constexpr std::uint32_t kEndianMarker = 0x12345678u;
 constexpr std::uint32_t kMaximumCount = 16u * 1024u * 1024u;
 constexpr std::uint32_t kMaximumTextureDimension = 8192u;
+constexpr std::uint32_t kMaximumTextureBytes =
+    kMaximumTextureDimension * kMaximumTextureDimension * 4u;
 constexpr std::uint32_t kMaximumStringBytes = 64u * 1024u;
 constexpr std::uint64_t kMaximumPackageBytes = 2ull * 1024ull * 1024ull * 1024ull;
 constexpr float kAreaEpsilon = 1.0e-10f;
@@ -526,7 +528,15 @@ MapDefinition LoadOwnedMapPackage(const std::filesystem::path& path) {
     texture.color_space =
         static_cast<TextureColorSpace>(reader.Scalar<std::uint32_t>());
     const std::uint32_t byte_count = reader.Scalar<std::uint32_t>();
-    RequireCount(byte_count, "texture byte");
+    const std::uint64_t expected_byte_count =
+        std::uint64_t(texture.width) * texture.height * 4u;
+    if (texture.width == 0 || texture.height == 0 ||
+        texture.width > kMaximumTextureDimension ||
+        texture.height > kMaximumTextureDimension ||
+        byte_count > kMaximumTextureBytes ||
+        byte_count != expected_byte_count) {
+      throw std::runtime_error("SKATE embedded texture is invalid");
+    }
     texture.rgba8 = reader.ByteVector(byte_count);
     map.textures.push_back(std::move(texture));
   }
