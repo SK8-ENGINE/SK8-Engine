@@ -96,6 +96,16 @@ Copy-Item -LiteralPath (
 )
 Copy-Item -LiteralPath (Join-Path $repoRoot 'release\maps\README.txt') `
     -Destination (Join-Path $stageRoot 'maps\README.txt')
+foreach ($bundledMapFile in @(
+    'blender_bake_showcase.skate',
+    'blender_bake_showcase.blend'
+)) {
+    Copy-Item -LiteralPath (
+        Join-Path $repoRoot "maps\$bundledMapFile"
+    ) -Destination (
+        Join-Path $stageRoot "maps\$bundledMapFile"
+    )
+}
 Copy-Item -LiteralPath (
     Join-Path $repoRoot 'tools\blender_owned_map\owned_world_material_addon.zip'
 ) -Destination (
@@ -121,9 +131,19 @@ $forbiddenNames = @(
     'default.xex', 'default.xexp', 'EAWebkit.xex', 'EAWebkit.xexp',
     'active_map.txt', 'settings.toml'
 )
+$allowedFirstPartyMapFiles = @(
+    'maps/blender_bake_showcase.skate',
+    'maps/blender_bake_showcase.blend'
+)
 $stagedFiles = Get-ChildItem -LiteralPath $stageRoot -Recurse -File
 foreach ($file in $stagedFiles) {
-    if ($forbiddenExtensions -contains $file.Extension.ToLowerInvariant() -or
+    $relative = [System.IO.Path]::GetRelativePath(
+        $stageRoot, $file.FullName
+    ).Replace('\', '/')
+    $isAllowedFirstPartyMap =
+        $allowedFirstPartyMapFiles -contains $relative
+    if ((-not $isAllowedFirstPartyMap -and
+         $forbiddenExtensions -contains $file.Extension.ToLowerInvariant()) -or
         $forbiddenNames -contains $file.Name) {
         throw "Forbidden release payload detected: $($file.FullName)"
     }

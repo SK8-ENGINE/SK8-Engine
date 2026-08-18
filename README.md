@@ -37,9 +37,10 @@ knowledge. After installing it, open **3D View → Sidebar → Skate 3 Map**,
 select **Prepare Scene**, assign your visual/collision/grind objects, place
 the spawn, validate, and export.
 
-No Skate 3 retail files, third-party maps, extracted assets, or Blender
-source scenes are distributed with this repository. You must provide your
-own legally obtained game copy, and map authors must have permission to
+The repository includes only our original Blender Feature Park demonstration
+and its self-contained Blender source under [`maps`](maps). No Skate 3 retail
+files, third-party maps, or extracted assets are distributed. You must provide
+your own legally obtained game copy, and map authors must have permission to
 distribute everything embedded in their SKATE packages.
 
 ## Licensing and upstream permission

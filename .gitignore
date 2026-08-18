@@ -30,6 +30,10 @@
 *.blend
 *.blend[0-9]
 
+# Reviewed first-party example map and its self-contained Blender source.
+!/maps/blender_bake_showcase.skate
+!/maps/blender_bake_showcase.blend
+
 # Local runtime/config overrides
 skate3.toml
 skate3_ultrawide_targets*.toml

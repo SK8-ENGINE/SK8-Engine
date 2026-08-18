@@ -17,8 +17,10 @@ water, weather, and renderer caches are rebuilt against one coherent world.
 The selected package is remembered for the next launch.
 
 Release archives contain a `maps` folder beside the executable, so that is
-the active folder for a normal extracted build. If no local `maps` folder is
-present, the game uses:
+the active folder for a normal extracted build. It includes the first-party
+Blender Feature Park demonstration and selects it automatically on a fresh
+installation. Its editable, self-contained `.blend` source is included beside
+the playable package. If no local `maps` folder is present, the game uses:
 
 - Windows: `%APPDATA%\skate3\maps`
 - portable mode: `maps` beside the executable

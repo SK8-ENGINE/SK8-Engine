@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.0-preview.2 - 2026-08-18
+
+- Bundled the original Blender Feature Park `.skate` map so a fresh
+  installation starts in the complete demonstration world.
+- Added the self-contained Blender 5.1 source scene under the top-level
+  `maps` folder as a working authoring example.
+- Updated release packaging and documentation to include only these two
+  explicitly reviewed first-party map files while continuing to reject
+  arbitrary map and Blender payloads.
+
 ## 0.1.0-preview.1 - 2026-08-18
 
 First public Windows/D3D12 preview.
