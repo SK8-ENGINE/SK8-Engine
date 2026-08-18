@@ -653,6 +653,33 @@ OwnedCollisionBuildSet CompileOwnedMapChunks(
     }
   }
 
+  // Preserve triangle adjacency across the whole authored map whenever the
+  // native format can represent it. The ClusteredMesh already contains its
+  // own KD tree, so dividing an ordinary map into arbitrary 128 m top-level
+  // volumes only destroys edge adjacency at cell boundaries. Those invisible
+  // seams can make a board hop, stutter, or bail while crossing an otherwise
+  // continuous floor or ramp.
+  skate::world::RwCollisionBuildResult unified =
+      skate::world::BuildRwCollisionMesh(source, options);
+  if (unified.ok && !unified.mesh.bytes.empty()) {
+    REXLOG_INFO(
+        "native-collision: compiled continuous map triangles={} vertices={} "
+        "clusters={} bytes={}",
+        unified.mesh.triangle_count, unified.mesh.vertex_count,
+        unified.mesh.cluster_count, unified.mesh.bytes.size());
+    result.chunks.push_back(std::move(unified));
+    return result;
+  }
+
+  // Extremely large maps may exceed a ClusteredMesh format limit. Retain a
+  // spatial fallback so they still load, while making the loss of cross-cell
+  // adjacency explicit in the log for diagnosis.
+  REXLOG_WARN(
+      "native-collision: continuous build failed ({}); falling back to "
+      "{} m spatial chunks",
+      unified.error.empty() ? "unknown error" : unified.error,
+      kOwnedCollisionCellSize);
+
   using Cell = std::pair<std::int32_t, std::int32_t>;
   std::map<Cell, std::vector<skate::world::CollisionTriangle>> cells;
   for (const skate::world::CollisionTriangle& triangle :

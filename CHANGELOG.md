@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Made Blender NPC routes and grind collections genuinely optional during
+  export instead of failing when their collections are absent.
+- Added full-map collision validation, grouped object-level diagnostics, and
+  non-destructive export-time cleanup of harmless zero-area and duplicate
+  collision triangles without changing visual meshes or UVs.
+- Kept wrong-facing rideable surfaces as explicit blockers to catch inverted
+  ramp collision before it can cause instant bails in game.
+- Removed ordinary maps' artificial 128-metre native-collision seams by
+  compiling one continuous RenderWare KD collision mesh whenever format
+  limits permit; spatial chunking is now only an oversized-map fallback.
 - Added a one-button Windows release updater under **Settings > System** with
   asynchronous progress, GitHub-only downloads, exact size/SHA-256
   verification, staged installation, and automatic restart.

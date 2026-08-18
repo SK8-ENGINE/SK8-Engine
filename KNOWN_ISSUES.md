@@ -20,5 +20,6 @@ This is an experimental preview rather than a finished standalone game engine.
   is original project content. A legally obtained Skate 3 ISO is required on
   first start.
 
-When reporting a problem, include the map name, GPU, driver version, and the
-latest log, but never upload retail game data.
+When reporting a problem, include the map name, GPU, driver version, selected
+Graphics API and Renderer, framerate cap, controller backend, and the latest
+`logs/skate3_*.log`, but never upload retail game data.
