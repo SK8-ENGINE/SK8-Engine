@@ -53,9 +53,11 @@ The packager creates a zip containing only:
 - `skate3.exe`;
 - `rexruntime.dll`;
 - map/player documentation;
+- the first-party Blender Feature Park `.skate` map and its self-contained
+  editable `.blend` source;
 - project licensing, notices, changelog, and known issues;
 - the Blender addon and format documentation;
-- an empty release-facing `maps` folder represented by its README; and
+- a release-facing `maps` folder for additional packages; and
 - SHA-256 checksums.
 
 It fails closed if the stage contains known retail, generated-code, map,

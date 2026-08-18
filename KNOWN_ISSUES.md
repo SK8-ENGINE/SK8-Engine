@@ -16,8 +16,9 @@ This is an experimental preview rather than a finished standalone game engine.
   and physics resources are rebuilt coherently.
 - The layer activates once normal Skate 3 gameplay reaches a stable local
   player. Frontend and loading screens still use the upstream runtime.
-- No retail game files or maps are bundled. A legally obtained Skate 3 ISO is
-  required on first start.
+- No retail game files or retail maps are bundled. The included Feature Park
+  is original project content. A legally obtained Skate 3 ISO is required on
+  first start.
 
 When reporting a problem, include the map name, GPU, driver version, and the
 latest log, but never upload retail game data.
