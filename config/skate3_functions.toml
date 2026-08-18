@@ -1774,3 +1774,11 @@
 "0x82CFC3A0" = { end = 0x82CFC3C0 }
 
 "0x8246CED8" = { end = 0x8246CF10 }
+
+# Required by the owned landing-state observer. This boundary used to survive
+# only in incremental generated trees, which made clean source builds fail.
+"0x82BA69F0" = { end = 0x82BA6A40 }
+"0x82BA6A04" = { end = 0x82BA6A24, parent = 0x82BA69F0 }
+"0x82BA6A24" = { end = 0x82BA6A28, parent = 0x82BA69F0 }
+"0x82BA6A28" = { end = 0x82BA6A40, parent = 0x82BA69F0 }
+"0x82BA6A40" = { end = 0x82BA6A48 }

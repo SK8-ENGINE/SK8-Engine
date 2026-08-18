@@ -199,16 +199,20 @@ The build-time codegen needs an extracted game dump containing `default.xex` and
 `data/webkit/EAWebkit.xex`. Put that dump in `game/`, or pass a path with
 `SKATE3_GAME_DATA_ROOT`.
 
-The codegen should also be given the Skate 3 Title Update 3 package - the same
+The runtime also needs the Skate 3 Title Update 3 package - the same
 `TU_12K2276_000000C000000.00000000000O3` file the in-game title update
 installer downloads. Place it in the repository root under its original name,
-or pass a path with `-DSKATE3_TITLE_UPDATE_PACKAGE=`. With the package
-present, the build extracts the update patches and recompiles the TU3-patched
-executables - the configuration used by release builds, whose runtime requires
-the title update to be staged before the game will boot. Without the package,
-codegen falls back to the unpatched retail image; that path is no longer
-regularly tested, and `generate-all` reporting unresolved calls on a clean
-retail dump is the usual symptom of building without the title update.
+or pass a path with `-DSKATE3_TITLE_UPDATE_PACKAGE=`. The build extracts and
+stages its `.xexp` patches next to the application.
+
+Custom Engine Layer release codegen deliberately keeps the base executable's
+stable addresses because the owned collision, grind, trick, and lifecycle
+observers are reviewed against that address space. TU3 is then applied by the
+runtime. If an extracted dump already contains both `.xexp` files, the build
+detects and stages them without needing the original package. Generating host
+code directly from the patched executable is an experimental upstream path
+available with `-DSKATE3_CODEGEN_PATCHED_TITLE_UPDATE=ON`; it is not compatible
+with the current owned observer patch set.
 
 Generate the recompiled source first:
 

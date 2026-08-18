@@ -92,6 +92,9 @@ set(SKATE3_TITLE_UPDATE_PACKAGE
 option(SKATE3_ENABLE_X86_64_V3
     "Build x86_64 desktop binaries for x86-64-v3 CPUs (AVX2/BMI2)"
     OFF)
+option(SKATE3_CODEGEN_PATCHED_TITLE_UPDATE
+    "Generate host code from the TU3-patched executable instead of the stable base-address image"
+    OFF)
 
 if(NOT APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "AMD64|x86_64")
     if(SKATE3_ENABLE_X86_64_V3)
@@ -158,7 +161,10 @@ endif()
 
 set(SKATE3_PATCHED_DEFAULT_XEX_LINE "")
 set(SKATE3_PATCHED_EAWEBKIT_XEX_LINE "")
-set(SKATE3_CODEGEN_ARGS "")
+# The reviewed recomp boundary contains a small set of known unresolved guest
+# control-flow edges. Release generation intentionally preserves the existing
+# guarded stubs instead of requiring an incremental generated cache.
+set(SKATE3_CODEGEN_ARGS "--force")
 set(SKATE3_FUNCTION_CONFIG_INCLUDES
     "  \"${SKATE3_SOURCE_DIR_CONFIG}/config/skate3_functions.toml\",")
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
@@ -210,14 +216,19 @@ if(NOT SKATE3_EFFECTIVE_TITLE_UPDATE_PACKAGE STREQUAL "")
         SKATE3_TITLE_UPDATE_DEFAULT_XEX_CONFIG)
     file(TO_CMAKE_PATH "${SKATE3_TITLE_UPDATE_EAWEBKIT_XEX}"
         SKATE3_TITLE_UPDATE_EAWEBKIT_XEX_CONFIG)
-    set(SKATE3_PATCHED_DEFAULT_XEX_LINE
-        "patched_file_path = \"${SKATE3_TITLE_UPDATE_DEFAULT_XEX_CONFIG}\"")
-    set(SKATE3_PATCHED_EAWEBKIT_XEX_LINE
-        "patched_file_path = \"${SKATE3_TITLE_UPDATE_EAWEBKIT_XEX_CONFIG}\"")
-    set(SKATE3_FUNCTION_CONFIG_INCLUDES
-        "  \"${SKATE3_SOURCE_DIR_CONFIG}/config/skate3_tu_functions.toml\",")
-    message(STATUS
-        "Skate 3 title update codegen enabled: ${SKATE3_EFFECTIVE_TITLE_UPDATE_PACKAGE}")
+    if(SKATE3_CODEGEN_PATCHED_TITLE_UPDATE)
+        set(SKATE3_PATCHED_DEFAULT_XEX_LINE
+            "patched_file_path = \"${SKATE3_TITLE_UPDATE_DEFAULT_XEX_CONFIG}\"")
+        set(SKATE3_PATCHED_EAWEBKIT_XEX_LINE
+            "patched_file_path = \"${SKATE3_TITLE_UPDATE_EAWEBKIT_XEX_CONFIG}\"")
+        set(SKATE3_FUNCTION_CONFIG_INCLUDES
+            "  \"${SKATE3_SOURCE_DIR_CONFIG}/config/skate3_tu_functions.toml\",")
+        message(STATUS
+            "Skate 3 TU3-patched codegen enabled: ${SKATE3_EFFECTIVE_TITLE_UPDATE_PACKAGE}")
+    else()
+        message(STATUS
+            "Skate 3 TU3 package will be staged for runtime; codegen keeps stable base addresses")
+    endif()
 endif()
 
 file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/manifests")

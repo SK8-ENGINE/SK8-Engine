@@ -354,18 +354,35 @@ foreach(_file IN LISTS _skate3_recomp_files)
   endif()
 
   foreach(_label IN ITEMS 82771ABC 82771E10)
-    set(_site
+    set(_covered_site
 "loc_${_label}:
 	skate3::function_coverage::MaybeRecordAddress(0x${_label});
 	// lwz r11,4(r24)
 	ctx.r11.u64 = REX_LOAD_U32(ctx.r24.u32 + 4);")
-    set(_patch
+    set(_covered_patch
 "loc_${_label}:
 	skate3::function_coverage::MaybeRecordAddress(0x${_label});
 	// lwz r11,4(r24)
 	ctx.r11.u64 = REX_LOAD_U32(ctx.r24.u32 + 4);
 	skate3::native_collision::ObserveNativeQueryMesh(ctx.r11.u32);")
-    string(REPLACE "${_site}" "${_patch}" _patched "${_contents}")
+    string(REPLACE "${_covered_site}" "${_covered_patch}"
+      _patched "${_contents}")
+    if(_patched STREQUAL _contents)
+      # A clean codegen tree has not reached the basic-block coverage pass
+      # below yet. Accept that form as well; the later pass will insert the
+      # address probe without disturbing this observer.
+      set(_fresh_site
+"loc_${_label}:
+	// lwz r11,4(r24)
+	ctx.r11.u64 = REX_LOAD_U32(ctx.r24.u32 + 4);")
+      set(_fresh_patch
+"loc_${_label}:
+	// lwz r11,4(r24)
+	ctx.r11.u64 = REX_LOAD_U32(ctx.r24.u32 + 4);
+	skate3::native_collision::ObserveNativeQueryMesh(ctx.r11.u32);")
+      string(REPLACE "${_fresh_site}" "${_fresh_patch}"
+        _patched "${_contents}")
+    endif()
     if(_patched STREQUAL _contents)
       message(FATAL_ERROR
         "Failed to patch native query mesh observer at ${_label}")
@@ -970,6 +987,16 @@ foreach(_file IN LISTS _skate3_recomp_files)
 	skate3::function_coverage::MaybeRecordAddress(0x82D19D34);
 	skate3::trick_pipeline::ObserveActiveCustomAnimationAssetLoadStage(\"async-complete\");")
   string(FIND "${_contents}" "${_stage_site}" _stage_anchor)
+  if(_stage_anchor EQUAL -1)
+    # A clean codegen tree has not reached the basic-block coverage pass
+    # below yet. Patch the bare label; the later pass will retain this
+    # observer and insert the coverage probe immediately after the label.
+    set(_stage_site "loc_82D19D34:")
+    set(_stage_patch
+"loc_82D19D34:
+	skate3::trick_pipeline::ObserveActiveCustomAnimationAssetLoadStage(\"async-complete\");")
+    string(FIND "${_contents}" "${_stage_site}" _stage_anchor)
+  endif()
   if(_stage_anchor EQUAL -1)
     message(FATAL_ERROR "Failed to find Andale async-complete stage")
   endif()
