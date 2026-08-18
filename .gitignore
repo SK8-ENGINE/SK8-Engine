@@ -4,11 +4,31 @@
 /generated/
 /generated.backup-*/
 /tools/
+!/tools/
+/tools/*
+!/tools/blender_owned_map/
+!/tools/blender_owned_map/**
+**/__pycache__/
+*.pyc
 
 # Local game dump and retail media. Users must provide their own copy.
 /game/
+/runtime/
+/dlc/
+/saves/
+/cache/
+/logs/
 *.iso
 *.xex
+*.xexp
+*.stfs
+*.live
+*.pirs
+*.con
+*.skate
+*.skate.export-cache.json
+*.blend
+*.blend[0-9]
 
 # Local runtime/config overrides
 skate3.toml
@@ -35,3 +55,6 @@ CMakeUserPresets.json
 
 # Local developer scripts (texture decoding, extraction, bootstrap helpers)
 /scripts/
+!/scripts/
+/scripts/*
+!/scripts/Package-Windows-Release.ps1

@@ -84,8 +84,8 @@ constexpr size_t kTrickIntentWordCount = trick::TrickIntents::kWordCount;
 constexpr size_t kAnimationIntentWordCount =
     trick::TrickIntentDescriptor::kWordCount;
 constexpr size_t kFocusedEventCapacity = 512;
-constexpr size_t kLocalSpatialSampleCapacity = 192;
-constexpr uint64_t kLocalSpatialSampleIntervalFrames = 12;
+constexpr size_t kLocalSpatialSampleCapacity = 512;
+constexpr uint64_t kLocalSpatialSampleIntervalFrames = 1;
 
 struct ArmPose {
   std::array<float, 4> upper;
@@ -186,8 +186,10 @@ struct LocalSpatialSample {
   uint32_t position_y_bits;
   uint32_t position_z_bits;
   uint32_t x_axis_x_bits;
+  uint32_t x_axis_y_bits;
   uint32_t x_axis_z_bits;
   uint32_t z_axis_x_bits;
+  uint32_t z_axis_y_bits;
   uint32_t z_axis_z_bits;
 };
 
@@ -991,13 +993,21 @@ bool ResolveLocalPhysOut(uint8_t *base, uint32_t phys_out) {
     return false;
   }
   const uint32_t resolved = g_local_phys_out.load(std::memory_order_acquire);
-  if (resolved) {
-    return phys_out == resolved &&
-           actor == g_local_phys_out_actor.load(std::memory_order_acquire);
+  const uint32_t resolved_actor =
+      g_local_phys_out_actor.load(std::memory_order_acquire);
+  if (resolved && phys_out == resolved && actor == resolved_actor) {
+    return true;
   }
   const auto path = FindGuestReferencePath(base, actor, phys_out);
   if (!path) {
     return false;
+  }
+  // The direct-boot lifecycle may replace the player's PhysOut component
+  // while retaining the same ActionGraph Actor allocation. Do not permanently
+  // pin the pre-freeroam component: promote a replacement only when it is
+  // independently found in that actor's verified component table.
+  if (resolved != phys_out || resolved_actor != actor) {
+    g_local_spatial_frame.store(0, std::memory_order_release);
   }
   g_local_phys_out_actor.store(actor, std::memory_order_release);
   g_local_phys_out_root_offset.store(path->root_offset,
@@ -3520,6 +3530,56 @@ bool CurrentLocalBoardPosition(float out_position[3]) {
          std::isfinite(out_position[2]);
 }
 
+bool CurrentLiveSpatialSnapshot(LiveSpatialSnapshot &out) {
+  const uint64_t frame =
+      g_local_spatial_frame.load(std::memory_order_acquire);
+  const uint32_t phys_out =
+      g_local_phys_out.load(std::memory_order_acquire);
+  if (frame == 0 || phys_out == 0) {
+    return false;
+  }
+
+  LiveSpatialSnapshot snapshot{};
+  snapshot.frame = frame;
+  snapshot.phys_out = phys_out;
+  snapshot.board_controller =
+      g_local_board_controller.load(std::memory_order_acquire);
+  snapshot.board_body = g_local_board_body.load(std::memory_order_acquire);
+  snapshot.transform_state =
+      g_local_board_transform_state.load(std::memory_order_acquire);
+  snapshot.position_bits = {
+      g_local_board_position_x_bits.load(std::memory_order_acquire),
+      g_local_board_position_y_bits.load(std::memory_order_acquire),
+      g_local_board_position_z_bits.load(std::memory_order_acquire),
+  };
+  snapshot.x_axis_bits = {
+      g_local_board_x_axis_x_bits.load(std::memory_order_acquire),
+      g_local_board_x_axis_y_bits.load(std::memory_order_acquire),
+      g_local_board_x_axis_z_bits.load(std::memory_order_acquire),
+  };
+  snapshot.z_axis_bits = {
+      g_local_board_z_axis_x_bits.load(std::memory_order_acquire),
+      g_local_board_z_axis_y_bits.load(std::memory_order_acquire),
+      g_local_board_z_axis_z_bits.load(std::memory_order_acquire),
+  };
+  snapshot.board_state_flags =
+      g_board_state_last_packed.load(std::memory_order_acquire);
+  out = snapshot;
+  return true;
+}
+
+OwnedWorldCollisionBridgeScope::OwnedWorldCollisionBridgeScope(
+    PPCContext& ctx, uint8_t* base)
+    : ctx_(ctx),
+      base_(base),
+      controller_(ctx.r3.u32),
+      phys_out_(ctx.r4.u32) {}
+
+OwnedWorldCollisionBridgeScope::~OwnedWorldCollisionBridgeScope() {
+  mechanics_sandbox::ApplyOwnedWorldCollisionAfterPhysOut(
+      ctx_, base_, controller_, phys_out_);
+}
+
 void ObserveLocalSkateboardSpatialState(PPCContext &ctx, uint8_t *base) {
   const uint32_t controller = ctx.r3.u32;
   const uint32_t phys_out = ctx.r4.u32;
@@ -3581,7 +3641,8 @@ void ObserveLocalSkateboardSpatialState(PPCContext &ctx, uint8_t *base) {
   }
   g_local_spatial_samples.push_back(
       {frame, position_x_bits, position_y_bits, position_z_bits, x_axis_x_bits,
-       x_axis_z_bits, z_axis_x_bits, z_axis_z_bits});
+       x_axis_y_bits, x_axis_z_bits, z_axis_x_bits, z_axis_y_bits,
+       z_axis_z_bits});
 }
 
 ScoreCollectorTransitionObservationScope::
@@ -5852,9 +5913,13 @@ void AppendObservationFields(std::ostream &response) {
       response << ':';
       AppendHex(response, sample.x_axis_x_bits);
       response << ':';
+      AppendHex(response, sample.x_axis_y_bits);
+      response << ':';
       AppendHex(response, sample.x_axis_z_bits);
       response << ':';
       AppendHex(response, sample.z_axis_x_bits);
+      response << ':';
+      AppendHex(response, sample.z_axis_y_bits);
       response << ':';
       AppendHex(response, sample.z_axis_z_bits);
     }

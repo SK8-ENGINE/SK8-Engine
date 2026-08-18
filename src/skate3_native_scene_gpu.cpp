@@ -61,6 +61,8 @@
 #include "skate3_native_scene_gpu_internal.h"
 #include "skate3_mechanics_sandbox.h"
 #include "skate3_mechanics_sandbox_map.h"
+#include "skate3_native_collision.h"
+#include "skate3_native_raytraced_mirror.h"
 
 // Cvars defined in skate3_native_scene.cpp (and SDK cvars re-declared there).
 REXCVAR_DECLARE(bool, async_shader_compilation);
@@ -731,19 +733,36 @@ nrhi::Buffer* AcquireMeshUploadBuffer(nrhi::Device* device, size_t size) {
   return CreateUploadBuffer(device, size, nrhi::BufferBindClass::kVertexIndex);
 }
 
-constexpr uint32_t kSandboxMapMesh = 0xF00D0001u;
+constexpr uint32_t kSandboxSkyMesh = 0xF00D0002u;
+constexpr uint32_t kSandboxMapMeshBase = 0xF1000000u;
+constexpr std::size_t kSandboxMapMeshCapacity = 0x00FFFFFFu;
+constexpr uint32_t kSandboxKinematicMeshBase = 0xF2000000u;
+constexpr std::size_t kSandboxKinematicMeshCapacity = 0x0000FFFFu;
+constexpr uint32_t kSandboxHingedDoorMeshBase = 0xF2100000u;
+constexpr std::size_t kSandboxHingedDoorMeshCapacity = 0x0000FFFFu;
+constexpr uint32_t kSandboxWaterMesh = 0xF3000000u;
+constexpr uint32_t kSandboxWaterPusherMesh = 0xF3000001u;
+constexpr uint32_t kSandboxMovingLightMesh = 0xF4000000u;
+constexpr uint32_t kSandboxRainMesh = 0xF5000000u;
+constexpr uint32_t kSandboxLightningMesh = 0xF5000001u;
 
-bool EnsureSandboxMapMesh(nrhi::Device* device) {
-  if (g_r.meshes.find(kSandboxMapMesh) != g_r.meshes.end()) {
+uint32_t SandboxMapMeshKey(std::size_t chunk_index) {
+  return kSandboxMapMeshBase + static_cast<uint32_t>(chunk_index);
+}
+
+bool EnsureSandboxVisualMesh(
+    nrhi::Device* device, uint32_t key,
+    const mechanics_sandbox::map::VisualMesh& mesh,
+    const char* label) {
+  if (g_r.meshes.find(key) != g_r.meshes.end()) {
     return true;
   }
-  const mechanics_sandbox::map::VisualMesh& mesh =
-      mechanics_sandbox::map::TestVisualMesh();
   if (mesh.vertices.empty() || mesh.indices.empty() ||
       mesh.vertices.size() > 0xFFFFu) {
     static std::atomic<uint32_t> s_invalid_map_log{0};
     if (s_invalid_map_log.fetch_add(1, std::memory_order_relaxed) == 0) {
-      REXLOG_ERROR("native-scene: sandbox map geometry is empty or too large");
+      REXLOG_ERROR(
+          "native-scene: sandbox {} geometry is empty or too large", label);
     }
     return false;
   }
@@ -755,8 +774,9 @@ bool EnsureSandboxMapMesh(nrhi::Device* device) {
   if (vb == nullptr || ib == nullptr) {
     static std::atomic<uint32_t> s_buffer_map_log{0};
     if (s_buffer_map_log.fetch_add(1, std::memory_order_relaxed) == 0) {
-      REXLOG_ERROR("native-scene: sandbox map buffer allocation failed (vb={} ib={})",
-                   vb != nullptr ? 1 : 0, ib != nullptr ? 1 : 0);
+      REXLOG_ERROR(
+          "native-scene: sandbox {} buffer allocation failed (vb={} ib={})",
+          label, vb != nullptr ? 1 : 0, ib != nullptr ? 1 : 0);
     }
     PoolMeshBuffer(device, vb);
     PoolMeshBuffer(device, ib);
@@ -767,8 +787,9 @@ bool EnsureSandboxMapMesh(nrhi::Device* device) {
   if (vb_ptr == nullptr || ib_ptr == nullptr) {
     static std::atomic<uint32_t> s_map_map_log{0};
     if (s_map_map_log.fetch_add(1, std::memory_order_relaxed) == 0) {
-      REXLOG_ERROR("native-scene: sandbox map buffer mapping failed (vb={} ib={})",
-                   vb_ptr != nullptr ? 1 : 0, ib_ptr != nullptr ? 1 : 0);
+      REXLOG_ERROR(
+          "native-scene: sandbox {} buffer mapping failed (vb={} ib={})",
+          label, vb_ptr != nullptr ? 1 : 0, ib_ptr != nullptr ? 1 : 0);
     }
     if (vb_ptr != nullptr) device->Unmap(vb);
     if (ib_ptr != nullptr) device->Unmap(ib);
@@ -790,9 +811,121 @@ bool EnsureSandboxMapMesh(nrhi::Device* device) {
   buffers.ib_view = {ib, 0, uint32_t(mesh.indices.size() * sizeof(uint16_t))};
   buffers.fingerprint = 1;
   buffers.last_used_frame = 0;
-  g_r.meshes.emplace(kSandboxMapMesh, std::move(buffers));
-  REXLOG_INFO("native-scene: sandbox map mesh ready (vertices={} indices={})",
-              mesh.vertices.size(), mesh.indices.size());
+  g_r.meshes.emplace(key, std::move(buffers));
+  return true;
+}
+
+bool EnsureSandboxMapChunk(nrhi::Device* device,
+                           std::size_t chunk_index) {
+  const mechanics_sandbox::map::VisualWorld& world =
+      mechanics_sandbox::map::ActiveVisualWorld();
+  if (chunk_index >= world.chunks.size() ||
+      chunk_index >= kSandboxMapMeshCapacity) {
+    return false;
+  }
+  return EnsureSandboxVisualMesh(
+      device, SandboxMapMeshKey(chunk_index), world.chunks[chunk_index],
+      "map chunk");
+}
+
+bool EnsureSandboxKinematicMesh(nrhi::Device* device,
+                                std::size_t object_index) {
+  if (object_index >=
+          mechanics_sandbox::map::ActiveKinematicObjectCount() ||
+      object_index >= kSandboxKinematicMeshCapacity) {
+    return false;
+  }
+  return EnsureSandboxVisualMesh(
+      device,
+      kSandboxKinematicMeshBase +
+          static_cast<uint32_t>(object_index),
+      mechanics_sandbox::map::ActiveKinematicVisualMesh(object_index),
+      "kinematic object");
+}
+
+bool EnsureSandboxHingedDoorMesh(nrhi::Device* device,
+                                 std::size_t door_index) {
+  if (door_index >=
+          mechanics_sandbox::map::ActiveHingedDoorCount() ||
+      door_index >= kSandboxHingedDoorMeshCapacity) {
+    return false;
+  }
+  return EnsureSandboxVisualMesh(
+      device,
+      kSandboxHingedDoorMeshBase +
+          static_cast<std::uint32_t>(door_index),
+      mechanics_sandbox::map::ActiveHingedDoorVisualMesh(door_index),
+      "hinged door");
+}
+
+bool EnsureSandboxSkyMesh(nrhi::Device* device) {
+  return EnsureSandboxVisualMesh(
+      device, kSandboxSkyMesh,
+      mechanics_sandbox::map::ActiveSkyMesh(), "sky");
+}
+
+bool EnsureSandboxMovingLightMesh(nrhi::Device* device) {
+  return EnsureSandboxVisualMesh(
+      device, kSandboxMovingLightMesh,
+      mechanics_sandbox::map::ActiveMovingLightVisualMesh(),
+      "moving light orb");
+}
+
+bool EnsureSandboxRainMesh(nrhi::Device* device) {
+  return EnsureSandboxVisualMesh(
+      device, kSandboxRainMesh,
+      mechanics_sandbox::map::ActiveRainVisualMesh(), "storm rain");
+}
+
+bool EnsureSandboxLightningMesh(nrhi::Device* device) {
+  return EnsureSandboxVisualMesh(
+      device, kSandboxLightningMesh,
+      mechanics_sandbox::map::ActiveLightningVisualMesh(),
+      "storm lightning");
+}
+
+bool UpdateSandboxDynamicVisualMesh(
+    nrhi::Device* device, uint32_t key,
+    const mechanics_sandbox::map::VisualMesh& mesh,
+    const char* label) {
+  if (!EnsureSandboxVisualMesh(device, key, mesh, label)) {
+    return false;
+  }
+  auto found = g_r.meshes.find(key);
+  if (found == g_r.meshes.end() ||
+      found->second.vb_view.size_bytes !=
+          mesh.vertices.size() *
+              sizeof(mechanics_sandbox::map::VisualVertex)) {
+    return false;
+  }
+
+  nrhi::Buffer* replacement = AcquireMeshUploadBuffer(
+      device, found->second.vb_view.size_bytes);
+  if (replacement == nullptr) {
+    return false;
+  }
+  void* mapped = device->Map(replacement);
+  if (mapped == nullptr) {
+    PoolMeshBuffer(device, replacement);
+    return false;
+  }
+  std::memcpy(
+      mapped, mesh.vertices.data(),
+      mesh.vertices.size() *
+          sizeof(mechanics_sandbox::map::VisualVertex));
+  device->Unmap(replacement);
+
+  nrhi::Buffer* previous = found->second.vb;
+  found->second.vb = replacement;
+  found->second.vb_view = {
+      replacement, 0,
+      static_cast<uint32_t>(
+          mesh.vertices.size() *
+          sizeof(mechanics_sandbox::map::VisualVertex)),
+      static_cast<uint32_t>(
+          sizeof(mechanics_sandbox::map::VisualVertex)),
+  };
+  PoolMeshBuffer(device, previous);
   return true;
 }
 
@@ -1174,6 +1307,12 @@ bool DecodeMesh(nrhi::Device* device, uint8_t* base, const DrawItem& item,
   if (item.ropa) {
     out.ropa_verts.assign(dst, dst + size_t(num_verts) * 14);
   }
+  const bool retain_raytracing =
+      item.dyn_entity || item.skinned || item.ropa ||
+      item.char_family != 0;
+  if (retain_raytracing) {
+    out.raytracing_verts.assign(dst, dst + size_t(num_verts) * 14);
+  }
   device->Unmap(vb);
   // Blend indices outside the captured palette read garbage rows and mangle
   // the vertex. Indices are plain bone numbers, bone k = palette rows 3k.
@@ -1332,6 +1471,9 @@ bool DecodeMesh(nrhi::Device* device, uint8_t* base, const DrawItem& item,
         }
       }
     }
+  }
+  if (retain_raytracing) {
+    out.raytracing_indices.assign(dst_ib, dst_ib + item.ib_count);
   }
   device->Unmap(ib);
 
@@ -2819,13 +2961,11 @@ bool EnsureRootSignature(const NativeGuestOutputRenderContext& context) {
     // root-signature DWORD the v2 material table below needs.
     ld.params[7] = {nrhi::BindingParamKind::kTextureTable, 6, 2,
                     nrhi::Visibility::kPixel};
-    // World-shading v2 material maps: the detail normal map (t8) + the
-    // decal families' spec/ecc masks (t9), plus the native static
-    // sun-shadow map (t10) as the table's third entry; extending an
-    // existing table costs no root-signature DWORDs. Bound together via
-    // SetTextures (a pair-only bind would drop t10 to the backend
-    // fallback).
-    ld.params[8] = {nrhi::BindingParamKind::kTextureTable, 8, 3,
+    // World-shading v2 material maps: detail (t8), spec/ecc (t9), and three
+    // independent owned-world static-shadow cascades (t10..t12). Retained
+    // rendering continues to use its tiled atlas in t10. Extending this
+    // existing descriptor table costs no root-signature DWORDs.
+    ld.params[8] = {nrhi::BindingParamKind::kTextureTable, 8, 5,
                     nrhi::Visibility::kPixel};
     // Character lighting block (b2): the canonical per-draw rows captured
     // from the guest PS bank (CaptureCharLighting), sliced out of the bone
@@ -3656,12 +3796,16 @@ bool EnsureShadowResources(const NativeGuestOutputRenderContext& context) {
   // any device-limit clamping the texture cache applied, and gives the same
   // effective shadow raster the emulated GPU renders at that scale.
   const int32_t tile_cfg = REXCVAR_GET(skate3_native_render_scene_shadow_tile);
+  const uint32_t automatic_tile =
+      std::min(512u * std::max(
+                          1u, (context.guest_output_height + 719u) / 720u),
+               4096u);
   const uint32_t want_tile =
       tile_cfg > 0
           ? uint32_t(tile_cfg)
-          : std::min(512u * std::max(1u, (context.guest_output_height + 719u) /
-                                             720u),
-                     4096u);
+          : (mechanics_sandbox::VisualMapEnabled()
+                 ? std::max(automatic_tile, 2048u)
+                 : automatic_tile);
   if (g_r.shadow_raw != nullptr && g_r.shadow_tile != want_tile) {
     // Hot tile-size change: retire the atlas chain; recreated below. The
     // new atlas starts in RENDER_TARGET state and is re-rendered by this
@@ -3774,7 +3918,44 @@ bool EnsureShadowResources(const NativeGuestOutputRenderContext& context) {
     }
     device->DestroyDeferred(g_r.static_sun);
     g_r.static_sun = nullptr;
+    if (g_r.static_sun_history_srv != nullptr) {
+      device->DestroyDeferred(g_r.static_sun_history_srv);
+      g_r.static_sun_history_srv = nullptr;
+    }
+    if (g_r.static_sun_history != nullptr) {
+      device->DestroyDeferred(g_r.static_sun_history);
+      g_r.static_sun_history = nullptr;
+    }
+    g_r.static_sun_history_valid = false;
+    g_r.nsm_progressive_build = false;
     g_r.nsm_built_radius = 0.0f;
+  }
+  const uint32_t owned_cascade_sizes[3] = {
+      std::min(want_static_size, 2048u),
+      std::min(want_static_size, 1536u),
+      std::min(want_static_size, 1024u),
+  };
+  bool retire_owned_cascades = false;
+  for (uint32_t cascade = 0; cascade < 3; ++cascade) {
+    retire_owned_cascades |=
+        g_r.owned_static_sun[cascade] != nullptr &&
+        g_r.owned_static_sun_size[cascade] != owned_cascade_sizes[cascade];
+  }
+  if (retire_owned_cascades) {
+    for (uint32_t cascade = 0; cascade < 3; ++cascade) {
+      if (g_r.owned_static_sun_srv[cascade] != nullptr) {
+        device->DestroyDeferred(g_r.owned_static_sun_srv[cascade]);
+        g_r.owned_static_sun_srv[cascade] = nullptr;
+      }
+      if (g_r.owned_static_sun[cascade] != nullptr) {
+        device->DestroyDeferred(g_r.owned_static_sun[cascade]);
+        g_r.owned_static_sun[cascade] = nullptr;
+      }
+      g_r.owned_static_sun_valid[cascade] = false;
+      g_r.owned_static_sun_in_srv[cascade] = false;
+      g_r.owned_nsm_last_update[cascade] = 0;
+      g_r.owned_nsm_next_update[cascade] = {};
+    }
   }
   if (!g_r.static_sun && g_r.shadow_raw != nullptr &&
       REXCVAR_GET(skate3_native_render_scene_shadow_static_casters)) {
@@ -3817,9 +3998,77 @@ bool EnsureShadowResources(const NativeGuestOutputRenderContext& context) {
       return false;
     }
     g_r.static_sun_in_srv = false;
+    // A second same-resolution atlas preserves the previous sun sample
+    // while the newly rendered one fades in. Failure is non-fatal: the
+    // renderer falls back to the original single-atlas stepping behavior
+    // rather than dropping native presentation.
+    desc.initial_state = nrhi::ResourceState::kRenderTarget;
+    g_r.static_sun_history = device->CreateTexture(desc);
+    if (g_r.static_sun_history != nullptr) {
+      nrhi::TextureViewDesc vd;
+      vd.mip_levels = 1;
+      g_r.static_sun_history_srv =
+          device->CreateTextureView(g_r.static_sun_history, vd);
+    }
+    if (g_r.static_sun_history_srv == nullptr) {
+      if (g_r.static_sun_history != nullptr) {
+        device->DestroyDeferred(g_r.static_sun_history);
+        g_r.static_sun_history = nullptr;
+      }
+      REXLOG_WARN(
+          "native-scene: static sun-shadow history atlas unavailable; "
+          "temporal blending disabled");
+    }
+    g_r.static_sun_history_in_srv = false;
+    g_r.static_sun_history_valid = false;
     REXLOG_INFO(
-        "native-scene: static sun-shadow map created ({}x{}, 3 cascades)",
-        g_r.static_sun_size * 3, g_r.static_sun_size);
+        "native-scene: static sun-shadow map created ({}x{}, 3 cascades, "
+        "temporal_blend={})",
+        g_r.static_sun_size * 3, g_r.static_sun_size,
+        g_r.static_sun_history != nullptr ? 1 : 0);
+  }
+  if (g_r.shadow_raw != nullptr &&
+      REXCVAR_GET(skate3_native_render_scene_shadow_static_casters)) {
+    for (uint32_t cascade = 0; cascade < 3; ++cascade) {
+      if (g_r.owned_static_sun[cascade] != nullptr) {
+        continue;
+      }
+      g_r.owned_static_sun_size[cascade] = owned_cascade_sizes[cascade];
+      nrhi::TextureDesc desc;
+      desc.width = owned_cascade_sizes[cascade];
+      desc.height = owned_cascade_sizes[cascade];
+      desc.format = nrhi::Format::kR16G16_UNORM;
+      desc.usage = nrhi::kTextureUsageRenderTarget;
+      desc.initial_state = nrhi::ResourceState::kRenderTarget;
+      desc.clear_color[0] = 1.0f;
+      desc.clear_color[1] = 1.0f;
+      g_r.owned_static_sun[cascade] = device->CreateTexture(desc);
+      if (g_r.owned_static_sun[cascade] != nullptr) {
+        nrhi::TextureViewDesc vd;
+        vd.mip_levels = 1;
+        g_r.owned_static_sun_srv[cascade] =
+            device->CreateTextureView(g_r.owned_static_sun[cascade], vd);
+      }
+      if (g_r.owned_static_sun_srv[cascade] == nullptr) {
+        REXLOG_ERROR(
+            "native-scene: owned static cascade {} creation failed ({}x{})",
+            cascade, owned_cascade_sizes[cascade],
+            owned_cascade_sizes[cascade]);
+        g_r.failed = true;
+        return false;
+      }
+      g_r.owned_static_sun_in_srv[cascade] = false;
+      g_r.owned_static_sun_valid[cascade] = false;
+    }
+    static bool s_logged_owned_cascades = false;
+    if (!s_logged_owned_cascades) {
+      s_logged_owned_cascades = true;
+      REXLOG_INFO(
+          "native-scene: independent owned static cascades created "
+          "(near={} mid={} far={})",
+          owned_cascade_sizes[0], owned_cascade_sizes[1],
+          owned_cascade_sizes[2]);
+    }
   }
   if (!g_r.shadow_cb) {
     // Always created (even with shadows off): the scene PS declares b1 and
@@ -4055,6 +4304,203 @@ bool EnsureFallbackTextures(const NativeGuestOutputRenderContext& context) {
     g_r.white_cube.valid = true;
   }
   return true;
+}
+
+enum class OwnedTextureRole : uint8_t {
+  Color,
+  Normal,
+  Data,
+};
+
+nrhi::TextureView* ResolveOwnedMapTexture(
+    const NativeGuestOutputRenderContext& context,
+    skate::world::TextureId texture_id,
+    OwnedTextureRole role = OwnedTextureRole::Color) {
+  if (texture_id == 0) {
+    return g_r.white.srv;
+  }
+  const auto cached = g_r.owned_map_textures.find(texture_id);
+  if (cached != g_r.owned_map_textures.end()) {
+    return cached->second.valid ? cached->second.srv : g_r.white.srv;
+  }
+
+  const skate::world::ImageTexture* source =
+      mechanics_sandbox::map::ActiveImageTexture(texture_id);
+  if (source == nullptr || source->width == 0 || source->height == 0 ||
+      source->rgba8.size() !=
+          std::size_t(source->width) * source->height * 4u) {
+    REXLOG_ERROR(
+        "native-scene: owned map texture {} is missing or malformed",
+        texture_id);
+    g_r.owned_map_textures.emplace(texture_id, GuestTexture{});
+    return g_r.white.srv;
+  }
+
+  GuestTexture texture;
+  // Imported images are stored in scene-linear RGBA8. Build a complete
+  // CPU-filtered mip chain once at first use so the scene's 8x anisotropic
+  // sampler has actual lower-frequency data at distance. Normal maps need
+  // vector-aware filtering; averaging their encoded RGB directly shortens
+  // the normal and produces dark, lumpy specular response.
+  std::vector<std::vector<std::uint8_t>> mips;
+  mips.push_back(source->rgba8);
+  std::uint32_t mip_width = source->width;
+  std::uint32_t mip_height = source->height;
+  while (mip_width > 1 || mip_height > 1) {
+    const std::uint32_t next_width = std::max(mip_width >> 1, 1u);
+    const std::uint32_t next_height = std::max(mip_height >> 1, 1u);
+    const std::vector<std::uint8_t>& input = mips.back();
+    std::vector<std::uint8_t> output(
+        std::size_t(next_width) * next_height * 4u);
+    for (std::uint32_t y = 0; y < next_height; ++y) {
+      const std::uint32_t y0 = std::min(y * 2u, mip_height - 1u);
+      const std::uint32_t y1 = std::min(y0 + 1u, mip_height - 1u);
+      for (std::uint32_t x = 0; x < next_width; ++x) {
+        const std::uint32_t x0 = std::min(x * 2u, mip_width - 1u);
+        const std::uint32_t x1 = std::min(x0 + 1u, mip_width - 1u);
+        const std::size_t source_pixels[4] = {
+            (std::size_t(y0) * mip_width + x0) * 4u,
+            (std::size_t(y0) * mip_width + x1) * 4u,
+            (std::size_t(y1) * mip_width + x0) * 4u,
+            (std::size_t(y1) * mip_width + x1) * 4u,
+        };
+        const std::size_t destination =
+            (std::size_t(y) * next_width + x) * 4u;
+        if (role == OwnedTextureRole::Normal) {
+          float normal[3] = {};
+          for (const std::size_t pixel : source_pixels) {
+            normal[0] += float(input[pixel + 0]) * (2.0f / 255.0f) - 1.0f;
+            normal[1] += float(input[pixel + 1]) * (2.0f / 255.0f) - 1.0f;
+            normal[2] += float(input[pixel + 2]) * (2.0f / 255.0f) - 1.0f;
+          }
+          const float length = std::sqrt(
+              normal[0] * normal[0] + normal[1] * normal[1] +
+              normal[2] * normal[2]);
+          if (length > 1.0e-6f) {
+            for (float& component : normal) {
+              component /= length;
+            }
+          } else {
+            normal[0] = normal[1] = 0.0f;
+            normal[2] = 1.0f;
+          }
+          for (int channel = 0; channel < 3; ++channel) {
+            output[destination + channel] = std::uint8_t(std::clamp(
+                std::lround((normal[channel] * 0.5f + 0.5f) * 255.0f),
+                0l, 255l));
+          }
+        } else {
+          for (int channel = 0; channel < 3; ++channel) {
+            const std::uint32_t sum =
+                input[source_pixels[0] + channel] +
+                input[source_pixels[1] + channel] +
+                input[source_pixels[2] + channel] +
+                input[source_pixels[3] + channel];
+            output[destination + channel] =
+                std::uint8_t((sum + 2u) / 4u);
+          }
+        }
+        const std::uint32_t alpha =
+            input[source_pixels[0] + 3] + input[source_pixels[1] + 3] +
+            input[source_pixels[2] + 3] + input[source_pixels[3] + 3];
+        output[destination + 3] = std::uint8_t((alpha + 2u) / 4u);
+      }
+    }
+    mips.emplace_back(std::move(output));
+    mip_width = next_width;
+    mip_height = next_height;
+  }
+  struct MipUpload {
+    std::uint64_t offset = 0;
+    std::uint32_t row_pitch = 0;
+    std::uint32_t width = 0;
+    std::uint32_t height = 0;
+  };
+  std::vector<MipUpload> uploads(mips.size());
+  std::uint64_t upload_size = 0;
+  for (std::size_t mip = 0; mip < mips.size(); ++mip) {
+    MipUpload& upload = uploads[mip];
+    upload.width = std::max(source->width >> mip, 1u);
+    upload.height = std::max(source->height >> mip, 1u);
+    const std::uint32_t row_bytes = upload.width * 4u;
+    upload.row_pitch =
+        (row_bytes + nrhi::kRowPitchAlignment - 1u) &
+        ~(nrhi::kRowPitchAlignment - 1u);
+    upload.offset =
+        (upload_size + kUploadPlacementAlignment - 1u) &
+        ~(std::uint64_t(kUploadPlacementAlignment) - 1u);
+    upload_size =
+        upload.offset + std::uint64_t(upload.row_pitch) * upload.height;
+  }
+
+  nrhi::TextureDesc desc;
+  desc.width = source->width;
+  desc.height = source->height;
+  desc.mip_levels = static_cast<std::uint32_t>(mips.size());
+  desc.format = nrhi::Format::kR8G8B8A8_UNORM;
+  desc.initial_state = nrhi::ResourceState::kCopyDest;
+  texture.texture = context.device->CreateTexture(desc);
+  texture.upload = CreateUploadBuffer(
+      context.device, upload_size,
+      nrhi::BufferBindClass::kCopySrc);
+  if (texture.texture == nullptr || texture.upload == nullptr) {
+    context.device->DestroyDeferred(texture.texture);
+    context.device->DestroyDeferred(texture.upload);
+    REXLOG_ERROR(
+        "native-scene: GPU allocation failed for owned map texture {} "
+        "({}x{})",
+        source->name, source->width, source->height);
+    g_r.owned_map_textures.emplace(texture_id, GuestTexture{});
+    return g_r.white.srv;
+  }
+
+  auto* destination =
+      static_cast<std::uint8_t*>(context.device->Map(texture.upload));
+  if (destination == nullptr) {
+    context.device->DestroyDeferred(texture.texture);
+    context.device->DestroyDeferred(texture.upload);
+    g_r.owned_map_textures.emplace(texture_id, GuestTexture{});
+    return g_r.white.srv;
+  }
+  for (std::size_t mip = 0; mip < mips.size(); ++mip) {
+    const MipUpload& upload = uploads[mip];
+    const std::size_t row_bytes = std::size_t(upload.width) * 4u;
+    for (std::uint32_t row = 0; row < upload.height; ++row) {
+      std::memcpy(
+          destination + upload.offset +
+              std::uint64_t(row) * upload.row_pitch,
+          mips[mip].data() + std::size_t(row) * row_bytes,
+          row_bytes);
+    }
+  }
+  context.device->Unmap(texture.upload);
+  for (std::size_t mip = 0; mip < mips.size(); ++mip) {
+    const MipUpload& upload = uploads[mip];
+    context.cmd->CopyBufferToTexture(
+        texture.texture, static_cast<std::uint32_t>(mip), 0,
+        texture.upload, upload.offset, upload.row_pitch,
+        upload.width, upload.height, 1);
+  }
+  context.cmd->Barrier(
+      texture.texture, nrhi::ResourceState::kCopyDest,
+      nrhi::ResourceState::kPixelShaderResource);
+  context.device->DestroyDeferred(texture.upload);
+  texture.upload = nullptr;
+  nrhi::TextureViewDesc view;
+  view.mip_levels = static_cast<std::uint32_t>(mips.size());
+  texture.srv = context.device->CreateTextureView(texture.texture, view);
+  texture.valid = texture.srv != nullptr;
+  if (!texture.valid) {
+    context.device->DestroyDeferred(texture.texture);
+    texture.texture = nullptr;
+  }
+  nrhi::TextureView* resolved =
+      texture.valid ? texture.srv : g_r.white.srv;
+  g_r.owned_map_textures.emplace(texture_id, std::move(texture));
+  REXLOG_INFO(
+      "native-scene: uploaded owned map texture {} '{}' ({}x{}, {} mips)",
+      texture_id, source->name, source->width, source->height, mips.size());
+  return resolved;
 }
 
 // Depth buffer + MSAA color target, rebuilt on output-size change.
@@ -6140,6 +6586,596 @@ static nrhi::TextureView* LookupResolvedTexture(uint32_t tex_ptr) {
   return sit->second.srv;
 }
 
+// Build project-owned concentric CSM receiver rows. These use the same
+// compact row contract as Skate's captured atlas (base X/Y/depth plus two
+// scale/offset cascades), but they are driven by the owned celestial key and
+// a stable camera-centered light basis. Static SKATE casters and retained
+// dynamic skater/board casters can therefore share one physical sun axis.
+bool BuildOwnedShadowRows(const FrameScene& scene, float out[36]) {
+  if (!mechanics_sandbox::VisualMapEnabled()) {
+    return false;
+  }
+  float origin[3] = {};
+  if (!mechanics_sandbox::SandboxMapRenderOrigin(origin)) {
+    return false;
+  }
+  const skate::world::DayNightState celestial =
+      mechanics_sandbox::map::ActiveDayNightState();
+  float sun[3] = {
+      celestial.light_direction_to_light.x,
+      celestial.light_direction_to_light.y,
+      celestial.light_direction_to_light.z,
+  };
+  const float slen =
+      std::sqrt(sun[0] * sun[0] + sun[1] * sun[1] + sun[2] * sun[2]);
+  if (slen < 0.5f || celestial.light_intensity <= 0.001f) {
+    return false;
+  }
+  for (float& value : sun) {
+    value /= slen;
+  }
+
+  std::memset(out, 0, 36 * sizeof(float));
+  const float zl[3] = {-sun[0], -sun[1], -sun[2]};
+  float xl[3] = {zl[2], 0.0f, -zl[0]};
+  const float xlen = std::sqrt(xl[0] * xl[0] + xl[2] * xl[2]);
+  if (xlen > 1.0e-5f) {
+    xl[0] /= xlen;
+    xl[2] /= xlen;
+  } else {
+    xl[0] = 1.0f;
+    xl[2] = 0.0f;
+  }
+  const float yl[3] = {
+      zl[1] * xl[2] - zl[2] * xl[1],
+      zl[2] * xl[0] - zl[0] * xl[2],
+      zl[0] * xl[1] - zl[1] * xl[0],
+  };
+
+  // The owned near cascade exists primarily for the skater and board.
+  // A 30 m half-extent spent most of a 1024/2048 tile on empty world and
+  // gave body self-shadows 3-6 cm texels. Fourteen metres keeps the chase
+  // camera and skater comfortably covered at ~1.4 cm per texel on the
+  // owned 2048 quality floor; the middle cascade catches the handoff.
+  constexpr float kNearRadius = 14.0f;
+  constexpr float kMiddleRadius = 55.0f;
+  const float far_radius = std::clamp(
+      float(REXCVAR_GET(skate3_native_render_scene_shadow_static_radius)),
+      120.0f, 600.0f);
+  const float depth_half = far_radius * 2.0f;
+  const float tile = float(std::max(1u, g_r.shadow_tile));
+
+  float center[3] = {scene.cam_pos[0], scene.cam_pos[1], scene.cam_pos[2]};
+  // Snap in the near-cascade plane. This prevents camera sub-pixel movement
+  // from making the skater/board penumbra shimmer at high output scales.
+  const float texel_m = 2.0f * kNearRadius / tile;
+  const float center_x =
+      xl[0] * center[0] + xl[1] * center[1] + xl[2] * center[2];
+  const float center_y =
+      yl[0] * center[0] + yl[1] * center[1] + yl[2] * center[2];
+  const float snap_x = std::round(center_x / texel_m) * texel_m - center_x;
+  const float snap_y = std::round(center_y / texel_m) * texel_m - center_y;
+  for (int axis = 0; axis < 3; ++axis) {
+    center[axis] += xl[axis] * snap_x + yl[axis] * snap_y;
+  }
+
+  for (int axis = 0; axis < 3; ++axis) {
+    out[axis] = xl[axis] / kNearRadius;
+    out[12 + axis] = yl[axis] / kNearRadius;
+    out[16 + axis] = zl[axis] / (2.0f * depth_half);
+  }
+  out[3] = -(out[0] * center[0] + out[1] * center[1] +
+             out[2] * center[2]);
+  out[15] = -(out[12] * center[0] + out[13] * center[1] +
+              out[14] * center[2]);
+  out[19] = 0.5f - (out[16] * center[0] + out[17] * center[1] +
+                    out[18] * center[2]);
+  out[4] = kNearRadius / kMiddleRadius;
+  out[5] = kNearRadius / kMiddleRadius;
+  out[8] = kNearRadius / far_radius;
+  out[9] = kNearRadius / far_radius;
+  out[20] = 0.00045f;
+  out[24] = sun[0];
+  out[25] = sun[1];
+  out[26] = sun[2];
+  out[32] = 0.08f;
+  out[33] = 0.09f;
+  out[34] = 0.11f;
+  return true;
+}
+
+// Continue an owned static-world shadow rebuild in the inactive atlas.
+// Six spatial chunks per frame keeps the draw submission bounded while the
+// active atlas remains immutable and sampleable. This changes frame-time
+// distribution, not the amount of geometry rendered per completed update.
+static bool RenderOwnedStaticSunSlice(
+    const NativeGuestOutputRenderContext& context, uint32_t bone_region,
+    uint64_t frame_number) {
+  if (!g_r.nsm_progressive_build) {
+    return false;
+  }
+  if (g_r.static_sun_history == nullptr ||
+      g_r.static_sun_history_srv == nullptr ||
+      g_r.pso_shadow_caster == nullptr ||
+      g_r.pso_shadow_caster_clip == nullptr) {
+    g_r.nsm_progressive_build = false;
+    g_r.static_sun_history_valid = false;
+    return true;
+  }
+
+  const mechanics_sandbox::map::VisualWorld& world =
+      mechanics_sandbox::map::ActiveVisualWorld();
+  constexpr std::size_t kChunksPerFrame = 6;
+  const std::size_t first =
+      std::min(g_r.nsm_progressive_chunk, world.chunks.size());
+  const std::size_t last =
+      std::min(first + kChunksPerFrame, world.chunks.size());
+  float owned_origin[3] = {};
+  if (!mechanics_sandbox::SandboxMapRenderOrigin(owned_origin)) {
+    g_r.nsm_progressive_build = false;
+    return true;
+  }
+
+  nrhi::Cmd* cmd = context.cmd;
+  cmd->SetRenderTargets(g_r.static_sun_history, nullptr);
+  cmd->SetBindingLayout(g_r.layout);
+  cmd->SetConstantBuffer(9, g_r.bone_ring, bone_region);
+  cmd->SetPrimitiveTopology(nrhi::PrimitiveTopology::kTriangleList);
+  const float size = float(g_r.static_sun_size);
+  constexpr float kRatioMid = 2.0f;
+  constexpr float kRatioInner = 6.0f;
+
+  for (int tile = 0; tile < 3; ++tile) {
+    const float* tvp = g_r.nsm_progressive_vp[tile];
+    const float cull = tile == 0   ? 1.05f / kRatioInner
+                       : tile == 1 ? 1.05f / kRatioMid
+                                   : 1.05f;
+    cmd->SetViewport(
+        nrhi::Viewport{size * tile, 0.0f, size, size, 0.0f, 1.0f});
+    cmd->SetScissor(nrhi::Rect{int32_t(g_r.static_sun_size) * tile, 0,
+                               int32_t(g_r.static_sun_size) * (tile + 1),
+                               int32_t(g_r.static_sun_size)});
+    for (int phase = 0; phase < 2; ++phase) {
+      cmd->SetPipeline(phase == 0 ? g_r.pso_shadow_caster
+                                  : g_r.pso_shadow_caster_clip);
+      for (std::size_t chunk_index = first; chunk_index < last;
+           ++chunk_index) {
+        const mechanics_sandbox::map::VisualChunk& chunk =
+            world.chunks[chunk_index];
+        float umin = std::numeric_limits<float>::max();
+        float umax = -umin;
+        float vmin = umin;
+        float vmax = -umin;
+        for (int corner = 0; corner < 8; ++corner) {
+          const float wx =
+              owned_origin[0] +
+              ((corner & 1) ? chunk.bounds_max[0] : chunk.bounds_min[0]);
+          const float wy =
+              owned_origin[1] +
+              ((corner & 2) ? chunk.bounds_max[1] : chunk.bounds_min[1]);
+          const float wz =
+              owned_origin[2] +
+              ((corner & 4) ? chunk.bounds_max[2] : chunk.bounds_min[2]);
+          const float u = g_r.nsm_progressive_rows[0] * wx +
+                          g_r.nsm_progressive_rows[1] * wy +
+                          g_r.nsm_progressive_rows[2] * wz +
+                          g_r.nsm_progressive_rows[3];
+          const float v = g_r.nsm_progressive_rows[4] * wx +
+                          g_r.nsm_progressive_rows[5] * wy +
+                          g_r.nsm_progressive_rows[6] * wz +
+                          g_r.nsm_progressive_rows[7];
+          umin = std::min(umin, u);
+          umax = std::max(umax, u);
+          vmin = std::min(vmin, v);
+          vmax = std::max(vmax, v);
+        }
+        if (umax < -cull || umin > cull || vmax < -cull ||
+            vmin > cull ||
+            !EnsureSandboxMapChunk(context.device, chunk_index)) {
+          continue;
+        }
+        auto mit = g_r.meshes.find(SandboxMapMeshKey(chunk_index));
+        if (mit == g_r.meshes.end()) {
+          continue;
+        }
+        mit->second.last_used_frame = frame_number;
+        float constants[52] = {};
+        constants[0] = constants[5] = constants[10] = constants[15] = 1.0f;
+        constants[12] = owned_origin[0];
+        constants[13] = owned_origin[1];
+        constants[14] = owned_origin[2];
+        float* mvp = constants + 16;
+        for (int row = 0; row < 4; ++row) {
+          for (int col = 0; col < 4; ++col) {
+            float sum = 0.0f;
+            for (int k = 0; k < 4; ++k) {
+              sum += constants[row * 4 + k] * tvp[k * 4 + col];
+            }
+            mvp[row * 4 + col] = sum;
+          }
+        }
+        cmd->SetRootConstants(0, 52, constants, 0);
+        cmd->SetBufferSrv(3, g_r.bone_ring, bone_region);
+        cmd->SetVertexBuffer(mit->second.vb_view.buffer,
+                             mit->second.vb_view.offset,
+                             mit->second.vb_view.size_bytes,
+                             mit->second.vb_view.stride);
+        cmd->SetIndexBuffer(mit->second.ib_view.buffer,
+                            mit->second.ib_view.offset,
+                            mit->second.ib_view.size_bytes);
+        for (const mechanics_sandbox::map::VisualDraw& draw : chunk.draws) {
+          const bool mask =
+              draw.alpha_mode ==
+              skate::world::SurfaceMaterial::AlphaMode::Mask;
+          if (draw.alpha_mode ==
+                  skate::world::SurfaceMaterial::AlphaMode::Blend ||
+              mask != (phase == 1)) {
+            continue;
+          }
+          if (phase == 1) {
+            cmd->SetTexture(
+                1, ResolveOwnedMapTexture(context, draw.albedo_texture));
+          }
+          cmd->DrawIndexed(draw.index_count, draw.first_index, 0);
+          ++g_r.nsm_progressive_draws;
+        }
+      }
+    }
+  }
+
+  g_r.nsm_progressive_chunk = last;
+  if (last < world.chunks.size()) {
+    return true;
+  }
+
+  cmd->Barrier(g_r.static_sun_history, nrhi::ResourceState::kRenderTarget,
+               nrhi::ResourceState::kPixelShaderResource);
+  cmd->FlushBarriers();
+  g_r.static_sun_history_in_srv = true;
+
+  // The completed inactive texture becomes current. The previous complete
+  // current texture becomes history, so the existing receiver transition
+  // remains valid and never samples a half-built atlas.
+  std::memcpy(g_r.nsm_history_rows, g_r.nsm_rows,
+              sizeof(g_r.nsm_history_rows));
+  std::swap(g_r.static_sun, g_r.static_sun_history);
+  std::swap(g_r.static_sun_srv, g_r.static_sun_history_srv);
+  std::swap(g_r.static_sun_in_srv, g_r.static_sun_history_in_srv);
+  std::memcpy(g_r.nsm_rows, g_r.nsm_progressive_rows,
+              sizeof(g_r.nsm_rows));
+  std::memcpy(g_r.nsm_center, g_r.nsm_progressive_center,
+              sizeof(g_r.nsm_center));
+  std::memcpy(g_r.nsm_sun, g_r.nsm_progressive_sun,
+              sizeof(g_r.nsm_sun));
+  g_r.nsm_built_radius = g_r.nsm_progressive_built_radius;
+  g_r.nsm_depth_range = g_r.nsm_progressive_depth_range;
+  g_r.nsm_radius = g_r.nsm_progressive_radius;
+  g_r.static_sun_history_valid = true;
+  g_r.static_sun_valid = true;
+
+  const auto now = std::chrono::steady_clock::now();
+  if (g_r.nsm_blend_started.time_since_epoch().count() != 0) {
+    const float completion_interval =
+        std::chrono::duration<float>(now - g_r.nsm_blend_started).count();
+    g_r.nsm_blend_seconds =
+        std::clamp(completion_interval * 0.9f, 0.15f, 1.5f);
+  }
+  g_r.nsm_blend_started = now;
+  g_r.nsm_last_build_frame = frame_number;
+  g_r.nsm_progressive_build = false;
+  if (g_r.nsm_progressive_sequence <= 8 ||
+      (g_r.nsm_progressive_sequence & 63u) == 0) {
+    REXLOG_INFO(
+        "native-scene: owned sun-shadow progressive rebuild complete "
+        "(chunks={} caster_draws={} build={})",
+        world.chunks.size(), g_r.nsm_progressive_draws,
+        g_r.nsm_progressive_sequence);
+  }
+  return true;
+}
+
+// Render one independently-owned static-world map per cascade. Near, middle,
+// and far have separate resources, transforms, and update clocks: transitioning
+// or clearing one map cannot invalidate either of the others. Spatial SKATE
+// chunks are rejected against the exact light-space box before any material
+// ranges are submitted.
+static bool RenderOwnedStaticCascades(
+    const NativeGuestOutputRenderContext& context, const FrameScene& scene,
+    const float* owned_rows, uint32_t bone_region, uint64_t frame_number) {
+  for (uint32_t cascade = 0; cascade < 3; ++cascade) {
+    if (g_r.owned_static_sun[cascade] == nullptr ||
+        g_r.owned_static_sun_srv[cascade] == nullptr) {
+      return false;
+    }
+  }
+  float owned_origin[3] = {};
+  if (!mechanics_sandbox::SandboxMapRenderOrigin(owned_origin)) {
+    return false;
+  }
+  float sun[3] = {owned_rows[24], owned_rows[25], owned_rows[26]};
+  const float slen =
+      std::sqrt(sun[0] * sun[0] + sun[1] * sun[1] + sun[2] * sun[2]);
+  if (slen < 0.5f) {
+    return g_r.owned_static_sun_valid[0] &&
+           g_r.owned_static_sun_valid[1] &&
+           g_r.owned_static_sun_valid[2];
+  }
+  for (float& v : sun) {
+    v /= slen;
+  }
+  if (sun[1] < 0.08f) {
+    return g_r.owned_static_sun_valid[0] &&
+           g_r.owned_static_sun_valid[1] &&
+           g_r.owned_static_sun_valid[2];
+  }
+
+  const float zl[3] = {-sun[0], -sun[1], -sun[2]};
+  float xl[3] = {zl[2], 0.0f, -zl[0]};
+  const float xll = std::sqrt(xl[0] * xl[0] + xl[2] * xl[2]);
+  if (xll > 1e-5f) {
+    xl[0] /= xll;
+    xl[2] /= xll;
+  } else {
+    xl[0] = 1.0f;
+    xl[2] = 0.0f;
+  }
+  const float yl[3] = {zl[1] * xl[2] - zl[2] * xl[1],
+                       zl[2] * xl[0] - zl[0] * xl[2],
+                       zl[0] * xl[1] - zl[1] * xl[0]};
+  const float far_radius = std::clamp(
+      float(REXCVAR_GET(skate3_native_render_scene_shadow_static_radius)),
+      20.0f, 500.0f);
+  const float radii[3] = {
+      std::max(14.0f, far_radius / 6.0f),
+      std::max(42.0f, far_radius / 2.0f),
+      far_radius,
+  };
+  // The recomp may submit this scene hundreds of times per second. Real-time
+  // clocks keep "live" near shadows at display-rate instead of tying their
+  // cost to an uncapped internal frame counter. Middle/far run at lower rates
+  // where their projected movement is much smaller.
+  constexpr float update_hz[3] = {60.0f, 30.0f, 15.0f};
+  const float depth_range = far_radius * 4.0f;
+  const float depth_half = depth_range * 0.5f;
+  const mechanics_sandbox::map::VisualWorld& world =
+      mechanics_sandbox::map::ActiveVisualWorld();
+  nrhi::Cmd* cmd = context.cmd;
+
+  for (uint32_t cascade = 0; cascade < 3; ++cascade) {
+    const auto now = std::chrono::steady_clock::now();
+    const bool due =
+        !g_r.owned_static_sun_valid[cascade] ||
+        g_r.owned_nsm_next_update[cascade].time_since_epoch().count() == 0 ||
+        now >= g_r.owned_nsm_next_update[cascade];
+    if (!due) {
+      continue;
+    }
+    const auto submit_started = std::chrono::steady_clock::now();
+    const float radius = radii[cascade];
+    const float texel_m =
+        2.0f * radius /
+        float(std::max(1u, g_r.owned_static_sun_size[cascade]));
+    float center[3] = {scene.cam_pos[0], scene.cam_pos[1], scene.cam_pos[2]};
+    const float cx = xl[0] * center[0] + xl[1] * center[1] +
+                     xl[2] * center[2];
+    const float cy = yl[0] * center[0] + yl[1] * center[1] +
+                     yl[2] * center[2];
+    const float dx = cx - std::round(cx / texel_m) * texel_m;
+    const float dy = cy - std::round(cy / texel_m) * texel_m;
+    for (int axis = 0; axis < 3; ++axis) {
+      center[axis] -= xl[axis] * dx + yl[axis] * dy;
+    }
+    float rows[12] = {};
+    for (int axis = 0; axis < 3; ++axis) {
+      rows[axis] = xl[axis] / radius;
+      rows[4 + axis] = yl[axis] / radius;
+      rows[8 + axis] = zl[axis] / depth_range;
+    }
+    rows[3] = -(rows[0] * center[0] + rows[1] * center[1] +
+                rows[2] * center[2]);
+    rows[7] = -(rows[4] * center[0] + rows[5] * center[1] +
+                rows[6] * center[2]);
+    rows[11] = 0.5f - (rows[8] * center[0] + rows[9] * center[1] +
+                       rows[10] * center[2]);
+    float vp[16] = {};
+    for (int row = 0; row < 3; ++row) {
+      vp[row * 4 + 0] = rows[row];
+      vp[row * 4 + 1] = rows[4 + row];
+      vp[row * 4 + 2] = rows[8 + row];
+    }
+    vp[12] = rows[3];
+    vp[13] = rows[7];
+    vp[14] = rows[11];
+    vp[15] = 1.0f;
+    const auto chunk_overlaps_cascade =
+        [&](const mechanics_sandbox::map::VisualChunk& chunk) {
+          float umin = std::numeric_limits<float>::max();
+          float umax = -umin;
+          float vmin = umin;
+          float vmax = -umin;
+          for (int corner = 0; corner < 8; ++corner) {
+            const float wx =
+                owned_origin[0] +
+                ((corner & 1) ? chunk.bounds_max[0] : chunk.bounds_min[0]);
+            const float wy =
+                owned_origin[1] +
+                ((corner & 2) ? chunk.bounds_max[1] : chunk.bounds_min[1]);
+            const float wz =
+                owned_origin[2] +
+                ((corner & 4) ? chunk.bounds_max[2] : chunk.bounds_min[2]);
+            const float u =
+                rows[0] * wx + rows[1] * wy + rows[2] * wz + rows[3];
+            const float v =
+                rows[4] * wx + rows[5] * wy + rows[6] * wz + rows[7];
+            umin = std::min(umin, u);
+            umax = std::max(umax, u);
+            vmin = std::min(vmin, v);
+            vmax = std::max(vmax, v);
+          }
+          return umax >= -1.05f && umin <= 1.05f && vmax >= -1.05f &&
+                 vmin <= 1.05f;
+        };
+    uint32_t overlap_count = 0;
+    for (const mechanics_sandbox::map::VisualChunk& chunk : world.chunks) {
+      overlap_count += chunk_overlaps_cascade(chunk) ? 1u : 0u;
+    }
+    // During session transitions the camera can briefly contain a valid
+    // numeric position that is nowhere near the owned map. Keep the last
+    // complete cascade rather than clearing it to fully lit for that frame.
+    if (overlap_count == 0 && g_r.owned_static_sun_valid[cascade]) {
+      continue;
+    }
+
+    if (g_r.owned_static_sun_in_srv[cascade]) {
+      cmd->Barrier(g_r.owned_static_sun[cascade],
+                   nrhi::ResourceState::kPixelShaderResource,
+                   nrhi::ResourceState::kRenderTarget);
+      cmd->FlushBarriers();
+      g_r.owned_static_sun_in_srv[cascade] = false;
+    }
+    const float clear[4] = {1.0f, 1.0f, 0.0f, 0.0f};
+    cmd->ClearRenderTarget(g_r.owned_static_sun[cascade], clear);
+    cmd->SetRenderTargets(g_r.owned_static_sun[cascade], nullptr);
+    cmd->SetBindingLayout(g_r.layout);
+    cmd->SetConstantBuffer(9, g_r.bone_ring, bone_region);
+    cmd->SetPrimitiveTopology(nrhi::PrimitiveTopology::kTriangleList);
+    const float size = float(g_r.owned_static_sun_size[cascade]);
+    cmd->SetViewport(nrhi::Viewport{0.0f, 0.0f, size, size, 0.0f, 1.0f});
+    cmd->SetScissor(
+        nrhi::Rect{0, 0, int32_t(g_r.owned_static_sun_size[cascade]),
+                   int32_t(g_r.owned_static_sun_size[cascade])});
+
+    uint32_t caster_draws = 0;
+    uint32_t visible_chunks = 0;
+    for (int alpha_phase = 0; alpha_phase < 2; ++alpha_phase) {
+      cmd->SetPipeline(alpha_phase == 0 ? g_r.pso_shadow_caster
+                                        : g_r.pso_shadow_caster_clip);
+      for (std::size_t chunk_index = 0; chunk_index < world.chunks.size();
+           ++chunk_index) {
+        const mechanics_sandbox::map::VisualChunk& chunk =
+            world.chunks[chunk_index];
+        if (!chunk_overlaps_cascade(chunk) ||
+            !EnsureSandboxMapChunk(context.device, chunk_index)) {
+          continue;
+        }
+        if (alpha_phase == 0) {
+          ++visible_chunks;
+        }
+        auto mit = g_r.meshes.find(SandboxMapMeshKey(chunk_index));
+        if (mit == g_r.meshes.end()) {
+          continue;
+        }
+        mit->second.last_used_frame = frame_number;
+        float constants[52] = {};
+        constants[0] = constants[5] = constants[10] = constants[15] = 1.0f;
+        constants[12] = owned_origin[0];
+        constants[13] = owned_origin[1];
+        constants[14] = owned_origin[2];
+        float* mvp = constants + 16;
+        for (int row = 0; row < 4; ++row) {
+          for (int col = 0; col < 4; ++col) {
+            float sum = 0.0f;
+            for (int k = 0; k < 4; ++k) {
+              sum += constants[row * 4 + k] * vp[k * 4 + col];
+            }
+            mvp[row * 4 + col] = sum;
+          }
+        }
+        cmd->SetRootConstants(0, 52, constants, 0);
+        cmd->SetBufferSrv(3, g_r.bone_ring, bone_region);
+        cmd->SetVertexBuffer(mit->second.vb_view.buffer,
+                             mit->second.vb_view.offset,
+                             mit->second.vb_view.size_bytes,
+                             mit->second.vb_view.stride);
+        cmd->SetIndexBuffer(mit->second.ib_view.buffer,
+                            mit->second.ib_view.offset,
+                            mit->second.ib_view.size_bytes);
+        if (alpha_phase == 0) {
+          // Static opaque casters do not sample material textures. Collapse
+          // adjacent material ranges into one index submission whenever the
+          // exporter laid them contiguously; the GTA scene has thousands of
+          // visual materials but only tens of spatial chunks.
+          uint32_t batch_first = 0;
+          uint32_t batch_count = 0;
+          const auto flush_batch = [&]() {
+            if (batch_count == 0) {
+              return;
+            }
+            cmd->DrawIndexed(batch_count, batch_first, 0);
+            ++caster_draws;
+            batch_count = 0;
+          };
+          for (const mechanics_sandbox::map::VisualDraw& draw : chunk.draws) {
+            if (draw.alpha_mode !=
+                skate::world::SurfaceMaterial::AlphaMode::Opaque) {
+              flush_batch();
+              continue;
+            }
+            if (batch_count != 0 &&
+                draw.first_index == batch_first + batch_count) {
+              batch_count += draw.index_count;
+            } else {
+              flush_batch();
+              batch_first = draw.first_index;
+              batch_count = draw.index_count;
+            }
+          }
+          flush_batch();
+        } else {
+          for (const mechanics_sandbox::map::VisualDraw& draw : chunk.draws) {
+            if (draw.alpha_mode !=
+                skate::world::SurfaceMaterial::AlphaMode::Mask) {
+              continue;
+            }
+            cmd->SetTexture(
+                1, ResolveOwnedMapTexture(context, draw.albedo_texture));
+            cmd->DrawIndexed(draw.index_count, draw.first_index, 0);
+            ++caster_draws;
+          }
+        }
+      }
+    }
+    cmd->Barrier(g_r.owned_static_sun[cascade],
+                 nrhi::ResourceState::kRenderTarget,
+                 nrhi::ResourceState::kPixelShaderResource);
+    cmd->FlushBarriers();
+    g_r.owned_static_sun_in_srv[cascade] = true;
+    g_r.owned_static_sun_valid[cascade] = true;
+    std::memcpy(g_r.owned_nsm_rows[cascade], rows, sizeof(rows));
+    std::memcpy(g_r.owned_nsm_center[cascade], center, sizeof(center));
+    std::memcpy(g_r.owned_nsm_sun[cascade], sun, sizeof(sun));
+    g_r.owned_nsm_radius[cascade] = radius;
+    g_r.owned_nsm_depth_range[cascade] = depth_range;
+    g_r.owned_nsm_last_update[cascade] = frame_number;
+    const float phase_seconds =
+        g_r.owned_nsm_update_count[cascade] == 0
+            ? (cascade == 0 ? 0.0f : (cascade == 1 ? 0.008f : 0.025f))
+            : 0.0f;
+    g_r.owned_nsm_next_update[cascade] =
+        now + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                  std::chrono::duration<float>(
+                      1.0f / update_hz[cascade] + phase_seconds));
+    g_r.owned_nsm_last_draws[cascade] = caster_draws;
+    g_r.owned_nsm_last_chunks[cascade] = visible_chunks;
+    const uint64_t update = ++g_r.owned_nsm_update_count[cascade];
+    if (update <= 8 || (update & 255u) == 0) {
+      const float submit_ms =
+          std::chrono::duration<float, std::milli>(
+              std::chrono::steady_clock::now() - submit_started)
+              .count();
+      REXLOG_INFO(
+          "native-scene: owned static cascade {} update "
+          "(radius={:.1f}m chunks={}/{} draws={} cpu_submit={:.2f}ms "
+          "update_hz={:.0f} update={})",
+          cascade, radius, visible_chunks, world.chunks.size(), caster_draws,
+          submit_ms, update_hz[cascade], update);
+    }
+  }
+  return g_r.owned_static_sun_valid[0] &&
+         g_r.owned_static_sun_valid[1] &&
+         g_r.owned_static_sun_valid[2];
+}
+
 // Native static sun-shadow map: one camera-centered ortho depth pass over
 // the STATIC world items along the material sun (the captured c6 row:
 // the direction the world materials and their baked shadows are lit
@@ -6156,12 +7192,43 @@ static nrhi::TextureView* LookupResolvedTexture(uint32_t tex_ptr) {
 static void RenderStaticSunMap(const NativeGuestOutputRenderContext& context,
                                const FrameScene& scene, uint32_t bone_region,
                                int32_t debug_mode, uint64_t frame_number) {
+  const bool previous_map_valid = g_r.static_sun_valid;
   g_r.static_sun_valid = false;
+  float owned_rows[36] = {};
+  const bool owned_shadow = BuildOwnedShadowRows(scene, owned_rows);
+  static bool s_shadow_mode_initialized = false;
+  static bool s_last_owned_shadow = false;
+  const bool shadow_mode_changed =
+      !s_shadow_mode_initialized || owned_shadow != s_last_owned_shadow;
+  if (shadow_mode_changed) {
+    // F5 can swap between the retained renderer and the owned world without
+    // recreating GPU state. Never serve a cache rendered from the other
+    // geometry set after that boundary changes.
+    g_r.nsm_built_radius = 0.0f;
+    g_r.nsm_dirty = true;
+    g_r.nsm_progressive_build = false;
+    g_r.static_sun_history_valid = false;
+    s_last_owned_shadow = owned_shadow;
+    s_shadow_mode_initialized = true;
+  }
   if (g_r.static_sun == nullptr || g_r.pso_shadow_caster == nullptr ||
       g_r.pso_shadow_caster_clip == nullptr || debug_mode != 0 ||
-      !scene.shadow_valid ||
+      (!scene.shadow_valid && !owned_shadow) ||
       !REXCVAR_GET(skate3_native_render_scene_shadows) ||
       !REXCVAR_GET(skate3_native_render_scene_shadow_static_casters)) {
+    g_r.owned_nsm_active = false;
+    return;
+  }
+  if (owned_shadow) {
+    g_r.owned_nsm_active = RenderOwnedStaticCascades(
+        context, scene, owned_rows, bone_region, frame_number);
+    g_r.static_sun_valid = g_r.owned_nsm_active;
+    return;
+  }
+  g_r.owned_nsm_active = false;
+  if (owned_shadow && g_r.nsm_progressive_build) {
+    g_r.static_sun_valid = previous_map_valid;
+    RenderOwnedStaticSunSlice(context, bone_region, frame_number);
     return;
   }
   // Sun axis = the material sun (c6). It is the only sun-like direction
@@ -6173,8 +7240,11 @@ static void RenderStaticSunMap(const NativeGuestOutputRenderContext& context,
   // baked lightmaps were authored with yet another sun the two can
   // disagree, which the strength floor and the receivers' min-clamp keep
   // plausible rather than doubled.
-  float sun[3] = {scene.shadow_rows[24], scene.shadow_rows[25],
-                  scene.shadow_rows[26]};
+  float sun[3] = {
+      owned_shadow ? owned_rows[24] : scene.shadow_rows[24],
+      owned_shadow ? owned_rows[25] : scene.shadow_rows[25],
+      owned_shadow ? owned_rows[26] : scene.shadow_rows[26],
+  };
   const float slen =
       std::sqrt(sun[0] * sun[0] + sun[1] * sun[1] + sun[2] * sun[2]);
   bool sun_usable = slen >= 0.5f;
@@ -6207,10 +7277,17 @@ static void RenderStaticSunMap(const NativeGuestOutputRenderContext& context,
     return;
   }
   s_unusable_run = 0;
+  // The million-triangle SKATE needs a coarser static-atlas sun quantum than
+  // retained retail scenery. Dynamic character/board cascades still follow
+  // the celestial direction every frame; the large static atlas advances in
+  // approximately two-degree steps, hidden by its soft filter, instead of
+  // replaying 5k+ caster draws for every tiny clock movement.
+  const float sun_rebuild_dot =
+      owned_shadow ? 0.9993908f : 0.999995f;
   if (g_r.nsm_built_radius > 0.0f) {
     const float held_dot = sun[0] * g_r.nsm_sun[0] + sun[1] * g_r.nsm_sun[1] +
                            sun[2] * g_r.nsm_sun[2];
-    if (held_dot < 0.999995f) {
+    if (held_dot < sun_rebuild_dot) {
       // The captured axis disagrees with the built one: require it to
       // persist two consecutive build frames before it can drive a
       // rebuild; until then keep working along the held axis.
@@ -6260,12 +7337,13 @@ static void RenderStaticSunMap(const NativeGuestOutputRenderContext& context,
   // shadows with the camera; the cache keeps once-seen geometry casting
   // from any direction. A new or content-changed record marks the map
   // dirty for a rebuild.
-  for (const DrawItem& item : scene.items) {
-    if (item.transparent || item.unlit || item.cloth_quads || item.water ||
-        item.water_ocean != 0 || item.skinned || item.ropa ||
-        item.char_family != 0 || item.dynobj != 0) {
-      continue;
-    }
+  if (!owned_shadow) {
+    for (const DrawItem& item : scene.items) {
+      if (item.transparent || item.unlit || item.cloth_quads || item.water ||
+          item.water_ocean != 0 || item.skinned || item.ropa ||
+          item.char_family != 0 || item.dynobj != 0) {
+        continue;
+      }
     // Key: mesh + quantized world translation (placed instances of one
     // mesh are distinct casters; a re-streamed identical placement maps
     // back onto its record).
@@ -6289,7 +7367,8 @@ static void RenderStaticSunMap(const NativeGuestOutputRenderContext& context,
       rec.draws.assign(item.draws.begin(), item.draws.end());
       g_r.nsm_dirty = true;
     }
-    rec.last_seen_frame = frame_number;
+      rec.last_seen_frame = frame_number;
+    }
   }
   // Cache maintenance: distance eviction (region streamed away) plus a
   // long staleness timeout, which bounds ghost shadows from content the
@@ -6325,9 +7404,9 @@ static void RenderStaticSunMap(const NativeGuestOutputRenderContext& context,
   // newly streamed geometry is invisible; drift/sun rebuilds stay
   // immediate.
   bool rebuild = g_r.nsm_built_radius <= 0.0f ||
-                 std::fabs(radius - g_r.nsm_built_radius) > 0.5f ||
-                 frame_number >= g_r.nsm_rebuild_frame ||
-                 (g_r.nsm_dirty &&
+                  std::fabs(radius - g_r.nsm_built_radius) > 0.5f ||
+                  frame_number >= g_r.nsm_rebuild_frame ||
+                  (g_r.nsm_dirty &&
                   frame_number >= g_r.nsm_last_build_frame + 30);
   if (!rebuild) {
     // Camera drift from the built center, measured in the map plane: the
@@ -6343,14 +7422,73 @@ static void RenderStaticSunMap(const NativeGuestOutputRenderContext& context,
   if (!rebuild) {
     rebuild = sun[0] * g_r.nsm_sun[0] + sun[1] * g_r.nsm_sun[1] +
                   sun[2] * g_r.nsm_sun[2] <
-              0.999995f;
+              sun_rebuild_dot;
   }
   if (!rebuild) {
     g_r.static_sun_valid = true;  // serve the cached map + stored rows
     return;
   }
+  // Preserve the last complete atlas and its transform, then render into
+  // the alternate texture. Receivers cross-fade the two independent
+  // projections over the interval between sun quanta, turning the former
+  // two-degree shadow jump into continuous motion without submitting the
+  // million-triangle world on every frame.
+  // The inactive atlas cannot be incrementally rendered while it remains in
+  // the scene texture table: D3D12 still validates/binds the SRV even when a
+  // shader branch would not sample it. That prototype caused whole-map
+  // flashes and is intentionally disabled pending independent per-cascade
+  // resources.
+  const bool progressive_build = false;
+  float displayed_rows[12] = {};
+  float displayed_center[3] = {};
+  float displayed_sun[3] = {};
+  float displayed_built_radius = g_r.nsm_built_radius;
+  float displayed_depth_range = g_r.nsm_depth_range;
+  float displayed_radius = g_r.nsm_radius;
+  if (progressive_build) {
+    std::memcpy(displayed_rows, g_r.nsm_rows, sizeof(displayed_rows));
+    std::memcpy(displayed_center, g_r.nsm_center,
+                sizeof(displayed_center));
+    std::memcpy(displayed_sun, g_r.nsm_sun, sizeof(displayed_sun));
+  }
+  const bool temporal_blend =
+      !progressive_build && owned_shadow && previous_map_valid &&
+      !shadow_mode_changed && g_r.static_sun_history != nullptr &&
+      g_r.static_sun_history_srv != nullptr;
+  if (temporal_blend) {
+    std::swap(g_r.static_sun, g_r.static_sun_history);
+    std::swap(g_r.static_sun_srv, g_r.static_sun_history_srv);
+    std::swap(g_r.static_sun_in_srv, g_r.static_sun_history_in_srv);
+    std::memcpy(g_r.nsm_history_rows, g_r.nsm_rows,
+                sizeof(g_r.nsm_history_rows));
+    g_r.static_sun_history_valid = true;
+    const auto now = std::chrono::steady_clock::now();
+    if (g_r.nsm_blend_started.time_since_epoch().count() != 0) {
+      const float rebuild_interval =
+          std::chrono::duration<float>(now - g_r.nsm_blend_started).count();
+      // Finish just before the next expected sun-quantum rebuild. This
+      // keeps motion continuous while ensuring the next history swap starts
+      // from a fully converged atlas.
+      g_r.nsm_blend_seconds =
+          std::clamp(rebuild_interval * 0.9f, 0.15f, 1.5f);
+    }
+    g_r.nsm_blend_started = now;
+  } else if (!progressive_build) {
+    g_r.static_sun_history_valid = false;
+  } else {
+    // The inactive atlas is about to become a render target and must not be
+    // sampled while only part of the map has reached it.
+    g_r.static_sun_history_valid = false;
+  }
   g_r.nsm_dirty = false;
-  g_r.nsm_rebuild_frame = frame_number + 600;
+  // Retained geometry is stream-fed, so it keeps a periodic refresh.
+  // SKATE geometry is immutable for the process lifetime: camera drift,
+  // radius changes, F5 mode changes, and sun-axis changes already invalidate
+  // it explicitly. A 600-frame timer on a fast GPU rebuilt thousands of
+  // owned material ranges every ~2 seconds for no visual benefit.
+  g_r.nsm_rebuild_frame =
+      owned_shadow ? std::numeric_limits<uint64_t>::max()
+                   : frame_number + 600;
   g_r.nsm_last_build_frame = frame_number;
   g_r.nsm_built_radius = radius;
   std::memcpy(g_r.nsm_sun, sun, sizeof(g_r.nsm_sun));
@@ -6408,6 +7546,55 @@ static void RenderStaticSunMap(const NativeGuestOutputRenderContext& context,
     vp_inner[r * 4 + 0] *= kRatioInner;
     vp_inner[r * 4 + 1] *= kRatioInner;
   }
+  if (progressive_build) {
+    std::memcpy(g_r.nsm_progressive_rows, g_r.nsm_rows,
+                sizeof(g_r.nsm_progressive_rows));
+    std::memcpy(g_r.nsm_progressive_vp[0], vp_inner, sizeof(vp_inner));
+    std::memcpy(g_r.nsm_progressive_vp[1], vp_mid, sizeof(vp_mid));
+    std::memcpy(g_r.nsm_progressive_vp[2], vp, sizeof(vp));
+    std::memcpy(g_r.nsm_progressive_center, g_r.nsm_center,
+                sizeof(g_r.nsm_progressive_center));
+    std::memcpy(g_r.nsm_progressive_sun, g_r.nsm_sun,
+                sizeof(g_r.nsm_progressive_sun));
+    g_r.nsm_progressive_built_radius = g_r.nsm_built_radius;
+    g_r.nsm_progressive_depth_range = g_r.nsm_depth_range;
+    g_r.nsm_progressive_radius = g_r.nsm_radius;
+
+    // Keep every receiver parameter pointed at the complete displayed map
+    // until the background target is fully rendered.
+    std::memcpy(g_r.nsm_rows, displayed_rows, sizeof(g_r.nsm_rows));
+    std::memcpy(g_r.nsm_center, displayed_center, sizeof(g_r.nsm_center));
+    std::memcpy(g_r.nsm_sun, displayed_sun, sizeof(g_r.nsm_sun));
+    g_r.nsm_built_radius = displayed_built_radius;
+    g_r.nsm_depth_range = displayed_depth_range;
+    g_r.nsm_radius = displayed_radius;
+
+    nrhi::Cmd* progressive_cmd = context.cmd;
+    if (g_r.static_sun_history_in_srv) {
+      progressive_cmd->Barrier(
+          g_r.static_sun_history,
+          nrhi::ResourceState::kPixelShaderResource,
+          nrhi::ResourceState::kRenderTarget);
+      progressive_cmd->FlushBarriers();
+      g_r.static_sun_history_in_srv = false;
+    }
+    const float clear[4] = {1.0f, 1.0f, 0.0f, 0.0f};
+    progressive_cmd->ClearRenderTarget(g_r.static_sun_history, clear);
+    g_r.nsm_progressive_build = true;
+    g_r.nsm_progressive_chunk = 0;
+    g_r.nsm_progressive_draws = 0;
+    ++g_r.nsm_progressive_sequence;
+    if (g_r.nsm_progressive_sequence <= 8 ||
+        (g_r.nsm_progressive_sequence & 63u) == 0) {
+      REXLOG_INFO(
+          "native-scene: owned sun-shadow progressive rebuild started "
+          "(chunks={} batch=6 build={})",
+          mechanics_sandbox::map::ActiveVisualWorld().chunks.size(),
+          g_r.nsm_progressive_sequence);
+    }
+    RenderOwnedStaticSunSlice(context, bone_region, frame_number);
+    return;
+  }
   nrhi::Cmd* cmd = context.cmd;
   if (g_r.static_sun_in_srv) {
     cmd->Barrier(g_r.static_sun, nrhi::ResourceState::kPixelShaderResource,
@@ -6421,6 +7608,94 @@ static void RenderStaticSunMap(const NativeGuestOutputRenderContext& context,
   cmd->SetBindingLayout(g_r.layout);
   cmd->SetConstantBuffer(9, g_r.bone_ring, bone_region);
   const float size = float(g_r.static_sun_size);
+  uint32_t owned_caster_draws = 0;
+  const auto draw_owned_casters =
+      [&](const float* tvp, float cull, int phase) {
+        float owned_origin[3] = {};
+        if (!mechanics_sandbox::SandboxMapRenderOrigin(owned_origin)) {
+          return;
+        }
+        const mechanics_sandbox::map::VisualWorld& owned_world =
+            mechanics_sandbox::map::ActiveVisualWorld();
+        for (std::size_t chunk_index = 0;
+             chunk_index < owned_world.chunks.size(); ++chunk_index) {
+          const mechanics_sandbox::map::VisualChunk& chunk =
+              owned_world.chunks[chunk_index];
+          float umin = std::numeric_limits<float>::max();
+          float umax = -umin;
+          float vmin = umin;
+          float vmax = -umin;
+          for (int corner = 0; corner < 8; ++corner) {
+            const float wx =
+                owned_origin[0] +
+                ((corner & 1) ? chunk.bounds_max[0] : chunk.bounds_min[0]);
+            const float wy =
+                owned_origin[1] +
+                ((corner & 2) ? chunk.bounds_max[1] : chunk.bounds_min[1]);
+            const float wz =
+                owned_origin[2] +
+                ((corner & 4) ? chunk.bounds_max[2] : chunk.bounds_min[2]);
+            const float u =
+                rows[0] * wx + rows[1] * wy + rows[2] * wz + rows[3];
+            const float v =
+                rows[4] * wx + rows[5] * wy + rows[6] * wz + rows[7];
+            umin = std::min(umin, u);
+            umax = std::max(umax, u);
+            vmin = std::min(vmin, v);
+            vmax = std::max(vmax, v);
+          }
+          if (umax < -cull || umin > cull || vmax < -cull ||
+              vmin > cull ||
+              !EnsureSandboxMapChunk(context.device, chunk_index)) {
+            continue;
+          }
+          auto mit = g_r.meshes.find(SandboxMapMeshKey(chunk_index));
+          if (mit == g_r.meshes.end()) {
+            continue;
+          }
+          mit->second.last_used_frame = frame_number;
+          float constants[52] = {};
+          constants[0] = constants[5] = constants[10] = constants[15] = 1.0f;
+          constants[12] = owned_origin[0];
+          constants[13] = owned_origin[1];
+          constants[14] = owned_origin[2];
+          float* mvp = constants + 16;
+          for (int r = 0; r < 4; ++r) {
+            for (int col = 0; col < 4; ++col) {
+              float sum = 0.0f;
+              for (int k = 0; k < 4; ++k) {
+                sum += constants[r * 4 + k] * tvp[k * 4 + col];
+              }
+              mvp[r * 4 + col] = sum;
+            }
+          }
+          cmd->SetRootConstants(0, 52, constants, 0);
+          cmd->SetBufferSrv(3, g_r.bone_ring, bone_region);
+          cmd->SetVertexBuffer(mit->second.vb_view.buffer,
+                               mit->second.vb_view.offset,
+                               mit->second.vb_view.size_bytes,
+                               mit->second.vb_view.stride);
+          cmd->SetIndexBuffer(mit->second.ib_view.buffer,
+                              mit->second.ib_view.offset,
+                              mit->second.ib_view.size_bytes);
+          for (const mechanics_sandbox::map::VisualDraw& draw : chunk.draws) {
+            const bool mask =
+                draw.alpha_mode ==
+                skate::world::SurfaceMaterial::AlphaMode::Mask;
+            if (draw.alpha_mode ==
+                    skate::world::SurfaceMaterial::AlphaMode::Blend ||
+                mask != (phase == 1)) {
+              continue;
+            }
+            if (phase == 1) {
+              cmd->SetTexture(
+                  1, ResolveOwnedMapTexture(context, draw.albedo_texture));
+            }
+            cmd->DrawIndexed(draw.index_count, draw.first_index, 0);
+            ++owned_caster_draws;
+          }
+        }
+      };
   // Per tile (0 = inner r/6, 1 = mid r/2, 2 = far), two phases each:
   // opaque statics, then the alpha-tested families (trees, alphatest
   // fences/grates) with the clip PSO and their diffuse.
@@ -6439,6 +7714,10 @@ static void RenderStaticSunMap(const NativeGuestOutputRenderContext& context,
     for (int phase = 0; phase < 2; ++phase) {
       cmd->SetPipeline(phase == 0 ? g_r.pso_shadow_caster
                                   : g_r.pso_shadow_caster_clip);
+      if (owned_shadow) {
+        draw_owned_casters(tvp, cull, phase);
+        continue;
+      }
       for (const auto& [key, rec] : g_r.static_casters) {
         if (rec.clip != (phase == 1)) {
           continue;
@@ -6519,6 +7798,18 @@ static void RenderStaticSunMap(const NativeGuestOutputRenderContext& context,
       }
     }
   }
+  if (owned_shadow) {
+    static std::atomic<uint32_t> s_owned_shadow_builds{0};
+    const uint32_t build =
+        s_owned_shadow_builds.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (build <= 8 || (build & 63u) == 0) {
+      REXLOG_INFO(
+          "native-scene: owned sun-shadow cascades rebuilt "
+          "(chunks={} caster_draws={} radius={:.1f}m build={})",
+          mechanics_sandbox::map::ActiveVisualWorld().chunks.size(),
+          owned_caster_draws, radius, build);
+    }
+  }
   cmd->Barrier(g_r.static_sun, nrhi::ResourceState::kRenderTarget,
                nrhi::ResourceState::kPixelShaderResource);
   cmd->FlushBarriers();
@@ -6527,12 +7818,14 @@ static void RenderStaticSunMap(const NativeGuestOutputRenderContext& context,
 }
 
 bool RenderShadowAtlas(const NativeGuestOutputRenderContext& context,
-                       const FrameScene& scene, uint32_t bone_region,
-                       int32_t debug_mode, uint32_t* out_draws) {
+                       const FrameScene& scene, const float* sh,
+                       bool shadow_rows_valid, bool owned_shadow,
+                       uint32_t bone_region, int32_t debug_mode,
+                       uint32_t* out_draws) {
   nrhi::Cmd* cmd = context.cmd;
-  const float* sh = scene.shadow_rows;
   bool shadow_ready = false;
   uint32_t shadow_draws = 0;
+  size_t owned_caster_count = 0;
   // Atlas-readback bookkeeping: write completed dumps to disk in frame
   // order; re-arm once the recording session that requested them ends.
   if (!g_recording.load(std::memory_order_relaxed) &&
@@ -6568,7 +7861,7 @@ bool RenderShadowAtlas(const NativeGuestOutputRenderContext& context,
         k, path.string());
     ++g_r.shadow_dump_written;
   }
-  if (REXCVAR_GET(skate3_native_render_scene_shadows) && scene.shadow_valid &&
+  if (REXCVAR_GET(skate3_native_render_scene_shadows) && shadow_rows_valid &&
       g_r.shadow_raw != nullptr && g_r.pso_shadow_caster != nullptr &&
       g_r.pso_shadow_blur != nullptr && debug_mode == 0) {
     struct Caster {
@@ -6648,6 +7941,9 @@ bool RenderShadowAtlas(const NativeGuestOutputRenderContext& context,
         c.bones = true;
       }
       casters.push_back(c);
+    }
+    if (owned_shadow) {
+      owned_caster_count = casters.size();
     }
     if (!casters.empty()) {
       if (g_r.shadow_in_srv_state) {
@@ -6982,6 +8278,24 @@ bool RenderShadowAtlas(const NativeGuestOutputRenderContext& context,
                    nrhi::ResourceState::kPixelShaderResource);
       cmd->FlushBarriers();
       g_r.world_shadow_in_srv = true;
+    }
+  }
+  if (owned_shadow) {
+    static uint64_t s_owned_shadow_frames = 0;
+    static size_t s_last_owned_casters = std::numeric_limits<size_t>::max();
+    static bool s_last_owned_ready = false;
+    ++s_owned_shadow_frames;
+    if (s_owned_shadow_frames <= 4 ||
+        owned_caster_count != s_last_owned_casters ||
+        shadow_ready != s_last_owned_ready ||
+        (s_owned_shadow_frames % 600u) == 0) {
+      REXLOG_INFO(
+          "native-scene: owned dynamic shadows "
+          "(scene_items={} casters={} draws={} ready={})",
+          scene.items.size(), owned_caster_count, shadow_draws,
+          shadow_ready ? 1 : 0);
+      s_last_owned_casters = owned_caster_count;
+      s_last_owned_ready = shadow_ready;
     }
   }
   *out_draws = shadow_draws;
@@ -7628,16 +8942,332 @@ bool SandboxShouldDrawItem(const DrawItem& item) {
   return false;
 }
 
+RaytracedDynamicScene BuildRaytracedLocalPresentation(
+    const FrameScene& scene,
+    const std::unordered_map<const DrawItem*,
+                             const GuestTexture*>& diffuse_by_item) {
+  RaytracedDynamicScene result;
+
+  const auto normalize3 = [](float value[3]) {
+    const float length_squared =
+        value[0] * value[0] + value[1] * value[1] +
+        value[2] * value[2];
+    if (length_squared > 1.0e-12f) {
+      const float inverse = 1.0f / std::sqrt(length_squared);
+      value[0] *= inverse;
+      value[1] *= inverse;
+      value[2] *= inverse;
+    } else {
+      value[0] = 0.0f;
+      value[1] = 1.0f;
+      value[2] = 0.0f;
+    }
+  };
+  const auto transform_position = [](const float matrix[16],
+                                     const float input[3],
+                                     float output[3]) {
+    for (int column = 0; column < 3; ++column) {
+      output[column] =
+          input[0] * matrix[column] +
+          input[1] * matrix[4 + column] +
+          input[2] * matrix[8 + column] +
+          matrix[12 + column];
+    }
+  };
+  const auto transform_normal = [](const float matrix[16],
+                                   const float input[3],
+                                   float output[3]) {
+    for (int column = 0; column < 3; ++column) {
+      output[column] =
+          input[0] * matrix[column] +
+          input[1] * matrix[4 + column] +
+          input[2] * matrix[8 + column];
+    }
+  };
+
+  for (const DrawItem& item : scene.items) {
+    if (!item.dyn_entity || item.ctx == 0 ||
+        !SandboxShouldDrawItem(item)) {
+      continue;
+    }
+    native_entity::CtxInfo identity;
+    if (!native_entity::LookupCtx(item.ctx, &identity) ||
+        mechanics_sandbox::ClassifyPresentationEntity(
+            identity.entity,
+            static_cast<uint8_t>(identity.cls)) !=
+            mechanics_sandbox::PresentationDecision::Keep) {
+      continue;
+    }
+    const auto mesh_it = g_r.meshes.find(item.mesh);
+    if (mesh_it == g_r.meshes.end()) {
+      continue;
+    }
+    const MeshBuffers& buffers = mesh_it->second;
+    const std::vector<float>& decoded =
+        item.ropa && !buffers.ropa_verts.empty()
+            ? buffers.ropa_verts
+            : buffers.raytracing_verts;
+    if (decoded.empty() || decoded.size() % 14 != 0 ||
+        buffers.raytracing_indices.empty()) {
+      continue;
+    }
+
+    const uint32_t vertex_base =
+        static_cast<uint32_t>(result.vertices.size());
+    const uint32_t vertex_count =
+        static_cast<uint32_t>(decoded.size() / 14);
+    result.vertices.reserve(result.vertices.size() + vertex_count);
+    for (uint32_t vertex = 0; vertex < vertex_count; ++vertex) {
+      const float* source = decoded.data() + size_t(vertex) * 14;
+      float position[3] = {source[0], source[1], source[2]};
+      float normal[3] = {source[9], source[10], source[11]};
+      if (item.skinned && !item.bones.empty()) {
+        uint32_t packed_weights = 0;
+        uint32_t packed_indices = 0;
+        std::memcpy(&packed_weights, source + 7, sizeof(packed_weights));
+        std::memcpy(&packed_indices, source + 8, sizeof(packed_indices));
+        float skinned_position[3] = {};
+        float skinned_normal[3] = {};
+        float weight_sum = 0.0f;
+        for (int influence = 0; influence < 4; ++influence) {
+          const float weight =
+              float((packed_weights >> (influence * 8)) & 0xffu) /
+              255.0f;
+          const uint32_t bone =
+              (packed_indices >> (influence * 8)) & 0xffu;
+          const size_t row = size_t(bone) * 12;
+          if (weight <= 0.0f || row + 11 >= item.bones.size()) {
+            continue;
+          }
+          const float* b = item.bones.data() + row;
+          for (int axis = 0; axis < 3; ++axis) {
+            const float* r = b + axis * 4;
+            skinned_position[axis] +=
+                weight * (position[0] * r[0] +
+                          position[1] * r[1] +
+                          position[2] * r[2] + r[3]);
+            skinned_normal[axis] +=
+                weight * (normal[0] * r[0] +
+                          normal[1] * r[1] +
+                          normal[2] * r[2]);
+          }
+          weight_sum += weight;
+        }
+        if (weight_sum > 0.001f) {
+          const float inverse = 1.0f / weight_sum;
+          for (int axis = 0; axis < 3; ++axis) {
+            position[axis] = skinned_position[axis] * inverse;
+            normal[axis] = skinned_normal[axis];
+          }
+        }
+      } else {
+        float transformed_normal[3];
+        transform_normal(item.world, normal, transformed_normal);
+        std::memcpy(normal, transformed_normal, sizeof(normal));
+      }
+      float world_position[3];
+      transform_position(item.world, position, world_position);
+      normalize3(normal);
+      result.vertices.push_back(
+          {{world_position[0], world_position[1], world_position[2]},
+           {normal[0], normal[1], normal[2]},
+           {source[3], source[4]}});
+    }
+
+    RaytracedDynamicMaterial material;
+    // Keep a readable fallback for a texture still streaming, but use the
+    // exact SRV served to the main character draw whenever it is available.
+    // Character recolour rows are material multipliers, not replacement
+    // albedo; ShadeCharacter applies them after sampling the authored page.
+    if (item.tint[3] > 0.01f) {
+      material.color[0] = std::max(0.03f, item.tint[0]);
+      material.color[1] = std::max(0.03f, item.tint[1]);
+      material.color[2] = std::max(0.03f, item.tint[2]);
+    } else {
+      static constexpr float palette[][3] = {
+          {0.18f, 0.20f, 0.23f}, {0.48f, 0.12f, 0.08f},
+          {0.11f, 0.22f, 0.32f}, {0.52f, 0.39f, 0.20f},
+          {0.32f, 0.34f, 0.36f}};
+      const auto& color = palette[(item.mesh >> 4) % std::size(palette)];
+      std::memcpy(material.color, color, sizeof(material.color));
+    }
+    const auto texture_it = diffuse_by_item.find(&item);
+    if (texture_it != diffuse_by_item.end() &&
+        texture_it->second != nullptr &&
+        texture_it->second->texture != nullptr &&
+        texture_it->second->srv != nullptr) {
+      const auto existing = std::find_if(
+          result.diffuse_textures.begin(),
+          result.diffuse_textures.end(),
+          [texture_it](const RaytracedDynamicScene::TextureBinding& binding) {
+            return binding.view == texture_it->second->srv;
+          });
+      if (existing != result.diffuse_textures.end()) {
+        material.texture_index =
+            static_cast<std::uint32_t>(
+                existing - result.diffuse_textures.begin());
+      } else if (result.diffuse_textures.size() <
+                 kRaytracedDynamicTextureLimit) {
+        material.texture_index =
+            static_cast<std::uint32_t>(
+                result.diffuse_textures.size());
+        result.diffuse_textures.push_back(
+            {texture_it->second->texture,
+             texture_it->second->srv});
+      }
+    }
+    material.roughness =
+        item.char_family == 0 ? 0.55f : 0.78f;
+    if (item.char_family != 0 &&
+        item.char_rows[14 * 4 + 1] > 0.0f) {
+      material.lighting_index =
+          static_cast<uint32_t>(
+              result.character_lighting.size());
+      material.character_family = item.char_family;
+      RaytracedCharacterLighting lighting;
+      std::memcpy(
+          lighting.rows, item.char_rows,
+          sizeof(lighting.rows));
+      result.character_lighting.push_back(lighting);
+    }
+
+    const auto append_triangle =
+        [&](uint32_t a, uint32_t b, uint32_t c) {
+          if (a >= vertex_count || b >= vertex_count ||
+              c >= vertex_count || a == b || b == c || a == c) {
+            return;
+          }
+          result.indices.push_back(vertex_base + a);
+          result.indices.push_back(vertex_base + b);
+          result.indices.push_back(vertex_base + c);
+          result.triangle_materials.push_back(material);
+        };
+    for (const DrawEntry& draw : item.draws) {
+      if (uint64_t(draw.start_index) + draw.index_count >
+          buffers.raytracing_indices.size()) {
+        continue;
+      }
+      const uint16_t* indices =
+          buffers.raytracing_indices.data() + draw.start_index;
+      if (draw.prim == 4) {
+        for (uint32_t i = 0; i + 2 < draw.index_count; i += 3) {
+          append_triangle(
+              uint32_t(indices[i]) + draw.base_vertex,
+              uint32_t(indices[i + 1]) + draw.base_vertex,
+              uint32_t(indices[i + 2]) + draw.base_vertex);
+        }
+      } else if (draw.prim == 6) {
+        for (uint32_t i = 0; i + 2 < draw.index_count; ++i) {
+          const uint32_t a =
+              uint32_t(indices[i + (i & 1u)]) + draw.base_vertex;
+          const uint32_t b =
+              uint32_t(indices[i + ((i & 1u) ? 0u : 1u)]) +
+              draw.base_vertex;
+          const uint32_t c =
+              uint32_t(indices[i + 2]) + draw.base_vertex;
+          append_triangle(a, b, c);
+        }
+      }
+    }
+  }
+  float map_origin[3] = {};
+  if (mechanics_sandbox::SandboxMapRenderOrigin(map_origin)) {
+    const mechanics_sandbox::map::VisualMesh& sphere =
+        mechanics_sandbox::map::ActiveMovingLightVisualMesh();
+    for (std::size_t light_index = 0;
+         light_index <
+             mechanics_sandbox::map::ActiveMovingLightCount();
+         ++light_index) {
+      mechanics_sandbox::map::MovingLightSnapshot light;
+      if (!mechanics_sandbox::map::ActiveMovingLightSnapshot(
+              light_index, light)) {
+        continue;
+      }
+      RaytracedMovingLight rt_light;
+      rt_light.position_range[0] =
+          map_origin[0] + light.position[0];
+      rt_light.position_range[1] =
+          map_origin[1] + light.position[1];
+      rt_light.position_range[2] =
+          map_origin[2] + light.position[2];
+      rt_light.position_range[3] = light.influence_radius;
+      rt_light.color_intensity[0] = light.color[0];
+      rt_light.color_intensity[1] = light.color[1];
+      rt_light.color_intensity[2] = light.color[2];
+      rt_light.color_intensity[3] = light.intensity;
+      rt_light.source_radius = light.source_radius;
+      result.moving_lights.push_back(rt_light);
+
+      if (!light.visible_source) {
+        continue;
+      }
+      const std::uint32_t vertex_base =
+          static_cast<std::uint32_t>(result.vertices.size());
+      result.vertices.reserve(
+          result.vertices.size() + sphere.vertices.size());
+      for (const mechanics_sandbox::map::VisualVertex& source :
+           sphere.vertices) {
+        result.vertices.push_back(
+            {{rt_light.position_range[0] +
+                  source.position[0] * light.source_radius,
+              rt_light.position_range[1] +
+                  source.position[1] * light.source_radius,
+              rt_light.position_range[2] +
+                  source.position[2] * light.source_radius},
+             {source.normal[0], source.normal[1], source.normal[2]},
+             {source.uv[0], source.uv[1]}});
+      }
+      RaytracedDynamicMaterial emissive;
+      emissive.color[0] = light.color[0] * 4.5f;
+      emissive.color[1] = light.color[1] * 4.5f;
+      emissive.color[2] = light.color[2] * 4.5f;
+      emissive.roughness = 0.08f;
+      emissive.texture_flags = 1u;
+      for (std::size_t index = 0;
+           index + 2 < sphere.indices.size(); index += 3) {
+        result.indices.push_back(
+            vertex_base + sphere.indices[index]);
+        result.indices.push_back(
+            vertex_base + sphere.indices[index + 1]);
+        result.indices.push_back(
+            vertex_base + sphere.indices[index + 2]);
+        result.triangle_materials.push_back(emissive);
+      }
+    }
+    mechanics_sandbox::map::MovingLightSnapshot lightning;
+    if (result.moving_lights.size() < 4 &&
+        mechanics_sandbox::map::ActiveLightningLightSnapshot(
+            lightning)) {
+      RaytracedMovingLight rt_light;
+      rt_light.position_range[0] =
+          map_origin[0] + lightning.position[0];
+      rt_light.position_range[1] =
+          map_origin[1] + lightning.position[1];
+      rt_light.position_range[2] =
+          map_origin[2] + lightning.position[2];
+      rt_light.position_range[3] =
+          lightning.influence_radius;
+      rt_light.color_intensity[0] = lightning.color[0];
+      rt_light.color_intensity[1] = lightning.color[1];
+      rt_light.color_intensity[2] = lightning.color[2];
+      rt_light.color_intensity[3] = lightning.intensity;
+      rt_light.source_radius = lightning.source_radius;
+      result.moving_lights.push_back(rt_light);
+    }
+  }
+  return result;
+}
+
 void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
                     nrhi::Cmd* cmd, const FrameScene& scene,
-                    uint64_t frame_number, bool use_depth) {
-  if (!mechanics_sandbox::VisualMapEnabled() || cmd == nullptr ||
-      !EnsureSandboxMapMesh(context.device)) {
+                    uint64_t frame_number, bool use_depth,
+                    bool shadow_ready) {
+  if (!mechanics_sandbox::VisualMapEnabled() || cmd == nullptr) {
     return;
   }
   mechanics_sandbox::ObserveSandboxCamera(scene.cam_pos);
   float origin[3] = {};
-  if (!mechanics_sandbox::SandboxMapOrigin(origin)) {
+  if (!mechanics_sandbox::SandboxMapRenderOrigin(origin)) {
     static std::atomic<uint32_t> s_origin_log{0};
     if (s_origin_log.fetch_add(1, std::memory_order_relaxed) == 0) {
       REXLOG_WARN("native-scene: sandbox map draw skipped; origin unavailable");
@@ -7651,44 +9281,78 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
                 origin[0], origin[1], origin[2], scene.cam_pos[0],
                 scene.cam_pos[1], scene.cam_pos[2]);
   }
-  const auto it = g_r.meshes.find(kSandboxMapMesh);
-  if (it == g_r.meshes.end()) {
-    return;
-  }
-  it->second.last_used_frame = frame_number;
-
-  // The native scene's published view is camera-relative: its captured
-  // camera position is the stable presentation origin, while the verified
-  // board-position seam is retained separately for collision telemetry. Use
-  // the camera frame here so the authored visual stays in the visible scene
-  // even when the guest board coordinates are in the retail map's offset
-  // frame.
+  // Render in the same verified board-origin frame used by owned collision.
+  // The old camera-relative probe made a huge clipped triangle appear in the
+  // sky and visually disconnected the park from its collision geometry.
   float constants[52] = {};
-  constants[0] = 1.0f;
-  constants[5] = 1.0f;
-  constants[10] = 1.0f;
-  constants[15] = 1.0f;
-  constants[12] = scene.cam_pos[0];
-  constants[13] = scene.cam_pos[1];
-  constants[14] = scene.cam_pos[2];
-  for (int r = 0; r < 4; ++r) {
-    for (int c = 0; c < 4; ++c) {
-      float sum = 0.0f;
-      for (int k = 0; k < 4; ++k) {
-        sum += constants[r * 4 + k] * scene.view_proj[k * 4 + c];
-      }
-      constants[16 + r * 4 + c] = sum;
-    }
-  }
-  // tint.a > 0 selects the scene shader's flat-color path, avoiding guest
-  // material/lightmap state while still exercising the real scene PSO.
-  constants[40] = 0.14f;
-  constants[41] = 0.28f;
-  constants[42] = 0.36f;
-  constants[43] = 1.0f;
+  const auto set_world_translation =
+      [&constants, &scene](float x, float y, float z,
+                           float scale = 1.0f) {
+        std::fill(constants, constants + 32, 0.0f);
+        constants[0] = scale;
+        constants[5] = scale;
+        constants[10] = scale;
+        constants[15] = 1.0f;
+        constants[12] = x;
+        constants[13] = y;
+        constants[14] = z;
+        for (int r = 0; r < 4; ++r) {
+          for (int c = 0; c < 4; ++c) {
+            float sum = 0.0f;
+            for (int k = 0; k < 4; ++k) {
+              sum += constants[r * 4 + k] *
+                     scene.view_proj[k * 4 + c];
+            }
+            constants[16 + r * 4 + c] = sum;
+          }
+        }
+      };
+  const auto set_world_basis =
+      [&constants, &scene](
+          const skate::world::Vec3& x_axis,
+          const skate::world::Vec3& y_axis,
+          const skate::world::Vec3& z_axis,
+          const skate::world::Vec3& translation) {
+        std::fill(constants, constants + 32, 0.0f);
+        constants[0] = x_axis.x;
+        constants[1] = x_axis.y;
+        constants[2] = x_axis.z;
+        constants[4] = y_axis.x;
+        constants[5] = y_axis.y;
+        constants[6] = y_axis.z;
+        constants[8] = z_axis.x;
+        constants[9] = z_axis.y;
+        constants[10] = z_axis.z;
+        constants[12] = translation.x;
+        constants[13] = translation.y;
+        constants[14] = translation.z;
+        constants[15] = 1.0f;
+        for (int row = 0; row < 4; ++row) {
+          for (int column = 0; column < 4; ++column) {
+            float sum = 0.0f;
+            for (int inner = 0; inner < 4; ++inner) {
+              sum += constants[row * 4 + inner] *
+                     scene.view_proj[inner * 4 + column];
+            }
+            constants[16 + row * 4 + column] = sum;
+          }
+        }
+      };
+  set_world_translation(origin[0], origin[1], origin[2]);
   constants[36] = scene.cam_pos[0];
   constants[37] = scene.cam_pos[1];
   constants[38] = scene.cam_pos[2];
+  constants[39] = -41.0f;
+  const skate::world::DayNightState celestial =
+      mechanics_sandbox::map::ActiveDayNightState();
+  constants[40] = celestial.light_direction_to_light.x;
+  constants[41] = celestial.light_direction_to_light.y;
+  constants[42] = celestial.light_direction_to_light.z;
+  constants[43] = celestial.ambient;
+  constants[44] = celestial.light_color.x;
+  constants[45] = celestial.light_color.y;
+  constants[46] = celestial.light_color.z;
+  constants[47] = celestial.light_intensity;
 
   cmd->SetBindingLayout(g_r.layout);
   cmd->SetPipeline(use_depth ? g_r.pso : g_r.pso_nodepth);
@@ -7698,19 +9362,701 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
   cmd->SetTexture(2, g_r.white.srv);
   cmd->SetTexture(4, g_r.white.srv);
   cmd->SetTexture(5, g_r.white.srv);
-  cmd->SetTexturePair(7, g_r.white_cube.srv, g_r.white.srv);
-  nrhi::TextureView* t8_default[3] = {g_r.white.srv, g_r.white.srv,
-                                       g_r.white.srv};
-  cmd->SetTextures(8, t8_default, 3);
-  cmd->SetVertexBuffer(it->second.vb_view.buffer, it->second.vb_view.offset,
-                       it->second.vb_view.size_bytes,
-                       it->second.vb_view.stride);
-  cmd->SetIndexBuffer(it->second.ib_view.buffer, it->second.ib_view.offset,
-                      it->second.ib_view.size_bytes);
+  cmd->SetTexturePair(
+      7, g_r.white_cube.srv,
+      shadow_ready ? g_r.shadow_srv_final : g_r.white.srv);
+  // Keep both static sun maps on t10/t11 while the owned-map renderer
+  // changes t8/t9 material resources.
+  nrhi::TextureView* t8_default[5] = {
+      g_r.white.srv, g_r.white.srv,
+      g_r.owned_nsm_active ? g_r.owned_static_sun_srv[0]
+                           : (g_r.static_sun_valid ? g_r.static_sun_srv
+                                                   : g_r.white.srv),
+      g_r.owned_nsm_active ? g_r.owned_static_sun_srv[1] : g_r.white.srv,
+      g_r.owned_nsm_active ? g_r.owned_static_sun_srv[2] : g_r.white.srv};
+  cmd->SetTextures(8, t8_default, 5);
   cmd->SetPrimitiveTopology(nrhi::PrimitiveTopology::kTriangleList);
-  cmd->DrawIndexed(uint32_t(mechanics_sandbox::map::TestVisualMesh().indices.size()),
-                   0, 0);
-  mechanics_sandbox::RecordMapDraw(true);
+
+  const mechanics_sandbox::map::VisualWorld& world =
+      mechanics_sandbox::map::ActiveVisualWorld();
+  constexpr float kDetailRenderDistance = 768.0f;
+  const float local_camera_x = scene.cam_pos[0] - origin[0];
+  const float local_camera_z = scene.cam_pos[2] - origin[2];
+  const int32_t camera_cell_x = static_cast<int32_t>(
+      std::floor(local_camera_x / world.chunk_size));
+  const int32_t camera_cell_z = static_cast<int32_t>(
+      std::floor(local_camera_z / world.chunk_size));
+  const int32_t cell_radius = static_cast<int32_t>(
+      std::ceil(kDetailRenderDistance / world.chunk_size));
+  uint32_t candidate_chunks = 0;
+  uint32_t visible_chunks = 0;
+  uint32_t draw_calls = 0;
+  const auto draw_chunk = [&](std::size_t chunk_index) {
+    const mechanics_sandbox::map::VisualChunk& chunk =
+        world.chunks[chunk_index];
+    ++candidate_chunks;
+    float corners[8][3];
+    for (int corner = 0; corner < 8; ++corner) {
+      corners[corner][0] =
+          origin[0] + ((corner & 1) ? chunk.bounds_max[0]
+                                    : chunk.bounds_min[0]);
+      corners[corner][1] =
+          origin[1] + ((corner & 2) ? chunk.bounds_max[1]
+                                    : chunk.bounds_min[1]);
+      corners[corner][2] =
+          origin[2] + ((corner & 4) ? chunk.bounds_max[2]
+                                    : chunk.bounds_min[2]);
+    }
+    if (CornersOutsideFrustum(corners, scene.view_proj, 1.05f)) {
+      return;
+    }
+    ++visible_chunks;
+    if (!EnsureSandboxMapChunk(context.device, chunk_index)) {
+      return;
+    }
+    const auto mesh =
+        g_r.meshes.find(SandboxMapMeshKey(chunk_index));
+    if (mesh == g_r.meshes.end()) {
+      return;
+    }
+    mesh->second.last_used_frame = frame_number;
+    cmd->SetVertexBuffer(
+        mesh->second.vb_view.buffer, mesh->second.vb_view.offset,
+        mesh->second.vb_view.size_bytes, mesh->second.vb_view.stride);
+    cmd->SetIndexBuffer(
+        mesh->second.ib_view.buffer, mesh->second.ib_view.offset,
+        mesh->second.ib_view.size_bytes);
+    // Material colours remain authored beside collision properties, while
+    // spatial submission is now independent per visible chunk.
+    for (const mechanics_sandbox::map::VisualDraw& draw : chunk.draws) {
+      const bool imported =
+          draw.albedo_texture != 0 || draw.indirect_lightmap != 0 ||
+          draw.normal_texture != 0 || draw.orm_texture != 0 ||
+          draw.emissive_texture != 0;
+      const bool alpha_blend =
+          draw.alpha_mode ==
+          skate::world::SurfaceMaterial::AlphaMode::Blend;
+      cmd->SetPipeline(
+          alpha_blend && g_r.pso_transparent != nullptr
+              ? g_r.pso_transparent
+              : (use_depth ? g_r.pso : g_r.pso_nodepth));
+      cmd->SetTexture(
+          1, ResolveOwnedMapTexture(context, draw.albedo_texture));
+      cmd->SetTexture(
+          2, ResolveOwnedMapTexture(
+                 context, draw.indirect_lightmap, OwnedTextureRole::Data));
+      cmd->SetTexturePair(
+          5,
+          ResolveOwnedMapTexture(context, draw.emissive_texture),
+          ResolveOwnedMapTexture(
+              context, draw.normal_texture, OwnedTextureRole::Normal));
+      nrhi::TextureView* owned_material_maps[5] = {
+          g_r.white.srv,
+          ResolveOwnedMapTexture(
+              context, draw.orm_texture, OwnedTextureRole::Data),
+          g_r.owned_nsm_active ? g_r.owned_static_sun_srv[0]
+                               : g_r.white.srv,
+          g_r.owned_nsm_active ? g_r.owned_static_sun_srv[1]
+                               : g_r.white.srv,
+          g_r.owned_nsm_active ? g_r.owned_static_sun_srv[2]
+                               : g_r.white.srv};
+      cmd->SetTextures(8, owned_material_maps, 5);
+      constants[32] = draw.color[0];
+      constants[33] = draw.color[1];
+      constants[34] = draw.color[2];
+      constants[35] = imported ? -draw.alpha_cutoff : 0.0f;
+      std::uint32_t owned_flags = 1u;
+      owned_flags |=
+          static_cast<std::uint32_t>(draw.alpha_mode) << 1u;
+      owned_flags |= draw.normal_texture != 0 ? 8u : 0u;
+      owned_flags |= draw.orm_texture != 0 ? 16u : 0u;
+      owned_flags |= draw.emissive_texture != 0 ? 32u : 0u;
+      constants[48] =
+          imported ? -static_cast<float>(owned_flags) : draw.material[0];
+      constants[49] =
+          imported ? draw.baked_indirect_strength : draw.material[1];
+      constants[50] = draw.material[2];
+      constants[51] =
+          imported
+              ? (draw.material[2] < 0.0f ? -draw.material[2] : 0.0f)
+              : draw.material[3];
+      cmd->SetRootConstants(0, 52, constants, 0);
+      cmd->DrawIndexed(draw.index_count, draw.first_index, 0);
+      ++draw_calls;
+    }
+  };
+  // The cell table is sorted by (x,z), allowing a bounded detail-radius
+  // lookup instead of scanning every chunk in a continent-sized map.
+  for (int32_t cell_x = camera_cell_x - cell_radius;
+       cell_x <= camera_cell_x + cell_radius; ++cell_x) {
+    for (int32_t cell_z = camera_cell_z - cell_radius;
+         cell_z <= camera_cell_z + cell_radius; ++cell_z) {
+      const auto cell = std::lower_bound(
+          world.cells.begin(), world.cells.end(),
+          std::pair<int32_t, int32_t>{cell_x, cell_z},
+          [](const mechanics_sandbox::map::VisualCellRange& left,
+             const std::pair<int32_t, int32_t>& right) {
+            return std::pair<int32_t, int32_t>{
+                       left.cell_x, left.cell_z} < right;
+          });
+      if (cell == world.cells.end() || cell->cell_x != cell_x ||
+          cell->cell_z != cell_z) {
+        continue;
+      }
+      for (std::size_t offset = 0; offset < cell->chunk_count; ++offset) {
+        draw_chunk(cell->first_chunk + offset);
+      }
+    }
+  }
+
+  // Advance and upload the project-owned heightfield. The solver itself is
+  // fixed-step and renderer-independent; wall-clock time is only accumulated
+  // here because this is the single render-thread owner of its GPU snapshot.
+  static auto water_clock = std::chrono::steady_clock::now();
+  const auto water_now = std::chrono::steady_clock::now();
+  const float water_frame_seconds =
+      std::chrono::duration<float>(water_now - water_clock).count();
+  water_clock = water_now;
+  if (mechanics_sandbox::map::AdvanceWaterSimulation(
+          water_frame_seconds)) {
+    const mechanics_sandbox::map::VisualMesh& water =
+        mechanics_sandbox::map::ActiveWaterVisualMesh();
+    if (UpdateSandboxDynamicVisualMesh(
+            context.device, kSandboxWaterMesh, water,
+            "simulated water")) {
+      const auto water_mesh = g_r.meshes.find(kSandboxWaterMesh);
+      if (water_mesh != g_r.meshes.end()) {
+        set_world_translation(origin[0], origin[1], origin[2]);
+        constants[39] = -43.0f;
+        water_mesh->second.last_used_frame = frame_number;
+        cmd->SetVertexBuffer(
+            water_mesh->second.vb_view.buffer,
+            water_mesh->second.vb_view.offset,
+            water_mesh->second.vb_view.size_bytes,
+            water_mesh->second.vb_view.stride);
+        cmd->SetIndexBuffer(
+            water_mesh->second.ib_view.buffer,
+            water_mesh->second.ib_view.offset,
+            water_mesh->second.ib_view.size_bytes);
+        for (const mechanics_sandbox::map::VisualDraw& draw :
+             water.draws) {
+          constants[32] = draw.color[0];
+          constants[33] = draw.color[1];
+          constants[34] = draw.color[2];
+          constants[35] = 0.0f;
+          constants[48] = 0.0f;
+          constants[49] = 0.0f;
+          constants[50] = 0.0f;
+          constants[51] = 0.0f;
+          cmd->SetRootConstants(0, 52, constants, 0);
+          cmd->DrawIndexed(
+              draw.index_count, draw.first_index, 0);
+          ++draw_calls;
+        }
+      }
+    }
+
+    float pusher_position[3] = {};
+    const mechanics_sandbox::map::VisualMesh& pusher =
+        mechanics_sandbox::map::ActiveWaterPusherVisualMesh();
+    if (mechanics_sandbox::map::ActiveWaterPusherPose(
+            pusher_position) &&
+        EnsureSandboxVisualMesh(
+            context.device, kSandboxWaterPusherMesh, pusher,
+            "water pusher")) {
+      const auto pusher_mesh =
+          g_r.meshes.find(kSandboxWaterPusherMesh);
+      if (pusher_mesh != g_r.meshes.end()) {
+        set_world_translation(
+            origin[0] + pusher_position[0],
+            origin[1] + pusher_position[1],
+            origin[2] + pusher_position[2]);
+        constants[39] = -41.25f;
+        pusher_mesh->second.last_used_frame = frame_number;
+        cmd->SetVertexBuffer(
+            pusher_mesh->second.vb_view.buffer,
+            pusher_mesh->second.vb_view.offset,
+            pusher_mesh->second.vb_view.size_bytes,
+            pusher_mesh->second.vb_view.stride);
+        cmd->SetIndexBuffer(
+            pusher_mesh->second.ib_view.buffer,
+            pusher_mesh->second.ib_view.offset,
+            pusher_mesh->second.ib_view.size_bytes);
+        for (const mechanics_sandbox::map::VisualDraw& draw :
+             pusher.draws) {
+          constants[32] = draw.color[0];
+          constants[33] = draw.color[1];
+          constants[34] = draw.color[2];
+          constants[35] = 0.0f;
+          constants[48] = draw.material[0];
+          constants[49] = draw.material[1];
+          constants[50] = draw.material[2];
+          constants[51] = draw.material[3];
+          cmd->SetRootConstants(0, 52, constants, 0);
+          cmd->DrawIndexed(
+              draw.index_count, draw.first_index, 0);
+          ++draw_calls;
+        }
+      }
+    }
+    set_world_translation(origin[0], origin[1], origin[2]);
+    constants[39] = -41.0f;
+  }
+
+  // Kinematic objects use the pose most recently committed to both native
+  // collision buffers. They are separate GPU meshes so their vertices never
+  // need to be rebuilt or uploaded as they move.
+  const skate::world::MapDefinition& definition =
+      mechanics_sandbox::map::ActiveDefinition();
+  for (std::size_t object_index = 0;
+       object_index < definition.kinematic_boxes.size();
+       ++object_index) {
+    float position[3] = {};
+    float velocity[3] = {};
+    if (!native_collision::KinematicObjectPose(
+            object_index, position, velocity)) {
+      continue;
+    }
+    const skate::world::KinematicBox& object =
+        definition.kinematic_boxes[object_index];
+    const float world_position[3] = {
+        origin[0] + position[0],
+        origin[1] + position[1],
+        origin[2] + position[2],
+    };
+    float corners[8][3];
+    for (int corner = 0; corner < 8; ++corner) {
+      corners[corner][0] =
+          world_position[0] +
+          ((corner & 1) ? object.local_max.x
+                        : object.local_min.x);
+      corners[corner][1] =
+          world_position[1] +
+          ((corner & 2) ? object.local_max.y
+                        : object.local_min.y);
+      corners[corner][2] =
+          world_position[2] +
+          ((corner & 4) ? object.local_max.z
+                        : object.local_min.z);
+    }
+    if (CornersOutsideFrustum(corners, scene.view_proj, 1.05f) ||
+        !EnsureSandboxKinematicMesh(
+            context.device, object_index)) {
+      continue;
+    }
+    const auto mesh = g_r.meshes.find(
+        kSandboxKinematicMeshBase +
+        static_cast<uint32_t>(object_index));
+    if (mesh == g_r.meshes.end()) {
+      continue;
+    }
+
+    set_world_translation(world_position[0], world_position[1],
+                          world_position[2]);
+    // -41.25 keeps the owned material family while asking the pixel shader
+    // to derive procedural coordinates from this object's local frame.
+    // Static map draws remain at -41.0 and retain world-aligned materials.
+    constants[39] = -41.25f;
+    mesh->second.last_used_frame = frame_number;
+    cmd->SetVertexBuffer(
+        mesh->second.vb_view.buffer, mesh->second.vb_view.offset,
+        mesh->second.vb_view.size_bytes, mesh->second.vb_view.stride);
+    cmd->SetIndexBuffer(
+        mesh->second.ib_view.buffer, mesh->second.ib_view.offset,
+        mesh->second.ib_view.size_bytes);
+    for (const mechanics_sandbox::map::VisualDraw& draw :
+         mechanics_sandbox::map::ActiveKinematicVisualMesh(
+             object_index).draws) {
+      constants[32] = draw.color[0];
+      constants[33] = draw.color[1];
+      constants[34] = draw.color[2];
+      constants[35] = 0.0f;
+      constants[48] = draw.material[0];
+      constants[49] = draw.material[1];
+      constants[50] = draw.material[2];
+      constants[51] = draw.material[3];
+      cmd->SetRootConstants(0, 52, constants, 0);
+      cmd->DrawIndexed(draw.index_count, draw.first_index, 0);
+      ++draw_calls;
+    }
+    constants[39] = -41.0f;
+  }
+
+  // Blender-authored doors are separate rigid leaves. The same hinge angle
+  // published after native collision is used here, so the textured door and
+  // its collision volume cannot follow different timelines.
+  const auto rotate_about_axis = [](
+      skate::world::Vec3 value, skate::world::Vec3 axis, float angle) {
+    const float cosine = std::cos(angle);
+    const float sine = std::sin(angle);
+    return value * cosine +
+           skate::world::Cross(axis, value) * sine +
+           axis * (skate::world::Dot(axis, value) * (1.0f - cosine));
+  };
+  for (std::size_t door_index = 0;
+       door_index < definition.hinged_doors.size(); ++door_index) {
+    float angle = 0.0f;
+    float angular_velocity = 0.0f;
+    if (!native_collision::HingedDoorPose(
+            door_index, &angle, &angular_velocity)) {
+      continue;
+    }
+    (void)angular_velocity;
+    const skate::world::HingedDoor& door =
+        definition.hinged_doors[door_index];
+    const skate::world::Vec3 x_axis = rotate_about_axis(
+        door.closed_width_axis, door.hinge_axis, angle);
+    const skate::world::Vec3 z_axis = rotate_about_axis(
+        door.closed_depth_axis, door.hinge_axis, angle);
+    const skate::world::Vec3 translation{
+        origin[0] + door.hinge_position.x,
+        origin[1] + door.hinge_position.y,
+        origin[2] + door.hinge_position.z,
+    };
+    float corners[8][3];
+    for (int corner = 0; corner < 8; ++corner) {
+      const float local_x =
+          (corner & 1) ? door.local_max.x : door.local_min.x;
+      const float local_y =
+          (corner & 2) ? door.local_max.y : door.local_min.y;
+      const float local_z =
+          (corner & 4) ? door.local_max.z : door.local_min.z;
+      const skate::world::Vec3 point =
+          translation + x_axis * local_x +
+          door.hinge_axis * local_y + z_axis * local_z;
+      corners[corner][0] = point.x;
+      corners[corner][1] = point.y;
+      corners[corner][2] = point.z;
+    }
+    if (CornersOutsideFrustum(corners, scene.view_proj, 1.05f) ||
+        !EnsureSandboxHingedDoorMesh(context.device, door_index)) {
+      continue;
+    }
+    const auto mesh = g_r.meshes.find(
+        kSandboxHingedDoorMeshBase +
+        static_cast<std::uint32_t>(door_index));
+    if (mesh == g_r.meshes.end()) {
+      continue;
+    }
+    set_world_basis(
+        x_axis, door.hinge_axis, z_axis, translation);
+    constants[39] = -41.0f;
+    mesh->second.last_used_frame = frame_number;
+    cmd->SetVertexBuffer(
+        mesh->second.vb_view.buffer, mesh->second.vb_view.offset,
+        mesh->second.vb_view.size_bytes, mesh->second.vb_view.stride);
+    cmd->SetIndexBuffer(
+        mesh->second.ib_view.buffer, mesh->second.ib_view.offset,
+        mesh->second.ib_view.size_bytes);
+    for (const mechanics_sandbox::map::VisualDraw& draw :
+         mechanics_sandbox::map::ActiveHingedDoorVisualMesh(
+             door_index).draws) {
+      const bool imported =
+          draw.albedo_texture != 0 || draw.indirect_lightmap != 0 ||
+          draw.normal_texture != 0 || draw.orm_texture != 0 ||
+          draw.emissive_texture != 0;
+      const bool alpha_blend =
+          draw.alpha_mode ==
+          skate::world::SurfaceMaterial::AlphaMode::Blend;
+      cmd->SetPipeline(
+          alpha_blend && g_r.pso_transparent != nullptr
+              ? g_r.pso_transparent
+              : (use_depth ? g_r.pso : g_r.pso_nodepth));
+      cmd->SetTexture(
+          1, ResolveOwnedMapTexture(context, draw.albedo_texture));
+      cmd->SetTexture(
+          2, ResolveOwnedMapTexture(
+                 context, draw.indirect_lightmap,
+                 OwnedTextureRole::Data));
+      cmd->SetTexturePair(
+          5,
+          ResolveOwnedMapTexture(context, draw.emissive_texture),
+          ResolveOwnedMapTexture(
+              context, draw.normal_texture,
+              OwnedTextureRole::Normal));
+      nrhi::TextureView* door_material_maps[5] = {
+          g_r.white.srv,
+          ResolveOwnedMapTexture(
+              context, draw.orm_texture, OwnedTextureRole::Data),
+          g_r.owned_nsm_active ? g_r.owned_static_sun_srv[0]
+                               : g_r.white.srv,
+          g_r.owned_nsm_active ? g_r.owned_static_sun_srv[1]
+                               : g_r.white.srv,
+          g_r.owned_nsm_active ? g_r.owned_static_sun_srv[2]
+                               : g_r.white.srv};
+      cmd->SetTextures(8, door_material_maps, 5);
+      constants[32] = draw.color[0];
+      constants[33] = draw.color[1];
+      constants[34] = draw.color[2];
+      constants[35] = imported ? -draw.alpha_cutoff : 0.0f;
+      std::uint32_t owned_flags = 1u;
+      owned_flags |=
+          static_cast<std::uint32_t>(draw.alpha_mode) << 1u;
+      owned_flags |= draw.normal_texture != 0 ? 8u : 0u;
+      owned_flags |= draw.orm_texture != 0 ? 16u : 0u;
+      owned_flags |= draw.emissive_texture != 0 ? 32u : 0u;
+      constants[48] =
+          imported ? -static_cast<float>(owned_flags)
+                   : draw.material[0];
+      constants[49] =
+          imported ? draw.baked_indirect_strength
+                   : draw.material[1];
+      constants[50] = draw.material[2];
+      constants[51] =
+          imported
+              ? (draw.material[2] < 0.0f
+                     ? -draw.material[2]
+                     : 0.0f)
+              : draw.material[3];
+      cmd->SetRootConstants(0, 52, constants, 0);
+      cmd->DrawIndexed(draw.index_count, draw.first_index, 0);
+      ++draw_calls;
+    }
+  }
+  cmd->SetPipeline(use_depth ? g_r.pso : g_r.pso_nodepth);
+  cmd->SetTexture(1, g_r.white.srv);
+  cmd->SetTexture(2, g_r.white.srv);
+  cmd->SetTexturePair(5, g_r.white.srv, g_r.white.srv);
+  cmd->SetTextures(8, t8_default, 5);
+  set_world_translation(origin[0], origin[1], origin[2]);
+
+  // The same cached authored poses are consumed later by the DXR dynamic
+  // scene. Rendering the emissive source meshes here makes their motion and
+  // their illumination visibly inseparable.
+  if (mechanics_sandbox::map::ActiveMovingLightCount() != 0 &&
+      EnsureSandboxMovingLightMesh(context.device)) {
+    const auto light_mesh =
+        g_r.meshes.find(kSandboxMovingLightMesh);
+    if (light_mesh != g_r.meshes.end()) {
+      light_mesh->second.last_used_frame = frame_number;
+      cmd->SetVertexBuffer(
+          light_mesh->second.vb_view.buffer,
+          light_mesh->second.vb_view.offset,
+          light_mesh->second.vb_view.size_bytes,
+          light_mesh->second.vb_view.stride);
+      cmd->SetIndexBuffer(
+          light_mesh->second.ib_view.buffer,
+          light_mesh->second.ib_view.offset,
+          light_mesh->second.ib_view.size_bytes);
+      for (std::size_t light_index = 0;
+           light_index <
+               mechanics_sandbox::map::ActiveMovingLightCount();
+           ++light_index) {
+        mechanics_sandbox::map::MovingLightSnapshot light;
+        if (!mechanics_sandbox::map::ActiveMovingLightSnapshot(
+                light_index, light)) {
+          continue;
+        }
+        if (!light.visible_source) {
+          continue;
+        }
+        set_world_translation(
+            origin[0] + light.position[0],
+            origin[1] + light.position[1],
+            origin[2] + light.position[2],
+            light.source_radius);
+        constants[32] = 1.0f;
+        constants[33] = 1.0f;
+        constants[34] = 1.0f;
+        constants[35] = 0.0f;
+        constants[39] = -44.0f;
+        constants[40] = light.color[0];
+        constants[41] = light.color[1];
+        constants[42] = light.color[2];
+        constants[43] = 0.0f;
+        constants[48] = 0.0f;
+        constants[49] = 0.0f;
+        constants[50] = 0.0f;
+        constants[51] = 0.0f;
+        cmd->SetRootConstants(0, 52, constants, 0);
+        cmd->DrawIndexed(
+            static_cast<uint32_t>(
+                mechanics_sandbox::map::
+                    ActiveMovingLightVisualMesh().indices.size()),
+            0, 0);
+        ++draw_calls;
+      }
+    }
+  }
+
+  // Camera-centred storm rain. The mesh is regenerated from the deterministic
+  // weather time, then uploaded through the same ring-safe path as water.
+  const mechanics_sandbox::map::WeatherSnapshot weather =
+      mechanics_sandbox::map::ActiveWeatherSnapshot();
+  if (weather.rain_intensity > 0.0f) {
+    const float local_camera[3] = {
+        scene.cam_pos[0] - origin[0],
+        scene.cam_pos[1] - origin[1],
+        scene.cam_pos[2] - origin[2],
+    };
+    mechanics_sandbox::map::UpdateRainVisualMesh(local_camera);
+    const mechanics_sandbox::map::VisualMesh& rain =
+        mechanics_sandbox::map::ActiveRainVisualMesh();
+    if (UpdateSandboxDynamicVisualMesh(
+            context.device, kSandboxRainMesh, rain, "storm rain")) {
+      const auto mesh = g_r.meshes.find(kSandboxRainMesh);
+      if (mesh != g_r.meshes.end()) {
+        set_world_translation(origin[0], origin[1], origin[2]);
+        constants[32] = 0.62f;
+        constants[33] = 0.66f;
+        constants[34] = 0.71f;
+        constants[35] = 0.0f;
+        constants[39] = -45.0f;
+        constants[40] = 0.0f;
+        constants[41] = 0.0f;
+        constants[42] = 0.0f;
+        constants[43] = weather.rain_intensity;
+        cmd->SetPipeline(g_r.pso_transparent);
+        cmd->SetVertexBuffer(
+            mesh->second.vb_view.buffer, mesh->second.vb_view.offset,
+            mesh->second.vb_view.size_bytes,
+            mesh->second.vb_view.stride);
+        cmd->SetIndexBuffer(
+            mesh->second.ib_view.buffer, mesh->second.ib_view.offset,
+            mesh->second.ib_view.size_bytes);
+        cmd->SetRootConstants(0, 52, constants, 0);
+        cmd->DrawIndexed(
+            static_cast<std::uint32_t>(rain.indices.size()), 0, 0);
+        ++draw_calls;
+      }
+    }
+  }
+
+  if (weather.flash_intensity > 0.001f &&
+      !mechanics_sandbox::map::ActiveLightningVisualMesh().indices.empty() &&
+      UpdateSandboxDynamicVisualMesh(
+          context.device, kSandboxLightningMesh,
+          mechanics_sandbox::map::ActiveLightningVisualMesh(),
+          "storm lightning")) {
+    const auto mesh = g_r.meshes.find(kSandboxLightningMesh);
+    if (mesh != g_r.meshes.end()) {
+      set_world_translation(origin[0], origin[1], origin[2]);
+      constants[32] = 1.0f;
+      constants[33] = 1.0f;
+      constants[34] = 1.0f;
+      constants[35] = 0.0f;
+      constants[39] = -44.0f;
+      constants[40] = 0.52f * weather.flash_intensity;
+      constants[41] = 0.70f * weather.flash_intensity;
+      constants[42] = 1.0f * weather.flash_intensity;
+      constants[43] = 0.0f;
+      cmd->SetPipeline(g_r.pso_transparent);
+      cmd->SetVertexBuffer(
+          mesh->second.vb_view.buffer, mesh->second.vb_view.offset,
+          mesh->second.vb_view.size_bytes,
+          mesh->second.vb_view.stride);
+      cmd->SetIndexBuffer(
+          mesh->second.ib_view.buffer, mesh->second.ib_view.offset,
+          mesh->second.ib_view.size_bytes);
+      cmd->SetRootConstants(0, 52, constants, 0);
+      cmd->DrawIndexed(
+          static_cast<std::uint32_t>(
+              mechanics_sandbox::map::ActiveLightningVisualMesh()
+                  .indices.size()),
+          0, 0);
+      ++draw_calls;
+    }
+  }
+  cmd->SetPipeline(use_depth ? g_r.pso : g_r.pso_nodepth);
+  constants[39] = -41.0f;
+
+  uint32_t resident_chunks = 0;
+  for (std::size_t chunk_index = 0;
+       chunk_index < world.chunks.size(); ++chunk_index) {
+    resident_chunks +=
+        g_r.meshes.contains(SandboxMapMeshKey(chunk_index)) ? 1u : 0u;
+  }
+  mechanics_sandbox::RecordMapChunks(
+      static_cast<uint32_t>(world.chunks.size()), candidate_chunks,
+      visible_chunks, resident_chunks, draw_calls);
+  mechanics_sandbox::RecordMapDraw(draw_calls != 0);
+}
+
+void DrawSandboxSky(const NativeGuestOutputRenderContext& context,
+                    nrhi::Cmd* cmd, const FrameScene& scene,
+                    uint64_t frame_number) {
+  if (!mechanics_sandbox::VisualMapEnabled() || cmd == nullptr ||
+      !mechanics_sandbox::map::ActiveDefinition().sky.enabled ||
+      !EnsureSandboxSkyMesh(context.device)) {
+    return;
+  }
+  const auto mesh = g_r.meshes.find(kSandboxSkyMesh);
+  if (mesh == g_r.meshes.end()) {
+    return;
+  }
+  mesh->second.last_used_frame = frame_number;
+
+  // The owned sphere follows the camera. It has no parallax and does not
+  // depend on Skate's sky assets or the authored world's physical extent.
+  float constants[52] = {};
+  constants[0] = 1.0f;
+  constants[5] = 1.0f;
+  constants[10] = 1.0f;
+  constants[15] = 1.0f;
+  constants[12] = scene.cam_pos[0];
+  constants[13] = scene.cam_pos[1];
+  constants[14] = scene.cam_pos[2];
+  for (int row = 0; row < 4; ++row) {
+    for (int column = 0; column < 4; ++column) {
+      float sum = 0.0f;
+      for (int index = 0; index < 4; ++index) {
+        sum += constants[row * 4 + index] *
+               scene.view_proj[index * 4 + column];
+      }
+      constants[16 + row * 4 + column] = sum;
+    }
+  }
+  constants[36] = scene.cam_pos[0];
+  constants[37] = scene.cam_pos[1];
+  constants[38] = scene.cam_pos[2];
+  constants[39] = -42.0f;
+  const skate::world::DayNightState celestial =
+      mechanics_sandbox::map::ActiveDayNightState();
+  constants[32] = celestial.sun_direction_to_light.x;
+  constants[33] = celestial.sun_direction_to_light.y;
+  constants[34] = celestial.sun_direction_to_light.z;
+  constants[35] = 0.0f;
+  constants[40] = celestial.sky_zenith.x;
+  constants[41] = celestial.sky_zenith.y;
+  constants[42] = celestial.sky_zenith.z;
+  constants[43] = celestial.star_visibility;
+  constants[44] = celestial.sky_horizon.x;
+  constants[45] = celestial.sky_horizon.y;
+  constants[46] = celestial.sky_horizon.z;
+  constants[47] = celestial.sun_visibility;
+  constants[48] = celestial.sky_nadir.x;
+  constants[49] = celestial.sky_nadir.y;
+  constants[50] = celestial.sky_nadir.z;
+  constants[51] = celestial.moon_visibility;
+
+  cmd->SetBindingLayout(g_r.layout);
+  cmd->SetPipeline(g_r.pso_nodepth);
+  cmd->SetRootConstants(0, 52, constants, 0);
+  cmd->SetBufferSrv(3, g_r.bone_ring, 0);
+  cmd->SetTexture(1, g_r.white.srv);
+  cmd->SetTexture(2, g_r.white.srv);
+  cmd->SetTexture(4, g_r.white.srv);
+  cmd->SetTexture(5, g_r.white.srv);
+  cmd->SetTexturePair(7, g_r.white_cube.srv, g_r.white.srv);
+  nrhi::TextureView* defaults[5] = {
+      g_r.white.srv, g_r.white.srv, g_r.white.srv, g_r.white.srv,
+      g_r.white.srv};
+  cmd->SetTextures(8, defaults, 5);
+  cmd->SetVertexBuffer(
+      mesh->second.vb_view.buffer, mesh->second.vb_view.offset,
+      mesh->second.vb_view.size_bytes, mesh->second.vb_view.stride);
+  cmd->SetIndexBuffer(
+      mesh->second.ib_view.buffer, mesh->second.ib_view.offset,
+      mesh->second.ib_view.size_bytes);
+  cmd->SetPrimitiveTopology(nrhi::PrimitiveTopology::kTriangleList);
+  uint32_t draw_calls = 0;
+  for (const mechanics_sandbox::map::VisualDraw& draw :
+       mechanics_sandbox::map::ActiveSkyMesh().draws) {
+    cmd->SetRootConstants(0, 52, constants, 0);
+    cmd->DrawIndexed(draw.index_count, draw.first_index, 0);
+    ++draw_calls;
+  }
+  mechanics_sandbox::RecordSkyDraw(draw_calls);
 }
 
 bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_data*/) {
@@ -8037,11 +10383,18 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
   bool shadow_ready = false;
   uint32_t shadow_draws = 0;
   const auto shadow_t0 = PerfClock::now();
-  const float* sh = scene.shadow_rows;
+  float owned_shadow_rows[36] = {};
+  const bool owned_shadow =
+      BuildOwnedShadowRows(scene, owned_shadow_rows);
+  const float* sh =
+      owned_shadow ? owned_shadow_rows : scene.shadow_rows;
+  const bool shadow_rows_valid =
+      owned_shadow || scene.shadow_valid;
   const int32_t debug_mode = REXCVAR_GET(skate3_native_render_scene_debug);
   cmd->ProfileRegion(nrhi::ProfileStage::kShadow);
-  shadow_ready =
-      RenderShadowAtlas(context, scene, bone_region, debug_mode, &shadow_draws);
+  shadow_ready = RenderShadowAtlas(
+      context, scene, sh, shadow_rows_valid, owned_shadow, bone_region,
+      debug_mode, &shadow_draws);
   cmd->ProfileRegion(nrhi::ProfileStage::kStaticSun);
   RenderStaticSunMap(context, scene, bone_region, debug_mode, frame_number);
   g_pw_shadow.Add(perf_ns_since(shadow_t0));
@@ -8051,11 +10404,11 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
   // atlas, so an alternating cascade capture darkens/lightens it per frame.
   {
     uint64_t sh_h = 1469598103934665603ull;
-    const uint8_t* sb = reinterpret_cast<const uint8_t*>(scene.shadow_rows);
-    for (size_t bi = 0; bi < sizeof(scene.shadow_rows); ++bi) {
+    const uint8_t* sb = reinterpret_cast<const uint8_t*>(sh);
+    for (size_t bi = 0; bi < sizeof(owned_shadow_rows); ++bi) {
       sh_h = (sh_h ^ sb[bi]) * 1099511628211ull;
     }
-    sh_h ^= (scene.shadow_valid ? 2u : 0u) | (shadow_ready ? 4u : 0u);
+    sh_h ^= (shadow_rows_valid ? 2u : 0u) | (shadow_ready ? 4u : 0u);
     static uint64_t s_sh_h1 = 0, s_sh_h2 = 0;  // render thread
     if (s_sh_h2 != 0 && sh_h != s_sh_h1 && sh_h == s_sh_h2) {
       g_shadow_alternations.fetch_add(1, std::memory_order_relaxed);
@@ -8065,7 +10418,7 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
         REXLOG_DEBUG(
             "native-scene: SHADOW ALTERNATION valid={} ready={} draws={} "
             "row0=({:.3f},{:.3f},{:.3f},{:.3f}) (n={})",
-            scene.shadow_valid ? 1 : 0, shadow_ready ? 1 : 0, shadow_draws,
+            shadow_rows_valid ? 1 : 0, shadow_ready ? 1 : 0, shadow_draws,
             sh[0], sh[1], sh[2], sh[3], sl);
       }
     }
@@ -8144,6 +10497,20 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
   // blurred atlas at t5 (white when no atlas was rendered this frame; the
   // shader is also gated by sh_misc.y).
   if (g_r.shadow_cb != nullptr) {
+    static auto moving_light_clock =
+        std::chrono::steady_clock::now();
+    const auto moving_light_now =
+        std::chrono::steady_clock::now();
+    mechanics_sandbox::map::AdvanceMovingLights(
+        std::chrono::duration<float>(
+            moving_light_now - moving_light_clock).count());
+    mechanics_sandbox::map::AdvanceDayNightCycle(
+        std::chrono::duration<float>(
+            moving_light_now - moving_light_clock).count());
+    mechanics_sandbox::map::AdvanceWeather(
+        std::chrono::duration<float>(
+            moving_light_now - moving_light_clock).count());
+    moving_light_clock = moving_light_now;
     const uint32_t cb_offset =
         uint32_t(frame_number % RendererState::kShadowCbRegions) *
         RendererState::kShadowCbSlice;
@@ -8167,8 +10534,21 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
       cb[27] = float(g_r.shadow_tile);
       // sh_char = the game's per-cascade character receive biases + enable
       // (see FrameScene::char_shadow_bias; exact 9-tap char sampling).
-      if (scene.char_shadow_bias[0] > 0.0f &&
-          REXCVAR_GET(skate3_native_render_scene_char_shadow_exact)) {
+      if (owned_shadow) {
+        // Owned CSM depth spans hundreds of metres, unlike Skate 3's
+        // compact character atlas. Reusing its unitless 0.005/0.014/0.020
+        // values offsets receivers by metres. Express stable per-cascade
+        // character bias in world metres and convert through the actual
+        // owned depth row.
+        const float owned_z_scale =
+            std::sqrt(sh[16] * sh[16] + sh[17] * sh[17] +
+                      sh[18] * sh[18]);
+        cb[56] = 0.018f * owned_z_scale;
+        cb[57] = 0.028f * owned_z_scale;
+        cb[58] = 0.045f * owned_z_scale;
+        cb[59] = 1.0f;
+      } else if (scene.char_shadow_bias[0] > 0.0f &&
+                 REXCVAR_GET(skate3_native_render_scene_char_shadow_exact)) {
         cb[56] = scene.char_shadow_bias[0];
         cb[57] = scene.char_shadow_bias[1];
         cb[58] = scene.char_shadow_bias[2];
@@ -8178,7 +10558,7 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
     // PCSS soft-shadow rows (sh_pcss / sh_pcss2, cb[136..143]). Filled
     // whenever the light rows are valid; the static sun-shadow sampler
     // shares the angular knobs even on frames with no dynamic casters.
-    if (scene.shadow_valid) {
+    if (shadow_rows_valid) {
       cb[136] =
           REXCVAR_GET(skate3_native_render_scene_shadow_pcss) ? 1.0f : 0.0f;
       cb[137] = std::tan(
@@ -8186,11 +10566,15 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
           float(REXCVAR_GET(skate3_native_render_scene_shadow_pcss_sun_deg)));
       cb[138] =
           float(REXCVAR_GET(skate3_native_render_scene_shadow_pcss_max_m));
-      cb[139] = 0.0f;  // atlas slope bias unused (dynamic casters only)
+      const float zlen =
+          std::sqrt(sh[16] * sh[16] + sh[17] * sh[17] +
+                    sh[18] * sh[18]);
+      // A small metric slope term suppresses grazing-angle acne on the
+      // high-resolution owned character receiver without detaching feet,
+      // board, or limb-on-body contact shadows.
+      cb[139] = owned_shadow ? 0.010f * zlen : 0.0f;
       cb[140] =
           float(REXCVAR_GET(skate3_native_render_scene_shadow_pcss_blocker_m));
-      const float zlen =
-          std::sqrt(sh[16] * sh[16] + sh[17] * sh[17] + sh[18] * sh[18]);
       const float xlen =
           std::sqrt(sh[0] * sh[0] + sh[1] * sh[1] + sh[2] * sh[2]);
       cb[141] = zlen > 1e-8f ? 1.0f / zlen : 0.0f;
@@ -8209,13 +10593,25 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
     // min(lm^2, s + sh_color) to pure black - the missing walls/floor.
     // The game itself never sun-shadows static world geometry indoors;
     // standing the map down restores its exact lm^2 shading.
-    if (g_r.static_sun_valid && scene.shadow_fresh) {
-      std::memcpy(cb + 144, g_r.nsm_rows, sizeof(g_r.nsm_rows));
+    if (g_r.static_sun_valid && (owned_shadow || scene.shadow_fresh)) {
+      const bool independent_owned =
+          owned_shadow && g_r.owned_nsm_active;
+      const float* primary_rows =
+          independent_owned ? g_r.owned_nsm_rows[0] : g_r.nsm_rows;
+      const float primary_radius =
+          independent_owned ? g_r.owned_nsm_radius[0] : g_r.nsm_radius;
+      const float primary_depth_range =
+          independent_owned ? g_r.owned_nsm_depth_range[0]
+                            : g_r.nsm_depth_range;
+      const uint32_t primary_size =
+          independent_owned ? g_r.owned_static_sun_size[0]
+                            : g_r.static_sun_size;
+      std::memcpy(cb + 144, primary_rows, sizeof(g_r.nsm_rows));
       cb[156] = std::clamp(
           float(REXCVAR_GET(skate3_native_render_scene_shadow_static_strength)),
           0.0f, 1.0f);
-      cb[157] = 1.0f / g_r.nsm_radius;  // far-tile uc units per meter
-      cb[158] = g_r.nsm_depth_range;    // meters per depth unit
+      cb[157] = 1.0f / primary_radius;
+      cb[158] = primary_depth_range;  // meters per depth unit
       // Filter floor: 2 physical texels (uc spans [-1,1] over one tile);
       // the map has no dilation blur, so a sub-texel kernel exposes raw
       // stair-step aliasing at full strength; two texels of
@@ -8223,7 +10619,7 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
       cb[159] = 2.0f * 2.0f *
                 float(REXCVAR_GET(
                     skate3_native_render_scene_shadow_pcss_min_texel)) /
-                float(std::max(1u, g_r.static_sun_size));
+                float(std::max(1u, primary_size));
       float bias_m = float(
           REXCVAR_GET(skate3_native_render_scene_shadow_static_bias));
       if (context.device->backend() == nrhi::Backend::kVulkan) {
@@ -8233,10 +10629,151 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
         bias_m += float(
             REXCVAR_GET(skate3_native_render_scene_shadow_static_bias_vk));
       }
-      cb[160] = bias_m / g_r.nsm_depth_range;  // base receiver bias
-      cb[161] = bias_m / g_r.nsm_depth_range;  // slope-scaled term
+      cb[160] = bias_m / primary_depth_range;  // base receiver bias
+      cb[161] = bias_m / primary_depth_range;  // slope-scaled term
       cb[162] = 0.0f;  // reserved (cascade ratios are shader constants)
-      cb[163] = float(std::max(1u, g_r.static_sun_size));  // tile px
+      cb[163] = float(std::max(1u, primary_size));
+      if (independent_owned) {
+        std::memcpy(cb + 216, g_r.owned_nsm_rows[1],
+                    sizeof(g_r.owned_nsm_rows[1]));
+        std::memcpy(cb + 228, g_r.owned_nsm_rows[2],
+                    sizeof(g_r.owned_nsm_rows[2]));
+        cb[240] = float(g_r.owned_static_sun_size[0]);
+        cb[241] = float(g_r.owned_static_sun_size[1]);
+        cb[242] = float(g_r.owned_static_sun_size[2]);
+        cb[243] = 1.0f;
+      } else {
+        cb[243] = 0.0f;
+      }
+    }
+    float owned_origin[3] = {};
+    if (mechanics_sandbox::Active() &&
+        mechanics_sandbox::SandboxMapRenderOrigin(
+            owned_origin)) {
+      // Maps retain every authored light. Keep the per-frame shader work
+      // bounded by selecting the 64 lights most relevant to the camera.
+      constexpr std::size_t kMaximumOwnedLocalLights = 64;
+      struct RankedOwnedLight {
+        mechanics_sandbox::map::MovingLightSnapshot light;
+        float score = 0.0f;
+      };
+      std::vector<RankedOwnedLight> ranked_lights;
+      ranked_lights.reserve(
+          mechanics_sandbox::map::ActiveMovingLightCount());
+      for (std::size_t light_index = 0;
+           light_index <
+               mechanics_sandbox::map::ActiveMovingLightCount();
+           ++light_index) {
+        mechanics_sandbox::map::MovingLightSnapshot light;
+        if (!mechanics_sandbox::map::ActiveMovingLightSnapshot(
+                light_index, light)) {
+          continue;
+        }
+        const float world_x = owned_origin[0] + light.position[0];
+        const float world_y = owned_origin[1] + light.position[1];
+        const float world_z = owned_origin[2] + light.position[2];
+        const float delta_x = world_x - scene.cam_pos[0];
+        const float delta_y = world_y - scene.cam_pos[1];
+        const float delta_z = world_z - scene.cam_pos[2];
+        const float range =
+            std::max(light.influence_radius, 0.01f);
+        ranked_lights.push_back(
+            {light,
+             (delta_x * delta_x + delta_y * delta_y +
+              delta_z * delta_z) /
+                 (range * range)});
+      }
+      const std::size_t selected_light_count =
+          std::min(ranked_lights.size(), kMaximumOwnedLocalLights);
+      if (ranked_lights.size() > selected_light_count) {
+        std::partial_sort(
+            ranked_lights.begin(),
+            ranked_lights.begin() + selected_light_count,
+            ranked_lights.end(),
+            [](const RankedOwnedLight& left,
+               const RankedOwnedLight& right) {
+              return left.score < right.score;
+            });
+      }
+      std::size_t light_count = 0;
+      for (std::size_t light_index = 0;
+           light_index < selected_light_count; ++light_index) {
+        const mechanics_sandbox::map::MovingLightSnapshot& light =
+            ranked_lights[light_index].light;
+        const std::size_t position = 244 + light_count * 4;
+        const std::size_t color = 500 + light_count * 4;
+        const std::size_t direction = 756 + light_count * 4;
+        const std::size_t spot = 1012 + light_count * 4;
+        cb[position + 0] =
+            owned_origin[0] + light.position[0];
+        cb[position + 1] =
+            owned_origin[1] + light.position[1];
+        cb[position + 2] =
+            owned_origin[2] + light.position[2];
+        cb[position + 3] = light.influence_radius;
+        cb[color + 0] = light.color[0];
+        cb[color + 1] = light.color[1];
+        cb[color + 2] = light.color[2];
+        cb[color + 3] = light.intensity;
+        cb[direction + 0] = light.direction[0];
+        cb[direction + 1] = light.direction[1];
+        cb[direction + 2] = light.direction[2];
+        cb[direction + 3] = static_cast<float>(light.type);
+        cb[spot + 0] = light.spot_inner_cosine;
+        cb[spot + 1] = light.spot_outer_cosine;
+        cb[spot + 2] = light.source_radius;
+        ++light_count;
+      }
+      mechanics_sandbox::map::MovingLightSnapshot lightning;
+      if (light_count < kMaximumOwnedLocalLights &&
+          mechanics_sandbox::map::ActiveLightningLightSnapshot(
+              lightning)) {
+        const std::size_t position = 244 + light_count * 4;
+        const std::size_t color = 500 + light_count * 4;
+        const std::size_t direction = 756 + light_count * 4;
+        const std::size_t spot = 1012 + light_count * 4;
+        cb[position + 0] =
+            owned_origin[0] + lightning.position[0];
+        cb[position + 1] =
+            owned_origin[1] + lightning.position[1];
+        cb[position + 2] =
+            owned_origin[2] + lightning.position[2];
+        cb[position + 3] = lightning.influence_radius;
+        cb[color + 0] = lightning.color[0];
+        cb[color + 1] = lightning.color[1];
+        cb[color + 2] = lightning.color[2];
+        cb[color + 3] = lightning.intensity;
+        cb[direction + 0] = 0.0f;
+        cb[direction + 1] = -1.0f;
+        cb[direction + 2] = 0.0f;
+        cb[direction + 3] = 0.0f;
+        cb[spot + 0] = 1.0f;
+        cb[spot + 1] = 1.0f;
+        cb[spot + 2] = lightning.source_radius;
+        ++light_count;
+      }
+      cb[200] = static_cast<float>(light_count);
+      const skate::world::DayNightState celestial =
+          mechanics_sandbox::map::ActiveDayNightState();
+      cb[201] =
+          mechanics_sandbox::map::ActiveDefinition()
+                  .day_night_cycle.enabled
+              ? 1.0f
+              : 0.0f;
+      cb[202] = celestial.night_amount;
+      cb[203] = celestial.daylight_amount;
+      cb[204] = celestial.light_direction_to_light.x;
+      cb[205] = celestial.light_direction_to_light.y;
+      cb[206] = celestial.light_direction_to_light.z;
+      cb[207] = celestial.light_intensity;
+      cb[208] = celestial.light_color.x;
+      cb[209] = celestial.light_color.y;
+      cb[210] = celestial.light_color.z;
+      cb[211] = celestial.ambient;
+      cb[212] = celestial.sun_visibility;
+      cb[213] = celestial.moon_visibility;
+      cb[214] = celestial.twilight_amount;
+      cb[215] = celestial.star_visibility;
     }
     // Exact world-shading frame rows (valid whenever the env-family PS bank
     // was captured this frame, independent of the shadow ATLAS being
@@ -8246,8 +10783,12 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
       cb[28] = sh[24];  // sun direction (PS c6), for the normal-map kd (v2)
       cb[29] = sh[25];
       cb[30] = sh[26];
-      cb[31] = sh[40];  // scene exposure (PS c10.x)
-      cb[32] = sh[45];  // material multiplier (PS c11.y)
+      // Owned rows intentionally replace only the light/shadow contract.
+      // Exposure and the retained-character material multiplier still come
+      // from the captured game frame (outside the compact 36-float owned
+      // row block).
+      cb[31] = scene.shadow_rows[40];  // scene exposure (PS c10.x)
+      cb[32] = scene.shadow_rows[45];  // material multiplier (PS c11.y)
       cb[33] = scene.family_rows[0];  // tree lightmap scale (tree PS c0.x)
       cb[34] = scene.family_rows[1];  // tree lightmap floor (tree PS c0.y)
       cb[35] = scene.family_rows[2];  // tree tint multiplier (tree PS c4.y)
@@ -8314,16 +10855,33 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
     // (draw_item re-pairs with the item's real cube when one resolves).
     cmd->SetTexturePair(7, g_r.white_cube.srv,
                         shadow_ready ? g_r.shadow_srv_final : g_r.white.srv);
-    // v2 material table default (t8/t9 white) + the static sun-shadow map
-    // at its third entry (t10); every lit branch samples it, so the table
-    // must be bound for all draws, not only the v2/ocean re-binds.
-    nrhi::TextureView* t8_default[3] = {
+    // v2 material table default (t8/t9 white) + independent static-shadow
+    // maps at t10..t12. Every lit branch can sample them.
+    nrhi::TextureView* t8_default[5] = {
         g_r.white.srv, g_r.white.srv,
-        g_r.static_sun_valid ? g_r.static_sun_srv : g_r.white.srv};
-    cmd->SetTextures(8, t8_default, 3);
+        g_r.owned_nsm_active ? g_r.owned_static_sun_srv[0]
+                             : (g_r.static_sun_valid ? g_r.static_sun_srv
+                                                     : g_r.white.srv),
+        g_r.owned_nsm_active ? g_r.owned_static_sun_srv[1] : g_r.white.srv,
+        g_r.owned_nsm_active ? g_r.owned_static_sun_srv[2] : g_r.white.srv};
+    cmd->SetTextures(8, t8_default, 5);
   }
   nrhi::TextureView* const nsm_view =
-      g_r.static_sun_valid ? g_r.static_sun_srv : g_r.white.srv;
+      g_r.owned_nsm_active
+          ? g_r.owned_static_sun_srv[0]
+          : (g_r.static_sun_valid ? g_r.static_sun_srv : g_r.white.srv);
+  nrhi::TextureView* const nsm_mid_view =
+      g_r.owned_nsm_active ? g_r.owned_static_sun_srv[1] : g_r.white.srv;
+  nrhi::TextureView* const nsm_far_view =
+      g_r.owned_nsm_active ? g_r.owned_static_sun_srv[2] : g_r.white.srv;
+
+  // The owned map and player now share one world frame and depth buffer.
+  // Drawing the park first gives the retained player ordinary occlusion
+  // against its floor, ramps, and obstacles.
+  DrawSandboxSky(context, cmd, scene, frame_number);
+  DrawSandboxMap(
+      context, cmd, scene, frame_number, use_depth, shadow_ready);
+  cmd->SetPipeline(use_depth ? g_r.pso : g_r.pso_nodepth);
 
   uint32_t drawn = 0;
   uint32_t item_index = 0;
@@ -8487,6 +11045,11 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
     const DrawItem* item;
   };
   std::vector<SsrGbufItem> ssr_items;
+  // Exact diffuse page served by each presentation draw. The DXR mirror is
+  // built after the main pass, so retain the resolved GuestTexture identity
+  // here rather than independently resolving streaming state a second time.
+  std::unordered_map<const DrawItem*, const GuestTexture*>
+      raytraced_diffuse_by_item;
   const bool ssr_on =
       hdr_on && use_depth && debug_mode == 0 && !loading_native &&
       !g_r.ssr_failed && REXCVAR_GET(skate3_native_render_scene_ssr) &&
@@ -8583,6 +11146,29 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
       it = g_r.meshes.emplace(item.mesh, buffers).first;
     }
     it->second.last_used_frame = frame_number;
+    // Loading prewarm reconstructs meshes from their bare mesh records,
+    // before per-instance character/skinning provenance exists. Such a
+    // cache entry is perfectly valid for raster drawing, but lacks the CPU
+    // decoded copy needed by the mirror. Fill that sidecar once from the
+    // live, fully classified item; keep the already-resident raster buffers.
+    if (item.dyn_entity &&
+        it->second.raytracing_verts.empty() &&
+        !item.retained) {
+      MeshBuffers raytracing_decode;
+      if (DecodeMesh(
+              g_r.device, base, item, raytracing_decode)) {
+        it->second.raytracing_verts =
+            std::move(raytracing_decode.raytracing_verts);
+        it->second.raytracing_indices =
+            std::move(raytracing_decode.raytracing_indices);
+        if (item.ropa && !raytracing_decode.ropa_verts.empty()) {
+          it->second.ropa_verts =
+              std::move(raytracing_decode.ropa_verts);
+        }
+        PoolMeshBuffer(g_r.device, raytracing_decode.vb);
+        PoolMeshBuffer(g_r.device, raytracing_decode.ib);
+      }
+    }
     const MeshBuffers& buffers = it->second;
     if (prof_items) {
       di_t1 = PerfClock::now();
@@ -8986,6 +11572,10 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
           return;
         }
       }
+    }
+    if (item.dyn_entity && diffuse != nullptr &&
+        diffuse->texture != nullptr && diffuse->srv != nullptr) {
+      raytraced_diffuse_by_item[&item] = diffuse;
     }
     const GuestTexture* lightmap =
         item.lightmap_tex != 0 && REXCVAR_GET(skate3_native_render_scene_lightmaps)
@@ -9687,12 +12277,12 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
     // World-shading v2 material pair (t8 detail + t9 decal spec); the exact
     // ocean rides the same pair (t8 = second PCA component, t9 = overlay).
     if (v2_flags != 0 || ocean_n2 || ocean_ov) {
-      // Three-entry bind: re-pairing only t8/t9 would reset the t10 static
-      // sun-shadow map to the backend fallback.
-      nrhi::TextureView* t8_views[3] = {
+      // Rebinding only t8/t9 would reset the three static-shadow maps.
+      nrhi::TextureView* t8_views[5] = {
           (v2_detail != nullptr ? v2_detail : &g_r.white)->srv,
-          (v2_spec2 != nullptr ? v2_spec2 : &g_r.white)->srv, nsm_view};
-      cmd->SetTextures(8, t8_views, 3);
+          (v2_spec2 != nullptr ? v2_spec2 : &g_r.white)->srv, nsm_view,
+          nsm_mid_view, nsm_far_view};
+      cmd->SetTextures(8, t8_views, 5);
     }
     // ROPA shape blend (see RendererState::ropa_shapes): combine the shape
     // generations with the kernel weights InterpolateDynamicItems computed
@@ -10327,10 +12917,6 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
       timed_draw(*item);
     }
   }
-  // The authored graybox is an independent native presentation layer. It is
-  // drawn after the retained local skater pass with depth testing enabled, so
-  // it cannot hide the player while still showing geometry around them.
-  DrawSandboxMap(context, cmd, scene, frame_number, use_depth);
   skate3::mechanics_sandbox::RecordRenderedItems(drawn);
   skate3::mechanics_sandbox::RecordRenderStage(
       skate3::mechanics_sandbox::RenderStage::MainPassComplete);
@@ -10606,6 +13192,21 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
       cmd->Draw(s.count, 0);
       ui_offset += bytes;
       ++drawn_spline;
+    }
+  }
+
+  if (use_depth && !loading_native &&
+      mechanics_sandbox::Active()) {
+    const RaytracedDynamicScene raytraced_dynamic =
+        BuildRaytracedLocalPresentation(
+            scene, raytraced_diffuse_by_item);
+    if (RenderRaytracedMirror(
+            context, cmd, scene, scene_color, g_r.depth,
+            msaa_on ? g_r.msaa : 1u, &raytraced_dynamic)) {
+      // The DXR composite owns a compact root signature. Restore the main
+      // scene layout before outline/SSR/resolve: those paths deliberately
+      // latch this layout and only restage the bindings they consume.
+      cmd->SetBindingLayout(g_r.layout);
     }
   }
 

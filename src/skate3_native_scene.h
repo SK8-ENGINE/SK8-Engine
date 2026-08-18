@@ -536,6 +536,11 @@ float CharFadeAlpha(const DrawItem& item);
 // per-item profiling attribution.
 bool ItemOutsideFrustum(const DrawItem& it, const float vp[16], float margin);
 
+// Lower-level AABB helper shared by owned-world chunks that already have
+// world-space bounds.
+bool CornersOutsideFrustum(const float (&corners)[8][3],
+                           const float vp[16], float margin);
+
 // Occlusion-cull handoff for the guest-side dispatch filter (defined in
 // skate3_native_scene_gpu.cpp): copies the most recent render frame's
 // culled-static MeshContext set (sorted ascending) into `out`, clearing it

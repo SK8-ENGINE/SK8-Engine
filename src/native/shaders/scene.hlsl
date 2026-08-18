@@ -75,6 +75,10 @@ Texture2D<float4> spec2_map : register(t9);
 // sun, rendered natively each frame. Sampled by SampleStaticSun as an
 // additional receive term on every lit branch.
 Texture2D<float2> static_sun : register(t10);
+// Owned-world middle and far static cascades. Retained rendering leaves these
+// at the white fallback and continues to use its tiled atlas at t10.
+Texture2D<float2> static_sun_history : register(t11);
+Texture2D<float2> static_sun_far : register(t12);
 // Raw bone palette: 3 float4 rows per bone, column-vector affine [R | t],
 // applied with explicit dots (StructuredBuffer<float4x4> default packing is
 // column-major and would silently transpose the matrices).
@@ -180,15 +184,379 @@ bool ShowcaseLayerOn(float px_x, int bit) {
 }
 #include "scene_shadows.hlsli"
 #include "scene_common.hlsli"
+
+float3 OwnedMovingLightContribution(
+    float3 world_position, float3 normal, float3 view_direction,
+    float3 albedo, float roughness) {
+  float3 total = 0.0;
+  const uint count =
+      min((uint)(owned_light_meta.x + 0.5), 64u);
+  [loop] for (uint light_index = 0;
+              light_index < count; ++light_index) {
+    const float3 delta =
+        owned_authored_light_position[light_index].xyz - world_position;
+    const float distance_squared =
+        max(dot(delta, delta), 0.04);
+    const float distance_to_light = sqrt(distance_squared);
+    const float range =
+        max(owned_authored_light_position[light_index].w, 0.01);
+    const float3 direction = delta / distance_to_light;
+    const float3 light_forward = normalize(
+        owned_authored_light_direction[light_index].xyz);
+    const float light_type =
+        owned_authored_light_direction[light_index].w;
+    float shape = 1.0;
+    if (light_type > 0.5 && light_type < 1.5) {
+      const float cone_cosine =
+          dot(light_forward, -direction);
+      shape = smoothstep(
+          owned_authored_light_spot[light_index].y,
+          owned_authored_light_spot[light_index].x,
+          cone_cosine);
+    } else if (light_type >= 1.5) {
+      // Blender Area lights emit from one face. The raster path approximates
+      // their rectangular source while preserving direction and soft size.
+      shape = saturate(dot(light_forward, -direction));
+      shape *= shape;
+    }
+    const float ndotl = saturate(dot(normal, direction));
+    const float range_fade =
+        saturate(1.0 - distance_squared / (range * range));
+    const float attenuation =
+        shape * range_fade * range_fade /
+        max(1.0, distance_squared * 0.22);
+    const float3 radiance =
+        owned_authored_light_color[light_index].rgb *
+        owned_authored_light_color[light_index].w * attenuation;
+    const float3 halfway =
+        normalize(direction + view_direction);
+    const float specular =
+        pow(saturate(dot(normal, halfway)),
+            lerp(96.0, 10.0, saturate(roughness))) *
+        ndotl * lerp(0.34, 0.055, saturate(roughness));
+    total += radiance * (albedo * ndotl + specular);
+  }
+  return total;
+}
+
 #include "scene_char.hlsli"
 #include "scene_dynobj.hlsli"
 #include "scene_water.hlsli"
+
+float OwnedHash21(float2 p) {
+  p = frac(p * float2(123.34, 456.21));
+  p += dot(p, p + 45.32);
+  return frac(p.x * p.y);
+}
+
+float2 OwnedSurfaceUv(float3 world_pos, float3 normal, float scale) {
+  float3 axis = abs(normal);
+  float2 uv = axis.y >= axis.x && axis.y >= axis.z
+                  ? world_pos.xz
+                  : (axis.z >= axis.x ? world_pos.xy : world_pos.zy);
+  return uv * max(scale, 0.01);
+}
+
+float OwnedGridLine(float value, float width) {
+  float edge = min(frac(value), 1.0 - frac(value));
+  return 1.0 - smoothstep(width, width + max(fwidth(value), 0.002), edge);
+}
+
+float3 OwnedMaterialAlbedo(float3 base, float2 uv, int pattern,
+                           float variation) {
+  float2 cell = floor(uv);
+  float noise = OwnedHash21(cell) * 2.0 - 1.0;
+  float fine = OwnedHash21(floor(uv * 7.0)) * 2.0 - 1.0;
+  float shade = 1.0 + variation * (noise * 0.45 + fine * 0.20);
+
+  if (pattern == 1) {
+    // Cast concrete: broad aggregate, faint slab joints and tonal mottling.
+    float joints = max(OwnedGridLine(uv.x * 0.22, 0.010),
+                       OwnedGridLine(uv.y * 0.22, 0.010));
+    shade *= 1.0 - joints * 0.28;
+    shade += fine * variation * 0.10;
+  } else if (pattern == 2) {
+    // Asphalt: dense fine aggregate with sparse pale stones.
+    float speck = step(0.89, OwnedHash21(floor(uv * 11.0)));
+    shade = 0.90 + fine * variation * 0.32 + speck * 0.13;
+  } else if (pattern == 3) {
+    // Running-bond brick. Mortar is antialiased in projected world space.
+    float row = floor(uv.y);
+    float2 brick_uv = float2(uv.x + fmod(abs(row), 2.0) * 0.5, uv.y);
+    float mortar = max(OwnedGridLine(brick_uv.x, 0.055),
+                       OwnedGridLine(brick_uv.y, 0.075));
+    float brick_noise =
+        OwnedHash21(floor(brick_uv)) * 2.0 - 1.0;
+    float3 brick = base * (0.88 + brick_noise * variation);
+    float3 grout = lerp(base, float3(0.52, 0.49, 0.43), 0.72);
+    return lerp(brick, grout, mortar);
+  } else if (pattern == 4) {
+    // Powder-coated/rusted metal panels with narrow fabrication seams.
+    float seam = max(OwnedGridLine(uv.x * 0.28, 0.012),
+                     OwnedGridLine(uv.y * 0.12, 0.008));
+    float brushed = sin(uv.y * 38.0) * 0.018;
+    shade = 1.0 + noise * variation * 0.35 + brushed - seam * 0.32;
+  } else if (pattern == 5) {
+    // Long timber planks with layered grain.
+    float plank = OwnedGridLine(uv.y * 0.32, 0.018);
+    float grain = sin(uv.x * 7.0 + sin(uv.y * 1.7) * 2.4) * 0.5 +
+                  sin(uv.x * 19.0) * 0.18;
+    shade = 0.94 + grain * variation * 0.34 - plank * 0.30;
+  } else if (pattern == 6) {
+    // Plaza/glass tile grid.
+    float grout = max(OwnedGridLine(uv.x, 0.020),
+                      OwnedGridLine(uv.y, 0.020));
+    shade = 1.0 + noise * variation * 0.22 - grout * 0.24;
+  } else if (pattern == 7) {
+    // Grass/planting seen at skating distance.
+    float blades = sin(uv.x * 15.0 + sin(uv.y * 8.0)) *
+                   sin(uv.y * 17.0);
+    shade = 0.82 + fine * variation * 0.50 + blades * 0.08;
+  } else if (pattern == 8) {
+    // Painted skate surfaces: subtle roller variation and sparse chips.
+    float chip = step(0.965, OwnedHash21(floor(uv * 5.0)));
+    shade = 0.98 + fine * variation * 0.16 - chip * 0.22;
+  }
+  return max(base * shade, 0.0);
+}
+
 // The full material shading for every family (see ps_main below; the
 // showcase wrapper substitutes the early build-up stages' looks over this
 // result's rgb while keeping its alpha).
 float4 ShadePixel(VSOut i) {
+  if (cam_pos.w < -44.5 && cam_pos.w > -45.5) {
+    // Project-owned rain streaks. Rain is a dim neutral dielectric catching
+    // ambient and local neon, not a self-lit blue particle effect.
+    const float distance_fade =
+        saturate(1.0 - length(i.rpos) / 43.0);
+    const float facing =
+        0.72 + 0.28 * saturate(abs(normalize(i.nrm).y));
+    const float alpha =
+        mat_tint.w * distance_fade * facing * 0.19;
+    const float3 world_pos = i.rpos + cam_pos.xyz;
+    const float3 normal = normalize(i.nrm);
+    const float3 view_dir = normalize(-i.rpos);
+    const float3 local_neon = OwnedMovingLightContribution(
+        world_pos, normal, view_dir, tint.rgb, 0.18);
+    const float3 rain_color =
+        tint.rgb * (0.20 + mat_tint.w * 0.06) +
+        local_neon * 0.035;
+    return float4(
+        PassGamma(max(rain_color, 0.0)), alpha);
+  }
   if (tint.a > 0.0) {
     return float4(PassGamma(tint.rgb), tint.a);
+  }
+  if (cam_pos.w < -43.5 && cam_pos.w > -44.5) {
+    const float3 normal = normalize(i.nrm);
+    const float facing =
+        pow(1.0 - saturate(dot(normal, normalize(-i.rpos))), 2.0);
+    return float4(
+        PassGamma(mat_tint.rgb * (3.8 + facing * 2.2)), 1.0);
+  }
+  // Project-owned world families. -41 consumes the owned procedural material
+  // contract and directional light. Moving draws use -41.25 so their
+  // procedural material coordinates live in the object's translated frame;
+  // -42 is the camera-relative owned sky; -43 is the simulated water mesh.
+  // mat_tint = direction-to-sun.xyz + ambient; overlay = sun rgb + intensity;
+  // misc = material pattern, repeat scale, roughness and variation.
+  if (cam_pos.w < -40.5 && cam_pos.w > -41.5) {
+    float3 normal = normalize(i.nrm);
+    float3 world_pos = i.rpos + cam_pos.xyz;
+    float3 material_pos =
+        cam_pos.w < -41.125 ? world_pos - world[3].xyz : world_pos;
+    float2 material_uv =
+        OwnedSurfaceUv(material_pos, normal, misc.y);
+    bool imported_material = misc.x < -0.5;
+    uint owned_flags =
+        imported_material ? (uint)(-misc.x + 0.5) : 0;
+    uint alpha_mode = (owned_flags >> 1) & 3;
+    bool has_normal_map = (owned_flags & 8) != 0;
+    bool has_orm_map = (owned_flags & 16) != 0;
+    bool has_emissive_map = (owned_flags & 32) != 0;
+    int pattern = (int)(misc.x + 0.5);
+    float emissive_intensity =
+        imported_material ? max(misc.w, 0.0) : max(-misc.z, 0.0);
+    float roughness =
+        imported_material ? saturate(misc.z)
+                          : (emissive_intensity > 0.0
+                                 ? 0.12
+                                 : saturate(misc.z));
+    float4 base_sample =
+        imported_material ? diffuse.Sample(smp, i.uv)
+                          : float4(1.0, 1.0, 1.0, 1.0);
+    if (imported_material && alpha_mode == 1) {
+      clip(base_sample.a - max(-tint.a, 0.0));
+    }
+    float output_alpha =
+        imported_material && alpha_mode == 2 ? base_sample.a : 1.0;
+    float3 albedo =
+        imported_material
+            ? base_sample.rgb * tint.rgb
+            : OwnedMaterialAlbedo(
+                  tint.rgb, material_uv, pattern, misc.w);
+    float ao = 1.0;
+    float metallic = 0.0;
+    if (imported_material && has_orm_map) {
+      float3 orm = spec2_map.Sample(smp, i.uv).rgb;
+      ao = orm.r;
+      roughness = saturate(orm.g);
+      metallic = saturate(orm.b);
+    }
+    if (imported_material && has_normal_map) {
+      float3 tangent_normal =
+          normal_map.Sample(smp, i.uv).xyz * 2.0 - 1.0;
+      float3 dpdx = ddx(world_pos);
+      float3 dpdy = ddy(world_pos);
+      float2 duvdx = ddx(i.uv);
+      float2 duvdy = ddy(i.uv);
+      float determinant =
+          duvdx.x * duvdy.y - duvdx.y * duvdy.x;
+      if (abs(determinant) > 1.0e-7) {
+        float inverse = rcp(determinant);
+        float3 tangent =
+            normalize((dpdx * duvdy.y - dpdy * duvdx.y) * inverse);
+        tangent = normalize(tangent - normal * dot(normal, tangent));
+        float3 bitangent =
+            normalize(cross(normal, tangent)) *
+            (determinant < 0.0 ? -1.0 : 1.0);
+        normal = normalize(
+            tangent * tangent_normal.x +
+            bitangent * tangent_normal.y +
+            normal * tangent_normal.z);
+      }
+    }
+
+    float3 light_dir = normalize(mat_tint.xyz);
+    float3 view_dir = normalize(-i.rpos);
+    float ndotl = saturate(dot(normal, light_dir));
+    float wrap = saturate((dot(normal, light_dir) + 0.20) / 1.20);
+    float sky_amount = saturate(normal.y * 0.5 + 0.5);
+    float3 sky_fill = lerp(float3(0.16, 0.17, 0.19),
+                           float3(0.35, 0.47, 0.64), sky_amount);
+    float3 ambient_light =
+        sky_fill * (mat_tint.w * lerp(0.72, 1.12, sky_amount));
+    if (imported_material) {
+      // UV1 holds static indirect illumination baked in Blender. It remains
+      // stable as the sun/moon move, while a restrained exposure response
+      // lets the same bounce lighting settle naturally at night.
+      float3 baked_encoded =
+          lightmap.Sample(smp_clamp, i.uv2).rgb;
+      // SKATE v1 stores sqrt(linear / 4) in UNORM8. Decode the transfer
+      // before lighting; direct linear quantization crushed most of the
+      // first low-energy indirect bake to exact black.
+      float3 baked_indirect =
+          baked_encoded * baked_encoded * 4.0;
+      float baked_exposure =
+          lerp(0.28, 1.0, saturate((mat_tint.w - 0.08) / 0.24));
+      // The bake is static indirect, not a replacement for the changing
+      // sky hemisphere. Keeping both terms is the actual hybrid model:
+      // runtime sky ambient remains readable through the cycle while the
+      // cyan/orange Blender bounce remains spatially authored.
+      ambient_light +=
+          baked_indirect * max(misc.y, 0.0) * baked_exposure;
+    }
+    float3 diffuse_light =
+        overlay.rgb * overlay.w * lerp(wrap * 0.24, ndotl, 0.84);
+    float dynamic_visibility =
+        SampleCsmShadowSoft(world_pos, 0.0, normal, i.pos.xy);
+    float static_visibility =
+        SampleStaticSun(world_pos, normal, i.pos.xy);
+    float sun_visibility =
+        min(dynamic_visibility, static_visibility);
+    diffuse_light *= lerp(0.22, 1.0, sun_visibility);
+
+    float3 halfway = normalize(light_dir + view_dir);
+    float spec_power = lerp(128.0, 8.0, roughness);
+    float specular = pow(saturate(dot(normal, halfway)), spec_power) *
+                     ndotl * lerp(0.34, 0.035, roughness) *
+                     sun_visibility;
+    float3 f0 = lerp(float3(0.04, 0.04, 0.04), albedo, metallic);
+    float fresnel = pow(1.0 - saturate(dot(normal, view_dir)), 4.0);
+    float edge_fill = fresnel * (1.0 - roughness) * 0.08;
+    float orientation_ao = lerp(0.82, 1.0, sky_amount);
+    float3 diffuse_color = albedo * (1.0 - metallic);
+    float3 lit =
+        diffuse_color * (ambient_light + diffuse_light) *
+            orientation_ao * ao +
+        overlay.rgb * f0 * specular +
+        sky_fill * f0 * edge_fill;
+    lit += OwnedMovingLightContribution(
+        world_pos, normal, view_dir, albedo, roughness);
+    float3 emissive_color =
+        has_emissive_map
+            ? decal_art.Sample(smp, i.uv).rgb
+            : albedo;
+    lit += emissive_color * emissive_intensity;
+    return float4(PassGamma(max(lit, 0.0)), output_alpha);
+  }
+  if (cam_pos.w < -42.5 && cam_pos.w > -43.5) {
+    // Project-owned simulated water. Large waves and normals come from the
+    // CPU shallow-water surface itself; this branch shades that geometry
+    // rather than inventing displacement in the pixel shader.
+    float3 normal = normalize(i.nrm);
+    float3 world_pos = i.rpos + cam_pos.xyz;
+    float3 view_dir = normalize(-i.rpos);
+    float3 light_dir = normalize(mat_tint.xyz);
+    float ndotl = saturate(dot(normal, light_dir));
+    float fresnel =
+        0.035 + 0.965 *
+        pow(1.0 - saturate(dot(normal, view_dir)), 5.0);
+
+    float3 reflected = reflect(-view_dir, normal);
+    float sky_height = saturate(reflected.y * 0.5 + 0.5);
+    float3 sky_reflection =
+        lerp(float3(0.16, 0.22, 0.26),
+             float3(0.30, 0.58, 0.82), sky_height);
+    float3 deep_water = float3(0.012, 0.12, 0.18);
+    float3 body = deep_water *
+                  (0.46 + mat_tint.w * 0.72 + ndotl * 0.34);
+
+    float3 halfway = normalize(light_dir + view_dir);
+    float sun_glint =
+        pow(saturate(dot(normal, halfway)), 180.0) *
+        ndotl * overlay.w;
+    float slope = saturate(1.0 - normal.y);
+    float crest = smoothstep(0.025, 0.22, slope) * 0.16;
+    float visibility =
+        SampleCsmShadowSoft(world_pos, 0.0, normal, i.pos.xy);
+    float3 color =
+        lerp(body, sky_reflection, fresnel) +
+        overlay.rgb * sun_glint * visibility +
+        float3(0.30, 0.56, 0.62) * crest;
+    color += OwnedMovingLightContribution(
+        world_pos, normal, view_dir,
+        float3(0.06, 0.20, 0.24), 0.12) * 1.35;
+    return float4(PassGamma(max(color, 0.0)), 1.0);
+  }
+  if (cam_pos.w < -41.5 && cam_pos.w > -42.5) {
+    float3 direction = normalize(i.rpos);
+    float blend = smoothstep(0.0, 1.0, abs(direction.y));
+    float3 edge = direction.y >= 0.0 ? mat_tint.rgb : misc.rgb;
+    float3 sky = lerp(overlay.rgb, edge, blend);
+    float sun_dot = saturate(dot(direction, normalize(tint.rgb)));
+    float moon_dot =
+        saturate(dot(direction, -normalize(tint.rgb)));
+    float sun_disc =
+        smoothstep(0.99875, 0.99982, sun_dot) * overlay.w;
+    float sun_glow =
+        pow(sun_dot, 96.0) * overlay.w;
+    float moon_disc =
+        smoothstep(0.9984, 0.99975, moon_dot) * misc.w;
+    float moon_glow =
+        pow(moon_dot, 64.0) * 0.10 * misc.w;
+    float stars =
+        step(0.9965, OwnedHash21(
+            floor(direction.xz * 820.0 +
+                  direction.y * 317.0))) *
+        smoothstep(-0.05, 0.35, direction.y) *
+        mat_tint.w;
+    sky += float3(1.0, 0.43, 0.12) * sun_glow * 0.42;
+    sky += float3(1.0, 0.88, 0.62) * sun_disc * 4.2;
+    sky += float3(0.40, 0.58, 1.0) * moon_glow;
+    sky += float3(0.72, 0.82, 1.0) * moon_disc * 1.8;
+    sky += stars * float3(0.45, 0.58, 0.92);
+    return float4(PassGamma(sky), 1.0);
   }
   float4 albedo = diffuse.Sample(smp, i.uv);
   // Alpha-tested foliage/fences; opaque formats sample alpha = 1. Character

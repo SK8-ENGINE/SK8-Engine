@@ -9,6 +9,18 @@ struct PPCContext;
 
 namespace skate3::trick_pipeline {
 
+struct LiveSpatialSnapshot {
+  uint64_t frame{};
+  uint32_t phys_out{};
+  uint32_t board_controller{};
+  uint32_t board_body{};
+  uint32_t transform_state{};
+  std::array<uint32_t, 3> position_bits{};
+  std::array<uint32_t, 3> x_axis_bits{};
+  std::array<uint32_t, 3> z_axis_bits{};
+  uint32_t board_state_flags{0xFFFFFFFFu};
+};
+
 // Player-0 ownership captured at the ActionGraphInputListener fill boundary.
 // This is intentionally distinct from the actor-global ground predicate.
 uint32_t LocalActionGraphActor();
@@ -1082,6 +1094,28 @@ void ApplySelectedAnimationOverride(PPCContext& ctx, uint8_t* base,
 // SkateboardController::FillPhysOut. The PhysOut argument is matched against
 // the harness-observed local player before any spatial data is retained.
 void ObserveLocalSkateboardSpatialState(PPCContext& ctx, uint8_t* base);
+// Delays the guarded owned-world board correction until the retail
+// SkateboardController::FillPhysOut body has completed.
+class OwnedWorldCollisionBridgeScope {
+ public:
+  OwnedWorldCollisionBridgeScope(PPCContext& ctx, uint8_t* base);
+  ~OwnedWorldCollisionBridgeScope();
+
+  OwnedWorldCollisionBridgeScope(
+      const OwnedWorldCollisionBridgeScope&) = delete;
+  OwnedWorldCollisionBridgeScope& operator=(
+      const OwnedWorldCollisionBridgeScope&) = delete;
+
+ private:
+  PPCContext& ctx_;
+  uint8_t* base_;
+  uint32_t controller_;
+  uint32_t phys_out_;
+};
+// Returns the latest player-owned board transform without retaining guest
+// pointers in the caller. This is the compact presentation boundary used by
+// the external Godot runtime capsule.
+bool CurrentLiveSpatialSnapshot(LiveSpatialSnapshot& out);
 // Samples the local player board-state provider resolved through the
 // verified IsOffboard condition. Retail IsOffboard is byte 673 || byte 675;
 // IsAirOffboard is byte 674.

@@ -1,10 +1,73 @@
+# Skate 3 Custom Engine Layer
+
+**Skate 3 Custom Engine Layer** builds a project-owned world, rendering,
+physics, and Blender map-authoring layer on top of
+[Skate3Recomp](https://github.com/mchughalex/skate3recomp). It keeps Skate 3's
+skater, board, tricks, animation, and gameplay while allowing original SKATE
+worlds to be authored as editable Blender projects and loaded from an in-game
+map library.
+
+Current additions include custom visual geometry, authoritative collision,
+grind paths, PBR materials, baked and dynamic lighting, day/night settings,
+weather, mirrors, water, and contact-driven hinged doors. The project is
+unofficial and is not affiliated with Electronic Arts.
+
+The first public preview is Windows/D3D12 only. The upstream recompilation
+supports additional platforms, but the Custom Engine Layer changes have not
+yet been validated on its Vulkan or macOS paths.
+
+Run the normal executable with no special launch flags. Once Skate 3 reaches
+gameplay, the Custom Engine Layer activates automatically, loads the selected
+map from the Maps folder, installs its native collision and grind data, and
+removes the retail world's static collision.
+
+## Documentation
+
+| Topic | Documentation |
+|---|---|
+| Installing and switching custom maps | [Custom Maps](CUSTOM_MAPS.md) |
+| Creating and exporting a map in Blender | [Blender Map Authoring](tools/blender_owned_map/README.md) |
+| SKATE v8 binary specification | [SKATE Format](tools/blender_owned_map/SKATE_FORMAT.md) |
+| Building and packaging a release | [Release Guide](RELEASE.md) |
+| Preview limitations | [Known Issues](KNOWN_ISSUES.md) |
+| Release history | [Changelog](CHANGELOG.md) |
+
+The Blender addon is designed to be used without Python or command-line
+knowledge. After installing it, open **3D View → Sidebar → Skate 3 Map**,
+select **Prepare Scene**, assign your visual/collision/grind objects, place
+the spawn, validate, and export.
+
+No Skate 3 retail files, third-party maps, extracted assets, or Blender
+source scenes are distributed with this repository. You must provide your
+own legally obtained game copy, and map authors must have permission to
+distribute everything embedded in their SKATE packages.
+
+## Licensing and upstream permission
+
+Original Custom Engine Layer code is available under
+[the MIT License](LICENSE-PROJECT.md). Upstream-derived and third-party files
+retain their existing ownership and terms. This source fork is published with
+the upstream maintainer's permission as recorded in [NOTICE.md](NOTICE.md).
+No Electronic Arts game data or intellectual property is licensed or
+distributed by this project.
+
+## Upstream Skate3Recomp README
+
+The remainder of this README retains the upstream project information and
+installation guidance. Release filenames have been adjusted for this fork.
+Platform claims below describe upstream Skate3Recomp; this fork's initial
+Custom Engine Layer preview is validated only on Windows/D3D12.
+
+---
+
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="banner.png">
   <source media="(prefers-color-scheme: light)" srcset="banner-light.png">
   <img alt="Skate 3 Native PC Recompilation" src="banner-light.png">
 </picture>
 
-An unofficial native recompilation of the Xbox 360 version of Skate 3, supporting Windows, Linux, and macOS.
+An unofficial native recompilation of the Xbox 360 version of Skate 3,
+supporting Windows, Linux, and macOS.
 
 As of v2.0.0, the game runs on a native renderer built directly on Direct3D 12 and Vulkan instead of emulating the Xbox 360 GPU. Compared to the emulated renderer it delivers more than twice the frame rate at roughly a quarter of the GPU power draw, and on Apple Silicon the frame rate uplift is closer to 10x.
 
@@ -30,7 +93,7 @@ Notes:
 
 ### Windows
 
-1. Download the latest release Skate3Recomp-Windows.zip from the releases page.
+1. Download the latest `Skate3CustomEngineLayer` Windows release from the releases page.
 2. Extract it anywhere you like, to a folder you control.
 3. Run skate3.exe.
 4. Click "Select ISO" to select your legally obtained copy of Skate 3.
@@ -39,7 +102,7 @@ Notes:
 
 ### Linux
 
-1. Download the latest release Skate3Recomp-Linux.zip from the releases page.
+1. Download the latest `Skate3CustomEngineLayer` Linux release from the releases page.
 2. Extract it anywhere you like, to a folder you control.
 3. Run skate3.
 4. Click "Select ISO" to select your legally obtained copy of Skate 3.
@@ -48,7 +111,7 @@ Notes:
 
 ### macOS (ARM / Experimental)
 
-1. Download the latest release Skate3Recomp-macOS.zip from the releases page.
+1. Download the latest `Skate3CustomEngineLayer` macOS release from the releases page.
 2. Extract it anywhere you like, to a folder you control.
 3. Run the game by opening the skate3recomp app. Game files, saves and settings are kept in the folder containing the app, so keep it in a folder you control rather than in Downloads or Applications.
 4. The first time, right-click the app and choose Open, or approve it under System Settings > Privacy & Security, before macOS will allow it to run.

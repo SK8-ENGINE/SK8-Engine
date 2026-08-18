@@ -15,7 +15,7 @@ Launch the newly built game and wait for the main menu. In another PowerShell
 window:
 
 ```powershell
-cd C:\Users\Daddy\Documents\Skate3Research\harness
+cd .\harness
 
 .\Input.cmd status
 .\Input.cmd reset-observation

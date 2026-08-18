@@ -12,6 +12,13 @@ float4 ShadeCharacter(VSOut i, float4 albedo) {
   float ndl = saturate(dot(cn, ch_light.xyz));
   float3 vd = -normalize(i.rpos);
   float3 lin;
+  // The retained branches below still reproduce Skate 3 when the owned
+  // world is disabled. In owned-world mode these carry only material
+  // identity into the project-owned lighting model; none of the captured
+  // retail key/ambient result is reused.
+  float3 owned_albedo = dlin;
+  float3 owned_normal = cn;
+  float owned_roughness = 0.72;
   float out_a = 1.0;
   if (fam > 5.5) {
     // Traffic vehicles (vehicle.fx fam 6 body / vehicle_glass.fx fam 7
@@ -78,10 +85,18 @@ float4 ShadeCharacter(VSOut i, float4 albedo) {
     // the mesh's "alpha" channel at the raw second texcoord (bound at t4)
     // - alpha-blended in the sorted sub-pass (hair drawn opaque is the
     // blocky-helmet look).
+    // CAC hair diffuse pages are intentionally grayscale. The actual
+    // per-skater colour was already captured into mat_tint from the
+    // character.hair PS c17 row, but the native shader previously ignored
+    // it, leaving dark brown/black hair neutral grey.
+    float3 hair_albedo =
+        dlin * (mat_tint.w > 0.5 ? max(mat_tint.rgb, 0.0) : 1.0);
     float fres = pow(1.0 - saturate(dot(cn, vd)), max(ch_light.w, 1.0));
     float3 hl = ch_key.rgb * (saturate(ndl * 0.75 + 0.25) + ch_amb.w) +
                 ch_tintB.rgb * fres * saturate(ndl * 1.75 + 0.25);
-    lin = dlin * hl;
+    lin = hair_albedo * hl;
+    owned_albedo = hair_albedo;
+    owned_roughness = 0.88;
     out_a = saturate(decal_art.Sample(smp, i.uv2).r * ch_tintB.w);
   } else if (fam > 2.5) {
     // livingworld pedestrians: the diffuse is a stamp-mask atlas; red
@@ -100,6 +115,7 @@ float4 ShadeCharacter(VSOut i, float4 albedo) {
                      ? dlin
                      : ch_tintA.rgb * dlin.r + ch_tintB.rgb * dlin.b;
     lin = sel * (ch_key.rgb * ndl * csm + ch_amb.rgb);
+    owned_albedo = sel;
     // livingworld_stamp_defaultPS ends `max oC0.w, c21.x`: the entity's
     // spawn/distance fade. Only visible when the item is routed to the
     // blended sub-pass (alpha < 1); the opaque pass ignores it.
@@ -139,6 +155,9 @@ float4 ShadeCharacter(VSOut i, float4 albedo) {
     if (ch_tintA.w > 0.0) {
       dlin *= ch_tintA.rgb;
     }
+    owned_albedo = dlin;
+    owned_normal = vn;
+    owned_roughness = fam > 1.5 ? 0.62 : 0.72;
     float3 irr = saturate(
         ch_sh[0].rgb + vn.x * ch_sh[1].rgb + vn.y * ch_sh[2].rgb +
         vn.z * ch_sh[3].rgb + (vn.x * vn.z) * ch_sh[4].rgb +
@@ -190,6 +209,97 @@ float4 ShadeCharacter(VSOut i, float4 albedo) {
     if (ch_misc.z > 0.5) {
       out_a *= saturate(decal_art.Sample(smp, i.uv2).r);
     }
+  }
+  if (owned_light_meta.y > 0.5 && fam < 5.5) {
+    // Fully relight retained character materials inside the owned world.
+    // Do not scale and reuse `lin`: it already contains Skate 3's key,
+    // ambient, SH, rim, exposure and tone response. Reusing it and then
+    // adding the owned sun was the direct-light double count that made the
+    // player glow white outdoors.
+    const float night = saturate(owned_light_meta.z);
+    const float3 world_position = i.rpos + cam_pos.xyz;
+    const float static_visibility =
+        SampleStaticSun(world_position, owned_normal, i.pos.xy);
+    const float dynamic_visibility =
+        SampleCsmShadowSoft(
+            world_position, 0.018, owned_normal, i.pos.xy);
+    const float direct_visibility =
+        min(static_visibility, dynamic_visibility);
+    const float3 light_direction =
+        normalize(owned_celestial_direction.xyz);
+    const float celestial_ndotl =
+        saturate(dot(owned_normal, light_direction));
+    const float wrapped_ndotl =
+        saturate((dot(owned_normal, light_direction) + 0.20) / 1.20);
+    const float diffuse_response =
+        fam > 3.5
+            ? lerp(wrapped_ndotl * 0.42, celestial_ndotl, 0.58)
+            : lerp(wrapped_ndotl * 0.24, celestial_ndotl, 0.84);
+    const float sky_amount =
+        saturate(owned_normal.y * 0.5 + 0.5);
+    const float3 sky_fill =
+        lerp(float3(0.16, 0.17, 0.19),
+             float3(0.35, 0.47, 0.64), sky_amount);
+    const float shelter_visibility =
+        lerp(0.30, 1.0, static_visibility);
+    float3 ambient_light =
+        sky_fill * owned_celestial_color.w *
+        lerp(0.82, 1.28, sky_amount) * shelter_visibility * 1.34;
+    // Characters need the lower-hemisphere bounce that their original
+    // material rig supplied separately from the directional key. This is
+    // owned sky/ground irradiance, not retained vanilla light: it keeps
+    // back-facing clothing and skin readable in open sunlight while still
+    // respecting shelter visibility.
+    const float3 ground_fill =
+        float3(0.24, 0.20, 0.17) *
+        owned_celestial_color.w *
+        lerp(0.42, 0.18, sky_amount) *
+        shelter_visibility;
+    ambient_light += ground_fill;
+    const float light_luma =
+        dot(owned_celestial_color.rgb,
+            float3(0.299, 0.587, 0.114));
+    // Preserve the authored skin/clothing colour under a very warm moving
+    // sun. The world keeps the full celestial colour; character diffuse
+    // uses a small neutral adaptation like a camera's skin-tone response.
+    const float3 character_light_color =
+        lerp(owned_celestial_color.rgb, light_luma.xxx, 0.16);
+    float3 direct_light =
+        character_light_color *
+        owned_celestial_direction.w *
+        diffuse_response *
+        lerp(0.16, 1.0, direct_visibility);
+    lin = owned_albedo * (ambient_light + direct_light);
+
+    // Restrained owned-direction specular. It follows the same sun and
+    // visibility as the diffuse term and therefore cannot reintroduce a
+    // bright vanilla rim in world shadow.
+    const float3 halfway =
+        normalize(light_direction + normalize(-i.rpos));
+    const float spec_power =
+        lerp(96.0, 8.0, owned_roughness);
+    const float specular =
+        pow(saturate(dot(owned_normal, halfway)), spec_power) *
+        celestial_ndotl * direct_visibility *
+        lerp(0.22, 0.025, owned_roughness);
+    lin += character_light_color * specular *
+           lerp(float3(0.04, 0.04, 0.04), owned_albedo, 0.06);
+    lin += OwnedMovingLightContribution(
+        world_position, owned_normal, normalize(-i.rpos),
+        owned_albedo, owned_roughness) *
+        lerp(0.12, 1.0, night);
+    // m_params[0].y is a material response scalar (normally ~1.2), not a
+    // light. Retaining it restores the intended cloth/skin colour density
+    // without bringing back Skate 3's key or SH result.
+    if (fam < 2.5 && ch_tintB.w > 0.25) {
+      lin *= clamp(ch_tintB.w, 0.8, 1.35);
+    }
+    // Retained character textures were authored for this highlight-
+    // compressing curve. Feed it a controlled owned exposure instead of
+    // the captured vanilla exposure: shadows lift gently, direct whites
+    // stop clipping, and channel compression improves colour balance.
+    const float owned_exposure = lerp(1.12, 0.96, night);
+    return ToneOut(max(lin, 0.0) * owned_exposure, out_a, false);
   }
   // Exact tone chain: sqrt(0.5 * (max(x*E/4 + 0.75, 1) - sat(1 - x*E)^2)).
   float E = max(ch_key.w, 0.01);

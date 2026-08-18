@@ -146,8 +146,9 @@ float SampleCsmShadowSoft(float3 wp, float extra_bias, float3 nrm,
   // Receiver bias: the same per-class conventions as SampleCsmShadow
   // (character per-cascade rows / dynobj literals / world bias), plus the
   // slope-scaled static term.
+  const bool character_receiver = extra_bias > 0.0 && sh_char.w > 0.0;
   float bias;
-  if (extra_bias > 0.0 && sh_char.w > 0.0) {
+  if (character_receiver) {
     bias = casc > 2.5 ? sh_char.z : (casc > 1.5 ? sh_char.y : sh_char.x);
   } else if (extra_bias < 0.0) {
     bias = casc > 1.5 ? 0.015 : 0.007;
@@ -169,7 +170,12 @@ float SampleCsmShadowSoft(float3 wp, float extra_bias, float3 nrm,
   // (x / 6, y / 2) (three tiles across, [-1,1] vertical).
   float2 uvpm = sh_pcss2.z * cscale;
   float2 luv_to_suv = float2(1.0 / 6.0, 0.5);
-  float ang = PcssRotation(px);
+  // Screen-pixel rotation is useful for broad world penumbras, but a
+  // moving body crosses that random pattern every frame and makes its
+  // self-shadow crawl. Character filtering uses a fixed light-space
+  // kernel; world/dynamic-object receivers retain the decorrelated screen
+  // rotation.
+  float ang = character_receiver ? 0.0 : PcssRotation(px);
   float2 rot = float2(cos(ang), sin(ang));
   // Blocker search over 7 taps in the search radius. The penumbra follows
   // the NEAREST blocker (max depth below the reference), not the average:
@@ -178,7 +184,9 @@ float SampleCsmShadowSoft(float3 wp, float extra_bias, float3 nrm,
   // own contact shadow and smear it to the max radius (the fully-blurred
   // character shadow). The nearest blocker is the one whose penumbra the
   // receiver is actually inside.
-  float2 rsearch = sh_pcss2.x * uvpm * luv_to_suv;
+  const float blocker_search_m =
+      character_receiver ? min(sh_pcss2.x, 0.45) : sh_pcss2.x;
+  float2 rsearch = blocker_search_m * uvpm * luv_to_suv;
   float bmax = -1.0;
   {
     float2 s = suv0;
@@ -202,11 +210,25 @@ float SampleCsmShadowSoft(float3 wp, float extra_bias, float3 nrm,
     return 1.0;
   }
   float dist_m = max(refd - bmax, 0.0) * sh_pcss2.y;
-  float pen_m = min(dist_m * sh_pcss.y, sh_pcss.z);
+  float pen_m =
+      min(dist_m * sh_pcss.y,
+          character_receiver ? min(sh_pcss.z, 0.14) : sh_pcss.z);
   // Filter radius: the penumbra in atlas units, floored at a fraction of a
   // physical atlas texel so edges always stay filtered.
   float2 rfilt = max(pen_m * uvpm, sh_pcss2.w * 2.0 / sh_misc.w) * luv_to_suv;
   float acc = CsmSoftTap(suv0, refd, tile_x0, tile_x1);
+  if (character_receiver) {
+    // A stable 25-tap Vogel disk resolves smooth body self-shadow gradients
+    // at the tighter owned near cascade. The old 13 randomly rotated taps
+    // exposed individual texels as low-resolution moving blotches.
+    [loop] for (int j = 0; j < 24; ++j) {
+      float r = sqrt((float(j) + 0.5) / 24.0);
+      float a = float(j) * 2.399963;
+      float2 o = float2(cos(a), sin(a)) * r;
+      acc += CsmSoftTap(suv0 + o * rfilt, refd, tile_x0, tile_x1);
+    }
+    return acc / 25.0;
+  }
   [unroll] for (int j = 0; j < 12; ++j) {
     float2 o = kPcssTaps[j];
     o = float2(o.x * rot.x - o.y * rot.y, o.x * rot.y + o.y * rot.x);
@@ -227,26 +249,21 @@ float SampleCsmShadowSoft(float3 wp, float extra_bias, float3 nrm,
 // a single compare otherwise. Uncovered texels hold the far clear = lit.
 // Clamped tap into one tile of the three-tile static sun atlas (inner,
 // mid, far left to right); taps never bleed across the tile seams.
-float NsmTap(float2 suv, float refd, float tile_u0) {
+float NsmTap(float2 suv, float refd, float tile_u0, bool history) {
   float hx = 0.1666667 / nsm_p2.w;  // half a texel in atlas u (3 tiles wide)
   float hy = 0.5 / nsm_p2.w;
   suv.x = clamp(suv.x, tile_u0 + hx, tile_u0 + 0.3333333 - hx);
   suv.y = clamp(suv.y, hy, 1.0 - hy);
   // Explicit LOD (the map is single-mip): the PCF loop below is dynamic
   // and implicit-gradient sampling is not allowed in divergent flow.
-  return static_sun.SampleLevel(smp_clamp, suv, 0.0).x;
+  return history
+             ? static_sun_history.SampleLevel(smp_clamp, suv, 0.0).x
+             : static_sun.SampleLevel(smp_clamp, suv, 0.0).x;
 }
-float SampleStaticSun(float3 wp, float3 nrm, float2 px) {
-  if (nsm_p.x <= 0.0) {
-    return 1.0;
-  }
-  // Showcase: until the shadow layer is revealed, render fully lit.
-  int sc_mask = ShowcaseMask(px.x);
-  if (sc_mask >= 0 && (sc_mask & 8) == 0) {
-    return 1.0;
-  }
-  float2 uc_far = float2(dot(nsm_x.xyz, wp) + nsm_x.w,
-                         dot(nsm_y.xyz, wp) + nsm_y.w);
+float SampleStaticSunMap(float3 wp, float3 nrm, float2 px, float4 map_x,
+                         float4 map_y, float4 map_z, bool history) {
+  float2 uc_far = float2(dot(map_x.xyz, wp) + map_x.w,
+                         dot(map_y.xyz, wp) + map_y.w);
   // Screen-pixel footprint in far-tile uc, BEFORE any divergent return
   // (gradient op; the enclosing family branches are uniform per draw).
   // Scales the filter floor with viewing distance so far shadows
@@ -298,9 +315,10 @@ float SampleStaticSun(float3 wp, float3 nrm, float2 px) {
     ndl = abs(dot(normalize(nrm), sh_sun.xyz));
   }
   float slope = sqrt(saturate(1.0 - ndl * ndl)) / max(ndl, 0.12);
-  float refd = dot(nsm_z.xyz, wp) + nsm_z.w - (nsm_p2.x + nsm_p2.y * slope);
+  float refd = dot(map_z.xyz, wp) + map_z.w -
+               (nsm_p2.x + nsm_p2.y * slope);
   if (sh_pcss.x <= 0.5) {
-    float s0 = NsmTap(suv, refd, tile_u0) >= refd ? 1.0 : 0.0;
+    float s0 = NsmTap(suv, refd, tile_u0, history) >= refd ? 1.0 : 0.0;
     return 1.0 - fade * nsm_p.x * (1.0 - s0);
   }
   // FIXED kernels throughout this sampler: no per-pixel noise. Verified
@@ -315,11 +333,12 @@ float SampleStaticSun(float3 wp, float3 nrm, float2 px) {
   float2 rsearch = sh_pcss2.x * ucpm * uc_to_suv;
   float bmax = -1.0;
   {
-    float d = NsmTap(suv, refd, tile_u0);
+    float d = NsmTap(suv, refd, tile_u0, history);
     if (d < refd) { bmax = d; }
   }
   [unroll] for (int k = 0; k < 12; k += 3) {
-    float d = NsmTap(suv + kPcssTaps[k] * rsearch, refd, tile_u0);
+    float d =
+        NsmTap(suv + kPcssTaps[k] * rsearch, refd, tile_u0, history);
     if (d < refd) { bmax = max(bmax, d); }
   }
   if (bmax < 0.0) {
@@ -350,9 +369,137 @@ float SampleStaticSun(float3 wp, float3 nrm, float2 px) {
     float r = sqrt((float(j) + 0.5) / float(n));
     float a = float(j) * 2.399963;
     float2 o = float2(cos(a), sin(a)) * r;
-    float d = NsmTap(suv + o * rfilt, refd, tile_u0);
+    float d = NsmTap(suv + o * rfilt, refd, tile_u0, history);
     acc += saturate((d - refd) / w + 0.5);
   }
   float s = acc / float(n);
   return 1.0 - fade * nsm_p.x * (1.0 - s);
+}
+float OwnedNsmTap(float2 suv, int cascade_index) {
+  // Explicit LOD: all three maps are single-mip and this sampler runs inside
+  // dynamic PCF loops.
+  if (cascade_index == 0) {
+    return static_sun.SampleLevel(smp_clamp, suv, 0.0).x;
+  }
+  if (cascade_index == 1) {
+    return static_sun_history.SampleLevel(smp_clamp, suv, 0.0).x;
+  }
+  return static_sun_far.SampleLevel(smp_clamp, suv, 0.0).x;
+}
+
+float SampleOwnedStaticCascade(float3 wp, float3 nrm, float2 px,
+                               float4 map_x, float4 map_y, float4 map_z,
+                               int cascade_index, float map_size,
+                               bool fade_outer) {
+  float2 uc = float2(dot(map_x.xyz, wp) + map_x.w,
+                     dot(map_y.xyz, wp) + map_y.w);
+  float edge = max(abs(uc.x), abs(uc.y));
+  if (edge >= 0.995) {
+    return 1.0;
+  }
+  float fade = fade_outer ? saturate((0.98 - edge) / 0.06) : 1.0;
+  float2 suv = float2(uc.x * 0.5 + 0.5, uc.y * -0.5 + 0.5);
+  const float half_texel = 0.5 / max(map_size, 1.0);
+  suv = clamp(suv, half_texel.xx, (1.0 - half_texel).xx);
+  float ndl = 1.0;
+  if (dot(nrm, nrm) > 1e-4) {
+    ndl = abs(dot(normalize(nrm), sh_sun.xyz));
+  }
+  float slope = sqrt(saturate(1.0 - ndl * ndl)) / max(ndl, 0.12);
+  float refd = dot(map_z.xyz, wp) + map_z.w -
+               (nsm_p2.x + nsm_p2.y * slope);
+  if (sh_pcss.x <= 0.5) {
+    float s0 = OwnedNsmTap(suv, cascade_index) >= refd ? 1.0 : 0.0;
+    return 1.0 - fade * nsm_p.x * (1.0 - s0);
+  }
+
+  const float ucpm = length(map_x.xyz);
+  float2 rsearch = sh_pcss2.x * ucpm * 0.5;
+  float bmax = -1.0;
+  {
+    float d = OwnedNsmTap(suv, cascade_index);
+    if (d < refd) {
+      bmax = d;
+    }
+  }
+  [unroll] for (int k = 0; k < 12; k += 3) {
+    float d =
+        OwnedNsmTap(suv + kPcssTaps[k] * rsearch, cascade_index);
+    if (d < refd) {
+      bmax = max(bmax, d);
+    }
+  }
+  if (bmax < 0.0) {
+    return 1.0;
+  }
+  float dist_m = max(refd - bmax, 0.0) * nsm_p.z;
+  float pen_m = min(dist_m * sh_pcss.y, sh_pcss.z);
+  float pxfoot = max(fwidth(uc.x), fwidth(uc.y));
+  float floor_uc =
+      max(4.0 / max(map_size, 1.0), 2.0 * pxfoot);
+  float r_uc = max(pen_m * ucpm, floor_uc);
+  float2 rfilt = r_uc * 0.5;
+  float soft_width = max(nsm_p2.x * 2.0, 1e-5);
+  int tap_count = r_uc > 0.3 * ucpm ? 26 : 13;
+  float acc = 0.0;
+  [loop] for (int j = 0; j < tap_count; ++j) {
+    float r = sqrt((float(j) + 0.5) / float(tap_count));
+    float a = float(j) * 2.399963;
+    float2 o = float2(cos(a), sin(a)) * r;
+    float d = OwnedNsmTap(suv + o * rfilt, cascade_index);
+    acc += saturate((d - refd) / soft_width + 0.5);
+  }
+  float shadow = acc / float(tap_count);
+  return 1.0 - fade * nsm_p.x * (1.0 - shadow);
+}
+
+float OwnedCascadeEdge(float3 wp, float4 map_x, float4 map_y) {
+  float2 uc = float2(dot(map_x.xyz, wp) + map_x.w,
+                     dot(map_y.xyz, wp) + map_y.w);
+  return max(abs(uc.x), abs(uc.y));
+}
+
+float SampleStaticSun(float3 wp, float3 nrm, float2 px) {
+  if (nsm_p.x <= 0.0) {
+    return 1.0;
+  }
+  // Showcase: until the shadow layer is revealed, render fully lit.
+  int sc_mask = ShowcaseMask(px.x);
+  if (sc_mask >= 0 && (sc_mask & 8) == 0) {
+    return 1.0;
+  }
+  if (nsm_owned_meta.w <= 0.5) {
+    return SampleStaticSunMap(wp, nrm, px, nsm_x, nsm_y, nsm_z,
+                              false);
+  }
+
+  // Select by each cascade's own stored projection. Blend only across a
+  // narrow spatial overlap; unlike the rejected whole-world temporal blend,
+  // this never mixes two different sun moments over the entire screen.
+  float near_edge = OwnedCascadeEdge(wp, nsm_x, nsm_y);
+  if (near_edge < 0.88) {
+    return SampleOwnedStaticCascade(
+        wp, nrm, px, nsm_x, nsm_y, nsm_z, 0, nsm_owned_meta.x, false);
+  }
+  float middle = SampleOwnedStaticCascade(
+      wp, nrm, px, nsm_mid_x, nsm_mid_y, nsm_mid_z, 1,
+      nsm_owned_meta.y, false);
+  if (near_edge < 0.98) {
+    float near_shadow = SampleOwnedStaticCascade(
+        wp, nrm, px, nsm_x, nsm_y, nsm_z, 0, nsm_owned_meta.x, false);
+    float blend = smoothstep(0.88, 0.98, near_edge);
+    return lerp(near_shadow, middle, blend);
+  }
+  float middle_edge = OwnedCascadeEdge(wp, nsm_mid_x, nsm_mid_y);
+  if (middle_edge < 0.90) {
+    return middle;
+  }
+  float far_shadow = SampleOwnedStaticCascade(
+      wp, nrm, px, nsm_far_x, nsm_far_y, nsm_far_z, 2,
+      nsm_owned_meta.z, true);
+  if (middle_edge < 0.99) {
+    float blend = smoothstep(0.90, 0.99, middle_edge);
+    return lerp(middle, far_shadow, blend);
+  }
+  return far_shadow;
 }

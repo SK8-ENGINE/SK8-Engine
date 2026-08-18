@@ -670,9 +670,10 @@ REXCVAR_DEFINE_INT32(skate3_native_render_scene_shadow_tile, 0, "Skate 3",
                      "the penumbra like the emulated baseline. 512 = the softer "
                      "original-console look, blocky up close. 0 = auto: 512 x "
                      "the render resolution scale (the Resolution Scale "
-                     "setting), matching the emulated renderer's shadow "
-                     "crispness at any render resolution. Applies live: the "
-                     "atlas chain recreates on change.")
+                     "setting), with a 2048 minimum in the owned world so "
+                     "close character/board shadows are not limited by the "
+                     "old console raster. Applies live: the atlas chain "
+                     "recreates on change.")
     .range(0, 4096)
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 REXCVAR_DEFINE_BOOL(skate3_native_render_scene_shadow_caster_parity, true,

@@ -8,6 +8,7 @@
 #include "skate3_mechanics_sandbox.h"
 #include "skate3_native_scene.h"
 #include "skate3_scoring.h"
+#include "skate3_screenshot.h"
 #include "skate3_target_trace.h"
 #include "skate3_trick_pipeline.h"
 
@@ -853,6 +854,47 @@ std::string HandleCommand(std::string_view command) {
   if (command == "PING") {
     return "OK PONG";
   }
+  auto append_capsule_snapshot = [](std::ostringstream& response) {
+    trick_pipeline::LiveSpatialSnapshot snapshot{};
+    const bool spatial_valid =
+        trick_pipeline::CurrentLiveSpatialSnapshot(snapshot);
+    response << " protocol=1"
+             << " spatial_valid=" << (spatial_valid ? 1 : 0)
+             << " player_state_valid="
+             << (g_player_state_valid.load(std::memory_order_acquire) ? 1 : 0)
+             << " on_ground="
+             << (g_player_on_ground.load(std::memory_order_acquire) ? 1 : 0)
+             << " in_air="
+             << (g_player_in_air.load(std::memory_order_acquire) ? 1 : 0);
+    if (!spatial_valid) {
+      return;
+    }
+    auto append_bits = [&response](const std::array<uint32_t, 3>& values) {
+      response << std::hex << std::uppercase
+               << "0x" << values[0] << ":0x" << values[1]
+               << ":0x" << values[2] << std::dec;
+    };
+    response << " frame=" << snapshot.frame
+             << " phys_out=" << snapshot.phys_out
+             << " board_controller=" << snapshot.board_controller
+             << " board_body=" << snapshot.board_body
+             << " transform_state=" << snapshot.transform_state
+             << " position_bits=";
+    append_bits(snapshot.position_bits);
+    response << " x_axis_bits=";
+    append_bits(snapshot.x_axis_bits);
+    response << " z_axis_bits=";
+    append_bits(snapshot.z_axis_bits);
+    response << " board_state_valid="
+             << (snapshot.board_state_flags == 0xFFFFFFFFu ? 0 : 1)
+             << " board_state_flags=" << snapshot.board_state_flags;
+  };
+  if (command == "CAPSULE_SNAPSHOT") {
+    std::ostringstream response;
+    response << "OK";
+    append_capsule_snapshot(response);
+    return response.str();
+  }
   if (command == "STATUS") {
     const uint32_t gameplay_context =
         rex::kernel::guest_presence::GameplayContextValue();
@@ -896,6 +938,23 @@ std::string HandleCommand(std::string_view command) {
   if (command == "RESET_OBSERVATION") {
     ResetObservation();
     return "OK observation reset";
+  }
+  if (command == "SCREENSHOT" ||
+      command.rfind("SCREENSHOT ", 0) == 0) {
+    std::string tag = "harness";
+    if (command.size() > 10) {
+      tag = std::string(Trim(command.substr(10)));
+      if (tag.empty() || tag.size() > 48 ||
+          !std::all_of(tag.begin(), tag.end(), [](unsigned char character) {
+            return std::isalnum(character) || character == '-' ||
+                   character == '_';
+          })) {
+        return "ERR screenshot tag must use 1-48 letters, digits, - or _";
+      }
+    }
+    screenshot::CaptureWindow(
+        screenshot::RememberedWindow(), tag.c_str());
+    return "OK screenshot queued tag=" + tag;
   }
   if (command == "RESET_SANDBOX") {
     if (!mechanics_sandbox::RequestReset()) {
@@ -996,6 +1055,20 @@ std::string HandleCommand(std::string_view command) {
     rex::kernel::xam::SetSyntheticInputState(state);
     g_enabled.store(true);
     return "OK state held";
+  }
+
+  if (verb == "CAPSULE_FRAME") {
+    SyntheticInputStep state{};
+    std::string error;
+    if (!ParseState(command, false, state, error)) {
+      return "ERR " + error;
+    }
+    rex::kernel::xam::SetSyntheticInputState(state);
+    g_enabled.store(true);
+    std::ostringstream response;
+    response << "OK";
+    append_capsule_snapshot(response);
+    return response.str();
   }
 
   if (verb == "QUEUE") {
@@ -1100,17 +1173,23 @@ extern "C" REX_FUNC(Skate3InputLab_GroundStatePredicateHook) {
     if (entity) {
       const uint32_t locomotion = REX_LOAD_U32(entity + 60);
       if (locomotion) {
+        const uint64_t frame = input_history_watch::CurrentFrameSequence();
+        const uint32_t local_phys_out = trick_pipeline::CurrentLocalPhysOut();
+        const uint32_t local_action_actor =
+            trick_pipeline::LocalActionGraphActor();
+        if (entity == local_phys_out &&
+            mechanics_sandbox::ShouldPublishOwnedWorldGround(
+                frame, local_phys_out)) {
+          REX_STORE_U8(locomotion + 14635, 1);
+          REX_STORE_U8(locomotion + 14636, 0);
+        }
         const bool on_ground = REX_LOAD_U8(locomotion + 14635) != 0;
         const bool in_air = REX_LOAD_U8(locomotion + 14636) != 0;
-        const uint64_t frame = input_history_watch::CurrentFrameSequence();
         g_player_entity.store(entity, std::memory_order_release);
         g_player_on_ground.store(on_ground, std::memory_order_release);
         g_player_in_air.store(in_air, std::memory_order_release);
         g_player_state_frame.store(frame, std::memory_order_release);
         g_player_state_valid.store(true, std::memory_order_release);
-        const uint32_t local_phys_out = trick_pipeline::CurrentLocalPhysOut();
-        const uint32_t local_action_actor =
-            trick_pipeline::LocalActionGraphActor();
         if (local_phys_out != 0) {
           mechanics_sandbox::ObserveLocalPresentationEntity(frame,
                                                              local_phys_out);

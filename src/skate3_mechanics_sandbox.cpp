@@ -1,26 +1,33 @@
 #include "skate3_mechanics_sandbox.h"
 
+#include "generated/skate3_init.h"
 #include "native/skate3_native_entity.h"
 #include "skate3_mechanics_sandbox_map.h"
+#include "skate3_native_collision.h"
+#include "skate3_native_grind.h"
+#include "skate3_native_raytraced_mirror.h"
+#include "skate3_owned_world_boundary.h"
 #include "skate3_trick_pipeline.h"
 
+#include <algorithm>
 #include <atomic>
 #include <bit>
 #include <cmath>
+#include <cstring>
 #include <mutex>
 #include <ostream>
-#include <cstring>
 #include <unordered_set>
 
 #include <rex/cvar.h>
 #include <rex/kernel/guest_presence.h>
 #include <rex/logging.h>
+#include <rex/ppc/context.h>
 
 REXCVAR_DEFINE_BOOL(
-    skate3_mechanics_sandbox, false, "Skate 3",
-    "After stable direct-boot gameplay, retain the generated mechanics kernel "
-    "and show only the verified local skater presentation in the native sandbox "
-    "shell. The original flat collision remains authoritative.")
+    skate3_mechanics_sandbox, true, "Skate 3",
+    "Use the Custom Engine Layer after stable gameplay is reached. Retain the "
+    "generated mechanics kernel and show the verified local skater inside the "
+    "project-owned world.")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 REXCVAR_DEFINE_BOOL(
     skate3_mechanics_sandbox_visual_map, true, "Skate 3",
@@ -33,6 +40,12 @@ REXCVAR_DEFINE_BOOL(
     "Run the native test-map hitbox query as read-only telemetry. It never "
     "feeds or overrides the generated physics kernel.")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
+REXCVAR_DEFINE_BOOL(
+    skate3_mechanics_sandbox_owned_collision, false, "Skate 3",
+    "Experimental: constrain only the verified local board vertically to "
+    "floor and ramp surfaces in the project-owned map after FillPhysOut. "
+    "Retail physics still supplies forces, orientation, and lateral contact.")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
 REXCVAR_DECLARE(bool, skate3_native_render);
 REXCVAR_DECLARE(bool, skate3_native_render_scene);
@@ -41,6 +54,7 @@ REXCVAR_DECLARE(bool, skate3_native_render_scene_splines);
 REXCVAR_DECLARE(bool, skate3_native_render_scene_selection_outline);
 REXCVAR_DECLARE(bool, skate3_native_render_scene_world_items);
 REXCVAR_DECLARE(bool, skate3_native_render_scene_dynamic_items);
+REXCVAR_DECLARE(bool, skate3_native_render_scene_entity_fade);
 REXCVAR_DECLARE(bool, skate3_native_render_scene_hdr);
 REXCVAR_DECLARE(int32_t, skate3_native_render_scene_msaa);
 
@@ -68,6 +82,8 @@ std::atomic<uint32_t> g_reset_failures{0};
 std::atomic<uint32_t> g_visible_items{0};
 std::atomic<uint32_t> g_dropped_nonlocal{0};
 std::atomic<uint32_t> g_dropped_unresolved{0};
+std::atomic<uint32_t> g_visible_nonlocal_skater_items{0};
+std::atomic<uint32_t> g_visible_nonlocal_skater_entities{0};
 std::atomic<uint8_t> g_diagnostic_mode{
     static_cast<uint8_t>(DiagnosticMode::CandidateOnly)};
 std::atomic<uint32_t> g_verified_ground_entity{0};
@@ -82,15 +98,37 @@ std::atomic<uint32_t> g_rendered_frames{0};
 std::atomic<uint32_t> g_candidate_draws{0};
 std::atomic<uint32_t> g_candidate_draw_frames{0};
 std::atomic<uint32_t> g_map_draws{0};
+std::atomic<uint32_t> g_map_chunk_count{0};
+std::atomic<uint32_t> g_map_candidate_chunks{0};
+std::atomic<uint32_t> g_map_visible_chunks{0};
+std::atomic<uint32_t> g_map_resident_chunks{0};
+std::atomic<uint32_t> g_map_chunk_draws{0};
+std::atomic<uint32_t> g_sky_draws{0};
 std::atomic<uint32_t> g_map_contact_count{0};
 std::atomic<uint32_t> g_map_last_contact_id{0};
 std::atomic<uint32_t> g_map_last_penetration_bits{0};
 std::atomic<uint32_t> g_map_origin_x_bits{0};
 std::atomic<uint32_t> g_map_origin_y_bits{0};
 std::atomic<uint32_t> g_map_origin_z_bits{0};
+std::atomic<uint32_t> g_map_origin_phys_out{0};
 std::atomic<bool> g_map_origin_valid{false};
+std::atomic<uint64_t> g_owned_collision_checks{0};
+std::atomic<uint64_t> g_owned_collision_corrections{0};
+std::atomic<uint64_t> g_owned_collision_step_rejections{0};
+std::atomic<uint64_t> g_owned_collision_floor_recoveries{0};
+std::atomic<uint32_t> g_owned_collision_last_surface{0};
+std::atomic<uint32_t> g_owned_collision_last_normal_y_bits{
+    std::bit_cast<uint32_t>(1.0f)};
+std::atomic<uint32_t> g_owned_collision_last_target_y_bits{0};
+std::atomic<uint32_t> g_owned_collision_floor_offset_bits{0};
+std::atomic<uint32_t> g_owned_collision_floor_samples{0};
+std::atomic<uint64_t> g_owned_collision_last_correction_check{0};
+std::atomic<uint64_t> g_owned_collision_last_correction_frame{0};
+std::atomic<uint64_t> g_owned_ground_override_count{0};
 std::mutex g_identity_log_mutex;
 std::unordered_set<uint32_t> g_logged_presentation_entities;
+std::mutex g_visible_skater_mutex;
+std::unordered_set<uint32_t> g_visible_nonlocal_skaters_this_frame;
 
 struct SavedRenderSettings {
   bool captured = false;
@@ -100,6 +138,7 @@ struct SavedRenderSettings {
   bool outline = true;
   bool world_items = true;
   bool dynamic_items = true;
+  bool entity_fade = true;
   bool hdr = true;
   int32_t msaa = 1;
 };
@@ -161,6 +200,8 @@ void ApplySandboxPresentation() {
         REXCVAR_GET(skate3_native_render_scene_world_items);
     g_saved_settings.dynamic_items =
         REXCVAR_GET(skate3_native_render_scene_dynamic_items);
+    g_saved_settings.entity_fade =
+        REXCVAR_GET(skate3_native_render_scene_entity_fade);
     g_saved_settings.hdr = REXCVAR_GET(skate3_native_render_scene_hdr);
     g_saved_settings.msaa = REXCVAR_GET(skate3_native_render_scene_msaa);
   }
@@ -178,6 +219,11 @@ void ApplySandboxPresentation() {
   // the black sandbox frame in the render matrix.
   REXCVAR_SET(skate3_native_render_scene_world_items, true);
   REXCVAR_SET(skate3_native_render_scene_dynamic_items, true);
+  // The provisional local presentation candidate is not a LivingWorld NPC,
+  // but its retained character rows can carry a spawn/distance alpha from
+  // the presentation bridge. Keep the local skater opaque in the sandbox;
+  // this is presentation-only and is restored on deactivation.
+  REXCVAR_SET(skate3_native_render_scene_entity_fade, false);
   // The background-only probe deliberately bypasses the HDR tonemap and
   // MSAA resolve. If the colored clear appears on the classic path, the
   // failure is in the HDR/post chain rather than scene submission.
@@ -204,9 +250,62 @@ void RestorePresentation() {
               g_saved_settings.world_items);
   REXCVAR_SET(skate3_native_render_scene_dynamic_items,
               g_saved_settings.dynamic_items);
+  REXCVAR_SET(skate3_native_render_scene_entity_fade,
+              g_saved_settings.entity_fade);
   REXCVAR_SET(skate3_native_render_scene_hdr, g_saved_settings.hdr);
   REXCVAR_SET(skate3_native_render_scene_msaa, g_saved_settings.msaa);
   g_saved_settings = {};
+}
+
+bool CaptureMapOriginFromOwnedPlayer(uint32_t phys_out,
+                                     const char* reason) {
+  if (phys_out == 0) {
+    return false;
+  }
+  float position[3] = {};
+  if (!trick_pipeline::CurrentLocalBoardPosition(position)) {
+    return false;
+  }
+  g_map_origin_x_bits.store(std::bit_cast<uint32_t>(position[0]),
+                            std::memory_order_release);
+  g_map_origin_y_bits.store(std::bit_cast<uint32_t>(position[1]),
+                            std::memory_order_release);
+  g_map_origin_z_bits.store(std::bit_cast<uint32_t>(position[2]),
+                            std::memory_order_release);
+  g_map_origin_phys_out.store(phys_out, std::memory_order_release);
+  g_map_origin_valid.store(true, std::memory_order_release);
+  g_owned_collision_floor_offset_bits.store(0,
+                                             std::memory_order_release);
+  g_owned_collision_floor_samples.store(0, std::memory_order_release);
+  g_owned_collision_floor_recoveries.store(0,
+                                            std::memory_order_release);
+  g_owned_collision_last_surface.store(0, std::memory_order_release);
+  g_owned_collision_last_normal_y_bits.store(
+      std::bit_cast<uint32_t>(1.0f), std::memory_order_release);
+  g_owned_collision_last_correction_check.store(
+      0, std::memory_order_release);
+  REXLOG_INFO(
+      "mechanics-sandbox: owned map origin {} physout=0x{:08X} "
+      "position=({:.3f},{:.3f},{:.3f})",
+      reason, phys_out, position[0], position[1], position[2]);
+  return true;
+}
+
+uint32_t LoadGuestU32(uint8_t* base, uint32_t address) {
+  if (!base || !address) {
+    return 0;
+  }
+  return REX_LOAD_U32(address);
+}
+
+float LoadGuestF32(uint8_t* base, uint32_t address) {
+  return std::bit_cast<float>(LoadGuestU32(base, address));
+}
+
+bool IsGuestHeapAddress(uint32_t address) {
+  constexpr uint32_t kGuestHeapStart = 0x40000000u;
+  constexpr uint32_t kGuestHeapEnd = 0x72000000u;
+  return address >= kGuestHeapStart && address < kGuestHeapEnd;
 }
 
 void MaybeDeactivate() {
@@ -217,7 +316,24 @@ void MaybeDeactivate() {
   if (previous != State::Disabled) {
     RestorePresentation();
     g_map_origin_valid.store(false, std::memory_order_release);
+    g_map_origin_phys_out.store(0, std::memory_order_release);
     g_map_contact_count.store(0, std::memory_order_relaxed);
+    g_owned_collision_checks.store(0, std::memory_order_relaxed);
+    g_owned_collision_corrections.store(0, std::memory_order_relaxed);
+    g_owned_collision_step_rejections.store(0, std::memory_order_relaxed);
+    g_owned_collision_floor_recoveries.store(0,
+                                              std::memory_order_relaxed);
+    g_owned_collision_last_surface.store(0, std::memory_order_relaxed);
+    g_owned_collision_last_normal_y_bits.store(
+        std::bit_cast<uint32_t>(1.0f), std::memory_order_relaxed);
+    g_owned_collision_floor_offset_bits.store(0,
+                                               std::memory_order_relaxed);
+    g_owned_collision_floor_samples.store(0, std::memory_order_relaxed);
+    g_owned_collision_last_correction_check.store(
+        0, std::memory_order_relaxed);
+    g_owned_collision_last_correction_frame.store(
+        0, std::memory_order_relaxed);
+    g_owned_ground_override_count.store(0, std::memory_order_relaxed);
     REXLOG_INFO("mechanics-sandbox: disabled; retail presentation restored");
   }
 }
@@ -235,16 +351,9 @@ void TryActivate(uint64_t frame) {
   if (gameplay && state != State::Active && state != State::ResetPending) {
     g_last_gameplay_frame.store(frame, std::memory_order_release);
     ApplySandboxPresentation();
-    float position[3] = {};
-    if (trick_pipeline::CurrentLocalBoardPosition(position)) {
-      g_map_origin_x_bits.store(std::bit_cast<uint32_t>(position[0]),
-                                std::memory_order_release);
-      g_map_origin_y_bits.store(std::bit_cast<uint32_t>(position[1]),
-                                std::memory_order_release);
-      g_map_origin_z_bits.store(std::bit_cast<uint32_t>(position[2]),
-                                std::memory_order_release);
-      g_map_origin_valid.store(true, std::memory_order_release);
-    }
+    CaptureMapOriginFromOwnedPlayer(
+        g_local_presentation_entity.load(std::memory_order_acquire),
+        "captured");
     g_state.store(State::Active, std::memory_order_release);
     REXLOG_INFO(
         "mechanics-sandbox: active after stable freeroam; local actor=0x{:08X} "
@@ -295,6 +404,11 @@ void ObserveLocalMotionState(uint64_t frame, uint32_t actor, bool on_ground,
   if (actor == 0 || !Active()) {
     return;
   }
+  if (player_owned && phys_out != 0 &&
+      phys_out !=
+          g_map_origin_phys_out.load(std::memory_order_acquire)) {
+    CaptureMapOriginFromOwnedPlayer(phys_out, "rebased");
+  }
   if (NativeCollisionObserverEnabled() && player_owned) {
     float position[3] = {};
     float origin[3] = {};
@@ -330,6 +444,7 @@ void ObserveLocalMotionState(uint64_t frame, uint32_t actor, bool on_ground,
       phys_out == g_reset_expected_phys_out.load(std::memory_order_acquire)) {
     g_reset_completions.fetch_add(1, std::memory_order_relaxed);
     g_state.store(State::ResetSucceeded, std::memory_order_release);
+    CaptureMapOriginFromOwnedPlayer(phys_out, "reset");
     REXLOG_INFO(
         "mechanics-sandbox: session-marker reset observed on verified player-0 "
         "ground entity=0x{:08X} action=0x{:08X} physout=0x{:08X}",
@@ -399,6 +514,317 @@ bool NativeCollisionObserverEnabled() {
          REXCVAR_GET(skate3_mechanics_sandbox_collision_observer);
 }
 
+bool OwnedWorldCollisionEnabled() {
+  return Active() &&
+         REXCVAR_GET(skate3_mechanics_sandbox_owned_collision);
+}
+
+bool ShouldPublishOwnedWorldGround(uint64_t frame, uint32_t phys_out) {
+  if (!OwnedWorldCollisionEnabled() || phys_out == 0 ||
+      phys_out != g_map_origin_phys_out.load(std::memory_order_acquire)) {
+    return false;
+  }
+  const uint64_t correction_frame =
+      g_owned_collision_last_correction_frame.load(
+          std::memory_order_acquire);
+  const bool active =
+      correction_frame != 0 && frame >= correction_frame &&
+      frame - correction_frame <= 2;
+  if (active) {
+    g_owned_ground_override_count.fetch_add(
+        1, std::memory_order_relaxed);
+  }
+  return active;
+}
+
+void ApplyOwnedWorldCollisionAfterPhysOut(PPCContext& ctx, uint8_t* base,
+                                          uint32_t controller,
+                                          uint32_t phys_out) {
+  if (!base || controller == 0 || phys_out == 0 ||
+      phys_out != trick_pipeline::CurrentLocalPhysOut() ||
+      phys_out != g_map_origin_phys_out.load(std::memory_order_acquire)) {
+    return;
+  }
+
+  // SkateboardController ownership/layout is established by the existing
+  // FillPhysOut observer: +428 is Skateboard*, +436 is ProcessedPhysIn*, and
+  // +448 selects the active board transform at +112 or +192.
+  const uint32_t skateboard = LoadGuestU32(base, controller + 428);
+  const uint32_t processed_phys_in =
+      LoadGuestU32(base, controller + 436);
+  const uint32_t transform_state =
+      LoadGuestU32(base, controller + 448);
+  if (!IsGuestHeapAddress(skateboard) ||
+      !IsGuestHeapAddress(processed_phys_in) ||
+      transform_state > 4) {
+    return;
+  }
+
+  const uint32_t transform =
+      processed_phys_in + (transform_state == 3 ? 112u : 192u);
+  float position[3] = {
+      LoadGuestF32(base, transform + 48),
+      LoadGuestF32(base, transform + 52),
+      LoadGuestF32(base, transform + 56),
+  };
+  if (!std::isfinite(position[0]) || !std::isfinite(position[1]) ||
+      !std::isfinite(position[2])) {
+    return;
+  }
+
+  float origin[3] = {};
+  if (!SandboxMapOrigin(origin)) {
+    return;
+  }
+
+  native_collision::EnsureInstalled(ctx, base, skateboard, origin);
+  native_collision::UpdateKinematicObjects(ctx, base);
+  native_collision::UpdateHingedDoors(ctx, base);
+  native_grind::EnsureInstalled(ctx, base);
+
+  if (!OwnedWorldCollisionEnabled()) {
+    return;
+  }
+
+  float local_position[3] = {
+      position[0] - origin[0],
+      position[1] - origin[1],
+      position[2] - origin[2],
+  };
+
+  const uint64_t check =
+      g_owned_collision_checks.fetch_add(1, std::memory_order_relaxed) + 1;
+  constexpr float kRecoveryProbeAbove = 64.0f;
+  constexpr float kProbeBelow = 8.0f;
+  map::GroundHit ground;
+  if (!map::QueryGround(local_position, kRecoveryProbeAbove, kProbeBelow,
+                        ground) ||
+      ground.normal[1] < 0.45f) {
+    return;
+  }
+
+  const bool calibration_floor =
+      ground.normal[1] > 0.99f && std::abs(ground.point[1]) < 0.02f;
+  if (calibration_floor) {
+    // The transform origin is not the wheel contact point. Learn its settled
+    // offset from any level zero-height park tile and preserve that clearance
+    // when the board transitions onto a ramp or obstacle.
+    const uint32_t samples =
+        g_owned_collision_floor_samples.load(std::memory_order_relaxed);
+    if (samples < 30 &&
+        std::abs(local_position[1] - ground.point[1]) < 0.5f) {
+      const float measured = local_position[1] - ground.point[1];
+      const float previous =
+          std::bit_cast<float>(g_owned_collision_floor_offset_bits.load(
+              std::memory_order_relaxed));
+      const float filtered =
+          samples == 0 ? measured : previous + (measured - previous) * 0.08f;
+      g_owned_collision_floor_offset_bits.store(
+          std::bit_cast<uint32_t>(filtered), std::memory_order_relaxed);
+      g_owned_collision_floor_samples.store(samples + 1,
+                                             std::memory_order_relaxed);
+    }
+  }
+
+  const float floor_offset =
+      std::bit_cast<float>(g_owned_collision_floor_offset_bits.load(
+          std::memory_order_relaxed));
+  if (g_owned_collision_floor_samples.load(std::memory_order_relaxed) < 30) {
+    return;
+  }
+  float target_y =
+      origin[1] + ground.point[1] + floor_offset;
+  float correction = target_y - position[1];
+  // A board already more than four centimetres above the surface is airborne.
+  // A large
+  // upward step is a wall/high edge, not a ramp entry, and must not teleport
+  // the player onto the top.
+  constexpr float kMaximumLandingDistance = 0.04f;
+  constexpr float kMaximumStepUp = 0.22f;
+  const uint64_t previous_correction_check =
+      g_owned_collision_last_correction_check.load(
+          std::memory_order_relaxed);
+  const bool continuing_surface =
+      ground.id ==
+          g_owned_collision_last_surface.load(std::memory_order_relaxed) &&
+      check <= previous_correction_check + 4;
+  bool recovered_to_lowest_ground = false;
+  if (correction > kMaximumStepUp && !continuing_surface) {
+    // A board that has penetrated below the park can be more than the old
+    // four-metre probe above its support. Recover to the lowest upward-facing
+    // skateable surface at this X/Z, selecting the floor below overlapping
+    // ramps and pads rather than teleporting onto their tops.
+    map::GroundHit recovery_ground;
+    if (map::QueryLowestGround(local_position, kRecoveryProbeAbove,
+                               kProbeBelow, recovery_ground) &&
+        recovery_ground.normal[1] >= 0.99f) {
+      const float recovery_target_y =
+          origin[1] + recovery_ground.point[1] + floor_offset;
+      const float recovery_correction =
+          recovery_target_y - position[1];
+      if (recovery_correction > kMaximumStepUp) {
+        ground = recovery_ground;
+        target_y = recovery_target_y;
+        correction = recovery_correction;
+        recovered_to_lowest_ground = true;
+      }
+    }
+  }
+  if (correction < -kMaximumLandingDistance ||
+      (correction > kMaximumStepUp && !continuing_surface &&
+       !recovered_to_lowest_ground)) {
+    g_owned_collision_step_rejections.fetch_add(
+        1, std::memory_order_relaxed);
+    return;
+  }
+  if (recovered_to_lowest_ground) {
+    g_owned_collision_floor_recoveries.fetch_add(
+        1, std::memory_order_relaxed);
+  }
+
+  position[1] = target_y;
+
+  float matrix[16] = {};
+  for (uint32_t component = 0; component < 16; ++component) {
+    matrix[component] = LoadGuestF32(
+        base, transform + component * sizeof(float));
+  }
+  matrix[12] = position[0];
+  matrix[13] = position[1];
+  matrix[14] = position[2];
+
+  // The transform rows are right/up/forward/translation. On an inclined
+  // surface, project the retail forward axis onto the contact plane and
+  // rebuild an orthonormal frame. Also return to level on the first flat
+  // correction after a ramp. Ordinary flat-ground frames preserve retail
+  // orientation so manuals and grounded animation are not flattened.
+  const float previous_normal_y =
+      std::bit_cast<float>(g_owned_collision_last_normal_y_bits.load(
+          std::memory_order_relaxed));
+  const bool align_to_surface =
+      ground.normal[1] < 0.999f || previous_normal_y < 0.999f;
+  if (align_to_surface) {
+    float up[3] = {
+        ground.normal[0], ground.normal[1], ground.normal[2]};
+    const float up_length = std::sqrt(
+        up[0] * up[0] + up[1] * up[1] + up[2] * up[2]);
+    float forward[3] = {matrix[8], matrix[9], matrix[10]};
+    if (up_length > 1.0e-5f) {
+      for (float& component : up) {
+        component /= up_length;
+      }
+      const float forward_up =
+          forward[0] * up[0] + forward[1] * up[1] +
+          forward[2] * up[2];
+      for (uint32_t component = 0; component < 3; ++component) {
+        forward[component] -= up[component] * forward_up;
+      }
+      float forward_length = std::sqrt(
+          forward[0] * forward[0] + forward[1] * forward[1] +
+          forward[2] * forward[2]);
+      if (forward_length < 1.0e-5f) {
+        // Degenerate only when the current forward is almost vertical.
+        // Recover heading from the current right axis.
+        const float right_up =
+            matrix[0] * up[0] + matrix[1] * up[1] +
+            matrix[2] * up[2];
+        float projected_right[3] = {
+            matrix[0] - up[0] * right_up,
+            matrix[1] - up[1] * right_up,
+            matrix[2] - up[2] * right_up,
+        };
+        const float right_length = std::sqrt(
+            projected_right[0] * projected_right[0] +
+            projected_right[1] * projected_right[1] +
+            projected_right[2] * projected_right[2]);
+        if (right_length > 1.0e-5f) {
+          for (float& component : projected_right) {
+            component /= right_length;
+          }
+          forward[0] =
+              projected_right[1] * up[2] - projected_right[2] * up[1];
+          forward[1] =
+              projected_right[2] * up[0] - projected_right[0] * up[2];
+          forward[2] =
+              projected_right[0] * up[1] - projected_right[1] * up[0];
+          forward_length = 1.0f;
+        }
+      }
+      if (forward_length > 1.0e-5f) {
+        for (float& component : forward) {
+          component /= forward_length;
+        }
+        float right[3] = {
+            up[1] * forward[2] - up[2] * forward[1],
+            up[2] * forward[0] - up[0] * forward[2],
+            up[0] * forward[1] - up[1] * forward[0],
+        };
+        const float right_length = std::sqrt(
+            right[0] * right[0] + right[1] * right[1] +
+            right[2] * right[2]);
+        if (right_length > 1.0e-5f) {
+          for (float& component : right) {
+            component /= right_length;
+          }
+          // Recompute forward to remove accumulated basis error.
+          forward[0] = right[1] * up[2] - right[2] * up[1];
+          forward[1] = right[2] * up[0] - right[0] * up[2];
+          forward[2] = right[0] * up[1] - right[1] * up[0];
+          for (uint32_t component = 0; component < 3; ++component) {
+            matrix[component] = right[component];
+            matrix[4 + component] = up[component];
+            matrix[8 + component] = forward[component];
+          }
+        }
+      }
+    }
+  }
+
+  // SetTransform retains its source matrix throughout a 352-byte guest stack
+  // frame, so keep the argument below that frame.
+  const uint32_t matrix_address = ctx.r1.u32 - 512u;
+  for (uint32_t component = 0; component < 16; ++component) {
+    REX_STORE_U32(
+        matrix_address + component * sizeof(float),
+        std::bit_cast<uint32_t>(matrix[component]));
+  }
+
+  PPCContext correction_ctx = ctx;
+  const uint32_t skateboard_body = LoadGuestU32(base, skateboard + 12);
+  if (!IsGuestHeapAddress(skateboard_body)) {
+    return;
+  }
+  correction_ctx.r3.u64 = skateboard_body;
+  correction_ctx.r4.u64 = matrix_address;
+  sub_82C0B2C8(correction_ctx, base);
+  // FillPhysOut samples this active ProcessedPhysIn matrix. Publish the same
+  // corrected transform so the following mechanics frame cannot immediately
+  // reintroduce hidden retail terrain height or level a ramp-aligned board.
+  for (uint32_t component = 0; component < 16; ++component) {
+    REX_STORE_U32(
+        transform + component * sizeof(float),
+        std::bit_cast<uint32_t>(matrix[component]));
+  }
+
+  g_owned_collision_corrections.fetch_add(1,
+                                           std::memory_order_relaxed);
+  g_owned_collision_last_surface.store(ground.id,
+                                        std::memory_order_release);
+  g_owned_collision_last_normal_y_bits.store(
+      std::bit_cast<uint32_t>(ground.normal[1]),
+      std::memory_order_release);
+  g_owned_collision_last_target_y_bits.store(
+      std::bit_cast<uint32_t>(target_y), std::memory_order_release);
+  g_owned_collision_last_correction_check.store(
+      check, std::memory_order_release);
+  trick_pipeline::LiveSpatialSnapshot snapshot;
+  if (trick_pipeline::CurrentLiveSpatialSnapshot(snapshot) &&
+      snapshot.phys_out == phys_out) {
+    g_owned_collision_last_correction_frame.store(
+        snapshot.frame, std::memory_order_release);
+  }
+}
+
 bool ObserveSandboxCamera(const float camera[3]) {
   if (!Active() || camera == nullptr ||
       g_map_origin_valid.load(std::memory_order_acquire)) {
@@ -412,6 +838,7 @@ bool ObserveSandboxCamera(const float camera[3]) {
                             std::memory_order_release);
   g_map_origin_z_bits.store(std::bit_cast<uint32_t>(camera[2]),
                             std::memory_order_release);
+  g_map_origin_phys_out.store(0, std::memory_order_release);
   g_map_origin_valid.store(true, std::memory_order_release);
   return true;
 }
@@ -429,6 +856,27 @@ bool SandboxMapOrigin(float out_origin[3]) {
       g_map_origin_z_bits.load(std::memory_order_acquire));
   return std::isfinite(out_origin[0]) && std::isfinite(out_origin[1]) &&
          std::isfinite(out_origin[2]);
+}
+
+bool SandboxMapRenderOrigin(float out_origin[3]) {
+  if (!SandboxMapOrigin(out_origin)) {
+    return false;
+  }
+  if (native_collision::MapWorldOrigin(out_origin)) {
+    return true;
+  }
+  if (OwnedWorldCollisionEnabled() &&
+      g_owned_collision_floor_samples.load(std::memory_order_acquire) >= 30) {
+    // The board transform sits near the deck centre, not at the bottom of the
+    // wheels. Put the visible plane below the transform/contact target so the
+    // board and wheels render above it instead of intersecting it.
+    constexpr float kBoardVisualClearance = 0.055f;
+    out_origin[1] +=
+        std::bit_cast<float>(g_owned_collision_floor_offset_bits.load(
+            std::memory_order_acquire)) -
+        kBoardVisualClearance;
+  }
+  return std::isfinite(out_origin[1]);
 }
 
 void RecordMapContact(bool hit, uint32_t id, const float normal[3],
@@ -459,10 +907,10 @@ PresentationDecision ClassifyPresentationEntity(uint32_t entity,
     return PresentationDecision::DropUnresolved;
   }
   // The verified player-0 PhysOut is not itself a PresentationEntity. Until
-  // the direct PhysOut->SkaterPresEntity link is instrumented, keep the first
-  // SkaterPresEntity published after player-0 activation. This is a bounded,
-  // presentation-only bridge: all later skater/world entities are dropped.
-  constexpr uint8_t kSkaterPresEntityClass = 2;
+  // the direct PhysOut->SkaterPresEntity link is instrumented, retain the
+  // first plain SkaterPresEntity as the local candidate.
+  constexpr uint8_t kSkaterPresEntityClass =
+      static_cast<uint8_t>(native_entity::EntClass::kSkater);
   uint32_t candidate = g_presentation_candidate.load(std::memory_order_acquire);
   if (candidate == 0 && entity_class == kSkaterPresEntityClass) {
     if (g_presentation_candidate.compare_exchange_strong(
@@ -474,8 +922,32 @@ PresentationDecision ClassifyPresentationEntity(uint32_t entity,
       candidate = entity;
     }
   }
-  return entity == candidate ? PresentationDecision::Keep
-                             : PresentationDecision::DropNonLocal;
+  if (entity == candidate) {
+    return PresentationDecision::Keep;
+  }
+
+  // Skater-family entities are now part of the owned presentation world.
+  // Their AI/mechanics can continue running while retail Living World and
+  // scene actors are stopped at their spawn boundaries.
+  const auto cls = static_cast<native_entity::EntClass>(entity_class);
+  const bool skater_family =
+      cls == native_entity::EntClass::kSkater ||
+      cls == native_entity::EntClass::kColorized ||
+      cls == native_entity::EntClass::kCac ||
+      cls == native_entity::EntClass::kSkaterAux;
+  if (skater_family) {
+    g_visible_nonlocal_skater_items.fetch_add(1, std::memory_order_relaxed);
+    {
+      std::lock_guard lock(g_visible_skater_mutex);
+      g_visible_nonlocal_skaters_this_frame.insert(entity);
+      g_visible_nonlocal_skater_entities.store(
+          static_cast<uint32_t>(
+              g_visible_nonlocal_skaters_this_frame.size()),
+          std::memory_order_relaxed);
+    }
+    return PresentationDecision::Keep;
+  }
+  return PresentationDecision::DropNonLocal;
 }
 
 void BeginPresentationFrame() {
@@ -485,7 +957,13 @@ void BeginPresentationFrame() {
   g_visible_items.store(0, std::memory_order_relaxed);
   g_dropped_nonlocal.store(0, std::memory_order_relaxed);
   g_dropped_unresolved.store(0, std::memory_order_relaxed);
+  g_visible_nonlocal_skater_items.store(0, std::memory_order_relaxed);
+  g_visible_nonlocal_skater_entities.store(0, std::memory_order_relaxed);
   g_candidate_draws.store(0, std::memory_order_relaxed);
+  {
+    std::lock_guard lock(g_visible_skater_mutex);
+    g_visible_nonlocal_skaters_this_frame.clear();
+  }
 }
 
 void RecordPresentation(PresentationDecision decision) {
@@ -542,6 +1020,20 @@ void RecordMapDraw(bool submitted) {
   }
 }
 
+void RecordMapChunks(uint32_t total, uint32_t candidates,
+                     uint32_t visible, uint32_t resident,
+                     uint32_t draw_calls) {
+  g_map_chunk_count.store(total, std::memory_order_relaxed);
+  g_map_candidate_chunks.store(candidates, std::memory_order_relaxed);
+  g_map_visible_chunks.store(visible, std::memory_order_relaxed);
+  g_map_resident_chunks.store(resident, std::memory_order_relaxed);
+  g_map_chunk_draws.store(draw_calls, std::memory_order_relaxed);
+}
+
+void RecordSkyDraw(uint32_t draw_calls) {
+  g_sky_draws.store(draw_calls, std::memory_order_relaxed);
+}
+
 void RecordRenderedPresentation(uint32_t entity, uint32_t draw_count) {
   if (!Active() || entity == 0 || draw_count == 0) {
     return;
@@ -581,6 +1073,13 @@ bool RequestReset() {
 }
 
 void AppendTelemetry(std::ostream& out) {
+  const map::WaterTelemetry water = map::ActiveWaterTelemetry();
+  const map::WeatherSnapshot weather =
+      map::ActiveWeatherSnapshot();
+  const skate::world::DayNightState celestial =
+      map::ActiveDayNightState();
+  const native_scene::RaytracedMirrorTelemetry mirror =
+      native_scene::GetRaytracedMirrorTelemetry();
   out << " sandbox_requested=" << (Requested() ? 1 : 0)
       << " sandbox_state=" << StateName()
       << " sandbox_active=" << (Active() ? 1 : 0)
@@ -594,6 +1093,10 @@ void AppendTelemetry(std::ostream& out) {
       << g_dropped_nonlocal.load(std::memory_order_relaxed)
       << " sandbox_dropped_unresolved="
       << g_dropped_unresolved.load(std::memory_order_relaxed)
+      << " sandbox_visible_nonlocal_skater_items="
+      << g_visible_nonlocal_skater_items.load(std::memory_order_relaxed)
+      << " sandbox_visible_nonlocal_skater_entities="
+      << g_visible_nonlocal_skater_entities.load(std::memory_order_relaxed)
       << " sandbox_diag_mode=" << DiagnosticModeName()
       << " sandbox_render_stage="
       << RenderStageNameFor(static_cast<RenderStage>(
@@ -608,6 +1111,18 @@ void AppendTelemetry(std::ostream& out) {
       << g_candidate_draw_frames.load(std::memory_order_relaxed)
       << " sandbox_map_draws="
       << g_map_draws.load(std::memory_order_relaxed)
+      << " sandbox_map_chunk_count="
+      << g_map_chunk_count.load(std::memory_order_relaxed)
+      << " sandbox_map_candidate_chunks="
+      << g_map_candidate_chunks.load(std::memory_order_relaxed)
+      << " sandbox_map_visible_chunks="
+      << g_map_visible_chunks.load(std::memory_order_relaxed)
+      << " sandbox_map_resident_chunks="
+      << g_map_resident_chunks.load(std::memory_order_relaxed)
+      << " sandbox_map_chunk_draws="
+      << g_map_chunk_draws.load(std::memory_order_relaxed)
+      << " sandbox_sky_draws="
+      << g_sky_draws.load(std::memory_order_relaxed)
       << " sandbox_presented_frames="
       << g_render_stage_frames.load(std::memory_order_relaxed)
       << " sandbox_verified_ground_entity="
@@ -622,13 +1137,111 @@ void AppendTelemetry(std::ostream& out) {
       << " sandbox_visual_map=" << (VisualMapEnabled() ? 1 : 0)
       << " sandbox_map_origin_valid="
       << (g_map_origin_valid.load(std::memory_order_acquire) ? 1 : 0)
+      << " sandbox_map_origin_physout="
+      << g_map_origin_phys_out.load(std::memory_order_acquire)
       << " sandbox_map_contact_count="
       << g_map_contact_count.load(std::memory_order_relaxed)
       << " sandbox_map_last_contact_id="
       << g_map_last_contact_id.load(std::memory_order_relaxed)
+      << " sandbox_map_source=owned"
+      << " sandbox_map_name=" << map::ActiveMapName()
+      << " sandbox_map_surface_count=" << map::ActiveSurfaceCount()
+      << " sandbox_local_light_count=" << map::ActiveMovingLightCount()
+      << " sandbox_map_ramp_count="
+      << map::ActiveRampCount()
+      << " sandbox_water_basin_count="
+      << map::ActiveWaterBasinCount()
+      << " sandbox_raytraced_mirror_count="
+      << map::ActiveRaytracedMirrorCount()
+      << " sandbox_raytraced_puddle_count="
+      << map::ActiveRaytracedPuddleCount()
+      << " sandbox_weather_elapsed_bits="
+      << std::bit_cast<uint32_t>(weather.elapsed_seconds)
+      << " sandbox_rain_intensity_bits="
+      << std::bit_cast<uint32_t>(weather.rain_intensity)
+      << " sandbox_lightning_flash_bits="
+      << std::bit_cast<uint32_t>(weather.flash_intensity)
+      << " sandbox_lightning_strikes="
+      << weather.strike_count
+      << " sandbox_thunder_events="
+      << weather.thunder_count
+      << " sandbox_day_night_elapsed_bits="
+      << std::bit_cast<uint32_t>(celestial.elapsed_seconds)
+      << " sandbox_day_night_phase_bits="
+      << std::bit_cast<uint32_t>(celestial.phase)
+      << " sandbox_time_of_day_hours_bits="
+      << std::bit_cast<uint32_t>(celestial.time_of_day_hours)
+      << " sandbox_sun_elevation_bits="
+      << std::bit_cast<uint32_t>(
+             celestial.sun_direction_to_light.y)
+      << " sandbox_daylight_amount_bits="
+      << std::bit_cast<uint32_t>(celestial.daylight_amount)
+      << " sandbox_night_amount_bits="
+      << std::bit_cast<uint32_t>(celestial.night_amount)
+      << " sandbox_celestial_key="
+      << (celestial.sun_is_key_light ? "sun" : "moon")
+      << " sandbox_dxr_supported=" << (mirror.supported ? 1 : 0)
+      << " sandbox_dxr_initialized=" << (mirror.initialized ? 1 : 0)
+      << " sandbox_dxr_as_recorded="
+      << (mirror.acceleration_structure_recorded ? 1 : 0)
+      << " sandbox_dxr_dispatches=" << mirror.dispatches
+      << " sandbox_dxr_width=" << mirror.width
+      << " sandbox_dxr_height=" << mirror.height
+      << " sandbox_dxr_triangles=" << mirror.triangle_count
+      << " sandbox_dxr_dynamic_triangles="
+      << mirror.dynamic_triangle_count
+      << " sandbox_dxr_reflectors="
+      << mirror.reflector_count
+      << " sandbox_dxr_puddles="
+      << mirror.puddle_count
+      << " sandbox_water_steps=" << water.simulation_steps
+      << " sandbox_water_dropped_frames=" << water.dropped_frames
+      << " sandbox_water_min_bits="
+      << std::bit_cast<uint32_t>(water.minimum_displacement)
+      << " sandbox_water_max_bits="
+      << std::bit_cast<uint32_t>(water.maximum_displacement)
+      << " sandbox_water_mean_bits="
+      << std::bit_cast<uint32_t>(water.mean_displacement)
+      << " sandbox_water_energy_bits="
+      << std::bit_cast<uint32_t>(water.kinetic_energy)
+      << " sandbox_owned_collision="
+      << (OwnedWorldCollisionEnabled() ? 1 : 0)
+      << " sandbox_owned_collision_checks="
+      << g_owned_collision_checks.load(std::memory_order_relaxed)
+      << " sandbox_owned_collision_corrections="
+      << g_owned_collision_corrections.load(std::memory_order_relaxed)
+      << " sandbox_owned_collision_step_rejections="
+      << g_owned_collision_step_rejections.load(std::memory_order_relaxed)
+      << " sandbox_owned_collision_floor_recoveries="
+      << g_owned_collision_floor_recoveries.load(
+             std::memory_order_relaxed)
+      << " sandbox_owned_collision_last_surface="
+      << g_owned_collision_last_surface.load(std::memory_order_acquire)
+      << " sandbox_owned_collision_last_normal_y_bits="
+      << g_owned_collision_last_normal_y_bits.load(
+             std::memory_order_acquire)
+      << " sandbox_owned_collision_last_target_y_bits="
+      << g_owned_collision_last_target_y_bits.load(
+             std::memory_order_acquire)
+      << " sandbox_owned_collision_floor_offset_bits="
+      << g_owned_collision_floor_offset_bits.load(
+             std::memory_order_relaxed)
+      << " sandbox_owned_collision_floor_samples="
+      << g_owned_collision_floor_samples.load(std::memory_order_relaxed)
+      << " sandbox_owned_collision_last_correction_check="
+      << g_owned_collision_last_correction_check.load(
+             std::memory_order_relaxed)
+      << " sandbox_owned_collision_last_correction_frame="
+      << g_owned_collision_last_correction_frame.load(
+             std::memory_order_relaxed)
+      << " sandbox_owned_ground_override_count="
+      << g_owned_ground_override_count.load(std::memory_order_relaxed)
       << " sandbox_collision="
-      << (NativeCollisionObserverEnabled() ? "native_test_map_observer"
-                                            : "retail_flat_bootstrap")
+      << (OwnedWorldCollisionEnabled()
+              ? "owned_world_position_bridge"
+              : (native_collision::Enabled()
+                     ? "owned_native_clustered_mesh"
+                     : "retail_flat_bootstrap"))
       << " sandbox_camera=retail_chase"
       << " sandbox_reset_requests="
       << g_reset_requests.load(std::memory_order_relaxed)
@@ -636,6 +1249,9 @@ void AppendTelemetry(std::ostream& out) {
       << g_reset_completions.load(std::memory_order_relaxed)
       << " sandbox_reset_failures="
       << g_reset_failures.load(std::memory_order_relaxed);
+  native_collision::AppendTelemetry(out);
+  native_grind::AppendTelemetry(out);
+  owned_world_boundary::AppendTelemetry(out);
 }
 
 }  // namespace skate3::mechanics_sandbox

@@ -11,7 +11,7 @@ if(SKATE3_STATIC_MSVC_RUNTIME)
     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 endif()
 
-project(skate3 VERSION 2.0.0 LANGUAGES CXX)
+project(Skate3CustomEngineLayer VERSION 0.1.0 LANGUAGES CXX)
 
 if(WIN32)
     enable_language(RC)
@@ -238,14 +238,26 @@ set(REXGLUE_ENABLE_PERF_COUNTERS OFF CACHE BOOL "Enable lightweight rexglue perf
 if(WIN32)
     set(REXGLUE_RUNTIME_RC_VERSION "${SKATE3_RC_VERSION}")
     set(REXGLUE_RUNTIME_RC_VERSION_STRING "${SKATE3_FULL_VERSION}")
-    set(REXGLUE_RUNTIME_RC_PRODUCT_NAME "Skate3Recomp")
-    set(REXGLUE_RUNTIME_RC_COMPANY "Skate3Recomp project")
-    set(REXGLUE_RUNTIME_RC_DESCRIPTION "Skate3Recomp guest runtime")
-    set(REXGLUE_RUNTIME_RC_COPYRIGHT "(c) Skate3Recomp contributors")
+    set(REXGLUE_RUNTIME_RC_PRODUCT_NAME "Skate 3 Custom Engine Layer")
+    set(REXGLUE_RUNTIME_RC_COMPANY "Skate 3 Custom Engine Layer project")
+    set(REXGLUE_RUNTIME_RC_DESCRIPTION "Skate 3 Custom Engine Layer runtime")
+    set(REXGLUE_RUNTIME_RC_COPYRIGHT
+        "(c) Skate3Recomp and Skate 3 Custom Engine Layer contributors")
 endif()
 
 include(cmake/RexGlue.cmake)
 include(cmake/CodegenTargets.cmake)
+
+# Project-owned game systems are kept inside this fork, separate from
+# generated recomp sources. The recomp links them only through narrow
+# adapters while it remains the migration host and behavioural reference.
+set(SKATE_OWNED_WORLD_BUILD_TESTS OFF CACHE BOOL
+    "The recomp consumes the owned world library without its standalone tests"
+    FORCE)
+add_subdirectory(
+    "${CMAKE_CURRENT_SOURCE_DIR}/owned/world"
+    "${CMAKE_CURRENT_BINARY_DIR}/owned-world"
+)
 
 set(SKATE3_COMMON_SOURCES
     src/exception_compat.cpp
@@ -261,6 +273,9 @@ set(SKATE3_COMMON_SOURCES
     src/skate3_input_lab.cpp
     src/skate3_mechanics_sandbox.cpp
     src/skate3_mechanics_sandbox_map.cpp
+    src/skate3_owned_world_boundary.cpp
+    src/skate3_native_collision.cpp
+    src/skate3_native_grind.cpp
     src/skate3_target_trace.cpp
     src/skate3_trick_overrides.cpp
     src/skate3_trick_pipeline.cpp
@@ -276,6 +291,7 @@ set(SKATE3_COMMON_SOURCES
     src/skate3_native_scene.cpp
     src/skate3_native_scene_gpu.cpp
     src/skate3_native_scene_post.cpp
+    src/skate3_native_raytraced_mirror.cpp
     src/skate3_screenshot.cpp
     src/skate3_shader_disasm.cpp
     src/skate3_title_update_installer.cpp
@@ -348,6 +364,32 @@ add_custom_command(
     COMMENT "Embedding native renderer shaders"
     VERBATIM)
 target_sources(skate3 PRIVATE ${SKATE3_NATIVE_SHADER_HEADER})
+
+if(WIN32)
+    find_program(SKATE3_DXC_EXECUTABLE dxc
+        HINTS
+            "$ENV{WindowsSdkDir}/bin/$ENV{WindowsSDKVersion}/x64"
+            "C:/Program Files (x86)/Windows Kits/10/bin/10.0.26100.0/x64"
+        REQUIRED)
+    set(SKATE3_RAYTRACED_MIRROR_HEADER
+        ${CMAKE_CURRENT_BINARY_DIR}/include/skate3_raytraced_mirror_cs.h)
+    add_custom_command(
+        OUTPUT ${SKATE3_RAYTRACED_MIRROR_HEADER}
+        COMMAND ${SKATE3_DXC_EXECUTABLE}
+            -T cs_6_5
+            -E cs_main
+            -O3
+            -Qstrip_debug
+            -Fo ${CMAKE_CURRENT_BINARY_DIR}/raytraced_mirror.dxil
+            -Fh ${SKATE3_RAYTRACED_MIRROR_HEADER}
+            -Vn g_skate3_raytraced_mirror_cs
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/native/shaders/raytraced_mirror.hlsl
+        DEPENDS
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/native/shaders/raytraced_mirror.hlsl
+        COMMENT "Compiling DXR 1.1 inline ray-query mirror shader"
+        VERBATIM)
+    target_sources(skate3 PRIVATE ${SKATE3_RAYTRACED_MIRROR_HEADER})
+endif()
 target_compile_definitions(skate3 PRIVATE SKATE3_BUILD_CONFIG="$<CONFIG>")
 if(NOT SKATE3_EFFECTIVE_TITLE_UPDATE_PACKAGE STREQUAL ""
    OR SKATE3_HAS_LOOSE_TITLE_UPDATE)
@@ -375,7 +417,7 @@ else()
     message(STATUS "generated/eawebkit/sources.cmake not found; run the generate-all target before building skate3")
 endif()
 
-target_link_libraries(skate3 PRIVATE rex::runtime)
+target_link_libraries(skate3 PRIVATE rex::runtime skate_owned_world)
 rexglue_configure_target(skate3)
 
 if(APPLE)
@@ -384,7 +426,8 @@ if(APPLE)
 endif()
 
 if(WIN32)
-    target_link_libraries(skate3 PRIVATE comdlg32 winhttp d3dcompiler gdiplus)
+    target_link_libraries(skate3 PRIVATE
+        comdlg32 winhttp d3d12 d3dcompiler dxgi dxguid gdiplus winmm)
 endif()
 
 set(SKATE3_REXRUNTIME_TARGET rexruntime)

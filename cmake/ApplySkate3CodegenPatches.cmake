@@ -250,6 +250,269 @@ function(_skate3_add_include _contents_var _include)
   set(${_contents_var} "${_contents}" PARENT_SCOPE)
 endfunction()
 
+set(_native_grind_load_observer_patched FALSE)
+set(_native_grind_add_observer_patched FALSE)
+foreach(_file IN LISTS _skate3_recomp_files)
+  file(READ "${_file}" _contents)
+
+  if(_contents MATCHES "ObserveSplineDataLoad\\(ctx, base\\)")
+    set(_native_grind_load_observer_patched TRUE)
+  elseif(_contents MATCHES "DEFINE_REX_FUNC\\(sub_82C1EEF0\\)")
+    set(_native_grind_load_site
+"DEFINE_REX_FUNC(sub_82C1EEF0) {
+	REX_FUNC_PROLOGUE();")
+    set(_native_grind_load_patch
+"DEFINE_REX_FUNC(sub_82C1EEF0) {
+	REX_FUNC_PROLOGUE();
+	skate3::native_grind::ObserveSplineDataLoad(ctx, base);")
+    string(REPLACE "${_native_grind_load_site}"
+      "${_native_grind_load_patch}" _patched_contents "${_contents}")
+    if(NOT _patched_contents STREQUAL _contents)
+      set(_contents "${_patched_contents}")
+      set(_native_grind_load_observer_patched TRUE)
+    endif()
+  endif()
+
+  if(_contents MATCHES "ObserveGrindDataAdd\\(ctx, base\\)")
+    set(_native_grind_add_observer_patched TRUE)
+  elseif(_contents MATCHES "DEFINE_REX_FUNC\\(sub_82C1ED60\\)")
+    set(_native_grind_add_site
+"DEFINE_REX_FUNC(sub_82C1ED60) {
+	REX_FUNC_PROLOGUE();")
+    set(_native_grind_add_patch
+"DEFINE_REX_FUNC(sub_82C1ED60) {
+	REX_FUNC_PROLOGUE();
+	skate3::native_grind::ObserveGrindDataAdd(ctx, base);")
+    string(REPLACE "${_native_grind_add_site}"
+      "${_native_grind_add_patch}" _patched_contents "${_contents}")
+    if(NOT _patched_contents STREQUAL _contents)
+      set(_contents "${_patched_contents}")
+      set(_native_grind_add_observer_patched TRUE)
+    endif()
+  endif()
+
+  if(_contents MATCHES "ObserveSplineDataLoad\\(ctx, base\\)" OR
+     _contents MATCHES "ObserveGrindDataAdd\\(ctx, base\\)")
+    _skate3_add_include(_contents "skate3_native_grind.h")
+    file(WRITE "${_file}" "${_contents}")
+  endif()
+endforeach()
+if(NOT _native_grind_load_observer_patched)
+  message(FATAL_ERROR
+    "Failed to apply native grind tSplineData load observer")
+endif()
+if(NOT _native_grind_add_observer_patched)
+  message(FATAL_ERROR
+    "Failed to apply native GrindData add observer")
+endif()
+
+set(_native_collision_streamer_observer_patched FALSE)
+foreach(_file IN LISTS _skate3_recomp_files)
+  file(READ "${_file}" _contents)
+  if(_contents MATCHES "ObserveWorldStreamerAddVolume\\(ctx, base\\)")
+    set(_native_collision_streamer_observer_patched TRUE)
+    break()
+  endif()
+  if(NOT _contents MATCHES "DEFINE_REX_FUNC\\(sub_82776B58\\)")
+    continue()
+  endif()
+  set(_native_collision_streamer_site
+"DEFINE_REX_FUNC(sub_82776B58) {
+	REX_FUNC_PROLOGUE();")
+  set(_native_collision_streamer_patch
+"DEFINE_REX_FUNC(sub_82776B58) {
+	REX_FUNC_PROLOGUE();
+	skate3::native_collision::ObserveWorldStreamerAddVolume(ctx, base);")
+  string(REPLACE "${_native_collision_streamer_site}"
+    "${_native_collision_streamer_patch}" _patched_contents "${_contents}")
+  if(_patched_contents STREQUAL _contents)
+    continue()
+  endif()
+  set(_contents "${_patched_contents}")
+  _skate3_add_include(_contents "skate3_native_collision.h")
+  file(WRITE "${_file}" "${_contents}")
+  set(_native_collision_streamer_observer_patched TRUE)
+  message(STATUS
+    "Applied owned native-collision streamer observer in ${_file}")
+  break()
+endforeach()
+if(NOT _native_collision_streamer_observer_patched)
+  message(FATAL_ERROR
+    "Failed to apply owned native-collision streamer observer")
+endif()
+
+set(_native_collision_query_observer_patched FALSE)
+foreach(_file IN LISTS _skate3_recomp_files)
+  file(READ "${_file}" _contents)
+  if(_contents MATCHES
+      "ObserveNativeTriangleResult\\(ctx\\.r3\\.u32\\)")
+    set(_native_collision_query_observer_patched TRUE)
+    break()
+  endif()
+  if(NOT _contents MATCHES "DEFINE_REX_FUNC\\(sub_827719B8\\)")
+    continue()
+  endif()
+
+  foreach(_label IN ITEMS 82771ABC 82771E10)
+    set(_site
+"loc_${_label}:
+	skate3::function_coverage::MaybeRecordAddress(0x${_label});
+	// lwz r11,4(r24)
+	ctx.r11.u64 = REX_LOAD_U32(ctx.r24.u32 + 4);")
+    set(_patch
+"loc_${_label}:
+	skate3::function_coverage::MaybeRecordAddress(0x${_label});
+	// lwz r11,4(r24)
+	ctx.r11.u64 = REX_LOAD_U32(ctx.r24.u32 + 4);
+	skate3::native_collision::ObserveNativeQueryMesh(ctx.r11.u32);")
+    string(REPLACE "${_site}" "${_patch}" _patched "${_contents}")
+    if(_patched STREQUAL _contents)
+      message(FATAL_ERROR
+        "Failed to patch native query mesh observer at ${_label}")
+    endif()
+    set(_contents "${_patched}")
+  endforeach()
+
+  set(_decode_one_site
+"	ctx.lr = 0x82771AEC;
+	sub_82ACA170(ctx, base);
+	// lwz r28,80(r1)
+	ctx.r28.u64 = REX_LOAD_U32(ctx.r1.u32 + 80);")
+  set(_decode_one_patch
+"	ctx.lr = 0x82771AEC;
+	sub_82ACA170(ctx, base);
+	// lwz r28,80(r1)
+	ctx.r28.u64 = REX_LOAD_U32(ctx.r1.u32 + 80);
+	skate3::native_collision::ObserveNativeClusterDecode(ctx.r28.u32);")
+  string(REPLACE "${_decode_one_site}" "${_decode_one_patch}"
+    _patched "${_contents}")
+  if(_patched STREQUAL _contents)
+    message(FATAL_ERROR "Failed to patch first native cluster decoder")
+  endif()
+  set(_contents "${_patched}")
+
+  set(_decode_two_site
+"	ctx.lr = 0x82771E40;
+	sub_82ACA170(ctx, base);
+	// lwz r11,80(r1)
+	ctx.r11.u64 = REX_LOAD_U32(ctx.r1.u32 + 80);")
+  set(_decode_two_patch
+"	ctx.lr = 0x82771E40;
+	sub_82ACA170(ctx, base);
+	// lwz r11,80(r1)
+	ctx.r11.u64 = REX_LOAD_U32(ctx.r1.u32 + 80);
+	skate3::native_collision::ObserveNativeClusterDecode(ctx.r11.u32);")
+  string(REPLACE "${_decode_two_site}" "${_decode_two_patch}"
+    _patched "${_contents}")
+  if(_patched STREQUAL _contents)
+    message(FATAL_ERROR "Failed to patch second native cluster decoder")
+  endif()
+  set(_contents "${_patched}")
+
+  foreach(_return_address IN ITEMS 82771B58 82771EAC)
+    set(_triangle_site
+"	ctx.lr = 0x${_return_address};
+	sub_82ADF5D8(ctx, base);")
+    set(_triangle_patch
+"	ctx.lr = 0x${_return_address};
+	sub_82ADF5D8(ctx, base);
+	skate3::native_collision::ObserveNativeTriangleResult(ctx.r3.u32);")
+    string(REPLACE "${_triangle_site}" "${_triangle_patch}"
+      _patched "${_contents}")
+    if(_patched STREQUAL _contents)
+      message(FATAL_ERROR
+        "Failed to patch native triangle result at ${_return_address}")
+    endif()
+    set(_contents "${_patched}")
+  endforeach()
+
+  _skate3_add_include(_contents "skate3_native_collision.h")
+  file(WRITE "${_file}" "${_contents}")
+  set(_native_collision_query_observer_patched TRUE)
+  message(STATUS
+    "Applied owned native-collision query observers in ${_file}")
+  break()
+endforeach()
+if(NOT _native_collision_query_observer_patched)
+  message(FATAL_ERROR
+    "Failed to apply owned native-collision query observers")
+endif()
+
+function(_skate3_patch_native_collision_entry
+         _symbol _statement _marker)
+  set(_patched FALSE)
+  foreach(_file IN LISTS _skate3_recomp_files)
+    file(READ "${_file}" _contents)
+    if(_contents MATCHES "${_marker}")
+      set(_patched TRUE)
+      break()
+    endif()
+    if(NOT _contents MATCHES "DEFINE_REX_FUNC\\(${_symbol}\\)")
+      continue()
+    endif()
+    set(_site
+"DEFINE_REX_FUNC(${_symbol}) {
+	REX_FUNC_PROLOGUE();")
+    set(_patch
+"DEFINE_REX_FUNC(${_symbol}) {
+	REX_FUNC_PROLOGUE();
+	${_statement}")
+    string(REPLACE "${_site}" "${_patch}" _patched_contents "${_contents}")
+    if(_patched_contents STREQUAL _contents)
+      continue()
+    endif()
+    set(_contents "${_patched_contents}")
+    _skate3_add_include(_contents "skate3_native_collision.h")
+    file(WRITE "${_file}" "${_contents}")
+    set(_patched TRUE)
+    message(STATUS
+      "Applied owned native-collision entry observer to ${_symbol} in ${_file}")
+    break()
+  endforeach()
+  if(NOT _patched)
+    message(FATAL_ERROR
+      "Failed to apply owned native-collision entry observer to ${_symbol}")
+  endif()
+endfunction()
+
+# Keep an already-generated tree in sync when the batch observer signature
+# evolves; generated recomp files are intentionally not the source of truth.
+foreach(_file IN LISTS _skate3_recomp_files)
+  file(READ "${_file}" _contents)
+  string(REPLACE
+    "ObserveNativeLineQueryBatch(ctx.r6.u32); // native_line_query_batch"
+    "ObserveNativeLineQueryBatch(ctx.r6.u32, base); // native_line_query_batch"
+    _patched_contents "${_contents}")
+  if(NOT _patched_contents STREQUAL _contents)
+    file(WRITE "${_file}" "${_patched_contents}")
+  endif()
+endforeach()
+
+_skate3_patch_native_collision_entry(
+  sub_827719B8
+  "skate3::native_collision::ObserveNativeLineWorker(REX_LOAD_U32(ctx.r8.u32 + 4));"
+  "ObserveNativeLineWorker")
+_skate3_patch_native_collision_entry(
+  sub_82772028
+  "skate3::native_collision::ObserveNativeBoxWorker(REX_LOAD_U32(ctx.r5.u32 + 4));"
+  "ObserveNativeBoxWorker")
+_skate3_patch_native_collision_entry(
+  sub_8276CC70
+  "skate3::native_collision::ObserveNativeIteratorMesh(ctx.r4.u32); // native_bbox_iterator"
+  "native_bbox_iterator")
+_skate3_patch_native_collision_entry(
+  sub_8276CE90
+  "skate3::native_collision::ObserveNativeIteratorMesh(ctx.r4.u32); // native_line_iterator"
+  "native_line_iterator")
+_skate3_patch_native_collision_entry(
+  sub_82770650
+  "skate3::native_collision::ObserveNativeLineQueryBatch(ctx.r6.u32, base); // native_line_query_batch"
+  "native_line_query_batch")
+_skate3_patch_native_collision_entry(
+  sub_82770B40
+  "skate3::native_collision::PrepareNativeBoxQueryBatch(ctx.r6.u32, base); // native_box_query_batch"
+  "native_box_query_batch")
+
 function(_skate3_patch_trick_pipeline_entry _symbol _statement _marker)
   set(_patched FALSE)
   foreach(_file IN LISTS _skate3_recomp_files)
@@ -1295,7 +1558,7 @@ set(_local_skateboard_spatial_patched FALSE)
 foreach(_file IN LISTS _skate3_recomp_files)
   file(READ "${_file}" _contents)
   if(_contents MATCHES
-     "DEFINE_REX_FUNC\\(sub_82D76D20\\)[^\n]*\n[^\n]*\n[^\n]*ObserveLocalSkateboardSpatialState")
+     "skate3::trick_pipeline::ObserveLocalSkateboardSpatialState\\(ctx, base\\);")
     set(_local_skateboard_spatial_patched TRUE)
     break()
   endif()
@@ -1324,6 +1587,39 @@ endforeach()
 if(NOT _local_skateboard_spatial_patched)
   message(FATAL_ERROR
     "Failed to apply Skate 3 local skateboard spatial observer")
+endif()
+
+set(_owned_world_collision_bridge_patched FALSE)
+foreach(_file IN LISTS _skate3_recomp_files)
+  file(READ "${_file}" _contents)
+  if(_contents MATCHES
+     "OwnedWorldCollisionBridgeScope owned_world_collision_bridge")
+    set(_owned_world_collision_bridge_patched TRUE)
+    break()
+  endif()
+  if(NOT _contents MATCHES
+     "skate3::trick_pipeline::ObserveLocalSkateboardSpatialState\\(ctx, base\\);")
+    continue()
+  endif()
+  set(_owned_world_collision_bridge_site
+"	skate3::trick_pipeline::ObserveLocalSkateboardSpatialState(ctx, base);")
+  set(_owned_world_collision_bridge_patch
+"	skate3::trick_pipeline::OwnedWorldCollisionBridgeScope owned_world_collision_bridge(ctx, base);
+	skate3::trick_pipeline::ObserveLocalSkateboardSpatialState(ctx, base);")
+  string(REPLACE
+    "${_owned_world_collision_bridge_site}"
+    "${_owned_world_collision_bridge_patch}"
+    _contents
+    "${_contents}")
+  file(WRITE "${_file}" "${_contents}")
+  set(_owned_world_collision_bridge_patched TRUE)
+  message(STATUS
+    "Applied Skate 3 owned-world collision bridge in ${_file}")
+  break()
+endforeach()
+if(NOT _owned_world_collision_bridge_patched)
+  message(FATAL_ERROR
+    "Failed to apply Skate 3 owned-world collision bridge")
 endif()
 
 # CharacterGesture indexes a compiled table of 37 B_GSTR_* lifecycle

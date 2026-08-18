@@ -8,6 +8,7 @@
 
 #include "skate3_native_scene_state.h"
 
+#include <chrono>
 #include <unordered_set>
 
 #if (defined(REX_HAS_D3D12) && REX_HAS_D3D12) || (defined(REX_HAS_VULKAN) && REX_HAS_VULKAN)
@@ -62,6 +63,11 @@ struct MeshBuffers {
   // ROPA only: the decoded vertex array (num_verts x 14 floats, the scene
   // VS layout) retained for draw-time shape blending onto the play clock.
   std::vector<float> ropa_verts;
+  // Dynamic presentation meshes retain their renderer-native decoded
+  // payload for CPU skinning into the DXR mirror's per-frame BLAS. Keeping
+  // the decoded copy avoids reading write-combined upload memory back.
+  std::vector<float> raytracing_verts;
+  std::vector<uint16_t> raytracing_indices;
   // Store LRU clock: last frame this entry served a draw. Meshes of
   // streamed-out areas age out instead of accumulating across map changes;
   // an evicted mesh re-decodes on miss exactly like first sight.
@@ -783,6 +789,11 @@ struct RendererState {
   // All zeros = showcase off (stage 0 = the full render in every consumer).
   float showcase_rows[3] = {};
   std::unordered_map<uint32_t, MeshBuffers> meshes;
+  // Immutable RGBA8 textures embedded in the active project-owned SKATE
+  // package. They are intentionally separate from the guest texture store:
+  // no Xbox fetch constants, streaming routes, or proprietary asset
+  // lifetime rules are involved.
+  std::unordered_map<uint32_t, GuestTexture> owned_map_textures;
   // (The old D3D12 bookkeeping, the retired-resource vector, the CPU SRV
   // staging heap and its slot allocator/recycling lists, is gone: resource
   // destruction is deferred inside the RHI (Device::DestroyDeferred) and
@@ -868,32 +879,65 @@ struct RendererState {
   uint32_t shadow_dump_enqueued = 0;
   uint32_t shadow_dump_written = 0;
   bool shadow_dump_done = false;
-  // Per-frame shadow constant buffer ring (CBV b1). 768-byte slices: the
+  // Per-frame shadow constant buffer ring (CBV b1). 1024-byte slices: the
   // first 256 bytes are the original 16-row block, rows 16-18 carry the
   // dynamicobject world-shadow transform (dyn_ws*), rows 19-22 the
   // flowingwateralpha m_params (wat_p*), rows 23-33 the ocean PCA/material
   // rows and the oceanreflection fade row (oc_* / orf), rows 34-35 the
   // PCSS soft-shadow parameters (sh_pcss / sh_pcss2).
   static constexpr uint32_t kShadowCbRegions = 8;
-  static constexpr uint32_t kShadowCbSlice = 768;
+  static constexpr uint32_t kShadowCbSlice = 8192;
   nrhi::Buffer* shadow_cb = nullptr;
   uint8_t* shadow_cb_cpu = nullptr;
-  // Native static sun-shadow map: a single camera-centered ortho depth map
-  // of the STATIC world along the material sun (RenderStaticSunMap),
-  // sampled at t10 by every lit branch (SampleStaticSun). RG16 to reuse
-  // the caster pipeline/clear conventions; G unused. nsm_rows are this
-  // frame's world->map transform rows for the b1 fill.
+  // Native static sun-shadow maps: two camera-centered ortho depth atlases
+  // of the STATIC world along adjacent material-sun samples. The current
+  // atlas is sampled at t10 and the history atlas at t11; receivers blend
+  // their independent transforms so a cached sun-angle rebuild does not
+  // visibly step. RG16 reuses the caster pipeline/clear conventions; G is
+  // unused. nsm_rows are the current world->map transform rows and
+  // nsm_history_rows belong to the history texture.
   nrhi::Texture* static_sun = nullptr;
   nrhi::TextureView* static_sun_srv = nullptr;
   bool static_sun_in_srv = false;
+  nrhi::Texture* static_sun_history = nullptr;
+  nrhi::TextureView* static_sun_history_srv = nullptr;
+  bool static_sun_history_in_srv = false;
+  bool static_sun_history_valid = false;
   bool static_sun_valid = false;
   uint32_t static_sun_size = 0;
+  // Owned-world static shadows use independent resources per cascade.
+  // This is deliberately separate from the retained renderer's tiled
+  // current/history atlases: a near-cascade refresh can transition and clear
+  // only its own texture, while the middle and far maps remain valid SRVs.
+  // The independent update clocks are the foundation for smooth nearby
+  // shadows without replaying the complete imported world every frame.
+  static constexpr uint32_t kOwnedStaticCascadeCount = 3;
+  nrhi::Texture* owned_static_sun[kOwnedStaticCascadeCount] = {};
+  nrhi::TextureView* owned_static_sun_srv[kOwnedStaticCascadeCount] = {};
+  bool owned_static_sun_in_srv[kOwnedStaticCascadeCount] = {};
+  bool owned_static_sun_valid[kOwnedStaticCascadeCount] = {};
+  uint32_t owned_static_sun_size[kOwnedStaticCascadeCount] = {};
+  float owned_nsm_rows[kOwnedStaticCascadeCount][12] = {};
+  float owned_nsm_center[kOwnedStaticCascadeCount][3] = {};
+  float owned_nsm_sun[kOwnedStaticCascadeCount][3] = {};
+  float owned_nsm_radius[kOwnedStaticCascadeCount] = {};
+  float owned_nsm_depth_range[kOwnedStaticCascadeCount] = {};
+  uint64_t owned_nsm_last_update[kOwnedStaticCascadeCount] = {};
+  std::chrono::steady_clock::time_point
+      owned_nsm_next_update[kOwnedStaticCascadeCount] = {};
+  uint64_t owned_nsm_update_count[kOwnedStaticCascadeCount] = {};
+  uint32_t owned_nsm_last_draws[kOwnedStaticCascadeCount] = {};
+  uint32_t owned_nsm_last_chunks[kOwnedStaticCascadeCount] = {};
+  bool owned_nsm_active = false;
   // The per-tile size this map was requested at (post backend-limit clamp,
   // pre allocation-failure fallback). The hot-size-change retire keys on
   // this, not static_sun_size: a map that allocated smaller than requested
   // must not be retired and re-tried every frame.
   uint32_t static_sun_requested = 0;
   float nsm_rows[12] = {};
+  float nsm_history_rows[12] = {};
+  std::chrono::steady_clock::time_point nsm_blend_started{};
+  float nsm_blend_seconds = 0.6f;
   float nsm_depth_range = 1.0f;  // meters per depth-map unit
   float nsm_radius = 1.0f;       // far-tile ortho half-extent in meters
   // Cross-frame map cache: the map only re-renders when the camera drifts
@@ -908,6 +952,21 @@ struct RendererState {
   bool nsm_dirty = true;
   uint64_t nsm_rebuild_frame = 0;
   uint64_t nsm_last_build_frame = 0;
+  // Owned-map static shadows are rebuilt into the inactive atlas in small
+  // chunk batches. The currently displayed atlas stays read-only until the
+  // replacement is complete, avoiding a 5k-draw spike on one frame without
+  // increasing average shadow work.
+  bool nsm_progressive_build = false;
+  std::size_t nsm_progressive_chunk = 0;
+  uint32_t nsm_progressive_draws = 0;
+  uint32_t nsm_progressive_sequence = 0;
+  float nsm_progressive_rows[12] = {};
+  float nsm_progressive_vp[3][16] = {};
+  float nsm_progressive_center[3] = {};
+  float nsm_progressive_sun[3] = {};
+  float nsm_progressive_built_radius = 0.0f;
+  float nsm_progressive_depth_range = 1.0f;
+  float nsm_progressive_radius = 1.0f;
   // Persistent static-caster cache for the sun map. scene.items is the
   // game's VIEW-CULLED draw list; rendering the map from it directly made
   // shadows pop with the camera (look away and the caster leaves the list;
