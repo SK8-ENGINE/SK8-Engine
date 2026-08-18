@@ -1,10 +1,14 @@
 #include "skate3_app_common.h"
 
 #include "skate3_demo_path.h"
+#include "skate3_custom_trick.h"
 #include "skate3_fov.h"
+#include "skate3_input_lab.h"
 #include "skate3_iso_installer.h"
+#include "skate3_mechanics_sandbox_map.h"
 #include "skate3_native_render.h"
 #include "skate3_native_scene.h"
+#include "skate3_scoring.h"
 #include "skate3_screenshot.h"
 #include "skate3_shader_disasm.h"
 #include "skate3_win_icon.h"
@@ -12,7 +16,9 @@
 #include "skate3_user_settings.h"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
+#include <cctype>
 #include <cstring>
 #include <cstdint>
 #include <cstdlib>
@@ -109,6 +115,15 @@ REXCVAR_DEFINE_DOUBLE(skate3_ultrawide_target_aspect, 0.0, "Skate 3",
 namespace {
 
 void ApplyDemoPathProfileOverride() {
+  if (rex::cvar::Query<bool>("skate3_direct_boot")) {
+    // Direct boot must resume a local profile and its save. An install with
+    // no persisted profiles file uses an ephemeral default profile, so make
+    // its offline sign-in state explicit before XAM initializes. This is a
+    // local profile session, not an Xbox Live sign-in.
+    rex::cvar::SetFlagByName("user_profile_signed_in", "true");
+    rex::cvar::SetFlagByName("user_live_signed_in", "false");
+    return;
+  }
   if (!rex::cvar::Query<bool>("skate3_demo_path") &&
       !rex::cvar::Query<bool>("skate3_demo_path_probe")) {
     return;
@@ -185,6 +200,268 @@ void SetRestartArgument(std::vector<std::string>& args, std::string name, std::s
 
 constexpr std::string_view kUserDirectoryName = "skate3";
 constexpr std::string_view kSettingsFilename = "settings.toml";
+constexpr std::string_view kMapsDirectoryName = "maps";
+constexpr std::string_view kActiveMapFilename = "active_map.txt";
+
+std::filesystem::path AbsoluteMapPath(const std::filesystem::path& path) {
+  if (path.empty()) {
+    return {};
+  }
+  std::error_code ec;
+  auto absolute = std::filesystem::absolute(path, ec);
+  return (ec ? path : absolute).lexically_normal();
+}
+
+bool IsSkatePackage(const std::filesystem::path& path) {
+  std::string extension = rex::path_to_utf8(path.extension());
+  std::transform(extension.begin(), extension.end(), extension.begin(),
+                 [](unsigned char value) {
+                   return static_cast<char>(std::tolower(value));
+                 });
+  return extension == ".skate";
+}
+
+bool SameMapFile(const std::filesystem::path& left,
+                 const std::filesystem::path& right) {
+  if (left.empty() || right.empty()) {
+    return false;
+  }
+  std::error_code ec;
+  if (std::filesystem::equivalent(left, right, ec) && !ec) {
+    return true;
+  }
+  return AbsoluteMapPath(left) == AbsoluteMapPath(right);
+}
+
+std::string ReadSkateDisplayName(const std::filesystem::path& path) {
+  std::ifstream stream(path, std::ios::binary);
+  std::array<char, 12> header{};
+  stream.read(header.data(), static_cast<std::streamsize>(header.size()));
+  if (!stream || std::memcmp(header.data(), "SKATE0", 6) != 0 ||
+      header[6] < '1' || header[6] > '7' || header[7] != '\0') {
+    return {};
+  }
+  const std::uint32_t endian =
+      static_cast<std::uint8_t>(header[8]) |
+      (static_cast<std::uint32_t>(
+           static_cast<std::uint8_t>(header[9]))
+       << 8) |
+      (static_cast<std::uint32_t>(
+           static_cast<std::uint8_t>(header[10]))
+       << 16) |
+      (static_cast<std::uint32_t>(
+           static_cast<std::uint8_t>(header[11]))
+       << 24);
+  if (endian != 0x12345678u) {
+    return {};
+  }
+  std::array<std::uint8_t, 4> size_bytes{};
+  stream.read(reinterpret_cast<char*>(size_bytes.data()),
+              static_cast<std::streamsize>(size_bytes.size()));
+  if (!stream) {
+    return {};
+  }
+  const std::uint32_t size =
+      size_bytes[0] |
+      (static_cast<std::uint32_t>(size_bytes[1]) << 8) |
+      (static_cast<std::uint32_t>(size_bytes[2]) << 16) |
+      (static_cast<std::uint32_t>(size_bytes[3]) << 24);
+  if (size == 0 || size > 64u * 1024u) {
+    return {};
+  }
+  std::string name(size, '\0');
+  stream.read(name.data(), static_cast<std::streamsize>(name.size()));
+  if (!stream) {
+    return {};
+  }
+  name.erase(std::remove_if(name.begin(), name.end(),
+                            [](unsigned char value) {
+                              return value < 0x20 && value != '\t';
+                            }),
+             name.end());
+  return name;
+}
+
+std::filesystem::path EnvironmentMapPath() {
+  const char* selected = std::getenv("SKATE3_OWNED_MAP");
+  return selected && selected[0] ? AbsoluteMapPath(selected)
+                                : std::filesystem::path{};
+}
+
+void SetEnvironmentMapPath(const std::filesystem::path& path) {
+  const auto absolute = AbsoluteMapPath(path);
+#if defined(_WIN32)
+  _wputenv_s(L"SKATE3_OWNED_MAP", absolute.c_str());
+#else
+  const std::string utf8_path = rex::path_to_utf8(absolute);
+  setenv("SKATE3_OWNED_MAP", utf8_path.c_str(), 1);
+#endif
+}
+
+bool SaveSelectedMap(const std::filesystem::path& maps_path,
+                     const std::filesystem::path& package_path);
+
+void ConfigureMapsFolder(const std::filesystem::path& maps_path) {
+  std::error_code ec;
+  std::filesystem::create_directories(maps_path, ec);
+  if (ec) {
+    REXLOG_WARN("Could not create custom Maps folder '{}': {}",
+                maps_path.string(), ec.message());
+    return;
+  }
+  if (!EnvironmentMapPath().empty()) {
+    return;
+  }
+  std::ifstream selected_file(maps_path / kActiveMapFilename);
+  std::string selected_path;
+  std::getline(selected_file, selected_path);
+  const auto package_path = AbsoluteMapPath(selected_path);
+  if (!package_path.empty() && IsSkatePackage(package_path) &&
+      std::filesystem::is_regular_file(package_path, ec) && !ec) {
+    SetEnvironmentMapPath(package_path);
+    REXLOG_INFO("Restored selected custom map '{}'", package_path.string());
+    return;
+  }
+
+  // A fresh install, a moved Maps folder, or a selection left by an older
+  // build should still enter the Custom Engine Layer without requiring
+  // command-line flags. Prefer the project starter map when it is installed;
+  // otherwise choose the first SKATE package deterministically.
+  std::vector<std::filesystem::path> installed_maps;
+  ec.clear();
+  for (std::filesystem::directory_iterator it(
+           maps_path, std::filesystem::directory_options::skip_permission_denied,
+           ec),
+       end;
+       !ec && it != end; it.increment(ec)) {
+    if (!it->is_regular_file(ec) || ec || !IsSkatePackage(it->path())) {
+      ec.clear();
+      continue;
+    }
+    installed_maps.push_back(AbsoluteMapPath(it->path()));
+  }
+  std::sort(installed_maps.begin(), installed_maps.end(),
+            [](const auto& left, const auto& right) {
+              return rex::path_to_utf8(left.filename()) <
+                     rex::path_to_utf8(right.filename());
+            });
+  if (installed_maps.empty()) {
+    return;
+  }
+
+  const auto preferred_path =
+      AbsoluteMapPath(maps_path / "blender_bake_showcase.skate");
+  const auto preferred = std::find_if(
+      installed_maps.begin(), installed_maps.end(),
+      [&](const auto& candidate) {
+        return SameMapFile(candidate, preferred_path);
+      });
+  const auto& startup_map =
+      preferred != installed_maps.end() ? *preferred : installed_maps.front();
+  SetEnvironmentMapPath(startup_map);
+  REXLOG_INFO("Selected startup custom map '{}'", startup_map.string());
+  if (!SaveSelectedMap(maps_path, startup_map)) {
+    REXLOG_WARN("Could not persist startup custom map '{}'",
+                startup_map.string());
+  }
+}
+
+std::filesystem::path ResolveMapsFolder(
+    const std::filesystem::path& user_data_root) {
+  const auto portable_maps =
+      rex::filesystem::GetAppRootFolder() /
+      std::string(kMapsDirectoryName);
+  std::error_code ec;
+  if (std::filesystem::is_directory(portable_maps, ec) && !ec) {
+    return portable_maps;
+  }
+  return user_data_root / std::string(kMapsDirectoryName);
+}
+
+bool SaveSelectedMap(const std::filesystem::path& maps_path,
+                     const std::filesystem::path& package_path) {
+  std::error_code ec;
+  std::filesystem::create_directories(maps_path, ec);
+  if (ec) {
+    return false;
+  }
+  std::ofstream output(maps_path / kActiveMapFilename,
+                       std::ios::binary | std::ios::trunc);
+  output << rex::path_to_utf8(AbsoluteMapPath(package_path)) << '\n';
+  return output.good();
+}
+
+rex::ui::SimpleMapState DiscoverCustomMaps(
+    const std::filesystem::path& maps_path) {
+  rex::ui::SimpleMapState state;
+  state.maps_folder = maps_path;
+  auto active_path = EnvironmentMapPath();
+  if (active_path.empty()) {
+    active_path =
+        AbsoluteMapPath("owned_maps/blender_bake_showcase.skate");
+  }
+  std::error_code ec;
+  std::filesystem::create_directories(maps_path, ec);
+  ec.clear();
+  for (std::filesystem::directory_iterator it(
+           maps_path, std::filesystem::directory_options::skip_permission_denied,
+           ec),
+       end;
+       !ec && it != end; it.increment(ec)) {
+    if (!it->is_regular_file(ec) || ec ||
+        !IsSkatePackage(it->path())) {
+      ec.clear();
+      continue;
+    }
+    rex::ui::SimpleMapInfo map;
+    map.package_path = AbsoluteMapPath(it->path());
+    map.name = ReadSkateDisplayName(map.package_path);
+    if (map.name.empty()) {
+      map.name = rex::path_to_utf8(map.package_path.stem());
+    }
+    map.active = SameMapFile(map.package_path, active_path);
+    state.maps.push_back(std::move(map));
+  }
+  std::sort(state.maps.begin(), state.maps.end(),
+            [](const rex::ui::SimpleMapInfo& left,
+               const rex::ui::SimpleMapInfo& right) {
+              return left.name < right.name;
+            });
+  for (int index = 0; index < static_cast<int>(state.maps.size()); ++index) {
+    if (state.maps[index].active) {
+      state.selected_index = index;
+      state.active_name = state.maps[index].name;
+      break;
+    }
+  }
+  if (state.active_name.empty() && !active_path.empty()) {
+    state.active_name = ReadSkateDisplayName(active_path);
+    if (state.active_name.empty()) {
+      state.active_name = rex::path_to_utf8(active_path.stem());
+    }
+  }
+  return state;
+}
+
+void OpenFolderInFileManager(const std::filesystem::path& path) {
+  std::error_code ec;
+  std::filesystem::create_directories(path, ec);
+#if defined(_WIN32)
+  std::wstring command = L"explorer.exe \"" + path.wstring() + L"\"";
+  STARTUPINFOW startup_info{};
+  startup_info.cb = sizeof(startup_info);
+  PROCESS_INFORMATION process_info{};
+  if (CreateProcessW(nullptr, command.data(), nullptr, nullptr, FALSE, 0,
+                     nullptr, nullptr, &startup_info, &process_info)) {
+    CloseHandle(process_info.hThread);
+    CloseHandle(process_info.hProcess);
+  } else {
+    REXLOG_WARN("Could not open custom Maps folder '{}'", path.string());
+  }
+#else
+  REXLOG_INFO("Custom Maps folder: {}", path.string());
+#endif
+}
 constexpr std::string_view kDlcDirectoryName = "dlc";
 constexpr std::string_view kSavesDirectoryName = "saves";
 constexpr double kSixteenNineAspect = 16.0 / 9.0;
@@ -520,6 +797,8 @@ Skate3BaseApp::~Skate3BaseApp() = default;
 
 void Skate3BaseApp::OnConfigurePaths(rex::PathConfig& paths) {
   ConfigureSkate3UserPaths(paths, user_settings_path_, profiles_path_);
+  maps_path_ = ResolveMapsFolder(paths.user_data_root);
+  ConfigureMapsFolder(maps_path_);
   config_path_ = paths.config_path;
   LoadAndNormalizeSimpleSettings(user_settings_path_, config_path_);
   Skate3InitializeFieldOfViewOverride();
@@ -585,6 +864,8 @@ std::optional<rex::PathConfig> Skate3BaseApp::OnFinalizePaths(
   config_path_ = defaults.config_path;
   user_settings_path_ = defaults.user_data_root / std::string(kSettingsFilename);
   profiles_path_ = skate3::ProfilesFilePath(defaults.user_data_root);
+  maps_path_ = ResolveMapsFolder(defaults.user_data_root);
+  ConfigureMapsFolder(maps_path_);
 
   auto profiles = skate3::LoadProfiles(profiles_path_);
   const bool has_profiles_file = std::filesystem::exists(profiles_path_);
@@ -793,11 +1074,17 @@ void Skate3BaseApp::OnPostSetup() {
   auto* dispatcher = runtime()->function_dispatcher();
   skate3::native_render::Install();
   skate3::demo_path::InstallHooks(dispatcher);
+  skate3::custom_trick::InstallHooks(dispatcher);
+  skate3::scoring::InstallHooks(dispatcher);
+  skate3::input_lab::InstallHooks(dispatcher);
+  skate3::input_lab::Install();
   // User-facing intro-movie skip (independent of the demo path): the movie
   // completion override polls the merged UI pad state through this provider.
   skate3::demo_path::SetUiInputProvider([this]() {
     return static_cast<rex::input::InputSystem*>(runtime()->input_system());
   });
+  skate3::custom_trick::InstallInputDriver(
+      static_cast<rex::input::InputSystem*>(runtime()->input_system()));
   if (dispatcher->InitializeFunctionTable(eawebkit_PPCImageConfig.code_base,
                                           eawebkit_PPCImageConfig.code_size,
                                           eawebkit_PPCImageConfig.image_base,
@@ -874,6 +1161,64 @@ void Skate3BaseApp::ToggleSimpleSettings() {
     ApplyDemoPathProfileOverride();
     ApplySelectedProfileToRuntime();
   };
+  auto load_maps = [this]() {
+    return DiscoverCustomMaps(maps_path_);
+  };
+  auto activate_map = [this](const std::filesystem::path& package_path) {
+    std::error_code ec;
+    if (!IsSkatePackage(package_path) ||
+        !std::filesystem::is_regular_file(package_path, ec) || ec) {
+      REXLOG_WARN("Refusing to load missing or invalid custom map path '{}'",
+                  package_path.string());
+      return;
+    }
+    if (!SaveSelectedMap(maps_path_, package_path)) {
+      REXLOG_WARN("Could not save selected custom map '{}'",
+                  package_path.string());
+      return;
+    }
+    SetEnvironmentMapPath(package_path);
+    REXLOG_INFO("Custom map selected; restarting into '{}'",
+                package_path.string());
+    RestartGame();
+  };
+  auto open_maps_folder = [this]() {
+    OpenFolderInFileManager(maps_path_);
+  };
+  auto load_world_lighting = []() {
+    const auto source =
+        skate3::mechanics_sandbox::map::ActiveWorldLightingSettings();
+    rex::ui::SimpleWorldLightingState state;
+    state.available = source.available;
+    state.paused = source.paused;
+    state.ping_pong = source.ping_pong;
+    state.time_of_day_hours = source.time_of_day_hours;
+    state.cycle_duration_seconds = source.cycle_duration_seconds;
+    state.start_hour = source.start_hour;
+    state.end_hour = source.end_hour;
+    state.orbit_azimuth_degrees = source.orbit_azimuth_degrees;
+    state.sky_red = source.sky_red;
+    state.sky_green = source.sky_green;
+    state.sky_blue = source.sky_blue;
+    state.sunlight_red = source.sunlight_red;
+    state.sunlight_green = source.sunlight_green;
+    state.sunlight_blue = source.sunlight_blue;
+    state.sun_intensity = source.sun_intensity;
+    state.moon_intensity = source.moon_intensity;
+    state.day_ambient = source.day_ambient;
+    state.night_ambient = source.night_ambient;
+    return state;
+  };
+  auto update_world_lighting =
+      [](rex::ui::SimpleWorldLightingField field, float value) {
+        using RuntimeField =
+            skate3::mechanics_sandbox::map::WorldLightingSetting;
+        skate3::mechanics_sandbox::map::SetWorldLightingSetting(
+            static_cast<RuntimeField>(field), value);
+      };
+  auto reset_world_lighting = []() {
+    skate3::mechanics_sandbox::map::ResetWorldLightingSettings();
+  };
   // Fires on every Hide (B/Esc, Close Settings, Close Game), the one spot
   // that reliably sees the menu close regardless of who initiated it.
   auto close_settings = [this]() {
@@ -924,6 +1269,11 @@ void Skate3BaseApp::ToggleSimpleSettings() {
   simple_settings_dialog_ =
       std::make_unique<rex::ui::SimpleSettingsDialog>(
           imgui_drawer(), user_settings_path_, std::move(load_profiles), std::move(save_profile),
+          std::move(load_maps), std::move(activate_map),
+          std::move(open_maps_folder),
+          std::move(load_world_lighting),
+          std::move(update_world_lighting),
+          std::move(reset_world_lighting),
           std::move(close_settings), std::move(close_game), std::move(restart_game),
           std::move(poll_gamepad));
   ApplySettingsCursorMode();
@@ -976,6 +1326,15 @@ void Skate3BaseApp::RestartGame() {
     }
     CloseHandle(process_info.hThread);
     CloseHandle(process_info.hProcess);
+    // Guest teardown can stall after a large owned world has installed more
+    // than a million collision triangles. The replacement process is already
+    // independent at this point, so bound the old process lifetime instead of
+    // leaving a multi-gigabyte zombie behind after every map switch.
+    std::thread([]() {
+      std::this_thread::sleep_for(std::chrono::seconds(5));
+      REXLOG_WARN("Restart shutdown watchdog exiting the replaced process");
+      std::_Exit(EXIT_SUCCESS);
+    }).detach();
 #elif defined(__linux__) || defined(__APPLE__)
     const auto executable_path = rex::filesystem::GetExecutablePath();
     if (executable_path.empty()) {
@@ -1348,5 +1707,14 @@ void Skate3BaseApp::InstallDlcPackages() {
   } else {
     REXLOG_INFO("No Skate 3 DLC packages found. Drop legally obtained DLC package files in {}",
                 user_dlc_root.string());
+  }
+
+  const auto installed_marketplace = runtime()->kernel_state()->content_manager()->ListContent(
+      static_cast<uint32_t>(rex::system::xam::DummyDeviceId::HDD), 0,
+      rex::system::XContentType::kMarketplaceContent, title_id);
+  REXLOG_INFO("Skate 3 installed Marketplace content audit: {} package(s) under {}",
+              installed_marketplace.size(), runtime()->user_data_root().string());
+  for (const auto& content : installed_marketplace) {
+    REXLOG_INFO("Skate 3 installed Marketplace package: {}", content.file_name());
   }
 }

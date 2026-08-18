@@ -92,4 +92,36 @@ cbuffer S : register(b1) {
   // kRatioInner/kRatioMid constants), w = tile size in pixels (tap
   // clamping).
   float4 nsm_p2;
+  // Project-owned moving spherical lights. Positions are in the live render
+  // world (xyz) with influence radius in w; colors carry intensity in w.
+  float4 owned_light_position[4];
+  float4 owned_light_color[4];
+  float4 owned_light_radius;
+  // x = active light count, y = day/night cycle enabled,
+  // z = night amount, w = daylight amount.
+  float4 owned_light_meta;
+  // Project-owned active celestial key light. The renderer switches from the
+  // sun to the opposite moon direction around the horizon, where intensity
+  // is already near zero.
+  float4 owned_celestial_direction;  // xyz = direction, w = intensity
+  float4 owned_celestial_color;      // rgb = color, w = ambient
+  float4 owned_celestial_meta;       // sun, moon, twilight, stars
+  // Independent owned-world middle/far static-shadow transforms. The near
+  // transform remains nsm_x/y/z above. nsm_owned_meta.xyz contain the three
+  // physical texture sizes; w selects this path over the retained tiled map.
+  float4 nsm_mid_x;
+  float4 nsm_mid_y;
+  float4 nsm_mid_z;
+  float4 nsm_far_x;
+  float4 nsm_far_y;
+  float4 nsm_far_z;
+  float4 nsm_owned_meta;
+  // SKATE local lights. Blender Point, Spot, and Area lights share this
+  // renderer-neutral contract. direction.w stores 0=point, 1=spot, 2=area.
+  float4 owned_authored_light_position[64];
+  float4 owned_authored_light_color[64];
+  float4 owned_authored_light_direction[64];
+  // x = inner cone cosine, y = outer cone cosine,
+  // z = source radius, w = reserved.
+  float4 owned_authored_light_spot[64];
 };

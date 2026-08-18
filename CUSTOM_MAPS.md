@@ -1,0 +1,78 @@
+# Custom maps
+
+This fork loads renderer-neutral `.skate` packages created by the original
+Blender exporter in `tools/blender_owned_map`.
+
+## Installing and switching maps
+
+1. Start the game and open **Settings > Maps > Open Maps Folder**.
+2. Copy one or more `.skate` files into that folder.
+3. Select **Refresh Map List**.
+4. Choose a package and select **Load Selected Map**.
+
+The session restarts automatically when a map is changed. This is an
+intentional release boundary: it guarantees that static collision, moving
+physics objects, hinged doors, grind splines, textures, shadows, mirrors,
+water, weather, and renderer caches are rebuilt against one coherent world.
+The selected package is remembered for the next launch.
+
+Release archives contain a `maps` folder beside the executable, so that is
+the active folder for a normal extracted build. If no local `maps` folder is
+present, the game uses:
+
+- Windows: `%APPDATA%\skate3\maps`
+- portable mode: `maps` beside the executable
+
+The Maps tab always shows and opens the exact folder currently in use.
+
+## Package compatibility
+
+The runtime accepts little-endian SKATE v1-v8 packages. Current Blender
+exports use v8 and can contain:
+
+- chunked visual geometry and embedded image textures;
+- albedo, normal, ORM, emissive and baked-indirect maps;
+- opaque, alpha-cutout and alpha-blended materials;
+- independent collision geometry;
+- Skate 3 audio, physics and contact material channels;
+- grind paths;
+- contact-driven hinged rigid doors;
+- ordinary Blender Point, Spot, Area, and Sun lights;
+- spawn, sky, day/night, weather, water, mirror and moving-light metadata.
+
+NPC route records are an experimental preview. The exporter retains them for
+future testing, but map authors should not currently rely on AI skaters
+remaining on an authored route.
+
+Open **Settings > World** while playing to pause or scrub the authored
+day/night clock and tune its speed, range, sun direction, sky RGB colour,
+directional sunlight RGB/strength, and ambient light. These changes are live
+session overrides. **Restore Map Defaults** returns to the values embedded
+by the map author without rewriting the `.skate` file.
+
+Large packages can use substantial CPU and GPU memory. Loading through the
+menu restarts the old process and includes a shutdown watchdog so a stalled
+guest heap cannot leave a second multi-gigabyte process running.
+
+## Blender exporter
+
+Install `tools/blender_owned_map/owned_world_material_addon.zip` through
+Blender's **Edit > Preferences > Get Extensions > Install from Disk**.
+The addon contains the complete exporter. Open **3D View > Sidebar >
+Skate 3 Map** to prepare a scene, assign selected objects as visual,
+collision, or grind data, place the spawn, edit world lighting, validate,
+and export without running Python scripts.
+
+Full UI guidance, scene conventions, and optional command-line automation are
+documented in `tools/blender_owned_map/README.md`; the binary specification
+is in `SKATE_FORMAT.md`.
+
+The exporter and runtime are original code and do not invoke, bundle, or
+depend on ArenaBuilder.
+
+## Distribution rules
+
+The game, source archive, and release package must not contain Skate 3 retail
+files, DLC, extracted executable data, or proprietary custom maps. SKATE can
+embed all source textures and geometry, so map authors must have permission
+to distribute every asset in a package.

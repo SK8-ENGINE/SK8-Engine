@@ -57,6 +57,7 @@ class Skate3BaseApp : public rex::ReXApp {
   std::filesystem::path config_path_;
   std::filesystem::path user_settings_path_;
   std::filesystem::path profiles_path_;
+  std::filesystem::path maps_path_;
   std::unique_ptr<rex::ui::SimpleSettingsDialog> simple_settings_dialog_;
   std::unique_ptr<skate3::NativeDebugDialog> native_debug_dialog_;
   std::unique_ptr<skate3::RenderModeIndicator> render_mode_indicator_;

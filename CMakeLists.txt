@@ -11,7 +11,7 @@ if(SKATE3_STATIC_MSVC_RUNTIME)
     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 endif()
 
-project(skate3 VERSION 2.0.0 LANGUAGES CXX)
+project(Skate3CustomEngineLayer VERSION 0.1.0 LANGUAGES CXX)
 
 if(WIN32)
     enable_language(RC)
@@ -92,6 +92,9 @@ set(SKATE3_TITLE_UPDATE_PACKAGE
 option(SKATE3_ENABLE_X86_64_V3
     "Build x86_64 desktop binaries for x86-64-v3 CPUs (AVX2/BMI2)"
     OFF)
+option(SKATE3_CODEGEN_PATCHED_TITLE_UPDATE
+    "Generate host code from the TU3-patched executable instead of the stable base-address image"
+    OFF)
 
 if(NOT APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "AMD64|x86_64")
     if(SKATE3_ENABLE_X86_64_V3)
@@ -147,10 +150,21 @@ if(SKATE3_EFFECTIVE_TITLE_UPDATE_PACKAGE STREQUAL "")
         set(SKATE3_EFFECTIVE_TITLE_UPDATE_PACKAGE "${SKATE3_LOCAL_TITLE_UPDATE_PACKAGE}")
     endif()
 endif()
+set(SKATE3_HAS_LOOSE_TITLE_UPDATE OFF)
+if(SKATE3_EFFECTIVE_TITLE_UPDATE_PACKAGE STREQUAL ""
+   AND EXISTS "${SKATE3_GAME_DATA_ROOT}/default.xexp"
+   AND EXISTS "${SKATE3_GAME_DATA_ROOT}/data/webkit/EAWebkit.xexp")
+    set(SKATE3_HAS_LOOSE_TITLE_UPDATE ON)
+    message(STATUS
+        "Skate 3 loose title update detected in ${SKATE3_GAME_DATA_ROOT}")
+endif()
 
 set(SKATE3_PATCHED_DEFAULT_XEX_LINE "")
 set(SKATE3_PATCHED_EAWEBKIT_XEX_LINE "")
-set(SKATE3_CODEGEN_ARGS "")
+# The reviewed recomp boundary contains a small set of known unresolved guest
+# control-flow edges. Release generation intentionally preserves the existing
+# guarded stubs instead of requiring an incremental generated cache.
+set(SKATE3_CODEGEN_ARGS "--force")
 set(SKATE3_FUNCTION_CONFIG_INCLUDES
     "  \"${SKATE3_SOURCE_DIR_CONFIG}/config/skate3_functions.toml\",")
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
@@ -202,14 +216,19 @@ if(NOT SKATE3_EFFECTIVE_TITLE_UPDATE_PACKAGE STREQUAL "")
         SKATE3_TITLE_UPDATE_DEFAULT_XEX_CONFIG)
     file(TO_CMAKE_PATH "${SKATE3_TITLE_UPDATE_EAWEBKIT_XEX}"
         SKATE3_TITLE_UPDATE_EAWEBKIT_XEX_CONFIG)
-    set(SKATE3_PATCHED_DEFAULT_XEX_LINE
-        "patched_file_path = \"${SKATE3_TITLE_UPDATE_DEFAULT_XEX_CONFIG}\"")
-    set(SKATE3_PATCHED_EAWEBKIT_XEX_LINE
-        "patched_file_path = \"${SKATE3_TITLE_UPDATE_EAWEBKIT_XEX_CONFIG}\"")
-    set(SKATE3_FUNCTION_CONFIG_INCLUDES
-        "  \"${SKATE3_SOURCE_DIR_CONFIG}/config/skate3_tu_functions.toml\",")
-    message(STATUS
-        "Skate 3 title update codegen enabled: ${SKATE3_EFFECTIVE_TITLE_UPDATE_PACKAGE}")
+    if(SKATE3_CODEGEN_PATCHED_TITLE_UPDATE)
+        set(SKATE3_PATCHED_DEFAULT_XEX_LINE
+            "patched_file_path = \"${SKATE3_TITLE_UPDATE_DEFAULT_XEX_CONFIG}\"")
+        set(SKATE3_PATCHED_EAWEBKIT_XEX_LINE
+            "patched_file_path = \"${SKATE3_TITLE_UPDATE_EAWEBKIT_XEX_CONFIG}\"")
+        set(SKATE3_FUNCTION_CONFIG_INCLUDES
+            "  \"${SKATE3_SOURCE_DIR_CONFIG}/config/skate3_tu_functions.toml\",")
+        message(STATUS
+            "Skate 3 TU3-patched codegen enabled: ${SKATE3_EFFECTIVE_TITLE_UPDATE_PACKAGE}")
+    else()
+        message(STATUS
+            "Skate 3 TU3 package will be staged for runtime; codegen keeps stable base addresses")
+    endif()
 endif()
 
 file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/manifests")
@@ -230,21 +249,47 @@ set(REXGLUE_ENABLE_PERF_COUNTERS OFF CACHE BOOL "Enable lightweight rexglue perf
 if(WIN32)
     set(REXGLUE_RUNTIME_RC_VERSION "${SKATE3_RC_VERSION}")
     set(REXGLUE_RUNTIME_RC_VERSION_STRING "${SKATE3_FULL_VERSION}")
-    set(REXGLUE_RUNTIME_RC_PRODUCT_NAME "Skate3Recomp")
-    set(REXGLUE_RUNTIME_RC_COMPANY "Skate3Recomp project")
-    set(REXGLUE_RUNTIME_RC_DESCRIPTION "Skate3Recomp guest runtime")
-    set(REXGLUE_RUNTIME_RC_COPYRIGHT "(c) Skate3Recomp contributors")
+    set(REXGLUE_RUNTIME_RC_PRODUCT_NAME "Skate 3 Custom Engine Layer")
+    set(REXGLUE_RUNTIME_RC_COMPANY "Skate 3 Custom Engine Layer project")
+    set(REXGLUE_RUNTIME_RC_DESCRIPTION "Skate 3 Custom Engine Layer runtime")
+    set(REXGLUE_RUNTIME_RC_COPYRIGHT
+        "(c) Skate3Recomp and Skate 3 Custom Engine Layer contributors")
 endif()
 
 include(cmake/RexGlue.cmake)
 include(cmake/CodegenTargets.cmake)
 
+# Project-owned game systems are kept inside this fork, separate from
+# generated recomp sources. The recomp links them only through narrow
+# adapters while it remains the migration host and behavioural reference.
+set(SKATE_OWNED_WORLD_BUILD_TESTS OFF CACHE BOOL
+    "The recomp consumes the owned world library without its standalone tests"
+    FORCE)
+add_subdirectory(
+    "${CMAKE_CURRENT_SOURCE_DIR}/owned/world"
+    "${CMAKE_CURRENT_BINARY_DIR}/owned-world"
+)
+
 set(SKATE3_COMMON_SOURCES
     src/exception_compat.cpp
     src/skate3_app_common.cpp
+    src/skate3_cac_gesture.cpp
+    src/skate3_dlc_runtime.cpp
+    src/skate3_custom_trick.cpp
     src/skate3_demo_path.cpp
     src/skate3_draw_distance.cpp
     src/skate3_fov.cpp
+    src/skate3_function_coverage.cpp
+    src/skate3_input_history_watch.cpp
+    src/skate3_input_lab.cpp
+    src/skate3_mechanics_sandbox.cpp
+    src/skate3_mechanics_sandbox_map.cpp
+    src/skate3_owned_world_boundary.cpp
+    src/skate3_native_collision.cpp
+    src/skate3_native_grind.cpp
+    src/skate3_target_trace.cpp
+    src/skate3_trick_overrides.cpp
+    src/skate3_trick_pipeline.cpp
     src/skate3_iso_installer.cpp
     src/native/skate3_native_diagnostics.cpp
     src/native/skate3_native_entity.cpp
@@ -252,10 +297,12 @@ set(SKATE3_COMMON_SOURCES
     src/native/skate3_native_lw.cpp
     src/native/skate3_native_palette.cpp
     src/skate3_native_debug_dialog.cpp
+    src/skate3_scoring.cpp
     src/skate3_native_render.cpp
     src/skate3_native_scene.cpp
     src/skate3_native_scene_gpu.cpp
     src/skate3_native_scene_post.cpp
+    src/skate3_native_raytraced_mirror.cpp
     src/skate3_screenshot.cpp
     src/skate3_shader_disasm.cpp
     src/skate3_title_update_installer.cpp
@@ -328,8 +375,35 @@ add_custom_command(
     COMMENT "Embedding native renderer shaders"
     VERBATIM)
 target_sources(skate3 PRIVATE ${SKATE3_NATIVE_SHADER_HEADER})
+
+if(WIN32)
+    find_program(SKATE3_DXC_EXECUTABLE dxc
+        HINTS
+            "$ENV{WindowsSdkDir}/bin/$ENV{WindowsSDKVersion}/x64"
+            "C:/Program Files (x86)/Windows Kits/10/bin/10.0.26100.0/x64"
+        REQUIRED)
+    set(SKATE3_RAYTRACED_MIRROR_HEADER
+        ${CMAKE_CURRENT_BINARY_DIR}/include/skate3_raytraced_mirror_cs.h)
+    add_custom_command(
+        OUTPUT ${SKATE3_RAYTRACED_MIRROR_HEADER}
+        COMMAND ${SKATE3_DXC_EXECUTABLE}
+            -T cs_6_5
+            -E cs_main
+            -O3
+            -Qstrip_debug
+            -Fo ${CMAKE_CURRENT_BINARY_DIR}/raytraced_mirror.dxil
+            -Fh ${SKATE3_RAYTRACED_MIRROR_HEADER}
+            -Vn g_skate3_raytraced_mirror_cs
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/native/shaders/raytraced_mirror.hlsl
+        DEPENDS
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/native/shaders/raytraced_mirror.hlsl
+        COMMENT "Compiling DXR 1.1 inline ray-query mirror shader"
+        VERBATIM)
+    target_sources(skate3 PRIVATE ${SKATE3_RAYTRACED_MIRROR_HEADER})
+endif()
 target_compile_definitions(skate3 PRIVATE SKATE3_BUILD_CONFIG="$<CONFIG>")
-if(NOT SKATE3_EFFECTIVE_TITLE_UPDATE_PACKAGE STREQUAL "")
+if(NOT SKATE3_EFFECTIVE_TITLE_UPDATE_PACKAGE STREQUAL ""
+   OR SKATE3_HAS_LOOSE_TITLE_UPDATE)
     target_compile_definitions(skate3 PRIVATE SKATE3_HAS_TITLE_UPDATE=1)
 else()
     target_compile_definitions(skate3 PRIVATE SKATE3_HAS_TITLE_UPDATE=0)
@@ -354,7 +428,7 @@ else()
     message(STATUS "generated/eawebkit/sources.cmake not found; run the generate-all target before building skate3")
 endif()
 
-target_link_libraries(skate3 PRIVATE rex::runtime)
+target_link_libraries(skate3 PRIVATE rex::runtime skate_owned_world)
 rexglue_configure_target(skate3)
 
 if(APPLE)
@@ -363,15 +437,21 @@ if(APPLE)
 endif()
 
 if(WIN32)
-    target_link_libraries(skate3 PRIVATE comdlg32 winhttp d3dcompiler gdiplus)
+    target_link_libraries(skate3 PRIVATE
+        comdlg32 winhttp d3d12 d3dcompiler dxgi dxguid gdiplus winmm)
+endif()
+
+set(SKATE3_REXRUNTIME_TARGET rexruntime)
+if(NOT TARGET rexruntime AND TARGET rex::runtime)
+    set(SKATE3_REXRUNTIME_TARGET rex::runtime)
 endif()
 
 add_custom_target(skate3_stage_runtime_library
     COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:skate3>"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "$<TARGET_FILE:rexruntime>"
+        "$<TARGET_FILE:${SKATE3_REXRUNTIME_TARGET}>"
         "$<TARGET_FILE_DIR:skate3>"
-    DEPENDS rexruntime
+    DEPENDS ${SKATE3_REXRUNTIME_TARGET}
     VERBATIM
 )
 add_dependencies(skate3 skate3_stage_runtime_library)
@@ -387,6 +467,19 @@ if(NOT SKATE3_EFFECTIVE_TITLE_UPDATE_PACKAGE STREQUAL "")
             "${SKATE3_TITLE_UPDATE_EAWEBKIT_XEXP}"
             "$<TARGET_FILE_DIR:skate3>/game/data/webkit/EAWebkit.xexp"
         DEPENDS skate3-title-update-codegen-inputs
+        VERBATIM
+    )
+    add_dependencies(skate3 skate3_stage_title_update_patches)
+elseif(SKATE3_HAS_LOOSE_TITLE_UPDATE)
+    add_custom_target(skate3_stage_title_update_patches
+        COMMAND ${CMAKE_COMMAND} -E make_directory
+            "$<TARGET_FILE_DIR:skate3>/game/data/webkit"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${SKATE3_GAME_DATA_ROOT}/default.xexp"
+            "$<TARGET_FILE_DIR:skate3>/game/default.xexp"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${SKATE3_GAME_DATA_ROOT}/data/webkit/EAWebkit.xexp"
+            "$<TARGET_FILE_DIR:skate3>/game/data/webkit/EAWebkit.xexp"
         VERBATIM
     )
     add_dependencies(skate3 skate3_stage_title_update_patches)
