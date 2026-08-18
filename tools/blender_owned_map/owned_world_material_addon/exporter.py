@@ -16,7 +16,7 @@ import os
 import struct
 import sys
 import time
-from typing import BinaryIO
+from typing import BinaryIO, Callable
 
 import bpy
 from mathutils import Vector
@@ -33,7 +33,15 @@ COLLISION_COLLECTION = "OW_COLLISION"
 GRIND_COLLECTION = "OW_GRIND"
 NPC_PATH_COLLECTION = "OW_NPC_PATHS"
 SPAWN_OBJECT = "OW_SPAWN"
-CACHE_SCHEMA = 8
+_HELPER_OBJECT_MARKERS = (
+    "character_size",
+    "character size",
+    "player_size",
+    "player size",
+    "scale_reference",
+    "scale reference",
+)
+CACHE_SCHEMA = 9
 METADATA_FLOAT_COUNT = 49
 METADATA_BYTE_COUNT = METADATA_FLOAT_COUNT * 4
 
@@ -72,6 +80,17 @@ class ExportHingedDoor:
     vertices: list[tuple]
     indices: list[int]
     collision: list[tuple]
+
+
+@dataclass
+class PackedVisualGeometry:
+    chunks: list[bytes]
+    vertex_count: int
+
+    @property
+    def index_count(self) -> int:
+        # SKATE v8 currently stores one unique vertex per triangle corner.
+        return self.vertex_count
 
 
 @dataclass
@@ -121,6 +140,16 @@ class CollisionGeometryError(ValueError):
 
 
 LAST_COLLISION_AUDIT: CollisionGeometryAudit | None = None
+ProgressCallback = Callable[[float, str], None]
+
+
+def _report_progress(
+    callback: ProgressCallback | None,
+    fraction: float,
+    stage: str,
+) -> None:
+    if callback is not None:
+        callback(max(0.0, min(1.0, float(fraction))), stage)
 
 
 def _write_u32(stream: BinaryIO, value: int) -> None:
@@ -142,6 +171,31 @@ def _write_string(stream: BinaryIO, value: str) -> None:
     encoded = value.encode("utf-8")
     _write_u32(stream, len(encoded))
     stream.write(encoded)
+
+
+def _write_sequential_indices(
+    stream: BinaryIO,
+    count: int,
+    progress: ProgressCallback | None = None,
+) -> None:
+    chunk_size = 262_144
+    for start in range(0, count, chunk_size):
+        end = min(count, start + chunk_size)
+        if numpy is not None:
+            packed = numpy.arange(
+                start, end, dtype=numpy.dtype("<u4")
+            ).tobytes()
+        else:
+            values = array("I", range(start, end))
+            if sys.byteorder != "little":
+                values.byteswap()
+            packed = values.tobytes()
+        stream.write(packed)
+        _report_progress(
+            progress,
+            end / max(1, count),
+            "Writing visual indices",
+        )
 
 
 def _cache_manifest_path(output: Path) -> Path:
@@ -196,8 +250,18 @@ def _hash_image_source(digest, image: bpy.types.Image) -> None:
         digest.update(struct.pack("<QQ", stat.st_size, stat.st_mtime_ns))
         return
 
-    # Generated, baked, and packed images have no trustworthy external file
-    # fingerprint. Hash their actual pixels so cache reuse remains correct.
+    packed = image.packed_file
+    if packed is not None and not image.is_dirty:
+        # Clean packed images decode deterministically from these source
+        # bytes. Hashing the packed payload avoids expanding large texture
+        # sets to float RGBA solely for an incremental-cache check.
+        _hash_text(digest, "PACKED_SOURCE")
+        digest.update(struct.pack("<Q", int(packed.size)))
+        digest.update(packed.data)
+        return
+
+    # Generated, baked, and dirty packed images have no trustworthy immutable
+    # source fingerprint. Hash their actual pixels so cache reuse is correct.
     expected = int(image.size[0]) * int(image.size[1]) * 4
     values = array("f", [0.0]) * expected
     if expected:
@@ -207,6 +271,36 @@ def _hash_image_source(digest, image: bpy.types.Image) -> None:
     digest.update(values.tobytes())
 
 
+def _mesh_for_export(
+    source_object: bpy.types.Object,
+    depsgraph,
+    *,
+    preserve_all_data_layers: bool = False,
+) -> tuple[bpy.types.Mesh, bpy.types.Object | None]:
+    # Blender 5.1 can keep newly-created UV layers off an already-built
+    # evaluated mesh even after the source datablock is tagged and the view
+    # layer is refreshed. An unmodified mesh does not need evaluation, so use
+    # its authoritative source data directly. Modified or shape-keyed meshes
+    # still use Blender's evaluated result.
+    source_mesh = source_object.data
+    if not source_object.modifiers and source_mesh.shape_keys is None:
+        return source_mesh, None
+
+    evaluated = source_object.evaluated_get(depsgraph)
+    mesh = (
+        evaluated.to_mesh(
+            preserve_all_data_layers=True, depsgraph=depsgraph
+        )
+        if preserve_all_data_layers
+        else evaluated.to_mesh()
+    )
+    if mesh is None:
+        raise ValueError(
+            f"Blender could not evaluate mesh {source_object.name!r}"
+        )
+    return mesh, evaluated
+
+
 def _hash_mesh(
     digest,
     source_object: bpy.types.Object,
@@ -214,13 +308,10 @@ def _hash_mesh(
     visual: bool,
     depsgraph,
 ) -> tuple[int, int]:
-    evaluated = source_object.evaluated_get(depsgraph)
-    mesh = (
-        evaluated.to_mesh(
-            preserve_all_data_layers=True, depsgraph=depsgraph
-        )
-        if visual
-        else evaluated.to_mesh()
+    mesh, evaluated = _mesh_for_export(
+        source_object,
+        depsgraph,
+        preserve_all_data_layers=visual,
     )
     try:
         mesh.calc_loop_triangles()
@@ -284,7 +375,8 @@ def _hash_mesh(
         triangle_count = len(mesh.loop_triangles)
         return triangle_count * 3, triangle_count
     finally:
-        evaluated.to_mesh_clear()
+        if evaluated is not None:
+            evaluated.to_mesh_clear()
 
 
 def _scene_content_fingerprint(
@@ -295,6 +387,7 @@ def _scene_content_fingerprint(
     materials: list[bpy.types.Material],
     images: list[bpy.types.Image],
     collision_triangle_count: int,
+    progress: ProgressCallback | None = None,
 ) -> SceneContentFingerprint:
     started = time.perf_counter()
     print(
@@ -332,10 +425,35 @@ def _scene_content_fingerprint(
         for property_name in material_properties:
             _hash_text(digest, property_name)
             _hash_text(digest, repr(material.get(property_name, None)))
-    for image in images:
+    for image_index, image in enumerate(images, start=1):
         _hash_image_source(digest, image)
+        _report_progress(
+            progress,
+            0.15 * image_index / max(1, len(images)),
+            f"Hashing textures ({image_index}/{len(images)}): "
+            f"{image.name}",
+        )
 
     depsgraph = bpy.context.evaluated_depsgraph_get()
+    total_objects = max(
+        1,
+        len(visual_objects)
+        + len(collision_objects)
+        + len(grind_objects)
+        + len(npc_path_objects)
+        + len(_visible_local_light_objects()),
+    )
+    processed_objects = 0
+
+    def object_complete(label: str) -> None:
+        nonlocal processed_objects
+        processed_objects += 1
+        _report_progress(
+            progress,
+            0.15 + 0.85 * processed_objects / total_objects,
+            label,
+        )
+
     visual_vertices = 0
     visual_indices = 0
     hinged_doors = 0
@@ -350,6 +468,7 @@ def _scene_content_fingerprint(
         else:
             visual_vertices += object_vertices
             visual_indices += object_vertices
+        object_complete(f"Hashing visuals: {obj.name}")
 
     for obj in collision_objects:
         if obj.type != "MESH":
@@ -362,6 +481,7 @@ def _scene_content_fingerprint(
         _hash_mesh(
             digest, obj, visual=False, depsgraph=depsgraph
         )
+        object_complete(f"Hashing collision: {obj.name}")
 
     grind_rails = 0
     for obj in grind_objects:
@@ -380,6 +500,7 @@ def _scene_content_fingerprint(
                 _hash_foreach(digest, spline.bezier_points, "co", 3, "f")
                 if len(spline.bezier_points) >= 2:
                     grind_rails += 1
+        object_complete(f"Hashing grind paths: {obj.name}")
 
     npc_routes = 0
     for obj in npc_path_objects:
@@ -404,6 +525,7 @@ def _scene_content_fingerprint(
                 _hash_foreach(digest, spline.bezier_points, "co", 3, "f")
                 if len(spline.bezier_points) >= 2:
                     npc_routes += 1
+        object_complete(f"Hashing NPC paths: {obj.name}")
 
     local_lights = 0
     for obj in _visible_local_light_objects():
@@ -424,6 +546,7 @@ def _scene_content_fingerprint(
             getattr(light, "spot_blend", 0.0),
         ):
             _hash_text(digest, repr(value))
+        object_complete(f"Hashing lights: {obj.name}")
 
     result = SceneContentFingerprint(
         digest=digest.hexdigest(),
@@ -793,6 +916,12 @@ def _collection(name: str) -> bpy.types.Collection:
     return collection
 
 
+def _is_helper_object(obj: bpy.types.Object) -> bool:
+    """Reject authoring references even when an old add-on linked them."""
+    identity = f"{obj.name} {getattr(obj.data, 'name', '')}".lower()
+    return any(marker in identity for marker in _HELPER_OBJECT_MARKERS)
+
+
 def _used_visual_materials(
     visual_objects: list[bpy.types.Object],
 ) -> list[bpy.types.Material]:
@@ -880,16 +1009,31 @@ def _material_color(material: bpy.types.Material) -> tuple[float, float, float]:
 def _export_visual_geometry(
     visual_objects: list[bpy.types.Object],
     material_name_ids: dict[str, int],
-) -> tuple[list[tuple], list[int]]:
+    progress: ProgressCallback | None = None,
+) -> PackedVisualGeometry:
     depsgraph = bpy.context.evaluated_depsgraph_get()
-    vertices: list[tuple] = []
-    indices: list[int] = []
-    for source_object in visual_objects:
+    chunks: list[bytes] = []
+    vertex_count = 0
+    mesh_objects = [
+        obj for obj in visual_objects if obj.type == "MESH"
+    ]
+    weights = [
+        max(1, len(obj.data.polygons)) for obj in mesh_objects
+    ]
+    total_weight = max(1, sum(weights))
+    completed_weight = 0
+    packed_vertex = struct.Struct("<3f3f2f2fI")
+
+    for object_index, (source_object, object_weight) in enumerate(
+        zip(mesh_objects, weights, strict=True),
+        start=1,
+    ):
         if source_object.type != "MESH":
             continue
-        evaluated = source_object.evaluated_get(depsgraph)
-        mesh = evaluated.to_mesh(
-            preserve_all_data_layers=True, depsgraph=depsgraph
+        mesh, evaluated = _mesh_for_export(
+            source_object,
+            depsgraph,
+            preserve_all_data_layers=True,
         )
         try:
             mesh.calc_loop_triangles()
@@ -900,45 +1044,239 @@ def _export_visual_geometry(
                     f"visual mesh {source_object.name!r} requires UVMap and "
                     "Lightmap UV layers"
                 )
-            normal_matrix = source_object.matrix_world.to_3x3().inverted().transposed()
-            for triangle in mesh.loop_triangles:
-                polygon = mesh.polygons[triangle.polygon_index]
-                if polygon.material_index >= len(mesh.materials):
-                    raise ValueError(
-                        f"mesh {source_object.name!r} has an invalid material slot"
+            loop_count = len(mesh.loops)
+            if len(uv0.data) != loop_count or len(uv1.data) != loop_count:
+                raise ValueError(
+                    f"visual mesh {source_object.name!r} has malformed UV "
+                    "layer data"
+                )
+
+            if numpy is not None:
+                triangle_count = len(mesh.loop_triangles)
+                corner_count = triangle_count * 3
+                triangle_loops = numpy.empty(
+                    corner_count, dtype=numpy.int32
+                )
+                triangle_polygons = numpy.empty(
+                    triangle_count, dtype=numpy.int32
+                )
+                mesh.loop_triangles.foreach_get(
+                    "loops", triangle_loops
+                )
+                mesh.loop_triangles.foreach_get(
+                    "polygon_index", triangle_polygons
+                )
+
+                loop_vertices = numpy.empty(
+                    loop_count, dtype=numpy.int32
+                )
+                loop_normals = numpy.empty(
+                    loop_count * 3, dtype=numpy.float32
+                )
+                mesh.loops.foreach_get(
+                    "vertex_index", loop_vertices
+                )
+                mesh.loops.foreach_get("normal", loop_normals)
+                loop_normals = loop_normals.reshape((-1, 3))
+
+                source_positions = numpy.empty(
+                    len(mesh.vertices) * 3, dtype=numpy.float32
+                )
+                mesh.vertices.foreach_get("co", source_positions)
+                source_positions = source_positions.reshape((-1, 3))
+
+                base_uvs = numpy.empty(
+                    loop_count * 2, dtype=numpy.float32
+                )
+                light_uvs = numpy.empty(
+                    loop_count * 2, dtype=numpy.float32
+                )
+                uv0.data.foreach_get("uv", base_uvs)
+                uv1.data.foreach_get("uv", light_uvs)
+                base_uvs = base_uvs.reshape((-1, 2))
+                light_uvs = light_uvs.reshape((-1, 2))
+
+                polygon_materials = numpy.empty(
+                    len(mesh.polygons), dtype=numpy.int32
+                )
+                mesh.polygons.foreach_get(
+                    "material_index", polygon_materials
+                )
+                if (
+                    polygon_materials.size
+                    and (
+                        int(polygon_materials.min()) < 0
+                        or int(polygon_materials.max())
+                        >= len(mesh.materials)
                     )
-                material = mesh.materials[polygon.material_index]
-                if material is None or material.name not in material_name_ids:
+                ):
                     raise ValueError(
-                        f"mesh {source_object.name!r} has an unexported material"
+                        f"mesh {source_object.name!r} has an invalid "
+                        "material slot"
                     )
-                material_id = material_name_ids[material.name]
-                for loop_index in triangle.loops:
-                    loop = mesh.loops[loop_index]
-                    point = source_object.matrix_world @ mesh.vertices[loop.vertex_index].co
-                    normal = (normal_matrix @ loop.normal).normalized()
-                    base_uv = uv0.data[loop_index].uv
-                    light_uv = uv1.data[loop_index].uv
-                    vertices.append(
-                        (
-                            _to_runtime(point),
-                            _to_runtime(normal),
-                            (float(base_uv.x), float(base_uv.y)),
-                            (float(light_uv.x), float(light_uv.y)),
-                            material_id,
+                mesh_material_ids = numpy.empty(
+                    len(mesh.materials), dtype=numpy.uint32
+                )
+                for material_index, material in enumerate(mesh.materials):
+                    if (
+                        material is None
+                        or material.name not in material_name_ids
+                    ):
+                        raise ValueError(
+                            f"mesh {source_object.name!r} has an "
+                            "unexported material"
                         )
+                    mesh_material_ids[material_index] = (
+                        material_name_ids[material.name]
                     )
-                    indices.append(len(vertices) - 1)
+
+                corner_vertices = loop_vertices[triangle_loops]
+                positions = source_positions[corner_vertices].astype(
+                    numpy.float64
+                )
+                world_matrix = numpy.asarray(
+                    source_object.matrix_world, dtype=numpy.float64
+                )
+                positions = (
+                    positions @ world_matrix[:3, :3].T
+                    + world_matrix[:3, 3]
+                )
+
+                normal_matrix = numpy.asarray(
+                    source_object.matrix_world
+                    .to_3x3()
+                    .inverted()
+                    .transposed(),
+                    dtype=numpy.float64,
+                )
+                normals = (
+                    loop_normals[triangle_loops].astype(numpy.float64)
+                    @ normal_matrix.T
+                )
+                lengths = numpy.linalg.norm(normals, axis=1)
+                nonzero_normals = lengths > 1.0e-12
+                normals[nonzero_normals] /= lengths[
+                    nonzero_normals, None
+                ]
+
+                runtime_positions = positions[:, (0, 2, 1)].copy()
+                runtime_positions[:, 2] *= -1.0
+                runtime_normals = normals[:, (0, 2, 1)].copy()
+                runtime_normals[:, 2] *= -1.0
+                corner_materials = numpy.repeat(
+                    mesh_material_ids[
+                        polygon_materials[triangle_polygons]
+                    ],
+                    3,
+                )
+
+                if not all(
+                    numpy.isfinite(values).all()
+                    for values in (
+                        runtime_positions,
+                        runtime_normals,
+                        base_uvs[triangle_loops],
+                        light_uvs[triangle_loops],
+                    )
+                ):
+                    raise ValueError(
+                        f"visual mesh {source_object.name!r} contains "
+                        "non-finite geometry or UV values"
+                    )
+
+                record_dtype = numpy.dtype(
+                    [
+                        ("position", "<f4", (3,)),
+                        ("normal", "<f4", (3,)),
+                        ("uv0", "<f4", (2,)),
+                        ("uv1", "<f4", (2,)),
+                        ("material", "<u4"),
+                    ],
+                    align=False,
+                )
+                records = numpy.empty(corner_count, dtype=record_dtype)
+                records["position"] = runtime_positions
+                records["normal"] = runtime_normals
+                records["uv0"] = base_uvs[triangle_loops]
+                records["uv1"] = light_uvs[triangle_loops]
+                records["material"] = corner_materials
+                chunks.append(records.tobytes())
+                vertex_count += corner_count
+            else:
+                normal_matrix = (
+                    source_object.matrix_world
+                    .to_3x3()
+                    .inverted()
+                    .transposed()
+                )
+                chunk = bytearray()
+                for triangle in mesh.loop_triangles:
+                    polygon = mesh.polygons[triangle.polygon_index]
+                    if polygon.material_index >= len(mesh.materials):
+                        raise ValueError(
+                            f"mesh {source_object.name!r} has an invalid "
+                            "material slot"
+                        )
+                    material = mesh.materials[polygon.material_index]
+                    if (
+                        material is None
+                        or material.name not in material_name_ids
+                    ):
+                        raise ValueError(
+                            f"mesh {source_object.name!r} has an "
+                            "unexported material"
+                        )
+                    material_id = material_name_ids[material.name]
+                    for loop_index in triangle.loops:
+                        loop = mesh.loops[loop_index]
+                        point = (
+                            source_object.matrix_world
+                            @ mesh.vertices[loop.vertex_index].co
+                        )
+                        normal = (
+                            normal_matrix @ loop.normal
+                        ).normalized()
+                        base_uv = uv0.data[loop_index].uv
+                        light_uv = uv1.data[loop_index].uv
+                        values = (
+                            *_to_runtime(point),
+                            *_to_runtime(normal),
+                            float(base_uv.x),
+                            float(base_uv.y),
+                            float(light_uv.x),
+                            float(light_uv.y),
+                        )
+                        if not all(math.isfinite(value) for value in values):
+                            raise ValueError(
+                                f"visual mesh {source_object.name!r} "
+                                "contains non-finite geometry or UV values"
+                            )
+                        chunk.extend(
+                            packed_vertex.pack(*values, material_id)
+                        )
+                        vertex_count += 1
+                chunks.append(bytes(chunk))
         finally:
-            evaluated.to_mesh_clear()
-    if not vertices:
+            if evaluated is not None:
+                evaluated.to_mesh_clear()
+
+        completed_weight += object_weight
+        _report_progress(
+            progress,
+            completed_weight / total_weight,
+            f"Packing visuals ({object_index}/{len(mesh_objects)}): "
+            f"{source_object.name}",
+        )
+
+    if not vertex_count:
         raise ValueError("OW_VISUAL contains no exportable triangles")
-    return vertices, indices
+    return PackedVisualGeometry(chunks, vertex_count)
 
 
 def audit_collision_geometry(
     collision_objects: list[bpy.types.Object],
     material_name_ids: dict[str, int] | None = None,
+    progress: ProgressCallback | None = None,
 ) -> tuple[list[tuple], CollisionGeometryAudit]:
     depsgraph = bpy.context.evaluated_depsgraph_get()
     triangles: list[tuple] = []
@@ -949,9 +1287,18 @@ def audit_collision_geometry(
     skipped_degenerate = 0
     skipped_duplicates = 0
     surface_id = 1
-    for source_object in collision_objects:
-        if source_object.type != "MESH":
-            continue
+    mesh_objects = [
+        obj for obj in collision_objects if obj.type == "MESH"
+    ]
+    for object_index, source_object in enumerate(
+        mesh_objects, start=1
+    ):
+        _report_progress(
+            progress,
+            (object_index - 1) / max(1, len(mesh_objects)),
+            f"Auditing collision ({object_index}/"
+            f"{len(mesh_objects)}): {source_object.name}",
+        )
         material_name = str(source_object.get("ow_material", ""))
         blender_material = bpy.data.materials.get(material_name)
         if (
@@ -975,8 +1322,7 @@ def audit_collision_geometry(
             if material_name_ids is not None
             else 0
         )
-        evaluated = source_object.evaluated_get(depsgraph)
-        mesh = evaluated.to_mesh()
+        mesh, evaluated = _mesh_for_export(source_object, depsgraph)
         object_degenerate = 0
         object_duplicates = 0
         object_non_finite = 0
@@ -1052,7 +1398,8 @@ def audit_collision_geometry(
                     )
                 )
         finally:
-            evaluated.to_mesh_clear()
+            if evaluated is not None:
+                evaluated.to_mesh_clear()
         if object_degenerate:
             warnings.append(
                 f"{source_object.name}: skipped {object_degenerate} "
@@ -1087,16 +1434,18 @@ def audit_collision_geometry(
         skipped_degenerate=skipped_degenerate,
         skipped_duplicates=skipped_duplicates,
     )
+    _report_progress(progress, 1.0, "Collision audit complete")
     return triangles, audit
 
 
 def _export_collision(
     collision_objects: list[bpy.types.Object],
     material_name_ids: dict[str, int],
+    progress: ProgressCallback | None = None,
 ) -> tuple[list[tuple], CollisionGeometryAudit]:
     global LAST_COLLISION_AUDIT
     triangles, audit = audit_collision_geometry(
-        collision_objects, material_name_ids
+        collision_objects, material_name_ids, progress
     )
     LAST_COLLISION_AUDIT = audit
     if audit.issues:
@@ -1257,9 +1606,10 @@ def _export_hinged_doors(
     depsgraph = bpy.context.evaluated_depsgraph_get()
     result: list[ExportHingedDoor] = []
     for source_object in _door_objects(visual_objects):
-        evaluated = source_object.evaluated_get(depsgraph)
-        mesh = evaluated.to_mesh(
-            preserve_all_data_layers=True, depsgraph=depsgraph
+        mesh, evaluated = _mesh_for_export(
+            source_object,
+            depsgraph,
+            preserve_all_data_layers=True,
         )
         try:
             mesh.calc_loop_triangles()
@@ -1457,7 +1807,8 @@ def _export_hinged_doors(
                 )
             )
         finally:
-            evaluated.to_mesh_clear()
+            if evaluated is not None:
+                evaluated.to_mesh_clear()
     return result
 
 
@@ -1467,10 +1818,12 @@ def export_scene(
     force_rebuild: bool = False,
     metadata_only: bool = False,
     adopt_existing_cache: bool = False,
+    progress: ProgressCallback | None = None,
 ) -> Path:
     started = time.perf_counter()
     output = Path(output_path).resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
+    _report_progress(progress, 0.0, "Preparing export")
 
     if metadata_only:
         manifest = _load_cache_manifest(output)
@@ -1488,15 +1841,21 @@ def export_scene(
             f"seconds={time.perf_counter() - started:.3f}",
             flush=True,
         )
+        _report_progress(progress, 1.0, "Metadata export complete")
         return output
 
     visual_objects = [
         obj
         for obj in _collection(VISUAL_COLLECTION).all_objects
         if bool(obj.get("ow_export_visual", True))
+        and not _is_helper_object(obj)
     ]
     static_visual_objects = _static_visual_objects(visual_objects)
-    collision_objects = list(_collection(COLLISION_COLLECTION).all_objects)
+    collision_objects = [
+        obj
+        for obj in _collection(COLLISION_COLLECTION).all_objects
+        if not _is_helper_object(obj)
+    ]
     grind_collection = bpy.data.collections.get(GRIND_COLLECTION)
     grind_objects = (
         list(grind_collection.all_objects)
@@ -1548,9 +1907,17 @@ def export_scene(
     # cannot conceal newly-invalid source geometry. Harmless zero-area and
     # duplicate triangles are omitted from the package without modifying the
     # Blender mesh (or its visual UVs).
+    _report_progress(progress, 0.05, "Auditing collision geometry")
     collision, _collision_audit = _export_collision(
-        collision_objects, material_name_ids
+        collision_objects,
+        material_name_ids,
+        progress=lambda fraction, stage: _report_progress(
+            progress,
+            0.05 + fraction * 0.20,
+            stage,
+        ),
     )
+    _report_progress(progress, 0.25, "Collision geometry ready")
 
     fingerprint: SceneContentFingerprint | None = None
     manifest = _load_cache_manifest(output)
@@ -1567,6 +1934,11 @@ def export_scene(
             materials,
             images,
             len(collision),
+            progress=lambda fraction, stage: _report_progress(
+                progress,
+                0.25 + fraction * 0.05,
+                stage,
+            ),
         )
         package_name, _, package_counts = _read_package_header(output)
         expected_name, _ = _scene_metadata(output)
@@ -1596,6 +1968,7 @@ def export_scene(
             f"seconds={time.perf_counter() - started:.3f}",
             flush=True,
         )
+        _report_progress(progress, 1.0, "Cache adoption complete")
         return output
 
     if not force_rebuild and manifest is not None:
@@ -1607,6 +1980,11 @@ def export_scene(
             materials,
             images,
             len(collision),
+            progress=lambda fraction, stage: _report_progress(
+                progress,
+                0.25 + fraction * 0.05,
+                stage,
+            ),
         )
         if (
             fingerprint.digest == manifest.get("content_sha256")
@@ -1621,15 +1999,23 @@ def export_scene(
                 f"seconds={time.perf_counter() - started:.3f}",
                 flush=True,
             )
+            _report_progress(progress, 1.0, "Fast export complete")
             return output
         print(
             "SKATE cache: content changed; rebuilding package",
             flush=True,
         )
 
-    vertices, indices = _export_visual_geometry(
-        static_visual_objects, material_name_ids
+    geometry = _export_visual_geometry(
+        static_visual_objects,
+        material_name_ids,
+        progress=lambda fraction, stage: _report_progress(
+            progress,
+            0.30 + fraction * 0.40,
+            stage,
+        ),
     )
+    _report_progress(progress, 0.71, "Packing map metadata")
     rails = _export_grinds(grind_objects)
     npc_routes = _export_npc_routes(npc_path_objects)
     doors = _export_hinged_doors(visual_objects, material_name_ids)
@@ -1696,8 +2082,8 @@ def export_scene(
         for count in (
             len(export_materials),
             len(images),
-            len(vertices),
-            len(indices),
+            geometry.vertex_count,
+            geometry.index_count,
             len(collision),
             len(rails),
             len(doors),
@@ -1748,7 +2134,7 @@ def export_scene(
             str(material.get("ow_lightmap_image", ""))
             for material in materials
         }
-        for image in images:
+        for image_index, image in enumerate(images, start=1):
             rgba8 = _image_rgba8(
                 image, lightmap=image.name in lightmap_names
             )
@@ -1762,21 +2148,64 @@ def export_scene(
             _write_u32(stream, 0)
             _write_u32(stream, len(rgba8))
             stream.write(rgba8)
+            _report_progress(
+                progress,
+                0.72
+                + 0.06 * image_index / max(1, len(images)),
+                f"Packing textures ({image_index}/{len(images)}): "
+                f"{image.name}",
+            )
 
-        for position, normal, uv0, uv1, material_id in vertices:
-            _write_vec(stream, position)
-            _write_vec(stream, normal)
-            _write_vec(stream, uv0)
-            _write_vec(stream, uv1)
-            _write_u32(stream, material_id)
-        for index in indices:
-            _write_u32(stream, index)
-        for a, b, c, surface_id, material_id in collision:
-            _write_vec(stream, a)
-            _write_vec(stream, b)
-            _write_vec(stream, c)
-            _write_u32(stream, surface_id)
-            _write_u32(stream, material_id)
+        for chunk_index, chunk in enumerate(geometry.chunks, start=1):
+            stream.write(chunk)
+            _report_progress(
+                progress,
+                0.78
+                + 0.08
+                * chunk_index
+                / max(1, len(geometry.chunks)),
+                f"Writing visuals ({chunk_index}/"
+                f"{len(geometry.chunks)})",
+            )
+        _write_sequential_indices(
+            stream,
+            geometry.index_count,
+            progress=lambda fraction, stage: _report_progress(
+                progress,
+                0.86 + fraction * 0.03,
+                stage,
+            ),
+        )
+        packed_collision = struct.Struct("<9fII")
+        collision_buffer = bytearray()
+        collision_flush_size = 16_384
+        for collision_index, (
+            a,
+            b,
+            c,
+            surface_id,
+            material_id,
+        ) in enumerate(collision, start=1):
+            collision_buffer.extend(
+                packed_collision.pack(
+                    *a, *b, *c, surface_id, material_id
+                )
+            )
+            if (
+                collision_index % collision_flush_size == 0
+                or collision_index == len(collision)
+            ):
+                stream.write(collision_buffer)
+                collision_buffer.clear()
+                _report_progress(
+                    progress,
+                    0.89
+                    + 0.05
+                    * collision_index
+                    / max(1, len(collision)),
+                    f"Writing collision ({collision_index}/"
+                    f"{len(collision)})",
+                )
         for name, closed, points in rails:
             _write_string(stream, name)
             _write_u32(stream, 1 if closed else 0)
@@ -1852,7 +2281,7 @@ def export_scene(
         output,
         f"materials={len(export_materials)}",
         f"textures={len(images)}",
-        f"triangles={len(indices) // 3}",
+        f"triangles={geometry.index_count // 3}",
         f"collision={len(collision)}",
         f"rails={len(rails)}",
         f"doors={len(doors)}",
@@ -1870,6 +2299,11 @@ def export_scene(
             materials,
             images,
             len(collision),
+            progress=lambda fraction, stage: _report_progress(
+                progress,
+                0.94 + fraction * 0.05,
+                stage,
+            ),
         )
     _write_cache_manifest(
         output, fingerprint, len(export_materials), len(images)
@@ -1879,6 +2313,7 @@ def export_scene(
         _cache_manifest_path(output),
         flush=True,
     )
+    _report_progress(progress, 1.0, "Export complete")
     return output
 
 

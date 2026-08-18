@@ -40,8 +40,11 @@ zip; users remain in control of installing it into Blender.
 
 The Blender addon is designed to be used without Python or command-line
 knowledge. After installing it, open **3D View → Sidebar → Skate 3 Map**,
-select **Prepare Scene**, assign your visual/collision/grind objects, place
-the spawn, validate, and export.
+place the spawn, and export. Ordinary Blender meshes, Principled materials and
+textures, real Blender lights, UV channels, and sensible static collision are
+prepared automatically. Visual/collision overrides, grind splines, doors,
+contact materials, and experimental NPC routes remain available for authors
+who need explicit control.
 
 The repository includes only our original Blender Feature Park demonstration
 and its self-contained Blender source under [`maps`](maps). No Skate 3 retail

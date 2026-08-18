@@ -1,7 +1,29 @@
 # Changelog
 
-## Unreleased
+## 0.1.0-preview.3 - 2026-08-18
 
+- Blender addon 1.7.4 refreshes stale automatically imported materials
+  from their live Principled shader graphs, fixing ordinary Blender maps that
+  previously exported with zero textures after an incomplete first import.
+  Editing a material through the addon UI transfers ownership to the author,
+  so deliberate material overrides remain protected.
+- The SKATE package loader now validates embedded texture bytes against the
+  declared dimensions instead of applying the generic element-count ceiling
+  to raw bytes. This restores the format's documented 4K/8K texture support
+  while retaining dimension, payload-size, and package-size safety checks.
+
+- Blender add-on 1.7.3 excludes imported player-size and scale-reference
+  helpers at validation and package-writing boundaries, including scenes
+  previously prepared by an older add-on.
+- Blender add-on 1.7.2 reloads its exporter implementation after an
+  in-process extension update, preventing a new panel from calling an older
+  cached `export_scene` signature.
+- Added one-click export for ordinary Blender scenes. Untagged visible meshes,
+  Principled textures/material values, UV channels, genuine Blender lights,
+  common collider naming conventions, and sensible static collision are now
+  adopted automatically while preserving existing authored overrides.
+- Kept player spawn, grind paths, doors, and experimental NPC routes as
+  deliberate authoring choices instead of unreliable geometry guesses.
 - Made Blender NPC routes and grind collections genuinely optional during
   export instead of failing when their collections are absent.
 - Added full-map collision validation, grouped object-level diagnostics, and
@@ -21,6 +43,15 @@
   as **Update Required** instead of attempting to load them.
 - Documented backward-compatible old-map loading and safe rejection of maps
   created by newer, unsupported exporters.
+- Fixed one-click export of some imported Blender 5.1 meshes where Blender
+  created a requested UV layer but returned `None` from its Python API.
+- Replaced per-corner Python visual serialization with byte-identical bulk
+  NumPy packing, chunked index generation, and buffered collision writes.
+- Added live 0-100% Blender progress with named collision, visual, texture,
+  write, and cache-hash stages.
+- Hash clean packed-image source bytes directly for the incremental cache
+  instead of expanding them to float RGBA, and make automatic fallback
+  material selection deterministic across Blender launches.
 
 ## 0.1.0-preview.2 - 2026-08-18
 

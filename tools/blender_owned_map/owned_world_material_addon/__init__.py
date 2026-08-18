@@ -7,8 +7,10 @@ invoke, redistribute, or depend on ArenaBuilder.
 from __future__ import annotations
 
 import bpy
+import importlib
 import math
 from pathlib import Path
+import re
 import traceback
 from bpy.app.handlers import persistent
 from bpy.props import (
@@ -23,13 +25,18 @@ from bpy.props import (
 from bpy.types import Material, Object, Operator, Panel, PropertyGroup, Scene
 from bpy_extras.io_utils import ExportHelper
 
-from . import exporter
+from . import exporter as _exporter
+
+# Blender may replace an installed extension while keeping its Python package
+# alive. Reload the implementation module so a newly installed panel cannot
+# call an older cached exporter with an incompatible function signature.
+exporter = importlib.reload(_exporter)
 
 
 bl_info = {
     "name": "Owned World Authoring",
     "author": "Skate 3 Custom Engine Layer contributors",
-    "version": (1, 6, 1),
+    "version": (1, 7, 4),
     "blender": (5, 0, 0),
     "location": "3D View > Sidebar > Skate 3 Map",
     "description": "Create, validate, and export Skate 3 Custom Engine maps",
@@ -160,6 +167,11 @@ def _sync(settings: "OwnedWorldMaterialSettings") -> None:
     material = settings.id_data
     if not isinstance(material, Material):
         return
+    # Once an author changes any value in the material panel, preserve that
+    # choice on future automatic scene preparation. Materials carrying the
+    # True marker are still owned by the importer and may be refreshed from
+    # their Blender shader graph to heal stale/partial imports.
+    material["ow_auto_imported"] = False
     material["ow_audio_surface"] = int(settings.audio_surface)
     material["ow_physics_surface"] = int(settings.physics_surface)
     material["ow_surface_pattern"] = int(settings.surface_pattern)
@@ -807,6 +819,520 @@ def _selected_of_type(context, object_type: str) -> list[bpy.types.Object]:
     ]
 
 
+_AUTO_COLLIDER_MARKERS = (
+    "collider",
+    "collision",
+    "ucx_",
+    "ubx_",
+    "usp_",
+    "ucp_",
+    "col - no pres",
+)
+_AUTO_NON_COLLISION_MARKERS = (
+    "billboard",
+    "decal",
+    "foliage",
+    "leaf",
+    "leaves",
+    "fern",
+    "bush",
+    "grass blade",
+    "meadow_grass",
+    "ivy",
+    "vine",
+    "wall stain",
+    "moss stain",
+    "skyline",
+    "backdrop",
+    "palm",
+    "tree",
+    "bark",
+    "plant",
+    "roots_system",
+    "roots system",
+    "shadow blocker",
+    "shadowblocked",
+    "reflection probe",
+)
+_AUTO_CUTOUT_MARKERS = (
+    "billboard",
+    "foliage",
+    "leaf",
+    "leaves",
+    "fern",
+    "bush",
+    "grass",
+    "ivy",
+    "vine",
+    "chainlink",
+    "chain link",
+    "fence",
+    "grate",
+)
+_AUTO_BLEND_MARKERS = ("glass", "window", "water")
+_AUTO_HELPER_OBJECT_MARKERS = (
+    "character_size",
+    "character size",
+    "player_size",
+    "player size",
+    "scale_reference",
+    "scale reference",
+)
+
+
+def _object_semantics(obj: bpy.types.Object) -> str:
+    names = [obj.name, getattr(obj.data, "name", "")]
+    current = obj.parent
+    while current is not None:
+        names.append(current.name)
+        current = current.parent
+    names.extend(
+        slot.material.name
+        for slot in obj.material_slots
+        if slot.material is not None
+    )
+    return " ".join(names).lower()
+
+
+def _is_auto_helper_object(obj: bpy.types.Object) -> bool:
+    object_identity = (
+        f"{obj.name} {getattr(obj.data, 'name', '')}".lower()
+    )
+    return any(
+        marker in object_identity
+        for marker in _AUTO_HELPER_OBJECT_MARKERS
+    )
+
+
+def _is_explicit_collider(obj: bpy.types.Object) -> bool:
+    semantics = _object_semantics(obj)
+    return any(marker in semantics for marker in _AUTO_COLLIDER_MARKERS)
+
+
+def _auto_visual_candidate(obj: bpy.types.Object) -> bool:
+    name = obj.name.lower()
+    lod_match = re.search(r"(^|[_. -])lod([1-9])($|[_. -])", name)
+    has_lod0_sibling = bool(
+        lod_match
+        and obj.parent is not None
+        and any(
+            child.type == "MESH"
+            and re.search(
+                r"(^|[_. -])lod0($|[_. -])", child.name.lower()
+            )
+            for child in obj.parent.children
+        )
+    )
+    return (
+        obj.type == "MESH"
+        and len(obj.data.polygons) > 0
+        and not obj.hide_render
+        and bool(obj.get("ow_export_visual", True))
+        and not _is_explicit_collider(obj)
+        and not _is_auto_helper_object(obj)
+        and not has_lod0_sibling
+        and not any(
+            marker in _object_semantics(obj)
+            for marker in ("shadow blocker", "shadowblocked")
+        )
+    )
+
+
+def _auto_collision_candidate(obj: bpy.types.Object) -> bool:
+    if obj.type != "MESH" or len(obj.data.polygons) == 0:
+        return False
+    if _is_explicit_collider(obj):
+        return True
+    semantics = _object_semantics(obj)
+    return (
+        _auto_visual_candidate(obj)
+        and not any(
+            marker in semantics for marker in _AUTO_NON_COLLISION_MARKERS
+        )
+    )
+
+
+def _node_images_upstream(socket) -> list[bpy.types.Image]:
+    images: list[bpy.types.Image] = []
+    pending = [link.from_node for link in socket.links]
+    visited: set[int] = set()
+    while pending:
+        node = pending.pop(0)
+        identity = node.as_pointer()
+        if identity in visited:
+            continue
+        visited.add(identity)
+        if node.type == "TEX_IMAGE" and node.image is not None:
+            images.append(node.image)
+            continue
+        for input_socket in node.inputs:
+            pending.extend(link.from_node for link in input_socket.links)
+    return images
+
+
+def _principled_node(
+    material: bpy.types.Material,
+) -> bpy.types.Node | None:
+    tree = material.node_tree
+    if tree is None:
+        return None
+    return next(
+        (node for node in tree.nodes if node.type == "BSDF_PRINCIPLED"),
+        None,
+    )
+
+
+def _socket_image(
+    node: bpy.types.Node | None, socket_name: str
+) -> bpy.types.Image | None:
+    if node is None:
+        return None
+    socket = node.inputs.get(socket_name)
+    if socket is None:
+        return None
+    images = _node_images_upstream(socket)
+    return images[0] if images else None
+
+
+def _socket_float(
+    node: bpy.types.Node | None, socket_name: str, fallback: float
+) -> float:
+    if node is None:
+        return fallback
+    socket = node.inputs.get(socket_name)
+    return float(socket.default_value) if socket is not None else fallback
+
+
+def _socket_color(
+    node: bpy.types.Node | None,
+    socket_name: str,
+    fallback: tuple[float, float, float],
+) -> tuple[float, float, float]:
+    if node is None:
+        return fallback
+    socket = node.inputs.get(socket_name)
+    if socket is None:
+        return fallback
+    return tuple(float(value) for value in socket.default_value[:3])
+
+
+def _named_image(
+    material: bpy.types.Material, markers: tuple[str, ...]
+) -> bpy.types.Image | None:
+    if material.node_tree is None:
+        return None
+    for node in material.node_tree.nodes:
+        if node.type != "TEX_IMAGE" or node.image is None:
+            continue
+        identity = f"{node.name} {node.label} {node.image.name}".lower()
+        if any(marker in identity for marker in markers):
+            return node.image
+    return None
+
+
+def _infer_contact_preset(material: bpy.types.Material) -> str:
+    name = material.name.lower()
+    rules = (
+        (("water",), "WATER"),
+        (("glass", "window"), "GLASS"),
+        (("ice",), "ICE"),
+        (("grass", "dirt", "soil", "mud"), "GRASS"),
+        (("stair", "step"), "STAIRS"),
+        (("wood", "plywood", "timber"), "WOOD"),
+        (("rail", "coping", "pipe", "metal"), "METAL_RAIL"),
+        (("asphalt", "road", "tarmac"), "ASPHALT"),
+        (("tile", "marble", "slate"), "TILE"),
+        (("concrete", "cement", "brick", "stone"), "CONCRETE"),
+    )
+    for markers, preset in rules:
+        if any(marker in name for marker in markers):
+            return preset
+    return "CONCRETE"
+
+
+def _auto_configure_material(material: bpy.types.Material) -> bool:
+    global _SYNCING
+    authored_keys = (
+        "ow_albedo_image",
+        "ow_normal_image",
+        "ow_orm_image",
+        "ow_emissive_image",
+        "ow_audio_surface",
+        "ow_physics_surface",
+    )
+    if (
+        any(key in material for key in authored_keys)
+        and not bool(material.get("ow_auto_imported", False))
+    ):
+        return False
+
+    shader = _principled_node(material)
+    base_image = _socket_image(shader, "Base Color")
+    normal_image = _socket_image(shader, "Normal")
+    emissive_image = _socket_image(shader, "Emission Color")
+    orm_image = _named_image(material, ("orm", "rma", "arm"))
+    lightmap_image = _named_image(
+        material, ("lightmap", "light map", "baked light")
+    )
+    display_color = _socket_color(
+        shader, "Base Color", tuple(material.diffuse_color[:3])
+    )
+    roughness = max(
+        0.0, min(1.0, _socket_float(shader, "Roughness", 0.78))
+    )
+    metallic = max(
+        0.0, min(1.0, _socket_float(shader, "Metallic", 0.0))
+    )
+    emissive = max(
+        0.0, _socket_float(shader, "Emission Strength", 0.0)
+    )
+
+    alpha_socket = shader.inputs.get("Alpha") if shader is not None else None
+    alpha_linked = bool(alpha_socket and alpha_socket.links)
+    alpha_value = (
+        float(alpha_socket.default_value) if alpha_socket is not None else 1.0
+    )
+    name = material.name.lower()
+    if any(marker in name for marker in _AUTO_BLEND_MARKERS):
+        alpha_mode = 2
+    elif alpha_linked or alpha_value < 0.999 or any(
+        marker in name for marker in _AUTO_CUTOUT_MARKERS
+    ):
+        alpha_mode = 1
+    else:
+        alpha_mode = 0
+
+    preset = _infer_contact_preset(material)
+    audio, physics, pattern, _preset_roughness, _metallic, _alpha = PRESETS[
+        preset
+    ]
+    material["ow_albedo_image"] = base_image.name if base_image else ""
+    material["ow_lightmap_image"] = (
+        lightmap_image.name if lightmap_image else ""
+    )
+    material["ow_normal_image"] = normal_image.name if normal_image else ""
+    material["ow_orm_image"] = orm_image.name if orm_image else ""
+    material["ow_emissive_image"] = (
+        emissive_image.name if emissive_image else ""
+    )
+    material["ow_display_color"] = display_color
+    material["ow_flags"] = 1
+    material["ow_audio_surface"] = audio
+    material["ow_physics_surface"] = physics
+    material["ow_surface_pattern"] = pattern
+    material["ow_alpha_mode"] = alpha_mode
+    material["ow_alpha_cutoff"] = 0.5
+    material["ow_roughness"] = roughness
+    material["ow_metallic"] = metallic
+    material["ow_friction"] = 0.82
+    material["ow_restitution"] = 0.0
+    material["ow_emissive"] = emissive
+    material["ow_baked_strength"] = 1.0 if lightmap_image else 0.0
+    material["ow_collision_enabled"] = not any(
+        marker in name for marker in _AUTO_NON_COLLISION_MARKERS
+    )
+    material["ow_auto_imported"] = True
+    was_syncing = _SYNCING
+    _SYNCING = True
+    try:
+        _hydrate_material(material)
+    finally:
+        _SYNCING = was_syncing
+    return True
+
+
+def _new_uv_layer(
+    mesh: bpy.types.Mesh, name: str
+) -> bpy.types.MeshUVLoopLayer:
+    # Blender 5.1 can successfully add a UV layer while returning None from
+    # MeshUVLoopLayers.new() for some imported meshes. Resolve the created
+    # layer from the collection instead of trusting that return value.
+    mesh.uv_layers.new(name=name)
+    layer = mesh.uv_layers.get(name)
+    if layer is None:
+        raise RuntimeError(
+            f"{mesh.name}: Blender could not create the {name!r} UV layer"
+        )
+    return layer
+
+
+def _ensure_auto_uv_layers(mesh: bpy.types.Mesh) -> tuple[int, bool]:
+    created = 0
+    source = mesh.uv_layers.get("UVMap") or mesh.uv_layers.active
+    missing_source = source is None
+    if source is None:
+        source = _new_uv_layer(mesh, "UVMap")
+        created += 1
+    elif source.name != "UVMap" and mesh.uv_layers.get("UVMap") is None:
+        uv_map = _new_uv_layer(mesh, "UVMap")
+        for destination, original in zip(
+            uv_map.data, source.data, strict=False
+        ):
+            destination.uv = original.uv
+        source = uv_map
+        created += 1
+    else:
+        source = mesh.uv_layers.get("UVMap") or source
+
+    if mesh.uv_layers.get("Lightmap") is None:
+        if len(mesh.uv_layers) >= 8:
+            lightmap = mesh.uv_layers[-1]
+            if lightmap != source:
+                lightmap.name = "Lightmap"
+        else:
+            lightmap = _new_uv_layer(mesh, "Lightmap")
+            for destination, original in zip(
+                lightmap.data, source.data, strict=False
+            ):
+                destination.uv = original.uv
+            created += 1
+    return created, missing_source
+
+
+def _default_material() -> bpy.types.Material:
+    material = bpy.data.materials.get("SKATE_Auto_Concrete")
+    if material is None:
+        material = bpy.data.materials.new("SKATE_Auto_Concrete")
+        material.diffuse_color = (0.45, 0.45, 0.47, 1.0)
+        _auto_configure_material(material)
+    return material
+
+
+def _first_collision_material(
+    obj: bpy.types.Object,
+    used_materials: set[str],
+    fallback: bpy.types.Material,
+) -> bpy.types.Material:
+    for slot in obj.material_slots:
+        material = slot.material
+        if (
+            material is not None
+            and material.name in used_materials
+            and bool(material.get("ow_collision_enabled", True))
+        ):
+            return material
+    return fallback
+
+
+def _auto_prepare_scene(
+    context, *, include_existing_roles: bool = False
+) -> tuple[str, list[str]]:
+    global _SYNCING
+    scene = context.scene
+    visual_collection = _ensure_collection(
+        scene, exporter.VISUAL_COLLECTION
+    )
+    collision_collection = _ensure_collection(
+        scene, exporter.COLLISION_COLLECTION
+    )
+    _ensure_collection(scene, exporter.GRIND_COLLECTION)
+    _ensure_collection(scene, exporter.NPC_PATH_COLLECTION)
+
+    scene_meshes = [
+        obj for obj in scene.objects if obj.type == "MESH"
+    ]
+    visual_empty = not any(
+        obj.type == "MESH" for obj in visual_collection.all_objects
+    )
+    collision_empty = not any(
+        obj.type == "MESH" for obj in collision_collection.all_objects
+    )
+    configure_visuals = include_existing_roles or visual_empty
+    configure_collision = include_existing_roles or collision_empty
+
+    visual_candidates = [
+        obj for obj in scene_meshes if _auto_visual_candidate(obj)
+    ]
+    if configure_visuals:
+        for obj in visual_candidates:
+            _link_object(visual_collection, obj)
+            obj["ow_export_visual"] = True
+
+    active_visuals = [
+        obj
+        for obj in visual_collection.all_objects
+        if obj.type == "MESH" and bool(obj.get("ow_export_visual", True))
+    ]
+    default_material = _default_material()
+    configured_materials = 0
+    created_uv_layers = 0
+    missing_source_uvs: list[str] = []
+    visited_meshes: set[int] = set()
+    used_materials: set[str] = set()
+    for obj in active_visuals:
+        if not obj.data.materials:
+            obj.data.materials.append(default_material)
+        mesh_identity = obj.data.as_pointer()
+        if mesh_identity not in visited_meshes:
+            created, missing_source = _ensure_auto_uv_layers(obj.data)
+            created_uv_layers += created
+            if missing_source:
+                missing_source_uvs.append(obj.name)
+            visited_meshes.add(mesh_identity)
+        for slot in obj.material_slots:
+            material = slot.material
+            if material is None:
+                continue
+            used_materials.add(material.name)
+            configured_materials += int(_auto_configure_material(material))
+
+    fallback = next(
+        (
+            bpy.data.materials.get(name)
+            for name in sorted(used_materials)
+            if bpy.data.materials.get(name) is not None
+            and bool(
+                bpy.data.materials[name].get(
+                    "ow_collision_enabled", True
+                )
+            )
+        ),
+        default_material,
+    )
+    if configure_collision:
+        for obj in scene_meshes:
+            if not _auto_collision_candidate(obj):
+                continue
+            _link_object(collision_collection, obj)
+            material = _first_collision_material(
+                obj, used_materials, fallback
+            )
+            obj["ow_material"] = material.name
+            obj["ow_upward_surface"] = False
+            was_syncing = _SYNCING
+            _SYNCING = True
+            try:
+                _hydrate_physics(obj)
+            finally:
+                _SYNCING = was_syncing
+
+    if scene.owned_world.map_name == "My Skate Map" and bpy.data.filepath:
+        scene.owned_world.map_name = Path(bpy.data.filepath).stem
+    if (
+        scene.owned_world.output_path == "//my_skate_map.skate"
+        and bpy.data.filepath
+    ):
+        scene.owned_world.output_path = str(
+            Path(bpy.data.filepath).with_suffix(".skate")
+        )
+
+    warnings: list[str] = []
+    if missing_source_uvs:
+        warnings.append(
+            f"{len(missing_source_uvs)} mesh(es) had no source UVs; "
+            "their generated UVMap is empty until unwrapped."
+        )
+    stats = (
+        f"Auto-prepared {len(active_visuals)} visual object(s), "
+        f"{len(collision_collection.all_objects)} collision object(s), "
+        f"{configured_materials} Blender material(s), "
+        f"{created_uv_layers} UV layer(s), and "
+        f"{len(exporter._visible_local_light_objects())} real Blender "
+        "local light(s)."
+    )
+    return stats, warnings
+
+
 def _validate_scene(
     context,
     *,
@@ -833,6 +1359,7 @@ def _validate_scene(
             for obj in visual_collection.all_objects
             if obj.type == "MESH"
             and bool(obj.get("ow_export_visual", True))
+            and not _is_auto_helper_object(obj)
         ]
         if visual_collection is not None
         else []
@@ -842,6 +1369,7 @@ def _validate_scene(
             obj
             for obj in collision_collection.all_objects
             if obj.type == "MESH"
+            and not _is_auto_helper_object(obj)
         ]
         if collision_collection is not None
         else []
@@ -1005,6 +1533,7 @@ def _resolved_output(settings: OwnedWorldSceneSettings) -> Path:
 
 def _run_export(context, output: Path) -> set[str]:
     settings = context.scene.owned_world
+    _auto_stats, auto_warnings = _auto_prepare_scene(context)
     _sync_scene(settings)
     # The exporter performs the authoritative geometry audit once. Keeping
     # this preflight structural-only avoids evaluating huge collision meshes
@@ -1012,16 +1541,62 @@ def _run_export(context, output: Path) -> set[str]:
     issues, warnings, stats = _validate_scene(
         context, inspect_geometry=False
     )
+    warnings = [*auto_warnings, *warnings]
     _store_validation(settings, issues, warnings, stats)
     if issues:
         raise ValueError(
             "Map validation failed. Open the Skate 3 Map panel for details."
         )
-    result = exporter.export_scene(
-        output,
-        force_rebuild=settings.export_mode == "FORCE",
-        metadata_only=settings.export_mode == "METADATA",
-    )
+    window_manager = context.window_manager
+    last_percent = -1
+    window_manager.progress_begin(0, 100)
+
+    def update_progress(fraction: float, stage: str) -> None:
+        nonlocal last_percent
+        percent = max(0, min(100, int(round(fraction * 100.0))))
+        settings.last_status = f"Exporting {percent}% — {stage}"
+        window_manager.progress_update(percent)
+        workspace = getattr(context, "workspace", None)
+        if workspace is not None:
+            try:
+                workspace.status_text_set(
+                    text=f"SKATE export: {percent}% — {stage}"
+                )
+            except (AttributeError, RuntimeError):
+                pass
+        if percent == last_percent:
+            return
+        last_percent = percent
+        print(
+            f"SKATE progress: {percent}% — {stage}",
+            flush=True,
+        )
+        if bpy.app.background:
+            return
+        screen = getattr(context, "screen", None)
+        if screen is not None:
+            for area in screen.areas:
+                area.tag_redraw()
+        try:
+            bpy.ops.wm.redraw_timer(type="DRAW_WIN_SWAP", iterations=1)
+        except RuntimeError:
+            pass
+
+    try:
+        result = exporter.export_scene(
+            output,
+            force_rebuild=settings.export_mode == "FORCE",
+            metadata_only=settings.export_mode == "METADATA",
+            progress=update_progress,
+        )
+    finally:
+        window_manager.progress_end()
+        workspace = getattr(context, "workspace", None)
+        if workspace is not None:
+            try:
+                workspace.status_text_set(text=None)
+            except (AttributeError, RuntimeError):
+                pass
     settings.output_path = str(result)
     settings.last_status = f"Exported successfully: {result.name}"
     collision_audit = exporter.LAST_COLLISION_AUDIT
@@ -1078,6 +1653,34 @@ class SKATE_OT_prepare_scene(Operator):
         )
         self.report({"INFO"}, "Owned World scene structure is ready")
         return {"FINISHED"}
+
+
+class SKATE_OT_auto_prepare_scene(Operator):
+    bl_idname = "skate_map.auto_prepare_scene"
+    bl_label = "Auto Prepare Blender Map"
+    bl_description = (
+        "Automatically adopt visible Blender meshes, shader textures, "
+        "ordinary Blender lights, UV layers, and sensible static collision"
+    )
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        try:
+            stats, warnings = _auto_prepare_scene(
+                context, include_existing_roles=True
+            )
+            settings = context.scene.owned_world
+            settings.last_status = stats
+            settings.validation_details = "\n".join(
+                f"WARNING: {warning}" for warning in warnings
+            )
+            self.report({"INFO"}, stats)
+            return {"FINISHED"}
+        except Exception as error:
+            traceback.print_exc()
+            _store_export_failure(context.scene.owned_world, error)
+            self.report({"ERROR"}, str(error))
+            return {"CANCELLED"}
 
 
 class SKATE_OT_assign_selected(Operator):
@@ -1181,7 +1784,7 @@ class SKATE_OT_create_uv_layers(Operator):
             source = layers.active
             uv_map = layers.get("UVMap")
             if uv_map is None:
-                uv_map = layers.new(name="UVMap")
+                uv_map = _new_uv_layer(obj.data, "UVMap")
                 created += 1
                 if source is not None and source != uv_map:
                     for destination, original in zip(
@@ -1192,7 +1795,7 @@ class SKATE_OT_create_uv_layers(Operator):
                     empty_created += 1
             lightmap = layers.get("Lightmap")
             if lightmap is None:
-                lightmap = layers.new(name="Lightmap")
+                lightmap = _new_uv_layer(obj.data, "Lightmap")
                 created += 1
                 for destination, original in zip(
                     lightmap.data, uv_map.data, strict=False
@@ -1237,8 +1840,10 @@ class SKATE_OT_validate(Operator):
 
     def execute(self, context):
         settings = context.scene.owned_world
+        _auto_stats, auto_warnings = _auto_prepare_scene(context)
         _sync_scene(settings)
         issues, warnings, stats = _validate_scene(context)
+        warnings = [*auto_warnings, *warnings]
         _store_validation(settings, issues, warnings, stats)
         if issues:
             self.report(
@@ -1472,11 +2077,19 @@ def _draw_map_panel(layout, context) -> None:
 
     intro = layout.box()
     intro.label(text="Skate 3 Custom Engine Map", icon="WORLD")
-    intro.label(text="Set up, validate, and export without scripts.")
-    intro.operator("skate_map.prepare_scene", icon="TOOL_SETTINGS")
+    intro.label(text="Open a Blender map, set spawn, then export.")
+    intro.operator(
+        "skate_map.auto_prepare_scene",
+        text="Auto Prepare Blender Map",
+        icon="IMPORT",
+    )
+    intro.label(
+        text="Export also auto-prepares an untouched scene.",
+        icon="INFO",
+    )
 
     authoring = layout.box()
-    authoring.label(text="Selected Objects", icon="OBJECT_DATA")
+    authoring.label(text="Optional Overrides", icon="OBJECT_DATA")
     row = authoring.row(align=True)
     visual = row.operator(
         "skate_map.assign_selected", text="Visual", icon="MESH_CUBE"
@@ -1497,6 +2110,11 @@ def _draw_map_panel(layout, context) -> None:
     )
     npc_path.role = "NPC_PATH"
     authoring.operator("skate_map.create_uv_layers", icon="GROUP_UVS")
+    authoring.operator(
+        "skate_map.prepare_scene",
+        text="Create Empty Authoring Structure",
+        icon="TOOL_SETTINGS",
+    )
     authoring.label(
         text="Material and door controls are in Properties.",
         icon="INFO",
@@ -1787,6 +2405,7 @@ CLASSES = (
     OwnedWorldNpcPathSettings,
     OwnedWorldSceneSettings,
     SKATE_OT_prepare_scene,
+    SKATE_OT_auto_prepare_scene,
     SKATE_OT_assign_selected,
     SKATE_OT_create_uv_layers,
     SKATE_OT_set_spawn,
