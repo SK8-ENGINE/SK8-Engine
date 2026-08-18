@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -400,6 +401,18 @@ MapDefinition LoadOwnedMapPackage(const std::filesystem::path& path) {
   const bool version_6 = magic == kMagicV6;
   const bool version_7 = magic == kMagicV7;
   const bool version_8 = magic == kMagicV8;
+  const bool skate_magic =
+      std::memcmp(magic.data(), "SKATE", 5) == 0 &&
+      std::isdigit(static_cast<unsigned char>(magic[5])) &&
+      std::isdigit(static_cast<unsigned char>(magic[6])) &&
+      magic[7] == '\0';
+  const int package_version =
+      skate_magic ? (magic[5] - '0') * 10 + (magic[6] - '0') : 0;
+  if (skate_magic && package_version > 8) {
+    throw std::runtime_error(
+        "SKATE v" + std::to_string(package_version) +
+        " requires a newer Custom Engine Layer release");
+  }
   if ((!version_1 && !version_2 && !version_3 && !version_4 &&
        !version_5 && !version_6 && !version_7 && !version_8) ||
       reader.Scalar<std::uint32_t>() != kEndianMarker) {

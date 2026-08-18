@@ -21,6 +21,12 @@ gameplay, the Custom Engine Layer activates automatically, loads the selected
 map from the Maps folder, installs its native collision and grind data, and
 removes the retail world's static collision.
 
+Windows release builds can update themselves from **Settings → System →
+Update Custom Engine Layer**. The verified release is installed after the
+game closes, while retail game data, saves, settings, and user maps are left
+in place. The downloaded release also refreshes the standalone Blender addon
+zip; users remain in control of installing it into Blender.
+
 ## Documentation
 
 | Topic | Documentation |

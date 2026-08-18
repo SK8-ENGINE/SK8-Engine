@@ -8,12 +8,14 @@
 #include "skate3_mechanics_sandbox_map.h"
 #include "skate3_native_render.h"
 #include "skate3_native_scene.h"
+#include "skate3_release_updater.h"
 #include "skate3_scoring.h"
 #include "skate3_screenshot.h"
 #include "skate3_shader_disasm.h"
 #include "skate3_win_icon.h"
 #include "skate3_title_update_installer.h"
 #include "skate3_user_settings.h"
+#include "skate3_version.h"
 
 #include <algorithm>
 #include <array>
@@ -233,14 +235,27 @@ bool SameMapFile(const std::filesystem::path& left,
   return AbsoluteMapPath(left) == AbsoluteMapPath(right);
 }
 
-std::string ReadSkateDisplayName(const std::filesystem::path& path) {
+struct SkatePackageHeader {
+  bool valid = false;
+  bool supported = false;
+  int version = 0;
+  std::string display_name;
+  std::string issue;
+};
+
+SkatePackageHeader InspectSkatePackage(const std::filesystem::path& path) {
+  SkatePackageHeader result;
   std::ifstream stream(path, std::ios::binary);
   std::array<char, 12> header{};
   stream.read(header.data(), static_cast<std::streamsize>(header.size()));
-  if (!stream || std::memcmp(header.data(), "SKATE0", 6) != 0 ||
-      header[6] < '1' || header[6] > '7' || header[7] != '\0') {
-    return {};
+  if (!stream || std::memcmp(header.data(), "SKATE", 5) != 0 ||
+      !std::isdigit(static_cast<unsigned char>(header[5])) ||
+      !std::isdigit(static_cast<unsigned char>(header[6])) ||
+      header[7] != '\0') {
+    result.issue = "This file is not a valid SKATE map package.";
+    return result;
   }
+  result.version = (header[5] - '0') * 10 + (header[6] - '0');
   const std::uint32_t endian =
       static_cast<std::uint8_t>(header[8]) |
       (static_cast<std::uint32_t>(
@@ -253,13 +268,27 @@ std::string ReadSkateDisplayName(const std::filesystem::path& path) {
            static_cast<std::uint8_t>(header[11]))
        << 24);
   if (endian != 0x12345678u) {
-    return {};
+    result.issue = "This SKATE package uses an unsupported byte order.";
+    return result;
+  }
+  result.valid = true;
+  result.supported = result.version >= 1 && result.version <= 8;
+  if (!result.supported) {
+    result.issue =
+        result.version > 8
+            ? "This map uses SKATE v" + std::to_string(result.version) +
+                  ". Update the Custom Engine Layer before loading it."
+            : "This map uses an unsupported legacy SKATE format.";
+    return result;
   }
   std::array<std::uint8_t, 4> size_bytes{};
   stream.read(reinterpret_cast<char*>(size_bytes.data()),
               static_cast<std::streamsize>(size_bytes.size()));
   if (!stream) {
-    return {};
+    result.valid = false;
+    result.supported = false;
+    result.issue = "This SKATE package has a truncated header.";
+    return result;
   }
   const std::uint32_t size =
       size_bytes[0] |
@@ -267,19 +296,34 @@ std::string ReadSkateDisplayName(const std::filesystem::path& path) {
       (static_cast<std::uint32_t>(size_bytes[2]) << 16) |
       (static_cast<std::uint32_t>(size_bytes[3]) << 24);
   if (size == 0 || size > 64u * 1024u) {
-    return {};
+    result.valid = false;
+    result.supported = false;
+    result.issue = "This SKATE package has an invalid map name.";
+    return result;
   }
   std::string name(size, '\0');
   stream.read(name.data(), static_cast<std::streamsize>(name.size()));
   if (!stream) {
-    return {};
+    result.valid = false;
+    result.supported = false;
+    result.issue = "This SKATE package has a truncated map name.";
+    return result;
   }
   name.erase(std::remove_if(name.begin(), name.end(),
                             [](unsigned char value) {
                               return value < 0x20 && value != '\t';
                             }),
              name.end());
-  return name;
+  result.display_name = std::move(name);
+  return result;
+}
+
+std::string ReadSkateDisplayName(const std::filesystem::path& path) {
+  return InspectSkatePackage(path).display_name;
+}
+
+bool IsSupportedSkatePackage(const std::filesystem::path& path) {
+  return InspectSkatePackage(path).supported;
 }
 
 std::filesystem::path EnvironmentMapPath() {
@@ -317,6 +361,7 @@ void ConfigureMapsFolder(const std::filesystem::path& maps_path) {
   std::getline(selected_file, selected_path);
   const auto package_path = AbsoluteMapPath(selected_path);
   if (!package_path.empty() && IsSkatePackage(package_path) &&
+      IsSupportedSkatePackage(package_path) &&
       std::filesystem::is_regular_file(package_path, ec) && !ec) {
     SetEnvironmentMapPath(package_path);
     REXLOG_INFO("Restored selected custom map '{}'", package_path.string());
@@ -338,7 +383,9 @@ void ConfigureMapsFolder(const std::filesystem::path& maps_path) {
       ec.clear();
       continue;
     }
-    installed_maps.push_back(AbsoluteMapPath(it->path()));
+    if (IsSupportedSkatePackage(it->path())) {
+      installed_maps.push_back(AbsoluteMapPath(it->path()));
+    }
   }
   std::sort(installed_maps.begin(), installed_maps.end(),
             [](const auto& left, const auto& right) {
@@ -415,10 +462,13 @@ rex::ui::SimpleMapState DiscoverCustomMaps(
     }
     rex::ui::SimpleMapInfo map;
     map.package_path = AbsoluteMapPath(it->path());
-    map.name = ReadSkateDisplayName(map.package_path);
+    const auto header = InspectSkatePackage(map.package_path);
+    map.name = header.display_name;
     if (map.name.empty()) {
       map.name = rex::path_to_utf8(map.package_path.stem());
     }
+    map.compatible = header.supported;
+    map.compatibility_note = header.issue;
     map.active = SameMapFile(map.package_path, active_path);
     state.maps.push_back(std::move(map));
   }
@@ -1029,6 +1079,28 @@ void Skate3BaseApp::OnPostSetup() {
   skate3::shader_disasm::RunIfRequested();
   ApplySelectedProfileToRuntime();
   ApplyGameplayCursorMode();
+  release_updater_ = std::make_unique<skate3::ReleaseUpdater>(
+      rex::filesystem::GetExecutablePath(), SKATE3_VERSION_STRING,
+      [this]() {
+        app_context().CallInUIThreadDeferred([this]() {
+          if (simple_settings_dialog_) {
+            simple_settings_dialog_->Hide();
+          }
+          if (window()) {
+            window()->RequestClose();
+          } else {
+            app_context().QuitFromUIThread();
+          }
+          // Large custom collision worlds can make guest teardown linger.
+          // The verified update helper is already waiting for this PID, so
+          // bound shutdown exactly as map-switch restarts do.
+          std::thread([]() {
+            std::this_thread::sleep_for(std::chrono::seconds(5));
+            REXLOG_WARN("Update shutdown watchdog exiting the old process");
+            std::_Exit(EXIT_SUCCESS);
+          }).detach();
+        });
+      });
 
   if (auto* input_system = static_cast<rex::input::InputSystem*>(runtime()->input_system())) {
     input_system->SetActiveCallback([this]() {
@@ -1110,6 +1182,7 @@ void Skate3BaseApp::OnShutdown() {
   ApplyGameplayCursorMode();
   skate3::native_scene::SetSettingsMenuBlur(false);
   simple_settings_dialog_.reset();
+  release_updater_.reset();
   native_debug_dialog_.reset();
   render_mode_indicator_.reset();
 }
@@ -1172,6 +1245,12 @@ void Skate3BaseApp::ToggleSimpleSettings() {
                   package_path.string());
       return;
     }
+    const auto header = InspectSkatePackage(package_path);
+    if (!header.supported) {
+      REXLOG_WARN("Refusing to load incompatible custom map '{}': {}",
+                  package_path.string(), header.issue);
+      return;
+    }
     if (!SaveSelectedMap(maps_path_, package_path)) {
       REXLOG_WARN("Could not save selected custom map '{}'",
                   package_path.string());
@@ -1218,6 +1297,26 @@ void Skate3BaseApp::ToggleSimpleSettings() {
       };
   auto reset_world_lighting = []() {
     skate3::mechanics_sandbox::map::ResetWorldLightingSettings();
+  };
+  auto load_update_state = [this]() {
+    rex::ui::SimpleUpdateState result;
+    if (!release_updater_) {
+      result.phase = rex::ui::SimpleUpdatePhase::kUnsupported;
+      result.status = "The release updater is unavailable in this session.";
+      return result;
+    }
+    const auto state = release_updater_->state();
+    result.phase = static_cast<rex::ui::SimpleUpdatePhase>(state.phase);
+    result.current_version = state.current_version;
+    result.latest_version = state.latest_version;
+    result.status = state.status;
+    result.progress = state.progress;
+    return result;
+  };
+  auto start_update = [this]() {
+    if (release_updater_) {
+      release_updater_->Start();
+    }
   };
   // Fires on every Hide (B/Esc, Close Settings, Close Game), the one spot
   // that reliably sees the menu close regardless of who initiated it.
@@ -1274,6 +1373,7 @@ void Skate3BaseApp::ToggleSimpleSettings() {
           std::move(load_world_lighting),
           std::move(update_world_lighting),
           std::move(reset_world_lighting),
+          std::move(load_update_state), std::move(start_update),
           std::move(close_settings), std::move(close_game), std::move(restart_game),
           std::move(poll_gamepad));
   ApplySettingsCursorMode();

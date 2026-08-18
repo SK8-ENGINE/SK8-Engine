@@ -164,6 +164,15 @@ Compress-Archive -LiteralPath $stageRoot -DestinationPath $archivePath `
     -CompressionLevel Optimal
 
 $archiveHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $archivePath).Hash
+$archiveSize = (Get-Item -LiteralPath $archivePath).Length
+$manifestPath = Join-Path $outputRoot 'update-manifest.toml'
+@"
+version = "$Version"
+asset_url = "https://github.com/chasmlol/Skate3CustomEngineLayer/releases/download/v$Version/$archiveBase.zip"
+sha256 = "$($archiveHash.ToLowerInvariant())"
+size = $archiveSize
+"@ | Set-Content -LiteralPath $manifestPath -Encoding ascii
 Write-Host "Release package: $archivePath"
 Write-Host "SHA-256:        $archiveHash"
+Write-Host "Update manifest: $manifestPath"
 Write-Host "Files:          $((Get-ChildItem -LiteralPath $stageRoot -Recurse -File).Count)"

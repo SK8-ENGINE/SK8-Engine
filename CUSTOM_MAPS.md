@@ -46,6 +46,21 @@ NPC route records are an experimental preview. The exporter retains them for
 future testing, but map authors should not currently rely on AI skaters
 remaining on an authored route.
 
+Compatibility is deliberately one-way:
+
+- New Custom Engine Layer releases continue to read older `.skate` versions
+  and supply safe defaults for fields that did not exist yet.
+- An older game release cannot understand features added by a newer exporter.
+  If it finds a future package version, the Maps menu marks it **Update
+  Required** and refuses to restart into it.
+- Updating the bundled Blender addon does not rewrite existing `.blend` or
+  `.skate` files. Install the newer addon manually when you want to export
+  newer format features.
+
+This means old maps are backward compatible with the current engine. New maps
+are not guaranteed to be forward compatible with old engines; they fail
+cleanly rather than being partially interpreted.
+
 Open **Settings > World** while playing to pause or scrub the authored
 day/night clock and tune its speed, range, sun direction, sky RGB colour,
 directional sunlight RGB/strength, and ambient light. These changes are live

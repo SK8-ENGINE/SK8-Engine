@@ -1,0 +1,6 @@
+# Reviewed public release consumed by the in-game updater.
+# Package-Windows-Release.ps1 generates the replacement for each release.
+version = "0.1.0-preview.2"
+asset_url = "https://github.com/chasmlol/Skate3CustomEngineLayer/releases/download/v0.1.0-preview.2/Skate3CustomEngineLayer-0.1.0-preview.2-Windows.zip"
+sha256 = "8359dd934d193b9b33269aa1ed1b233c9bbf86de8e704c0c647020b731994f7d"
+size = 53735935
