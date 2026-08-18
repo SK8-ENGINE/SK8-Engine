@@ -18,6 +18,7 @@
 /saves/
 /cache/
 /logs/
+/.cel-update/
 *.iso
 *.xex
 *.xexp

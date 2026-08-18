@@ -29,7 +29,7 @@ from . import exporter
 bl_info = {
     "name": "Owned World Authoring",
     "author": "Skate 3 Custom Engine Layer contributors",
-    "version": (1, 6, 0),
+    "version": (1, 6, 1),
     "blender": (5, 0, 0),
     "location": "3D View > Sidebar > Skate 3 Map",
     "description": "Create, validate, and export Skate 3 Custom Engine maps",
@@ -809,6 +809,8 @@ def _selected_of_type(context, object_type: str) -> list[bpy.types.Object]:
 
 def _validate_scene(
     context,
+    *,
+    inspect_geometry: bool = True,
 ) -> tuple[list[str], list[str], str]:
     issues: list[str] = []
     warnings: list[str] = []
@@ -918,21 +920,20 @@ def _validate_scene(
                 f"{obj.name}: collision material {material_name!r} is not "
                 "used by OW_VISUAL."
             )
-
-    if grind_collection is None:
-        warnings.append(
-            "OW_GRIND is missing; Prepare Scene creates it for future rails."
+    collision_audit = None
+    if collision_objects and inspect_geometry:
+        _triangles, collision_audit = exporter.audit_collision_geometry(
+            collision_objects
         )
+        issues.extend(collision_audit.issues)
+        warnings.extend(collision_audit.warnings)
+
     for obj in grind_objects:
         if not any(
             len(spline.points) >= 2 or len(spline.bezier_points) >= 2
             for spline in obj.data.splines
         ):
             warnings.append(f"{obj.name}: grind curve has fewer than 2 points.")
-    if npc_path_collection is None:
-        warnings.append(
-            "OW_NPC_PATHS is missing; Prepare Scene creates it for AI routes."
-        )
     for obj in npc_path_objects:
         if not any(
             len(spline.points) >= 2 or len(spline.bezier_points) >= 2
@@ -951,6 +952,11 @@ def _validate_scene(
     elif Path(bpy.path.abspath(raw_output)).suffix.lower() != ".skate":
         warnings.append("The .skate extension will be added automatically.")
 
+    collision_stats = (
+        f", {collision_audit.exported_triangles} usable collision triangle(s)"
+        if collision_audit is not None
+        else ""
+    )
     stats = (
         f"{len(visual_objects)} visual object(s), "
         f"{len(collision_objects)} collision object(s), "
@@ -958,6 +964,7 @@ def _validate_scene(
         f"{len(npc_path_objects)} NPC route(s), "
         f"{len(used_materials)} material(s), "
         f"{len(local_lights)} local light(s)"
+        f"{collision_stats}"
     )
     return issues, warnings, stats
 
@@ -999,7 +1006,12 @@ def _resolved_output(settings: OwnedWorldSceneSettings) -> Path:
 def _run_export(context, output: Path) -> set[str]:
     settings = context.scene.owned_world
     _sync_scene(settings)
-    issues, warnings, stats = _validate_scene(context)
+    # The exporter performs the authoritative geometry audit once. Keeping
+    # this preflight structural-only avoids evaluating huge collision meshes
+    # twice during Quick Export.
+    issues, warnings, stats = _validate_scene(
+        context, inspect_geometry=False
+    )
     _store_validation(settings, issues, warnings, stats)
     if issues:
         raise ValueError(
@@ -1012,17 +1024,36 @@ def _run_export(context, output: Path) -> set[str]:
     )
     settings.output_path = str(result)
     settings.last_status = f"Exported successfully: {result.name}"
+    collision_audit = exporter.LAST_COLLISION_AUDIT
+    if collision_audit is not None:
+        warnings.extend(collision_audit.warnings)
     settings.validation_details = "\n".join(
         f"WARNING: {message}" for message in warnings
     )
     return {"FINISHED"}
 
 
+def _store_export_failure(
+    settings: OwnedWorldSceneSettings,
+    error: Exception,
+) -> None:
+    if isinstance(error, exporter.CollisionGeometryError):
+        _store_validation(
+            settings,
+            error.issues,
+            error.warnings,
+            "collision geometry audit",
+        )
+        return
+    settings.last_status = f"Export failed: {error}"
+    settings.validation_details = f"ERROR: {error}"
+
+
 class SKATE_OT_prepare_scene(Operator):
     bl_idname = "skate_map.prepare_scene"
     bl_label = "Prepare Scene"
     bl_description = (
-        "Create the visual, collision, grind, NPC path, and spawn structure"
+        "Create required map structure plus optional grind and NPC collections"
     )
     bl_options = {"REGISTER", "UNDO"}
 
@@ -1234,7 +1265,7 @@ class SKATE_OT_quick_export(Operator):
             )
         except Exception as error:
             traceback.print_exc()
-            context.scene.owned_world.last_status = f"Export failed: {error}"
+            _store_export_failure(context.scene.owned_world, error)
             self.report({"ERROR"}, str(error))
             return {"CANCELLED"}
 
@@ -1259,7 +1290,7 @@ class SKATE_OT_export_dialog(Operator, ExportHelper):
             return _run_export(context, output)
         except Exception as error:
             traceback.print_exc()
-            context.scene.owned_world.last_status = f"Export failed: {error}"
+            _store_export_failure(context.scene.owned_world, error)
             self.report({"ERROR"}, str(error))
             return {"CANCELLED"}
 

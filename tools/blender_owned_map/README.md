@@ -40,8 +40,8 @@ workspace.
 
 ## First map: UI workflow
 
-1. Select **Prepare Scene**. This creates the visual, collision, grind, and
-   NPC-path collections plus an `OW_SPAWN` marker.
+1. Select **Prepare Scene**. This creates the required visual/collision and
+   spawn structure, plus optional grind and NPC-path collections.
 2. Model or import your map normally.
 3. Select rendered mesh objects and choose **Visual**.
 4. Select collision mesh objects, ensure they have the matching visual
@@ -66,7 +66,8 @@ workspace.
    their colour, power, range, softness, direction, and spot cone export
    automatically. A normal Blender Sun controls the world sunlight.
 10. Choose **Validate Map**. Every blocking problem is shown directly in the
-   panel with the object name and suggested correction.
+   panel with the object name and suggested correction. Collision validation
+   scans the whole map in one pass rather than stopping at the first mesh.
 11. Choose **Quick Export**, or **Export As...** to select another
     destination.
 
@@ -120,8 +121,10 @@ Create these collections:
 - `OW_VISUAL`: mesh objects rendered by the owned renderer.
 - `OW_COLLISION`: mesh objects used only for collision. Each object has an
   `ow_material` custom property naming an exported visual material.
-- `OW_GRIND`: curve objects whose splines become grind centerlines.
-- `OW_NPC_PATHS`: experimental route records for native AI skaters. Object
+- `OW_GRIND` (optional): curve objects whose splines become grind
+  centerlines.
+- `OW_NPC_PATHS` (optional/experimental): route records for native AI
+  skaters. Object
   properties `ow_npc_skater_count`, `ow_npc_speed`, and
   `ow_npc_spawn_spacing` configure each route.
 
@@ -180,9 +183,22 @@ change with object size. `Lightmap` remains a separate non-overlapping atlas.
 Collision is deliberately authored independently from render meshes. Prefer
 continuous rideable surfaces and simple exterior shells; do not stack
 intersecting solid boxes to form stairs or leave bottom faces coplanar with a
-floor. Set `ow_upward_surface=true` on floor/ramp-only proxies. Export fails
-on degenerate triangles, exact/opposite-wound duplicates, or a tagged
-rideable triangle whose normal does not point upward.
+floor. Set `ow_upward_surface=true` on floor/ramp-only proxies.
+
+The exporter safely omits zero-area and exact/opposite-wound duplicate
+collision triangles from the generated `.skate` package and reports every
+affected object together. It does not edit the Blender mesh. Do not dissolve
+or re-UV a visual mesh to satisfy collision cleanup; create a separate,
+simpler collision proxy when imported art is messy. Non-finite coordinates
+and downward/vertical triangles on an object marked **Rideable Top Surface**
+remain blocking errors because they can create invalid contacts, instant
+bails, or inverted ramps.
+
+At runtime, an ordinary map is compiled into one continuous native
+RenderWare collision mesh with its own KD tree. This preserves shared-edge
+adjacency across floors and ramps. Spatial chunking is used only if an
+exceptionally large map exceeds the continuous native format's limits; the
+fallback is recorded in `logs/skate3_*.log`.
 
 ## Rebuild the included Feature Park from the command line
 

@@ -100,6 +100,29 @@ class SceneContentFingerprint:
     local_lights: int
 
 
+@dataclass
+class CollisionGeometryAudit:
+    issues: list[str]
+    warnings: list[str]
+    source_triangles: int
+    exported_triangles: int
+    skipped_degenerate: int
+    skipped_duplicates: int
+
+
+class CollisionGeometryError(ValueError):
+    def __init__(self, issues: list[str], warnings: list[str]) -> None:
+        self.issues = list(issues)
+        self.warnings = list(warnings)
+        summary = "Collision validation failed:\n" + "\n".join(
+            f"- {issue}" for issue in self.issues
+        )
+        super().__init__(summary)
+
+
+LAST_COLLISION_AUDIT: CollisionGeometryAudit | None = None
+
+
 def _write_u32(stream: BinaryIO, value: int) -> None:
     stream.write(struct.pack("<I", value))
 
@@ -271,6 +294,7 @@ def _scene_content_fingerprint(
     npc_path_objects: list[bpy.types.Object],
     materials: list[bpy.types.Material],
     images: list[bpy.types.Image],
+    collision_triangle_count: int,
 ) -> SceneContentFingerprint:
     started = time.perf_counter()
     print(
@@ -327,7 +351,6 @@ def _scene_content_fingerprint(
             visual_vertices += object_vertices
             visual_indices += object_vertices
 
-    collision_triangles = 0
     for obj in collision_objects:
         if obj.type != "MESH":
             continue
@@ -336,10 +359,9 @@ def _scene_content_fingerprint(
             material.get("ow_collision_enabled", True)
         ):
             continue
-        _, object_triangles = _hash_mesh(
+        _hash_mesh(
             digest, obj, visual=False, depsgraph=depsgraph
         )
-        collision_triangles += object_triangles
 
     grind_rails = 0
     for obj in grind_objects:
@@ -407,7 +429,7 @@ def _scene_content_fingerprint(
         digest=digest.hexdigest(),
         visual_vertices=visual_vertices,
         visual_indices=visual_indices,
-        collision_triangles=collision_triangles,
+        collision_triangles=collision_triangle_count,
         grind_rails=grind_rails,
         npc_routes=npc_routes,
         hinged_doors=hinged_doors,
@@ -914,23 +936,23 @@ def _export_visual_geometry(
     return vertices, indices
 
 
-def _export_collision(
+def audit_collision_geometry(
     collision_objects: list[bpy.types.Object],
-    material_name_ids: dict[str, int],
-) -> list[tuple]:
+    material_name_ids: dict[str, int] | None = None,
+) -> tuple[list[tuple], CollisionGeometryAudit]:
     depsgraph = bpy.context.evaluated_depsgraph_get()
     triangles: list[tuple] = []
     triangle_owners: dict[tuple, str] = {}
+    issues: list[str] = []
+    warnings: list[str] = []
+    source_triangle_count = 0
+    skipped_degenerate = 0
+    skipped_duplicates = 0
     surface_id = 1
     for source_object in collision_objects:
         if source_object.type != "MESH":
             continue
         material_name = str(source_object.get("ow_material", ""))
-        if material_name not in material_name_ids:
-            raise ValueError(
-                f"collision object {source_object.name!r} references unknown "
-                f"material {material_name!r}"
-            )
         blender_material = bpy.data.materials.get(material_name)
         if (
             blender_material is not None
@@ -939,65 +961,149 @@ def _export_collision(
             )
         ):
             continue
-        material_id = material_name_ids[material_name]
+        if (
+            material_name_ids is not None
+            and material_name not in material_name_ids
+        ):
+            issues.append(
+                f"{source_object.name}: collision material "
+                f"{material_name!r} is not exported by OW_VISUAL."
+            )
+            continue
+        material_id = (
+            material_name_ids[material_name]
+            if material_name_ids is not None
+            else 0
+        )
         evaluated = source_object.evaluated_get(depsgraph)
         mesh = evaluated.to_mesh()
+        object_degenerate = 0
+        object_duplicates = 0
+        object_non_finite = 0
+        object_wrong_facing = 0
         try:
             mesh.calc_loop_triangles()
             for triangle in mesh.loop_triangles:
-                points = [
+                source_triangle_count += 1
+                blender_points = [
                     source_object.matrix_world @ mesh.vertices[index].co
                     for index in triangle.vertices
                 ]
-                cross = (points[1] - points[0]).cross(
-                    points[2] - points[0]
+                if not all(
+                    math.isfinite(float(component))
+                    for point in blender_points
+                    for component in point
+                ):
+                    object_non_finite += 1
+                    continue
+                try:
+                    points = [
+                        tuple(
+                            struct.unpack(
+                                "<f", struct.pack("<f", component)
+                            )[0]
+                            for component in _to_runtime(point)
+                        )
+                        for point in blender_points
+                    ]
+                except (OverflowError, struct.error):
+                    object_non_finite += 1
+                    continue
+                runtime_cross = (Vector(points[1]) - Vector(points[0])).cross(
+                    Vector(points[2]) - Vector(points[0])
                 )
                 # Keep this exactly aligned with the C++ SKATE loader. Very
                 # small source triangles can survive Blender's mesh cleanup
                 # but collapse after float32 package serialization.
-                if cross.length_squared <= 1.0e-10:
-                    raise ValueError(
-                        f"collision object {source_object.name!r} contains "
-                        "a degenerate triangle"
-                    )
+                if runtime_cross.length_squared <= 1.0e-10:
+                    object_degenerate += 1
+                    skipped_degenerate += 1
+                    continue
                 if (
                     bool(source_object.get("ow_upward_surface", False))
-                    and cross.z <= 1.0e-6
+                    and runtime_cross.y <= 1.0e-6
                 ):
-                    raise ValueError(
-                        f"rideable collision object {source_object.name!r} "
-                        "contains a downward or vertical triangle"
-                    )
+                    object_wrong_facing += 1
+                    continue
                 # Position-only, orientation-independent key catches both
                 # exact duplicates and opposite-wound copies. Those surfaces
                 # create contradictory native contacts and broken adjacency.
                 key = tuple(
                     sorted(
-                        tuple(round(float(component), 6) for component in point)
+                        tuple(
+                            round(float(component), 6)
+                            for component in point
+                        )
                         for point in points
                     )
                 )
                 if key in triangle_owners:
-                    raise ValueError(
-                        f"collision triangle in {source_object.name!r} "
-                        f"duplicates geometry from {triangle_owners[key]!r}"
-                    )
+                    object_duplicates += 1
+                    skipped_duplicates += 1
+                    continue
                 triangle_owners[key] = source_object.name
                 triangles.append(
                     (
-                        _to_runtime(points[0]),
-                        _to_runtime(points[1]),
-                        _to_runtime(points[2]),
+                        points[0],
+                        points[1],
+                        points[2],
                         surface_id,
                         material_id,
                     )
                 )
         finally:
             evaluated.to_mesh_clear()
+        if object_degenerate:
+            warnings.append(
+                f"{source_object.name}: skipped {object_degenerate} "
+                "zero-area collision triangle(s). No mesh dissolve or UV "
+                "changes are required."
+            )
+        if object_duplicates:
+            warnings.append(
+                f"{source_object.name}: skipped {object_duplicates} exact "
+                "or opposite-wound duplicate collision triangle(s)."
+            )
+        if object_non_finite:
+            issues.append(
+                f"{source_object.name}: {object_non_finite} collision "
+                "triangle(s) contain non-finite or float32-out-of-range "
+                "coordinates."
+            )
+        if object_wrong_facing:
+            issues.append(
+                f"{source_object.name}: {object_wrong_facing} triangle(s) "
+                "face downward or vertically, but this object is marked "
+                "Rideable Top Surface."
+            )
         surface_id += 1
     if not triangles:
-        raise ValueError("OW_COLLISION contains no exportable triangles")
-    return triangles
+        issues.append("OW_COLLISION contains no usable collision triangles.")
+    audit = CollisionGeometryAudit(
+        issues=issues,
+        warnings=warnings,
+        source_triangles=source_triangle_count,
+        exported_triangles=len(triangles),
+        skipped_degenerate=skipped_degenerate,
+        skipped_duplicates=skipped_duplicates,
+    )
+    return triangles, audit
+
+
+def _export_collision(
+    collision_objects: list[bpy.types.Object],
+    material_name_ids: dict[str, int],
+) -> tuple[list[tuple], CollisionGeometryAudit]:
+    global LAST_COLLISION_AUDIT
+    triangles, audit = audit_collision_geometry(
+        collision_objects, material_name_ids
+    )
+    LAST_COLLISION_AUDIT = audit
+    if audit.issues:
+        raise CollisionGeometryError(audit.issues, audit.warnings)
+    for warning in audit.warnings:
+        print(f"SKATE collision cleanup: {warning}", flush=True)
+    return triangles, audit
 
 
 def _export_grinds(grind_objects: list[bpy.types.Object]) -> list[tuple]:
@@ -1391,8 +1497,18 @@ def export_scene(
     ]
     static_visual_objects = _static_visual_objects(visual_objects)
     collision_objects = list(_collection(COLLISION_COLLECTION).all_objects)
-    grind_objects = list(_collection(GRIND_COLLECTION).all_objects)
-    npc_path_objects = list(_collection(NPC_PATH_COLLECTION).all_objects)
+    grind_collection = bpy.data.collections.get(GRIND_COLLECTION)
+    grind_objects = (
+        list(grind_collection.all_objects)
+        if grind_collection is not None
+        else []
+    )
+    npc_path_collection = bpy.data.collections.get(NPC_PATH_COLLECTION)
+    npc_path_objects = (
+        list(npc_path_collection.all_objects)
+        if npc_path_collection is not None
+        else []
+    )
     materials = _used_visual_materials(visual_objects)
     images, image_ids = _referenced_images(materials)
     material_ids = {
@@ -1428,6 +1544,14 @@ def export_scene(
             )
         )
 
+    # Collision is audited before cache checks so a previously cached package
+    # cannot conceal newly-invalid source geometry. Harmless zero-area and
+    # duplicate triangles are omitted from the package without modifying the
+    # Blender mesh (or its visual UVs).
+    collision, _collision_audit = _export_collision(
+        collision_objects, material_name_ids
+    )
+
     fingerprint: SceneContentFingerprint | None = None
     manifest = _load_cache_manifest(output)
     if adopt_existing_cache:
@@ -1442,6 +1566,7 @@ def export_scene(
             npc_path_objects,
             materials,
             images,
+            len(collision),
         )
         package_name, _, package_counts = _read_package_header(output)
         expected_name, _ = _scene_metadata(output)
@@ -1481,6 +1606,7 @@ def export_scene(
             npc_path_objects,
             materials,
             images,
+            len(collision),
         )
         if (
             fingerprint.digest == manifest.get("content_sha256")
@@ -1503,9 +1629,6 @@ def export_scene(
 
     vertices, indices = _export_visual_geometry(
         static_visual_objects, material_name_ids
-    )
-    collision = _export_collision(
-        collision_objects, material_name_ids
     )
     rails = _export_grinds(grind_objects)
     npc_routes = _export_npc_routes(npc_path_objects)
@@ -1746,6 +1869,7 @@ def export_scene(
             npc_path_objects,
             materials,
             images,
+            len(collision),
         )
     _write_cache_manifest(
         output, fingerprint, len(export_materials), len(images)

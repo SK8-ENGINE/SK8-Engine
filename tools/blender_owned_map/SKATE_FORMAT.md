@@ -146,3 +146,16 @@ behavior. Missing v6 environment fields use the engine's neutral sky grading
 and standard twilight, night, sun, moon, and ambient defaults. Older packages
 simply contain no authored local lights or NPC routes. NPC routes in v8 are
 experimental runtime data and are not yet a stable gameplay feature.
+
+## Version compatibility
+
+Every incompatible layout change increments the two-digit version in the
+eight-byte magic. The runtime keeps explicit readers for older versions and
+fills newly introduced fields with documented defaults. A runtime that sees
+a package version newer than it supports must reject it with an update
+requirement; it must never guess at the newer byte layout.
+
+Accordingly, newer runtimes are backward compatible with older packages.
+Older runtimes are not forward compatible with newer package features.
+Authors should keep the editable `.blend` source so a map can be re-exported
+with a future addon when required.

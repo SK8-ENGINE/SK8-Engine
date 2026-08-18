@@ -1,13 +1,17 @@
 #include "skate/world/maps.h"
 #include "skate/world/grind_spline.h"
+#include "skate/world/owned_map_package.h"
 #include "skate/world/render_world.h"
 #include "skate/world/rw_collision_mesh.h"
 #include "skate/world/water_simulation.h"
 
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <cmath>
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <limits>
 #include <string_view>
@@ -66,6 +70,33 @@ float ReadBeF32(const std::vector<std::uint8_t>& bytes,
 
 int main() {
   using namespace skate::world;
+
+  {
+    const auto future_package =
+        std::filesystem::temp_directory_path() /
+        "skate_owned_world_future_format_test.skate";
+    const std::array<std::uint8_t, 12> header = {
+        'S', 'K', 'A', 'T', 'E', '0', '9', '\0',
+        0x78, 0x56, 0x34, 0x12};
+    {
+      std::ofstream output(
+          future_package, std::ios::binary | std::ios::trunc);
+      output.write(
+          reinterpret_cast<const char*>(header.data()), header.size());
+    }
+    bool rejected_as_future = false;
+    try {
+      (void)LoadOwnedMapPackage(future_package);
+    } catch (const std::exception& error) {
+      rejected_as_future =
+          std::string_view(error.what()).find("requires a newer") !=
+          std::string_view::npos;
+    }
+    std::error_code ec;
+    std::filesystem::remove(future_package, ec);
+    Require(rejected_as_future,
+            "future SKATE versions must request a newer runtime");
+  }
 
   ShallowWaterConfig water_config;
   water_config.minimum = {-4.0f, -3.0f};

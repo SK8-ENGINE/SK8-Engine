@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased
+
+- Made Blender NPC routes and grind collections genuinely optional during
+  export instead of failing when their collections are absent.
+- Added full-map collision validation, grouped object-level diagnostics, and
+  non-destructive export-time cleanup of harmless zero-area and duplicate
+  collision triangles without changing visual meshes or UVs.
+- Kept wrong-facing rideable surfaces as explicit blockers to catch inverted
+  ramp collision before it can cause instant bails in game.
+- Removed ordinary maps' artificial 128-metre native-collision seams by
+  compiling one continuous RenderWare KD collision mesh whenever format
+  limits permit; spatial chunking is now only an oversized-map fallback.
+- Added a one-button Windows release updater under **Settings > System** with
+  asynchronous progress, GitHub-only downloads, exact size/SHA-256
+  verification, staged installation, and automatic restart.
+- Preserved retail game data, saves, settings, and user maps during updates
+  while refreshing shipped files and the downloadable Blender addon zip.
+- Fixed SKATE v8 names in the map browser and marked future format packages
+  as **Update Required** instead of attempting to load them.
+- Documented backward-compatible old-map loading and safe rejection of maps
+  created by newer, unsupported exporters.
+
 ## 0.1.0-preview.2 - 2026-08-18
 
 - Bundled the original Blender Feature Park `.skate` map so a fresh

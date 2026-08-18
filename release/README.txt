@@ -30,6 +30,18 @@ refresh the list, choose a package, and select Load Selected Map.
 The session restarts automatically to load every map resource cleanly.
 The Maps tab can also open the exact folder in File Explorer.
 
+UPDATES
+-------
+
+Open Settings > System and select Update Custom Engine Layer. The game checks
+the official release channel, downloads and verifies the new archive, closes,
+updates the shipped application files, and restarts. Existing game data,
+saves, settings, and custom maps are preserved.
+
+The latest Blender addon zip is refreshed in "Blender Map Tools", but it is
+not installed into Blender automatically. Install that zip manually whenever
+you want to use newly added authoring features.
+
 BLENDER
 -------
 

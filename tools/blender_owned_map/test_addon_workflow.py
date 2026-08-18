@@ -20,6 +20,21 @@ def require(condition: bool, message: str) -> None:
         raise RuntimeError(message)
 
 
+def collision_object(
+    name: str,
+    vertices: list[tuple[float, float, float]],
+    faces: list[tuple[int, int, int]],
+    material_name: str,
+) -> bpy.types.Object:
+    mesh = bpy.data.meshes.new(f"{name}Mesh")
+    mesh.from_pydata(vertices, [], faces)
+    mesh.update()
+    obj = bpy.data.objects.new(name, mesh)
+    bpy.data.collections[addon.exporter.COLLISION_COLLECTION].objects.link(obj)
+    obj["ow_material"] = material_name
+    return obj
+
+
 def main() -> None:
     addon.register()
     try:
@@ -53,6 +68,59 @@ def main() -> None:
             bpy.ops.skate_map.create_uv_layers() == {"FINISHED"},
             "UV layer helper failed",
         )
+
+        cleanup_proxy = collision_object(
+            "CollisionCleanupRegression",
+            [
+                (30.0, 0.0, 0.0),
+                (31.0, 0.0, 0.0),
+                (30.0, 1.0, 0.0),
+                # A separate vertex set with identical positions verifies
+                # position-based duplicate cleanup.
+                (30.0, 0.0, 0.0),
+                (31.0, 0.0, 0.0),
+                (30.0, 1.0, 0.0),
+                # Collinear source geometry must be skipped without editing
+                # this mesh or any visual UVs.
+                (35.0, 0.0, 0.0),
+                (36.0, 0.0, 0.0),
+                (37.0, 0.0, 0.0),
+            ],
+            [(0, 1, 2), (3, 4, 5), (6, 7, 8)],
+            material.name,
+        )
+
+        downward_a = collision_object(
+            "WrongFacingA",
+            [(40.0, 0.0, 0.0), (40.0, 1.0, 0.0), (41.0, 0.0, 0.0)],
+            [(0, 1, 2)],
+            material.name,
+        )
+        downward_b = collision_object(
+            "WrongFacingB",
+            [(45.0, 0.0, 0.0), (45.0, 1.0, 0.0), (46.0, 0.0, 0.0)],
+            [(0, 1, 2)],
+            material.name,
+        )
+        downward_a["ow_upward_surface"] = True
+        downward_b["ow_upward_surface"] = True
+        _triangles, wrong_facing_audit = (
+            addon.exporter.audit_collision_geometry(
+                [downward_a, downward_b]
+            )
+        )
+        require(
+            sum(
+                "face downward or vertically" in issue
+                for issue in wrong_facing_audit.issues
+            )
+            == 2,
+            "Collision audit did not report every bad mesh in one pass",
+        )
+        for obj in (downward_a, downward_b):
+            mesh = obj.data
+            bpy.data.objects.remove(obj, do_unlink=True)
+            bpy.data.meshes.remove(mesh)
 
         scene = bpy.context.scene
         point_data = bpy.data.lights.new("TestPointData", type="POINT")
@@ -111,9 +179,35 @@ def main() -> None:
         settings.start_hour = 8.0
         settings.end_hour = 18.0
 
+        # AI routes are experimental and optional. Their collection must not
+        # be required for validation or export.
+        npc_collection = bpy.data.collections.get(
+            addon.exporter.NPC_PATH_COLLECTION
+        )
+        require(npc_collection is not None, "Prepare Scene missed NPC paths")
+        bpy.data.collections.remove(npc_collection)
+        grind_collection = bpy.data.collections.get(
+            addon.exporter.GRIND_COLLECTION
+        )
+        require(grind_collection is not None, "Prepare Scene missed grinds")
+        bpy.data.collections.remove(grind_collection)
+
         require(
             bpy.ops.skate_map.validate() == {"FINISHED"},
             settings.validation_details or "Validation failed",
+        )
+        require(
+            "zero-area collision triangle" in settings.validation_details
+            and "duplicate collision triangle" in settings.validation_details,
+            "Validation did not explain automatic collision cleanup",
+        )
+        require(
+            "OW_NPC_PATHS" not in settings.validation_details,
+            "Optional NPC paths were reported as an export problem",
+        )
+        require(
+            "OW_GRIND" not in settings.validation_details,
+            "Optional grind collection was reported as an export problem",
         )
         require(
             bpy.ops.skate_map.quick_export() == {"FINISHED"},
@@ -126,8 +220,14 @@ def main() -> None:
             "Exported package has the wrong magic",
         )
         _, _, counts = addon.exporter._read_package_header(output)
+        collision_triangle_count = counts[4]
         local_light_count = counts[-2]
         npc_route_count = counts[-1]
+        require(
+            collision_triangle_count == 3,
+            "Degenerate or duplicate collision reached the package "
+            f"(got {collision_triangle_count}, expected 3)",
+        )
         require(
             local_light_count == 3,
             "Point, Spot, and Area lights were not exported",
@@ -140,6 +240,20 @@ def main() -> None:
         require(
             settings.last_status.startswith("Exported successfully"),
             "Friendly export result was not retained",
+        )
+        require(
+            "No mesh dissolve or UV changes are required"
+            in settings.validation_details,
+            "Quick Export did not retain collision cleanup guidance",
+        )
+        require(
+            bpy.ops.skate_map.quick_export() == {"FINISHED"},
+            "Incremental export failed after collision sanitation",
+        )
+        _, _, cached_counts = addon.exporter._read_package_header(output)
+        require(
+            cached_counts == counts,
+            "Incremental cache changed sanitized package counts",
         )
         blend_path = output.with_suffix(".blend")
         bpy.ops.wm.save_as_mainfile(filepath=str(blend_path))

@@ -21,6 +21,9 @@ Before publishing a source or binary revision:
 5. Package with the script below and inspect the complete staged file list.
 6. Confirm `NOTICE.md`, `LICENSE-PROJECT.md`, `KNOWN_ISSUES.md`, and checksums
    are present in the archive.
+7. Upload the archive, then copy the generated `out/packages/update-manifest.toml`
+   to `release/update-manifest.toml` on the public default branch. Do not
+   advertise an asset until its uploaded size and SHA-256 match the manifest.
 
 ## Windows binary package
 
@@ -35,6 +38,12 @@ After building the Release target, run:
 The packager rebuilds `owned_world_material_addon.zip` from its reviewed
 source files before staging it, so the release always contains the same
 self-contained GUI/exporter code as the repository.
+
+It also emits `update-manifest.toml` beside the archive. The in-game updater
+reads the reviewed copy under `release/` from the public default branch,
+downloads only GitHub-hosted assets, verifies the exact size and SHA-256, and
+then overlays release-owned files. It preserves `game`, `saves`,
+`settings.toml`, `active_map.txt`, and user-added map files.
 
 For the canonical research workspace's existing build directory:
 
