@@ -39,6 +39,8 @@
 skate3.toml
 skate3_ultrawide_targets*.toml
 CMakeUserPresets.json
+steam_appid.txt
+steam_api64.dll
 
 # Diagnostics and binary build products
 *.log
@@ -63,3 +65,5 @@ CMakeUserPresets.json
 !/scripts/
 /scripts/*
 !/scripts/Package-Windows-Release.ps1
+!/scripts/Launch-Local-Multiplayer.ps1
+!/scripts/Test-LocalMultiplayerLoad.ps1

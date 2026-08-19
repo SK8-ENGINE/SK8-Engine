@@ -123,6 +123,7 @@ const VisualMesh& ActiveHingedDoorVisualMesh(std::size_t index);
 const VisualMesh& ActiveWaterVisualMesh();
 const VisualMesh& ActiveWaterPusherVisualMesh();
 const VisualMesh& ActiveMovingLightVisualMesh();
+const VisualMesh& ActiveRemoteSkaterVisualMesh();
 const VisualMesh& ActiveRainVisualMesh();
 const VisualMesh& ActiveLightningVisualMesh();
 const skate::world::MapDefinition& ActiveDefinition();

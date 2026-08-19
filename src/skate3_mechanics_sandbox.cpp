@@ -3,6 +3,7 @@
 #include "generated/skate3_init.h"
 #include "native/skate3_native_entity.h"
 #include "skate3_mechanics_sandbox_map.h"
+#include "skate3_multiplayer.h"
 #include "skate3_native_collision.h"
 #include "skate3_native_grind.h"
 #include "skate3_native_raytraced_mirror.h"
@@ -1252,6 +1253,7 @@ void AppendTelemetry(std::ostream& out) {
   native_collision::AppendTelemetry(out);
   native_grind::AppendTelemetry(out);
   owned_world_boundary::AppendTelemetry(out);
+  multiplayer::AppendTelemetry(out);
 }
 
 }  // namespace skate3::mechanics_sandbox

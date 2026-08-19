@@ -284,6 +284,9 @@ set(SKATE3_COMMON_SOURCES
     src/skate3_input_lab.cpp
     src/skate3_mechanics_sandbox.cpp
     src/skate3_mechanics_sandbox_map.cpp
+    src/skate3_multiplayer.cpp
+    src/skate3_multiplayer_session.cpp
+    src/skate3_steam_backend.cpp
     src/skate3_owned_world_boundary.cpp
     src/skate3_native_collision.cpp
     src/skate3_native_grind.cpp
@@ -439,7 +442,7 @@ endif()
 
 if(WIN32)
     target_link_libraries(skate3 PRIVATE
-        comdlg32 winhttp d3d12 d3dcompiler dxgi dxguid gdiplus winmm)
+        comdlg32 winhttp d3d12 d3dcompiler dxgi dxguid gdiplus winmm ws2_32)
 endif()
 
 set(SKATE3_REXRUNTIME_TARGET rexruntime)

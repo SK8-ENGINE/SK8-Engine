@@ -42,6 +42,19 @@ The latest Blender addon zip is refreshed in "Blender Map Tools", but it is
 not installed into Blender automatically. Install that zip manually whenever
 you want to use newly added authoring features.
 
+MULTIPLAYER PREVIEW
+-------------------
+
+Open Escape > Multiplayer to host, browse, join, or leave a session.
+Multiplayer is an early visual-replication preview; gameplay authority,
+scoring, remote collisions, host migration, and production security are not
+finished.
+
+Steam internet testing currently requires a private development Steam setup.
+The App 480 development override and Steam runtime are deliberately not
+included in this public archive. See MULTIPLAYER.md for the exact boundary,
+local multi-client fallback, current bandwidth, and known limitations.
+
 BLENDER
 -------
 

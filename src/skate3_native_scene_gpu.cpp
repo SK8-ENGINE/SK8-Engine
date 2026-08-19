@@ -61,8 +61,10 @@
 #include "skate3_native_scene_gpu_internal.h"
 #include "skate3_mechanics_sandbox.h"
 #include "skate3_mechanics_sandbox_map.h"
+#include "skate3_multiplayer.h"
 #include "skate3_native_collision.h"
 #include "skate3_native_raytraced_mirror.h"
+#include "skate3_trick_pipeline.h"
 
 // Cvars defined in skate3_native_scene.cpp (and SDK cvars re-declared there).
 REXCVAR_DECLARE(bool, async_shader_compilation);
@@ -745,6 +747,7 @@ constexpr uint32_t kSandboxWaterPusherMesh = 0xF3000001u;
 constexpr uint32_t kSandboxMovingLightMesh = 0xF4000000u;
 constexpr uint32_t kSandboxRainMesh = 0xF5000000u;
 constexpr uint32_t kSandboxLightningMesh = 0xF5000001u;
+constexpr uint32_t kSandboxRemoteSkaterMesh = 0xF6000000u;
 
 uint32_t SandboxMapMeshKey(std::size_t chunk_index) {
   return kSandboxMapMeshBase + static_cast<uint32_t>(chunk_index);
@@ -869,6 +872,13 @@ bool EnsureSandboxMovingLightMesh(nrhi::Device* device) {
       device, kSandboxMovingLightMesh,
       mechanics_sandbox::map::ActiveMovingLightVisualMesh(),
       "moving light orb");
+}
+
+bool EnsureSandboxRemoteSkaterMesh(nrhi::Device* device) {
+  return EnsureSandboxVisualMesh(
+      device, kSandboxRemoteSkaterMesh,
+      mechanics_sandbox::map::ActiveRemoteSkaterVisualMesh(),
+      "remote skater");
 }
 
 bool EnsureSandboxRainMesh(nrhi::Device* device) {
@@ -9261,7 +9271,11 @@ RaytracedDynamicScene BuildRaytracedLocalPresentation(
 void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
                     nrhi::Cmd* cmd, const FrameScene& scene,
                     uint64_t frame_number, bool use_depth,
-                    bool shadow_ready) {
+                    bool shadow_ready,
+                    std::vector<DrawItem>* multiplayer_remote_items) {
+  if (multiplayer_remote_items != nullptr) {
+    multiplayer_remote_items->clear();
+  }
   if (!mechanics_sandbox::VisualMapEnabled() || cmd == nullptr) {
     return;
   }
@@ -9819,6 +9833,280 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
   cmd->SetTexturePair(5, g_r.white.srv, g_r.white.srv);
   cmd->SetTextures(8, t8_default, 5);
   set_world_translation(origin[0], origin[1], origin[2]);
+
+  // Capture the local player's final rendered skeleton. This is downstream
+  // of Skate 3's animation graph, IK and trick evaluation, so the network
+  // layer replicates the pose the sender actually displayed instead of
+  // trying to reconstruct animation state from gameplay flags.
+  multiplayer::AnimationPose local_animation;
+  std::vector<const DrawItem*> local_player_items;
+  const auto animation_mesh_key = [](const DrawItem& item) {
+    // Guest allocations are deterministic for two clients running the same
+    // profile and map, while the dynamic payload fingerprint can change as
+    // a skinned/cloth buffer is rewritten. The latter is therefore not a
+    // stable cross-frame animation-track identity.
+    return item.mesh;
+  };
+  float local_board_position[3] = {};
+  if (trick_pipeline::CurrentLocalBoardPosition(local_board_position)) {
+    std::memcpy(
+        local_animation.root_position, local_board_position,
+        sizeof(local_animation.root_position));
+    for (const DrawItem& item : scene.items) {
+      if (!item.dyn_entity || item.pending || item.retained ||
+          item.ctx == 0) {
+        continue;
+      }
+      native_entity::CtxInfo identity;
+      if (!native_entity::LookupCtx(item.ctx, &identity)) {
+        continue;
+      }
+      const bool skater_family =
+          identity.cls == native_entity::EntClass::kSkater ||
+          identity.cls == native_entity::EntClass::kColorized ||
+          identity.cls == native_entity::EntClass::kCac ||
+          identity.cls == native_entity::EntClass::kSkaterAux;
+      if (!skater_family) {
+        continue;
+      }
+      float anchor[3] = {
+          item.world[12], item.world[13], item.world[14]};
+      if (item.bones.size() >= 12) {
+        anchor[0] = item.bones[3];
+        anchor[1] = item.bones[7];
+        anchor[2] = item.bones[11];
+      }
+      const float dx = anchor[0] - local_board_position[0];
+      const float dy = anchor[1] - local_board_position[1];
+      const float dz = anchor[2] - local_board_position[2];
+      if (!std::isfinite(dx) || !std::isfinite(dy) ||
+          !std::isfinite(dz) || dx * dx + dy * dy + dz * dz > 16.0f) {
+        continue;
+      }
+      local_player_items.push_back(&item);
+      if (item.skinned && !item.bones.empty() &&
+          item.bones.size() % 12 == 0) {
+        const bool already_captured =
+            std::any_of(
+                local_animation.tracks.begin(),
+                local_animation.tracks.end(),
+                [&item, &animation_mesh_key](
+                    const multiplayer::AnimationTrack& track) {
+                  return track.mesh_key == animation_mesh_key(item);
+                });
+        if (!already_captured) {
+          local_animation.tracks.push_back(
+              {animation_mesh_key(item), item.bones});
+        }
+      }
+    }
+  }
+
+  std::vector<multiplayer::RemotePlayer> remote_players;
+  if (multiplayer::TickLocalVisuals(
+          mechanics_sandbox::map::ActiveMapName(), origin,
+          local_animation.tracks.empty() ? nullptr : &local_animation,
+          remote_players)) {
+  for (const multiplayer::RemotePlayer& remote_player : remote_players) {
+    const multiplayer::RemotePose& remote_pose = remote_player.pose;
+    const multiplayer::AnimationPose& remote_animation =
+        remote_player.animation;
+    const std::size_t remote_item_start =
+        multiplayer_remote_items == nullptr
+            ? 0
+            : multiplayer_remote_items->size();
+    bool replicated_real_skater = false;
+    if (multiplayer_remote_items != nullptr &&
+        !local_player_items.empty() &&
+        !remote_animation.tracks.empty()) {
+      trick_pipeline::LiveSpatialSnapshot local_spatial;
+      if (trick_pipeline::CurrentLiveSpatialSnapshot(local_spatial)) {
+        float local_board[16] = {};
+        float remote_board[16] = {};
+        const auto load_axis =
+            [&local_spatial](std::size_t axis, std::size_t component) {
+              return std::bit_cast<float>(
+                  axis == 0
+                      ? local_spatial.x_axis_bits[component]
+                      : local_spatial.z_axis_bits[component]);
+            };
+        float local_x[3] = {
+            load_axis(0, 0), load_axis(0, 1), load_axis(0, 2)};
+        float local_z[3] = {
+            load_axis(1, 0), load_axis(1, 1), load_axis(1, 2)};
+        float local_y[3] = {
+            local_z[1] * local_x[2] - local_z[2] * local_x[1],
+            local_z[2] * local_x[0] - local_z[0] * local_x[2],
+            local_z[0] * local_x[1] - local_z[1] * local_x[0]};
+        const float local_position[3] = {
+            std::bit_cast<float>(local_spatial.position_bits[0]),
+            std::bit_cast<float>(local_spatial.position_bits[1]),
+            std::bit_cast<float>(local_spatial.position_bits[2])};
+        const float remote_position[3] = {
+            origin[0] + remote_pose.position[0],
+            origin[1] + remote_pose.position[1],
+            origin[2] + remote_pose.position[2]};
+        const float* local_axes[3] = {local_x, local_y, local_z};
+        const float* remote_axes[3] = {
+            remote_pose.x_axis, remote_pose.y_axis,
+            remote_pose.z_axis};
+        for (std::size_t row = 0; row < 3; ++row) {
+          for (std::size_t column = 0; column < 3; ++column) {
+            local_board[row * 4 + column] =
+                local_axes[row][column];
+            remote_board[row * 4 + column] =
+                remote_axes[row][column];
+          }
+        }
+        local_board[12] = local_position[0];
+        local_board[13] = local_position[1];
+        local_board[14] = local_position[2];
+        local_board[15] = 1.0f;
+        remote_board[12] = remote_position[0];
+        remote_board[13] = remote_position[1];
+        remote_board[14] = remote_position[2];
+        remote_board[15] = 1.0f;
+
+        float inverse_local[16] = {};
+        inverse_local[15] = 1.0f;
+        for (std::size_t row = 0; row < 3; ++row) {
+          for (std::size_t column = 0; column < 3; ++column) {
+            inverse_local[row * 4 + column] =
+                local_board[column * 4 + row];
+          }
+        }
+        for (std::size_t column = 0; column < 3; ++column) {
+          inverse_local[12 + column] =
+              -(local_position[0] * inverse_local[column] +
+                local_position[1] * inverse_local[4 + column] +
+                local_position[2] * inverse_local[8 + column]);
+        }
+        const auto multiply4 = [](const float left[16],
+                                  const float right[16],
+                                  float out[16]) {
+          float result[16] = {};
+          for (std::size_t row = 0; row < 4; ++row) {
+            for (std::size_t column = 0; column < 4; ++column) {
+              for (std::size_t inner = 0; inner < 4; ++inner) {
+                result[row * 4 + column] +=
+                    left[row * 4 + inner] *
+                    right[inner * 4 + column];
+              }
+            }
+          }
+          std::memcpy(out, result, sizeof(result));
+        };
+        float local_to_remote[16] = {};
+        multiply4(inverse_local, remote_board, local_to_remote);
+
+        multiplayer_remote_items->reserve(
+            multiplayer_remote_items->size() +
+            local_player_items.size());
+        std::size_t matched_skinned_items = 0;
+        std::size_t skipped_skinned_items = 0;
+        for (const DrawItem* source : local_player_items) {
+          DrawItem clone = *source;
+          clone.selected = false;
+          clone.retained = false;
+          clone.pending = false;
+          clone.lw_alpha = -1.0f;
+          const multiplayer::AnimationTrack* remote_track = nullptr;
+          if (clone.skinned && !clone.bones.empty()) {
+            for (const multiplayer::AnimationTrack& track :
+                 remote_animation.tracks) {
+              if (track.mesh_key == animation_mesh_key(clone) &&
+                  track.bone_rows.size() == clone.bones.size()) {
+                remote_track = &track;
+                break;
+              }
+            }
+          }
+          if (remote_track != nullptr) {
+            std::copy_n(
+                remote_track->bone_rows.begin(),
+                clone.bones.size(), clone.bones.begin());
+            ++matched_skinned_items;
+          } else if (clone.skinned && !clone.bones.empty()) {
+            // Never apply a guessed palette or a partial root transform to a
+            // skinned piece. A missing shoe is diagnosable; a shoe using the
+            // face/torso remap stretches the entire character across space.
+            ++skipped_skinned_items;
+            continue;
+          } else {
+            float transformed[16] = {};
+            multiply4(clone.world, local_to_remote, transformed);
+            std::memcpy(clone.world, transformed, sizeof(clone.world));
+          }
+          multiplayer_remote_items->push_back(std::move(clone));
+        }
+        static std::atomic<std::uint32_t> s_replication_logs{0};
+        const std::uint32_t log_index =
+            s_replication_logs.fetch_add(1, std::memory_order_relaxed);
+        if (log_index < 4) {
+          REXLOG_INFO(
+              "multiplayer: real-skater pieces local={} remote_tracks={} "
+              "matched_skinned={} skipped_skinned={} published={}",
+              local_player_items.size(), remote_animation.tracks.size(),
+              matched_skinned_items, skipped_skinned_items,
+              multiplayer_remote_items->size() - remote_item_start);
+        }
+        replicated_real_skater =
+            multiplayer_remote_items->size() > remote_item_start;
+      }
+    }
+
+    // Keep the simple proxy as a startup/packet-loss fallback. It disappears
+    // as soon as one complete skeletal frame has arrived.
+    if (!replicated_real_skater &&
+        EnsureSandboxRemoteSkaterMesh(context.device)) {
+    const auto remote_mesh = g_r.meshes.find(kSandboxRemoteSkaterMesh);
+    if (remote_mesh != g_r.meshes.end()) {
+      const skate::world::Vec3 remote_x{
+          remote_pose.x_axis[0], remote_pose.x_axis[1],
+          remote_pose.x_axis[2]};
+      const skate::world::Vec3 remote_y{
+          remote_pose.y_axis[0], remote_pose.y_axis[1],
+          remote_pose.y_axis[2]};
+      const skate::world::Vec3 remote_z{
+          remote_pose.z_axis[0], remote_pose.z_axis[1],
+          remote_pose.z_axis[2]};
+      const skate::world::Vec3 remote_position{
+          origin[0] + remote_pose.position[0],
+          origin[1] + remote_pose.position[1],
+          origin[2] + remote_pose.position[2]};
+      set_world_basis(
+          remote_x, remote_y, remote_z, remote_position);
+      constants[39] = -41.25f;
+      remote_mesh->second.last_used_frame = frame_number;
+      cmd->SetVertexBuffer(
+          remote_mesh->second.vb_view.buffer,
+          remote_mesh->second.vb_view.offset,
+          remote_mesh->second.vb_view.size_bytes,
+          remote_mesh->second.vb_view.stride);
+      cmd->SetIndexBuffer(
+          remote_mesh->second.ib_view.buffer,
+          remote_mesh->second.ib_view.offset,
+          remote_mesh->second.ib_view.size_bytes);
+      for (const mechanics_sandbox::map::VisualDraw& draw :
+           mechanics_sandbox::map::ActiveRemoteSkaterVisualMesh().draws) {
+        constants[32] = draw.color[0];
+        constants[33] = draw.color[1];
+        constants[34] = draw.color[2];
+        constants[35] = 0.0f;
+        constants[48] = draw.material[0];
+        constants[49] = draw.material[1];
+        constants[50] = draw.material[2];
+        constants[51] = draw.material[3];
+        cmd->SetRootConstants(0, 52, constants, 0);
+        cmd->DrawIndexed(draw.index_count, draw.first_index, 0);
+        ++draw_calls;
+      }
+      set_world_translation(origin[0], origin[1], origin[2]);
+      constants[39] = -41.0f;
+    }
+    }
+  }
+  }
 
   // The same cached authored poses are consumed later by the DXR dynamic
   // scene. Rendering the emissive source meshes here makes their motion and
@@ -10879,8 +11167,10 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
   // Drawing the park first gives the retained player ordinary occlusion
   // against its floor, ramps, and obstacles.
   DrawSandboxSky(context, cmd, scene, frame_number);
+  std::vector<DrawItem> multiplayer_remote_items;
   DrawSandboxMap(
-      context, cmd, scene, frame_number, use_depth, shadow_ready);
+      context, cmd, scene, frame_number, use_depth, shadow_ready,
+      &multiplayer_remote_items);
   cmd->SetPipeline(use_depth ? g_r.pso : g_r.pso_nodepth);
 
   uint32_t drawn = 0;
@@ -12822,6 +13112,38 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
     }
     opaque_items.emplace_back(view_dist2(item), &item);
     stamp_route(1);
+  }
+  // Remote character clones use the same material routing as their local
+  // source pieces. They intentionally bypass entity-fade and occlusion
+  // bookkeeping: they are presentation replicas, not guest entities.
+  for (const DrawItem& item : multiplayer_remote_items) {
+    if (!SandboxShouldDrawItem(item)) {
+      continue;
+    }
+    const bool char_capture_ok =
+        item.char_rows[14 * 4 + 1] > 0.0f;
+    const bool hair_blend =
+        item.char_family >= 4 && item.char_family <= 5 &&
+        char_capture_ok;
+    const bool glass_blend =
+        item.char_family == 7 && char_capture_ok;
+    const bool cac_alpha_blend =
+        item.char_alpha && char_capture_ok &&
+        item.char_rows[14 * 4 + 2] > 0.0f;
+    const bool refl_trans_blend =
+        item.env_family == 13 && scene.shadow_valid;
+    const bool ocean_opaque =
+        item.water && item.water_ocean == 1 &&
+        scene.shadow_valid && scene.ocean_valid;
+    if ((item.transparent || item.water || hair_blend ||
+         glass_blend || cac_alpha_blend || refl_trans_blend) &&
+        !ocean_opaque && debug_mode == 0) {
+      if (REXCVAR_GET(skate3_native_render_scene_transparents)) {
+        transparent_items.push_back(&item);
+      }
+    } else {
+      opaque_items.emplace_back(view_dist2(item), &item);
+    }
   }
   // Publish the culled-ctx set every rendered frame, including empty ones:
   // the guest filter must clear promptly when the cull stands down. Ctxs
