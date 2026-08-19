@@ -619,6 +619,62 @@ VisualMesh BuildMovingLightVisualMesh() {
   return mesh;
 }
 
+VisualMesh BuildRemoteSkaterVisualMesh() {
+  // This intentionally simple rigid proxy proves the multiplayer transport,
+  // map-space convention, smoothing, and owned renderer integration before
+  // skeletal animation is replicated. Its origin is the board transform.
+  skate::world::MapBuilder builder("remote_skater_visual");
+  const skate::world::MaterialId material = builder.AddMaterial(
+      "remote_player", 0.8f, 0.0f, skate::world::SurfaceFlags::None,
+      {0.08f, 0.78f, 1.0f}, skate::world::MaterialPattern::Painted,
+      0.35f, 0.24f, 0.04f, 0.0f);
+  constexpr skate::world::SurfaceId surface = 1;
+  builder.AddBox(surface, material, {-0.43f, -0.045f, -0.12f},
+                 {0.43f, 0.015f, 0.12f});
+  builder.AddBox(surface, material, {-0.20f, 0.02f, -0.10f},
+                 {-0.05f, 0.62f, 0.10f});
+  builder.AddBox(surface, material, {0.05f, 0.02f, -0.10f},
+                 {0.20f, 0.62f, 0.10f});
+  builder.AddBox(surface, material, {-0.25f, 0.58f, -0.13f},
+                 {0.25f, 1.25f, 0.13f});
+  builder.AddBox(surface, material, {-0.40f, 0.62f, -0.09f},
+                 {-0.24f, 1.18f, 0.09f});
+  builder.AddBox(surface, material, {0.24f, 0.62f, -0.09f},
+                 {0.40f, 1.18f, 0.09f});
+  builder.AddBox(surface, material, {-0.15f, 1.25f, -0.13f},
+                 {0.15f, 1.55f, 0.13f});
+  const skate::world::MapDefinition local =
+      std::move(builder).Build();
+
+  VisualMesh mesh;
+  mesh.vertices.reserve(local.render_mesh.vertices.size());
+  for (const skate::world::RenderVertex& vertex :
+       local.render_mesh.vertices) {
+    mesh.vertices.push_back(ConvertVertex(vertex));
+  }
+  mesh.indices.reserve(local.render_mesh.indices.size());
+  for (std::uint32_t index : local.render_mesh.indices) {
+    if (index > std::numeric_limits<std::uint16_t>::max()) {
+      throw std::runtime_error(
+          "remote skater visual exceeds the 16-bit GPU limit");
+    }
+    mesh.indices.push_back(static_cast<std::uint16_t>(index));
+  }
+  VisualDraw draw;
+  draw.index_count = static_cast<std::uint32_t>(mesh.indices.size());
+  draw.color[0] = 0.08f;
+  draw.color[1] = 0.78f;
+  draw.color[2] = 1.0f;
+  draw.color[3] = 1.0f;
+  draw.material[0] =
+      static_cast<float>(skate::world::MaterialPattern::Painted);
+  draw.material[1] = 0.35f;
+  draw.material[2] = 0.24f;
+  draw.material[3] = 0.04f;
+  mesh.draws.push_back(draw);
+  return mesh;
+}
+
 std::vector<VisualMesh> BuildKinematicVisualMeshes() {
   const skate::world::MapDefinition& definition =
       ActiveWorld().Definition();
@@ -1076,6 +1132,11 @@ const VisualMesh& ActiveWaterPusherVisualMesh() {
 
 const VisualMesh& ActiveMovingLightVisualMesh() {
   static const VisualMesh mesh = BuildMovingLightVisualMesh();
+  return mesh;
+}
+
+const VisualMesh& ActiveRemoteSkaterVisualMesh() {
+  static const VisualMesh mesh = BuildRemoteSkaterVisualMesh();
   return mesh;
 }
 

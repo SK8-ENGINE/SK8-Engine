@@ -79,6 +79,9 @@ Copy-Item -LiteralPath (Join-Path $repoRoot 'release\README.txt') -Destination (
 Copy-Item -LiteralPath (Join-Path $repoRoot 'CUSTOM_MAPS.md') -Destination (
     Join-Path $stageRoot 'CUSTOM_MAPS.md'
 )
+Copy-Item -LiteralPath (Join-Path $repoRoot 'MULTIPLAYER.md') -Destination (
+    Join-Path $stageRoot 'MULTIPLAYER.md'
+)
 foreach ($document in @(
     'LICENSE-PROJECT.md',
     'NOTICE.md',

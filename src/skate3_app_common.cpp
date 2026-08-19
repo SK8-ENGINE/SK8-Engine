@@ -6,6 +6,7 @@
 #include "skate3_input_lab.h"
 #include "skate3_iso_installer.h"
 #include "skate3_mechanics_sandbox_map.h"
+#include "skate3_multiplayer_session.h"
 #include "skate3_native_render.h"
 #include "skate3_native_scene.h"
 #include "skate3_release_updater.h"
@@ -1181,6 +1182,7 @@ void Skate3BaseApp::OnShutdown() {
   rex::ui::UnregisterBind("bind_skate3_native_debug");
   ApplyGameplayCursorMode();
   skate3::native_scene::SetSettingsMenuBlur(false);
+  skate3::multiplayer::ShutdownSessions();
   simple_settings_dialog_.reset();
   release_updater_.reset();
   native_debug_dialog_.reset();
@@ -1233,6 +1235,76 @@ void Skate3BaseApp::ToggleSimpleSettings() {
     skate3::ApplyProfileCvars(profile);
     ApplyDemoPathProfileOverride();
     ApplySelectedProfileToRuntime();
+  };
+  auto active_map_name = [this]() {
+    return DiscoverCustomMaps(maps_path_).active_name;
+  };
+  auto load_multiplayer = [active_map_name](bool refresh) {
+    const auto source =
+        refresh
+            ? skate3::multiplayer::RefreshServerBrowser(active_map_name())
+            : skate3::multiplayer::GetSessionSnapshot(active_map_name());
+    rex::ui::SimpleMultiplayerState result;
+    result.phase =
+        static_cast<rex::ui::SimpleMultiplayerPhase>(source.phase);
+    result.is_host = source.is_host;
+    result.steam_available = source.steam_available;
+    result.backend_name = source.backend_name;
+    result.steam_status = source.steam_status;
+    result.status = source.status;
+    result.session_name = source.session_name;
+    result.host_name = source.host_name;
+    result.map_name = source.map_name;
+    result.players = static_cast<int>(source.players);
+    result.max_players = static_cast<int>(source.max_players);
+    for (const auto& server : source.servers) {
+      rex::ui::SimpleMultiplayerServerInfo entry;
+      entry.id = server.id;
+      entry.name = server.name;
+      entry.host_name = server.host_name;
+      entry.map_name = server.map_name;
+      entry.players = static_cast<int>(server.players);
+      entry.max_players = static_cast<int>(server.max_players);
+      entry.ping_ms = static_cast<int>(server.ping_ms);
+      entry.passworded = server.passworded;
+      entry.compatible = server.compatible;
+      entry.compatibility_note = server.compatibility_note;
+      result.servers.push_back(std::move(entry));
+    }
+    return result;
+  };
+  auto host_multiplayer =
+      [this, active_map_name](
+          const rex::ui::SimpleMultiplayerHostSettings& source) {
+        auto profiles = skate3::LoadProfiles(profiles_path_);
+        skate3::EnsureUsableProfileStore(profiles, "Player");
+        std::string host_name = "Player";
+        for (const auto& profile : profiles.profiles) {
+          if (profile.id == profiles.selected_profile) {
+            host_name = profile.gamertag;
+            break;
+          }
+        }
+        skate3::multiplayer::HostSettings settings;
+        settings.server_name = source.server_name;
+        settings.password = source.password;
+        settings.host_name = std::move(host_name);
+        settings.map_name = active_map_name();
+        settings.max_players =
+            static_cast<std::uint32_t>(std::clamp(source.max_players, 2, 100));
+        settings.privacy =
+            static_cast<skate3::multiplayer::SessionPrivacy>(source.privacy);
+        settings.allow_late_join = source.allow_late_join;
+        skate3::multiplayer::HostSession(settings);
+      };
+  auto join_multiplayer =
+      [active_map_name](const std::string& server_id,
+                        const std::string& password) {
+        skate3::multiplayer::JoinSession(
+            server_id, password, active_map_name());
+      };
+  auto leave_multiplayer = []() {
+    skate3::multiplayer::LeaveSession();
   };
   auto load_maps = [this]() {
     return DiscoverCustomMaps(maps_path_);
@@ -1368,6 +1440,8 @@ void Skate3BaseApp::ToggleSimpleSettings() {
   simple_settings_dialog_ =
       std::make_unique<rex::ui::SimpleSettingsDialog>(
           imgui_drawer(), user_settings_path_, std::move(load_profiles), std::move(save_profile),
+          std::move(load_multiplayer), std::move(host_multiplayer),
+          std::move(join_multiplayer), std::move(leave_multiplayer),
           std::move(load_maps), std::move(activate_map),
           std::move(open_maps_folder),
           std::move(load_world_lighting),

@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.1.0-preview.4 - 2026-08-19
+
+- Added the first multiplayer session flow under **Escape > Multiplayer**,
+  including hosting, worldwide Steam lobby discovery, joining, leaving,
+  privacy, password, late-join, and 2-100 player session settings.
+- Added authenticated Steam Networking Messages transport with lobby-member
+  role assignment, logical-host relay, map/protocol compatibility checks,
+  relevance routing, stale-peer removal, and a localhost UDP fallback for
+  development without Steam.
+- Added exact remote Skate 3 character rendering from the sender's final
+  animation palettes, including the skater, clothing, accessories, board,
+  tricks, IK, and bails.
+- Added timestamped interpolation and authoritative collision-tested root
+  replication so remote skaters no longer walk through a wall while the
+  source player remains blocked.
+- Added distance-based animation routing, a 12-player local high-detail
+  budget, low-rate distant presence updates, and burst-safe packet draining
+  as the first large-lobby optimization pass.
+- Added multiplayer telemetry, repeatable local multi-client launching, and a
+  synthetic 99-peer root-routing load test.
+- Initialize Steam before the input subsystem so Steam Input cannot reorder
+  an already-created controller device when multiplayer starts.
+- Added the multiplayer guide to both the repository and Windows release
+  package.
+
 ## 0.1.0-preview.3 - 2026-08-18
 
 - Blender addon 1.7.4 refreshes stale automatically imported materials
