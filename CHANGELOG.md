@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.1.0-preview.5 - 2026-08-19
+
+- Added zero-configuration Steam multiplayer setup for Windows preview users.
+  On first launch, the game now downloads the pinned Steamworks.NET standalone
+  runtime directly from its GitHub release, verifies both the archive and
+  extracted `steam_api64.dll` with fixed SHA-256 values, and caches it locally.
+- Generate the App 480 development marker locally instead of requiring users
+  to copy `steam_appid.txt` into the installation.
+- Start the Steam client automatically when it is not running and retry Steam
+  initialization while the client starts.
+- Prevent failed setup from spawning a new installer every frame. Setup now
+  makes one bounded attempt and writes a focused `.cel-steam/bootstrap.log`
+  diagnostic on failure.
+- Keep Valve's runtime and the App 480 marker out of the source repository and
+  public release archive; they are acquired or generated on the user's own
+  machine.
+
 ## 0.1.0-preview.4 - 2026-08-19
 
 - Added the first multiplayer session flow under **Escape > Multiplayer**,

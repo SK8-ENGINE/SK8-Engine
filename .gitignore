@@ -19,6 +19,7 @@
 /cache/
 /logs/
 /.cel-update/
+/.cel-steam/
 *.iso
 *.xex
 *.xexp
