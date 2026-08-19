@@ -209,9 +209,13 @@ void ApplySandboxPresentation() {
 
   // These are presentation-only gates. Dynamic captures stay on because the
   // local player/board still need their normal native scene path; the scene
-  // builder applies the ownership filter below.
+  // builder applies the ownership filter below. The game's 2D/APT stream is
+  // independent of the retail 3D world and must remain enabled: it carries
+  // the live vanilla HUD, trick text, notifications, pause UI, and loading
+  // UI that the native renderer composites after the custom world.
   REXCVAR_SET(skate3_native_render_scene, true);
-  REXCVAR_SET(skate3_native_render_scene_2d, false);
+  REXCVAR_SET(skate3_native_render_scene_2d,
+              g_saved_settings.scene_2d);
   REXCVAR_SET(skate3_native_render_scene_splines, false);
   REXCVAR_SET(skate3_native_render_scene_selection_outline, false);
   // Keep world-item capture alive even when the sandbox hides those items at

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.0-preview.6 - 2026-08-19
+
+- Restored Skate 3's live vanilla HUD over the Custom Engine Layer world,
+  including trick text, notifications, pause UI, and loading UI.
+- Keep the game's independent 2D/APT presentation stream enabled while the
+  retail 3D world remains hidden.
+
 ## 0.1.0-preview.5 - 2026-08-19
 
 - Added zero-configuration Steam multiplayer setup for Windows preview users.
