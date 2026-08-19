@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.0-preview.7 - 2026-08-19
+
+- Fixed the immediate startup termination after installing the bundled TU3
+  `default.xexp` by restoring the complete generated TU3 function table.
+- Added a packaging check for all configured TU3 function roots so an
+  incomplete generated executable cannot be released again.
+
 ## 0.1.0-preview.6 - 2026-08-19
 
 - Restored Skate 3's live vanilla HUD over the Custom Engine Layer world,

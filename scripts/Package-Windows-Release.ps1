@@ -47,6 +47,51 @@ foreach ($required in @($executable, $runtime)) {
     }
 }
 
+$tuFunctionsPath = Join-Path $repoRoot 'config\skate3_tu_functions.toml'
+$registerPath = Join-Path $repoRoot 'generated\skate3_register.cpp'
+foreach ($required in @($tuFunctionsPath, $registerPath)) {
+    if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
+        throw "TU3 function coverage input is missing: $required"
+    }
+}
+
+$requiredTuFunctions = [System.Collections.Generic.HashSet[string]]::new(
+    [StringComparer]::OrdinalIgnoreCase
+)
+foreach ($line in Get-Content -LiteralPath $tuFunctionsPath) {
+    if ($line -match '^\s*"(0x[0-9A-Fa-f]{8})"\s*=') {
+        [void]$requiredTuFunctions.Add($matches[1])
+    }
+}
+$registeredFunctions = [System.Collections.Generic.HashSet[string]]::new(
+    [StringComparer]::OrdinalIgnoreCase
+)
+$registerContents = Get-Content -LiteralPath $registerPath -Raw
+foreach ($match in [regex]::Matches(
+        $registerContents,
+        'SetFunction\((0x[0-9A-Fa-f]{8}),'
+    )) {
+    [void]$registeredFunctions.Add($match.Groups[1].Value)
+}
+$missingTuFunctions = @(
+    $requiredTuFunctions |
+        Where-Object { -not $registeredFunctions.Contains($_) } |
+        Sort-Object
+)
+if ($missingTuFunctions.Count -gt 0) {
+    $sample = ($missingTuFunctions | Select-Object -First 20) -join ', '
+    throw @"
+Generated function registration is incomplete for TU3.
+Missing $($missingTuFunctions.Count) of $($requiredTuFunctions.Count) roots.
+First missing roots: $sample
+Refusing to package a build that will terminate after installing default.xexp.
+"@
+}
+Write-Host (
+    "Verified TU3 function coverage: " +
+    "$($requiredTuFunctions.Count)/$($requiredTuFunctions.Count) roots registered."
+)
+
 if (-not (Test-Path -LiteralPath $addonBuildScript -PathType Leaf)) {
     throw "Blender addon build script is missing: $addonBuildScript"
 }
