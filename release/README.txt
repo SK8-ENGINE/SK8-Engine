@@ -51,9 +51,14 @@ scoring, remote collisions, host migration, and production security are not
 finished.
 
 Steam internet testing currently requires a private development Steam setup.
-The App 480 development override and Steam runtime are deliberately not
-included in this public archive. See MULTIPLAYER.md for the exact boundary,
-local multi-client fallback, current bandwidth, and known limitations.
+Keep Steam open and signed in before starting the game. On first launch, the
+game securely downloads and verifies the pinned development runtime and
+generates the local App 480 marker. Spacewar does not open another window;
+Steam tracks skate3.exe as the running App 480 game.
+
+The App 480 marker and Valve runtime are generated or acquired locally rather
+than embedded in this archive. See MULTIPLAYER.md for the exact source,
+verification boundary, local fallback, current bandwidth, and limitations.
 
 BLENDER
 -------

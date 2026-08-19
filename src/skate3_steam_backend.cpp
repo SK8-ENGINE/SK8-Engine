@@ -1,19 +1,22 @@
 #include "skate3_steam_backend.h"
 
+#include <rex/logging.h>
+
 #include <algorithm>
 #include <array>
 #include <charconv>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <mutex>
 #include <optional>
 #include <string_view>
 
-#include <rex/logging.h>
-
 #if defined(_WIN32)
 #define NOMINMAX
 #include <Windows.h>
+#include <shellapi.h>
+#include <tlhelp32.h>
 #endif
 
 namespace skate3::multiplayer::steam {
@@ -35,6 +38,14 @@ constexpr int kLobbyDistanceWorldwide = 3;
 constexpr int kSendUnreliableNoDelayAutoRestart = 1 | 4 | 32;
 constexpr int kNetworkingChannel = 0;
 constexpr std::string_view kGameKey = "skate3-custom-engine-layer";
+constexpr std::string_view kDevelopmentAppId = "480";
+constexpr std::string_view kSteamRuntimeUrl =
+    "https://github.com/rlabrecque/Steamworks.NET/releases/download/"
+    "2025.164.1/Steamworks.NET-Standalone_2025.164.1.zip";
+constexpr std::string_view kSteamRuntimeArchiveSha256 =
+    "9412348cc404563be5a43a28347cfeda3c679ee044a14d87a507ed2d796a537d";
+constexpr std::string_view kSteamRuntimeDllSha256 =
+    "eb17909a76668cf9ae0b92a618a34a50f6c73d3a6787cb4dd8ce36a8b10bfb75";
 
 #pragma pack(push, 8)
 struct CallbackMessage {
@@ -124,8 +135,7 @@ struct Api {
   using ManualRunFrame = void (*)(int);
   using ManualGetNext = bool (*)(int, CallbackMessage*);
   using ManualFreeLast = void (*)(int);
-  using ManualGetResult =
-      bool (*)(int, std::uint64_t, void*, int, int, bool*);
+  using ManualGetResult = bool (*)(int, std::uint64_t, void*, int, int, bool*);
   using GetInterface = void* (*)();
   using UserGetSteamId = std::uint64_t (*)(void*);
   using FriendsGetPersonaName = const char* (*)(void*);
@@ -138,23 +148,18 @@ struct Api {
   using JoinLobby = std::uint64_t (*)(void*, std::uint64_t);
   using LeaveLobby = void (*)(void*, std::uint64_t);
   using GetNumLobbyMembers = int (*)(void*, std::uint64_t);
-  using GetLobbyMemberByIndex =
-      std::uint64_t (*)(void*, std::uint64_t, int);
+  using GetLobbyMemberByIndex = std::uint64_t (*)(void*, std::uint64_t, int);
   using GetLobbyData = const char* (*)(void*, std::uint64_t, const char*);
-  using SetLobbyData =
-      bool (*)(void*, std::uint64_t, const char*, const char*);
+  using SetLobbyData = bool (*)(void*, std::uint64_t, const char*, const char*);
   using SetLobbyJoinable = bool (*)(void*, std::uint64_t, bool);
   using GetLobbyOwner = std::uint64_t (*)(void*, std::uint64_t);
   using IdentitySetSteamId = void (*)(SteamNetworkingIdentity*, std::uint64_t);
-  using IdentityGetSteamId =
-      std::uint64_t (*)(SteamNetworkingIdentity*);
-  using SendNetworkMessage =
-      int (*)(void*, SteamNetworkingIdentity*, const void*, std::uint32_t,
-              int, int);
-  using ReceiveNetworkMessages =
-      int (*)(void*, int, SteamNetworkingMessage**, int);
-  using AcceptNetworkSession =
-      bool (*)(void*, SteamNetworkingIdentity*);
+  using IdentityGetSteamId = std::uint64_t (*)(SteamNetworkingIdentity*);
+  using SendNetworkMessage = int (*)(void*, SteamNetworkingIdentity*,
+                                     const void*, std::uint32_t, int, int);
+  using ReceiveNetworkMessages = int (*)(void*, int, SteamNetworkingMessage**,
+                                         int);
+  using AcceptNetworkSession = bool (*)(void*, SteamNetworkingIdentity*);
   using ReleaseNetworkMessage = void (*)(SteamNetworkingMessage*);
 
   InitFlat init_flat = nullptr;
@@ -213,6 +218,7 @@ struct Runtime {
   std::uint32_t pending_privacy = 0;
   bool pending_allow_late_join = true;
   std::uint64_t pending_password_hash = 0;
+  bool bootstrap_attempted = false;
 };
 
 std::mutex g_mutex;
@@ -221,8 +227,8 @@ Runtime g_runtime;
 std::filesystem::path ExecutableDirectory() {
 #if defined(_WIN32)
   std::array<wchar_t, 32768> path{};
-  const DWORD size = GetModuleFileNameW(
-      nullptr, path.data(), static_cast<DWORD>(path.size()));
+  const DWORD size =
+      GetModuleFileNameW(nullptr, path.data(), static_cast<DWORD>(path.size()));
   if (size > 0 && size < path.size()) {
     return std::filesystem::path(path.data()).parent_path();
   }
@@ -230,23 +236,212 @@ std::filesystem::path ExecutableDirectory() {
   return std::filesystem::current_path();
 }
 
-std::string LobbyData(Runtime& runtime, std::uint64_t lobby,
-                      const char* key) {
+#if defined(_WIN32)
+std::wstring QuoteWindowsArgument(std::wstring_view value) {
+  std::wstring result = L"\"";
+  std::size_t slashes = 0;
+  for (wchar_t c : value) {
+    if (c == L'\\') {
+      ++slashes;
+      continue;
+    }
+    if (c == L'"') {
+      result.append(slashes * 2 + 1, L'\\');
+      result.push_back(L'"');
+      slashes = 0;
+      continue;
+    }
+    result.append(slashes, L'\\');
+    slashes = 0;
+    result.push_back(c);
+  }
+  result.append(slashes * 2, L'\\');
+  result.push_back(L'"');
+  return result;
+}
+
+bool WriteSteamBootstrapScript(const std::filesystem::path& path) {
+  static constexpr std::string_view kScript = R"PS1(
+param(
+  [Parameter(Mandatory=$true)][string]$InstallRoot
+)
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+$url = 'https://github.com/rlabrecque/Steamworks.NET/releases/download/2025.164.1/Steamworks.NET-Standalone_2025.164.1.zip'
+$archiveHash = '9412348cc404563be5a43a28347cfeda3c679ee044a14d87a507ed2d796a537d'
+$dllHash = 'eb17909a76668cf9ae0b92a618a34a50f6c73d3a6787cb4dd8ce36a8b10bfb75'
+$work = Join-Path $InstallRoot '.cel-steam'
+$log = Join-Path $work 'bootstrap.log'
+$archive = Join-Path $work 'Steamworks.NET-Standalone_2025.164.1.zip'
+$extract = Join-Path $work 'Steamworks.NET-Standalone_2025.164.1'
+$cachedDll = Join-Path $extract 'Windows-x64\steam_api64.dll'
+$targetDll = Join-Path $InstallRoot 'steam_api64.dll'
+New-Item -ItemType Directory -Path $work -Force | Out-Null
+function Get-Sha256Hex([string]$Path) {
+  $stream = [System.IO.File]::OpenRead($Path)
+  try {
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+      return [System.BitConverter]::ToString(
+        $sha.ComputeHash($stream)).Replace('-', '').ToLowerInvariant()
+    } finally {
+      $sha.Dispose()
+    }
+  } finally {
+    $stream.Dispose()
+  }
+}
+try {
+  if (-not (Test-Path -LiteralPath $cachedDll -PathType Leaf) -or
+      -not (Get-Sha256Hex $cachedDll).Equals(
+        $dllHash, [System.StringComparison]::OrdinalIgnoreCase)) {
+    if (-not (Test-Path -LiteralPath $archive -PathType Leaf) -or
+        -not (Get-Sha256Hex $archive).Equals(
+          $archiveHash, [System.StringComparison]::OrdinalIgnoreCase)) {
+      [System.Net.ServicePointManager]::SecurityProtocol =
+        [System.Net.SecurityProtocolType]::Tls12
+      $client = New-Object System.Net.WebClient
+      try {
+        $client.DownloadFile($url, $archive)
+      } finally {
+        $client.Dispose()
+      }
+    }
+    if (-not (Get-Sha256Hex $archive).Equals(
+        $archiveHash, [System.StringComparison]::OrdinalIgnoreCase)) {
+      throw 'The downloaded Steam runtime archive failed verification.'
+    }
+    if (Test-Path -LiteralPath $extract) {
+      Remove-Item -LiteralPath $extract -Recurse -Force
+    }
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    [System.IO.Compression.ZipFile]::ExtractToDirectory(
+      $archive, $extract)
+  }
+  if (-not (Test-Path -LiteralPath $cachedDll -PathType Leaf) -or
+      -not (Get-Sha256Hex $cachedDll).Equals(
+        $dllHash, [System.StringComparison]::OrdinalIgnoreCase)) {
+    throw 'The extracted Steam runtime failed verification.'
+  }
+  Copy-Item -LiteralPath $cachedDll -Destination $targetDll -Force
+  'Steam runtime bootstrap completed successfully.' |
+    Set-Content -LiteralPath $log -Encoding utf8
+} catch {
+  $_ | Out-String | Set-Content -LiteralPath $log -Encoding utf8
+  exit 1
+}
+)PS1";
+  std::ofstream output(path, std::ios::binary | std::ios::trunc);
+  if (!output) {
+    return false;
+  }
+  output.write(kScript.data(), static_cast<std::streamsize>(kScript.size()));
+  return static_cast<bool>(output);
+}
+
+bool BootstrapSteamRuntime(const std::filesystem::path& install_root,
+                           std::string& status) {
+  std::error_code ec;
+  const auto work = install_root / ".cel-steam";
+  std::filesystem::create_directories(work, ec);
+  if (ec) {
+    status = "Steam setup could not create its local cache.";
+    return false;
+  }
+  const auto script = work / "bootstrap-steam.ps1";
+  if (!WriteSteamBootstrapScript(script)) {
+    status = "Steam setup could not create its installer.";
+    return false;
+  }
+  const std::wstring command =
+      L"powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass "
+      L"-File " +
+      QuoteWindowsArgument(script.wstring()) + L" -InstallRoot " +
+      QuoteWindowsArgument(install_root.wstring());
+  std::vector<wchar_t> mutable_command(command.begin(), command.end());
+  mutable_command.push_back(L'\0');
+  STARTUPINFOW startup{};
+  startup.cb = sizeof(startup);
+  PROCESS_INFORMATION process{};
+  if (!CreateProcessW(nullptr, mutable_command.data(), nullptr, nullptr, FALSE,
+                      CREATE_NO_WINDOW, nullptr, install_root.c_str(), &startup,
+                      &process)) {
+    status = "Windows could not start the automatic Steam setup.";
+    return false;
+  }
+  CloseHandle(process.hThread);
+  const DWORD wait = WaitForSingleObject(process.hProcess, 120000);
+  DWORD exit_code = 1;
+  if (wait == WAIT_TIMEOUT) {
+    TerminateProcess(process.hProcess, 1);
+    status = "Automatic Steam setup timed out.";
+  } else if (wait != WAIT_OBJECT_0 ||
+             !GetExitCodeProcess(process.hProcess, &exit_code) ||
+             exit_code != 0) {
+    status = "Automatic Steam setup failed (exit " + std::to_string(exit_code) +
+             "). See .cel-steam/bootstrap.log.";
+  }
+  CloseHandle(process.hProcess);
+  if (wait != WAIT_OBJECT_0 || exit_code != 0) {
+    return false;
+  }
+  const auto library = install_root / "steam_api64.dll";
+  if (!std::filesystem::is_regular_file(library)) {
+    status = "Automatic Steam setup finished without the runtime DLL.";
+    return false;
+  }
+  status = "Steam multiplayer runtime installed automatically.";
+  return true;
+}
+
+void EnsureDevelopmentAppId(const std::filesystem::path& install_root) {
+  SetEnvironmentVariableW(L"SteamAppId", L"480");
+  SetEnvironmentVariableW(L"SteamGameId", L"480");
+  const auto marker = install_root / "steam_appid.txt";
+  if (std::filesystem::is_regular_file(marker)) {
+    return;
+  }
+  std::ofstream output(marker, std::ios::binary | std::ios::trunc);
+  if (output) {
+    output << kDevelopmentAppId << '\n';
+  }
+}
+
+bool IsSteamRunning() {
+  const HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+  if (snapshot == INVALID_HANDLE_VALUE) {
+    return false;
+  }
+  PROCESSENTRY32W entry{};
+  entry.dwSize = sizeof(entry);
+  bool running = false;
+  if (Process32FirstW(snapshot, &entry)) {
+    do {
+      if (_wcsicmp(entry.szExeFile, L"steam.exe") == 0) {
+        running = true;
+        break;
+      }
+    } while (Process32NextW(snapshot, &entry));
+  }
+  CloseHandle(snapshot);
+  return running;
+}
+#endif
+
+std::string LobbyData(Runtime& runtime, std::uint64_t lobby, const char* key) {
   const char* value =
       runtime.api.get_lobby_data(runtime.matchmaking, lobby, key);
   return value == nullptr ? std::string{} : std::string(value);
 }
 
-std::uint32_t ParseU32(std::string_view text,
-                       std::uint32_t fallback = 0) {
+std::uint32_t ParseU32(std::string_view text, std::uint32_t fallback = 0) {
   std::uint32_t value = fallback;
   const auto result =
       std::from_chars(text.data(), text.data() + text.size(), value);
   return result.ec == std::errc{} ? value : fallback;
 }
 
-std::uint64_t ParseU64(std::string_view text,
-                       std::uint64_t fallback = 0) {
+std::uint64_t ParseU64(std::string_view text, std::uint64_t fallback = 0) {
   std::uint64_t value = fallback;
   const auto result =
       std::from_chars(text.data(), text.data() + text.size(), value);
@@ -257,10 +452,10 @@ std::string RoleKey(std::uint64_t steam_id) {
   return "role_" + std::to_string(steam_id);
 }
 
-bool SetLobbyData(Runtime& runtime, std::uint64_t lobby,
-                  const char* key, const std::string& value) {
-  return runtime.api.set_lobby_data(
-      runtime.matchmaking, lobby, key, value.c_str());
+bool SetLobbyData(Runtime& runtime, std::uint64_t lobby, const char* key,
+                  const std::string& value) {
+  return runtime.api.set_lobby_data(runtime.matchmaking, lobby, key,
+                                    value.c_str());
 }
 
 int SteamLobbyType(std::uint32_t privacy) {
@@ -279,21 +474,18 @@ std::vector<Peer> LobbyPeersLocked(Runtime& runtime) {
   if (!runtime.state.in_lobby || runtime.state.lobby_id == 0) {
     return peers;
   }
-  const int count = std::max(
-      runtime.api.get_num_lobby_members(
-          runtime.matchmaking, runtime.state.lobby_id),
-      0);
-  const std::uint64_t owner = runtime.api.get_lobby_owner(
-      runtime.matchmaking, runtime.state.lobby_id);
+  const int count = std::max(runtime.api.get_num_lobby_members(
+                                 runtime.matchmaking, runtime.state.lobby_id),
+                             0);
+  const std::uint64_t owner =
+      runtime.api.get_lobby_owner(runtime.matchmaking, runtime.state.lobby_id);
   std::vector<Peer> clients;
   for (int index = 0; index < count; ++index) {
     const auto id = runtime.api.get_lobby_member_by_index(
         runtime.matchmaking, runtime.state.lobby_id, index);
     if (id != 0 && id != owner) {
       const std::uint32_t role = ParseU32(
-          LobbyData(
-              runtime, runtime.state.lobby_id, RoleKey(id).c_str()),
-          0);
+          LobbyData(runtime, runtime.state.lobby_id, RoleKey(id).c_str()), 0);
       if (role >= 2 && role <= 100) {
         clients.push_back({role, id});
       }
@@ -302,13 +494,11 @@ std::vector<Peer> LobbyPeersLocked(Runtime& runtime) {
   if (owner != 0) {
     peers.push_back({1, owner});
   }
-  std::sort(
-      clients.begin(), clients.end(),
-      [](const Peer& left, const Peer& right) {
-        return left.role == right.role
-                   ? left.steam_id < right.steam_id
-                   : left.role < right.role;
-      });
+  std::sort(clients.begin(), clients.end(),
+            [](const Peer& left, const Peer& right) {
+              return left.role == right.role ? left.steam_id < right.steam_id
+                                             : left.role < right.role;
+            });
   peers.insert(peers.end(), clients.begin(), clients.end());
   return peers;
 }
@@ -318,10 +508,9 @@ void AssignStableRoles(Runtime& runtime) {
       runtime.state.lobby_id == 0) {
     return;
   }
-  const int count = std::max(
-      runtime.api.get_num_lobby_members(
-          runtime.matchmaking, runtime.state.lobby_id),
-      0);
+  const int count = std::max(runtime.api.get_num_lobby_members(
+                                 runtime.matchmaking, runtime.state.lobby_id),
+                             0);
   std::vector<std::uint64_t> clients;
   clients.reserve(static_cast<std::size_t>(count));
   for (int index = 0; index < count; ++index) {
@@ -339,9 +528,7 @@ void AssignStableRoles(Runtime& runtime) {
   assignments.reserve(clients.size());
   for (std::uint64_t id : clients) {
     const std::uint32_t existing = ParseU32(
-        LobbyData(
-            runtime, runtime.state.lobby_id, RoleKey(id).c_str()),
-        0);
+        LobbyData(runtime, runtime.state.lobby_id, RoleKey(id).c_str()), 0);
     if (existing >= 2 && existing <= 100 && !used[existing]) {
       used[existing] = true;
       assignments.push_back({id, existing});
@@ -357,9 +544,8 @@ void AssignStableRoles(Runtime& runtime) {
       if (!used[candidate]) {
         role = candidate;
         used[candidate] = true;
-        SetLobbyData(
-            runtime, runtime.state.lobby_id, RoleKey(id).c_str(),
-            std::to_string(role));
+        SetLobbyData(runtime, runtime.state.lobby_id, RoleKey(id).c_str(),
+                     std::to_string(role));
         break;
       }
     }
@@ -378,23 +564,22 @@ void UpdateLobbyMembership(Runtime& runtime) {
     runtime.state.lobby_max_players = 0;
     return;
   }
-  runtime.state.host_steam_id = runtime.api.get_lobby_owner(
-      runtime.matchmaking, runtime.state.lobby_id);
+  runtime.state.host_steam_id =
+      runtime.api.get_lobby_owner(runtime.matchmaking, runtime.state.lobby_id);
   runtime.state.is_host =
       runtime.state.local_steam_id == runtime.state.host_steam_id;
   AssignStableRoles(runtime);
-  runtime.state.lobby_name =
-      LobbyData(runtime, runtime.state.lobby_id, "name");
+  runtime.state.lobby_name = LobbyData(runtime, runtime.state.lobby_id, "name");
   runtime.state.lobby_host_name =
       LobbyData(runtime, runtime.state.lobby_id, "host");
   runtime.state.lobby_map_name =
       LobbyData(runtime, runtime.state.lobby_id, "map");
-  runtime.state.lobby_players = static_cast<std::uint32_t>(std::max(
-      runtime.api.get_num_lobby_members(
-          runtime.matchmaking, runtime.state.lobby_id),
-      0));
-  runtime.state.lobby_max_players = ParseU32(
-      LobbyData(runtime, runtime.state.lobby_id, "max_players"), 8);
+  runtime.state.lobby_players = static_cast<std::uint32_t>(
+      std::max(runtime.api.get_num_lobby_members(runtime.matchmaking,
+                                                 runtime.state.lobby_id),
+               0));
+  runtime.state.lobby_max_players =
+      ParseU32(LobbyData(runtime, runtime.state.lobby_id, "max_players"), 8);
   runtime.state.local_role = 0;
   for (const Peer& peer : LobbyPeersLocked(runtime)) {
     if (peer.steam_id == runtime.state.local_steam_id) {
@@ -420,13 +605,11 @@ void PopulateLobbyList(Runtime& runtime, std::uint32_t count) {
     lobby.map_name = LobbyData(runtime, id, "map");
     lobby.players = static_cast<std::uint32_t>(std::max(
         runtime.api.get_num_lobby_members(runtime.matchmaking, id), 0));
-    lobby.max_players =
-        ParseU32(LobbyData(runtime, id, "max_players"), 8);
+    lobby.max_players = ParseU32(LobbyData(runtime, id, "max_players"), 8);
     lobby.privacy = ParseU32(LobbyData(runtime, id, "privacy"), 0);
     lobby.passworded =
         ParseU64(LobbyData(runtime, id, "password_hash"), 0) != 0;
-    lobby.allow_late_join =
-        LobbyData(runtime, id, "late_join") != "0";
+    lobby.allow_late_join = LobbyData(runtime, id, "late_join") != "0";
     runtime.state.lobbies.push_back(std::move(lobby));
   }
   runtime.state.busy = false;
@@ -444,9 +627,9 @@ std::optional<T> GetCallResult(Runtime& runtime,
   bool failed = false;
   if (completed.callback != expected_callback ||
       completed.parameter_bytes != sizeof(T) ||
-      !runtime.api.manual_get_result(
-          runtime.pipe, completed.call, &result, sizeof(result),
-          expected_callback, &failed) ||
+      !runtime.api.manual_get_result(runtime.pipe, completed.call, &result,
+                                     sizeof(result), expected_callback,
+                                     &failed) ||
       failed) {
     return std::nullopt;
   }
@@ -457,23 +640,18 @@ void FinishCreatedLobby(Runtime& runtime, const LobbyCreated& created) {
   runtime.pending_create = 0;
   runtime.state.busy = false;
   if (created.result != kResultOk || created.lobby_id == 0) {
-    runtime.state.status =
-        "Steam could not create the lobby (result " +
-        std::to_string(created.result) + ").";
+    runtime.state.status = "Steam could not create the lobby (result " +
+                           std::to_string(created.result) + ").";
     return;
   }
   runtime.state.in_lobby = true;
   runtime.state.lobby_id = created.lobby_id;
-  SetLobbyData(runtime, created.lobby_id, "cel_game",
-               std::string(kGameKey));
+  SetLobbyData(runtime, created.lobby_id, "cel_game", std::string(kGameKey));
   SetLobbyData(runtime, created.lobby_id, "cel_protocol",
                std::to_string(kProtocolVersion));
-  SetLobbyData(runtime, created.lobby_id, "name",
-               runtime.pending_server_name);
-  SetLobbyData(runtime, created.lobby_id, "host",
-               runtime.pending_host_name);
-  SetLobbyData(runtime, created.lobby_id, "map",
-               runtime.pending_map_name);
+  SetLobbyData(runtime, created.lobby_id, "name", runtime.pending_server_name);
+  SetLobbyData(runtime, created.lobby_id, "host", runtime.pending_host_name);
+  SetLobbyData(runtime, created.lobby_id, "map", runtime.pending_map_name);
   SetLobbyData(runtime, created.lobby_id, "max_players",
                std::to_string(runtime.pending_max_players));
   SetLobbyData(runtime, created.lobby_id, "privacy",
@@ -482,34 +660,30 @@ void FinishCreatedLobby(Runtime& runtime, const LobbyCreated& created) {
                runtime.pending_allow_late_join ? "1" : "0");
   SetLobbyData(runtime, created.lobby_id, "password_hash",
                std::to_string(runtime.pending_password_hash));
-  runtime.api.set_lobby_joinable(
-      runtime.matchmaking, created.lobby_id,
-      runtime.pending_allow_late_join);
+  runtime.api.set_lobby_joinable(runtime.matchmaking, created.lobby_id,
+                                 runtime.pending_allow_late_join);
   UpdateLobbyMembership(runtime);
   runtime.state.status =
       "Steam lobby created. Friends or another Steam account can now join.";
-  REXLOG_INFO(
-      "steam-multiplayer: created lobby {} as Steam user {}",
-      created.lobby_id, runtime.state.local_steam_id);
+  REXLOG_INFO("steam-multiplayer: created lobby {} as Steam user {}",
+              created.lobby_id, runtime.state.local_steam_id);
 }
 
 void FinishJoinedLobby(Runtime& runtime, const LobbyEnter& entered) {
   runtime.pending_join = 0;
   runtime.state.busy = false;
   if (entered.response != 1 || entered.lobby_id == 0) {
-    runtime.state.status =
-        "Steam lobby join failed (response " +
-        std::to_string(entered.response) + ").";
+    runtime.state.status = "Steam lobby join failed (response " +
+                           std::to_string(entered.response) + ").";
     return;
   }
   runtime.state.in_lobby = true;
   runtime.state.lobby_id = entered.lobby_id;
   UpdateLobbyMembership(runtime);
   runtime.state.status = "Connected to the Steam lobby.";
-  REXLOG_INFO(
-      "steam-multiplayer: joined lobby {} as role {} (Steam user {})",
-      entered.lobby_id, runtime.state.local_role,
-      runtime.state.local_steam_id);
+  REXLOG_INFO("steam-multiplayer: joined lobby {} as role {} (Steam user {})",
+              entered.lobby_id, runtime.state.local_role,
+              runtime.state.local_steam_id);
 }
 
 void DispatchCallback(Runtime& runtime, const CallbackMessage& message) {
@@ -521,8 +695,8 @@ void DispatchCallback(Runtime& runtime, const CallbackMessage& message) {
     const auto completed =
         *static_cast<const SteamApiCallCompleted*>(message.parameter);
     if (completed.call == runtime.pending_lobby_list) {
-      auto result = GetCallResult<LobbyMatchList>(
-          runtime, completed, kCallbackLobbyMatchList);
+      auto result = GetCallResult<LobbyMatchList>(runtime, completed,
+                                                  kCallbackLobbyMatchList);
       runtime.pending_lobby_list = 0;
       if (result) {
         PopulateLobbyList(runtime, result->count);
@@ -531,8 +705,8 @@ void DispatchCallback(Runtime& runtime, const CallbackMessage& message) {
         runtime.state.status = "Steam lobby search failed.";
       }
     } else if (completed.call == runtime.pending_create) {
-      auto result = GetCallResult<LobbyCreated>(
-          runtime, completed, kCallbackLobbyCreated);
+      auto result = GetCallResult<LobbyCreated>(runtime, completed,
+                                                kCallbackLobbyCreated);
       if (result) {
         FinishCreatedLobby(runtime, *result);
       } else {
@@ -541,8 +715,8 @@ void DispatchCallback(Runtime& runtime, const CallbackMessage& message) {
         runtime.state.status = "Steam lobby creation failed.";
       }
     } else if (completed.call == runtime.pending_join) {
-      auto result = GetCallResult<LobbyEnter>(
-          runtime, completed, kCallbackLobbyEnter);
+      auto result =
+          GetCallResult<LobbyEnter>(runtime, completed, kCallbackLobbyEnter);
       if (result) {
         FinishJoinedLobby(runtime, *result);
       } else {
@@ -553,49 +727,59 @@ void DispatchCallback(Runtime& runtime, const CallbackMessage& message) {
     }
   } else if (message.callback == kCallbackLobbyEnter &&
              message.parameter_bytes >= sizeof(LobbyEnter)) {
-    const auto entered =
-        *static_cast<const LobbyEnter*>(message.parameter);
+    const auto entered = *static_cast<const LobbyEnter*>(message.parameter);
     if (runtime.state.lobby_id == 0 ||
         runtime.state.lobby_id == entered.lobby_id) {
       FinishJoinedLobby(runtime, entered);
     }
   } else if (message.callback == kCallbackLobbyChatUpdate &&
              message.parameter_bytes >= sizeof(LobbyChatUpdate)) {
-    const auto update =
-        *static_cast<const LobbyChatUpdate*>(message.parameter);
+    const auto update = *static_cast<const LobbyChatUpdate*>(message.parameter);
     if (update.lobby_id == runtime.state.lobby_id) {
       UpdateLobbyMembership(runtime);
     }
   } else if (message.callback == kCallbackNetworkingSessionRequest &&
-             message.parameter_bytes >=
-                 sizeof(SteamNetworkingIdentity)) {
+             message.parameter_bytes >= sizeof(SteamNetworkingIdentity)) {
     auto identity =
         *static_cast<const SteamNetworkingIdentity*>(message.parameter);
-    runtime.api.accept_network_session(
-        runtime.networking, &identity);
+    runtime.api.accept_network_session(runtime.networking, &identity);
   }
 }
 
 bool LoadApi(Runtime& runtime) {
 #if defined(_WIN32)
-  const auto library_path = ExecutableDirectory() / "steam_api64.dll";
-  runtime.state.library_found =
-      std::filesystem::is_regular_file(library_path);
+  const auto install_root = ExecutableDirectory();
+  EnsureDevelopmentAppId(install_root);
+  const auto library_path = install_root / "steam_api64.dll";
+  runtime.state.library_found = std::filesystem::is_regular_file(library_path);
   if (!runtime.state.library_found) {
+    if (runtime.bootstrap_attempted) {
+      return false;
+    }
+    runtime.bootstrap_attempted = true;
     runtime.state.status =
-        "steam_api64.dll is not installed beside skate3.exe.";
-    return false;
+        "Installing the verified Steam multiplayer runtime...";
+    REXLOG_INFO(
+        "steam-multiplayer: runtime missing; downloading {} "
+        "(archive_sha256={} dll_sha256={})",
+        kSteamRuntimeUrl, kSteamRuntimeArchiveSha256, kSteamRuntimeDllSha256);
+    runtime.state.library_found =
+        BootstrapSteamRuntime(install_root, runtime.state.status);
+    if (!runtime.state.library_found) {
+      REXLOG_WARN("steam-multiplayer: {}", runtime.state.status);
+      return false;
+    }
   }
   runtime.api.module = LoadLibraryW(library_path.c_str());
   if (runtime.api.module == nullptr) {
     runtime.state.status = "steam_api64.dll could not be loaded.";
     return false;
   }
-#define LOAD_STEAM(field, export_name)                                      \
-  if (!LoadFunction(runtime.api.module, export_name, runtime.api.field)) {   \
-    runtime.state.status = std::string("Steam API export missing: ") +       \
-                           export_name;                                      \
-    return false;                                                           \
+#define LOAD_STEAM(field, export_name)                                     \
+  if (!LoadFunction(runtime.api.module, export_name, runtime.api.field)) { \
+    runtime.state.status =                                                 \
+        std::string("Steam API export missing: ") + export_name;           \
+    return false;                                                          \
   }
   LOAD_STEAM(init_flat, "SteamAPI_InitFlat");
   LOAD_STEAM(shutdown, "SteamAPI_Shutdown");
@@ -604,26 +788,22 @@ bool LoadApi(Runtime& runtime) {
   LOAD_STEAM(manual_run_frame, "SteamAPI_ManualDispatch_RunFrame");
   LOAD_STEAM(manual_get_next, "SteamAPI_ManualDispatch_GetNextCallback");
   LOAD_STEAM(manual_free_last, "SteamAPI_ManualDispatch_FreeLastCallback");
-  LOAD_STEAM(manual_get_result,
-             "SteamAPI_ManualDispatch_GetAPICallResult");
+  LOAD_STEAM(manual_get_result, "SteamAPI_ManualDispatch_GetAPICallResult");
   LOAD_STEAM(matchmaking_interface, "SteamAPI_SteamMatchmaking_v009");
   LOAD_STEAM(user_interface, "SteamAPI_SteamUser_v023");
   LOAD_STEAM(friends_interface, "SteamAPI_SteamFriends_v018");
   LOAD_STEAM(networking_interface,
              "SteamAPI_SteamNetworkingMessages_SteamAPI_v002");
   LOAD_STEAM(user_get_steam_id, "SteamAPI_ISteamUser_GetSteamID");
-  LOAD_STEAM(friends_get_persona_name,
-             "SteamAPI_ISteamFriends_GetPersonaName");
-  LOAD_STEAM(request_lobby_list,
-             "SteamAPI_ISteamMatchmaking_RequestLobbyList");
+  LOAD_STEAM(friends_get_persona_name, "SteamAPI_ISteamFriends_GetPersonaName");
+  LOAD_STEAM(request_lobby_list, "SteamAPI_ISteamMatchmaking_RequestLobbyList");
   LOAD_STEAM(add_lobby_string_filter,
              "SteamAPI_ISteamMatchmaking_AddRequestLobbyListStringFilter");
   LOAD_STEAM(add_lobby_distance_filter,
              "SteamAPI_ISteamMatchmaking_AddRequestLobbyListDistanceFilter");
   LOAD_STEAM(add_lobby_result_count_filter,
              "SteamAPI_ISteamMatchmaking_AddRequestLobbyListResultCountFilter");
-  LOAD_STEAM(get_lobby_by_index,
-             "SteamAPI_ISteamMatchmaking_GetLobbyByIndex");
+  LOAD_STEAM(get_lobby_by_index, "SteamAPI_ISteamMatchmaking_GetLobbyByIndex");
   LOAD_STEAM(create_lobby, "SteamAPI_ISteamMatchmaking_CreateLobby");
   LOAD_STEAM(join_lobby, "SteamAPI_ISteamMatchmaking_JoinLobby");
   LOAD_STEAM(leave_lobby, "SteamAPI_ISteamMatchmaking_LeaveLobby");
@@ -631,14 +811,10 @@ bool LoadApi(Runtime& runtime) {
              "SteamAPI_ISteamMatchmaking_GetNumLobbyMembers");
   LOAD_STEAM(get_lobby_member_by_index,
              "SteamAPI_ISteamMatchmaking_GetLobbyMemberByIndex");
-  LOAD_STEAM(get_lobby_data,
-             "SteamAPI_ISteamMatchmaking_GetLobbyData");
-  LOAD_STEAM(set_lobby_data,
-             "SteamAPI_ISteamMatchmaking_SetLobbyData");
-  LOAD_STEAM(set_lobby_joinable,
-             "SteamAPI_ISteamMatchmaking_SetLobbyJoinable");
-  LOAD_STEAM(get_lobby_owner,
-             "SteamAPI_ISteamMatchmaking_GetLobbyOwner");
+  LOAD_STEAM(get_lobby_data, "SteamAPI_ISteamMatchmaking_GetLobbyData");
+  LOAD_STEAM(set_lobby_data, "SteamAPI_ISteamMatchmaking_SetLobbyData");
+  LOAD_STEAM(set_lobby_joinable, "SteamAPI_ISteamMatchmaking_SetLobbyJoinable");
+  LOAD_STEAM(get_lobby_owner, "SteamAPI_ISteamMatchmaking_GetLobbyOwner");
   LOAD_STEAM(identity_set_steam_id,
              "SteamAPI_SteamNetworkingIdentity_SetSteamID64");
   LOAD_STEAM(identity_get_steam_id,
@@ -667,7 +843,24 @@ bool InitializeLocked(Runtime& runtime) {
     return false;
   }
   std::array<char, 1024> error{};
-  if (runtime.api.init_flat(error.data()) != 0) {
+  int init_result = runtime.api.init_flat(error.data());
+#if defined(_WIN32)
+  if (init_result != 0 && !IsSteamRunning()) {
+    REXLOG_INFO(
+        "steam-multiplayer: Steam is not running; starting the Steam client");
+    const auto launched = reinterpret_cast<std::intptr_t>(
+        ShellExecuteW(nullptr, L"open", L"steam://open/main", nullptr, nullptr,
+                      SW_SHOWNORMAL));
+    if (launched > 32) {
+      for (int attempt = 0; attempt < 60 && init_result != 0; ++attempt) {
+        Sleep(500);
+        error.fill('\0');
+        init_result = runtime.api.init_flat(error.data());
+      }
+    }
+  }
+#endif
+  if (init_result != 0) {
     runtime.state.status =
         error[0] == '\0'
             ? "SteamAPI initialization failed. Start Steam and sign in."
@@ -688,22 +881,19 @@ bool InitializeLocked(Runtime& runtime) {
     return false;
   }
   runtime.api.manual_init();
-  runtime.state.local_steam_id =
-      runtime.api.user_get_steam_id(runtime.user);
-  const char* persona =
-      runtime.api.friends_get_persona_name(runtime.friends);
+  runtime.state.local_steam_id = runtime.api.user_get_steam_id(runtime.user);
+  const char* persona = runtime.api.friends_get_persona_name(runtime.friends);
   runtime.state.persona_name =
       persona == nullptr ? std::string{} : std::string(persona);
   runtime.state.initialized = runtime.state.local_steam_id != 0;
-  runtime.state.status =
-      runtime.state.initialized
-          ? "Steam connected as " + runtime.state.persona_name +
-                " using development AppID 480."
-          : "Steam did not return a signed-in user.";
-  REXLOG_INFO(
-      "steam-multiplayer: initialized={} user={} persona='{}'",
-      runtime.state.initialized, runtime.state.local_steam_id,
-      runtime.state.persona_name);
+  runtime.state.status = runtime.state.initialized
+                             ? "Steam connected as " +
+                                   runtime.state.persona_name +
+                                   " using development AppID 480."
+                             : "Steam did not return a signed-in user.";
+  REXLOG_INFO("steam-multiplayer: initialized={} user={} persona='{}'",
+              runtime.state.initialized, runtime.state.local_steam_id,
+              runtime.state.persona_name);
   return runtime.state.initialized;
 }
 
@@ -746,31 +936,25 @@ void RefreshLobbies() {
   if (!InitializeLocked(g_runtime) || g_runtime.state.busy) {
     return;
   }
-  g_runtime.api.add_lobby_string_filter(
-      g_runtime.matchmaking, "cel_game", kGameKey.data(),
-      kLobbyComparisonEqual);
+  g_runtime.api.add_lobby_string_filter(g_runtime.matchmaking, "cel_game",
+                                        kGameKey.data(), kLobbyComparisonEqual);
   g_runtime.api.add_lobby_string_filter(
       g_runtime.matchmaking, "cel_protocol",
-      std::to_string(kProtocolVersion).c_str(),
-      kLobbyComparisonEqual);
-  g_runtime.api.add_lobby_distance_filter(
-      g_runtime.matchmaking, kLobbyDistanceWorldwide);
-  g_runtime.api.add_lobby_result_count_filter(
-      g_runtime.matchmaking, 100);
+      std::to_string(kProtocolVersion).c_str(), kLobbyComparisonEqual);
+  g_runtime.api.add_lobby_distance_filter(g_runtime.matchmaking,
+                                          kLobbyDistanceWorldwide);
+  g_runtime.api.add_lobby_result_count_filter(g_runtime.matchmaking, 100);
   g_runtime.pending_lobby_list =
       g_runtime.api.request_lobby_list(g_runtime.matchmaking);
   g_runtime.state.busy = g_runtime.pending_lobby_list != 0;
-  g_runtime.state.status =
-      g_runtime.state.busy ? "Searching Steam lobbies..."
-                           : "Steam lobby search could not start.";
+  g_runtime.state.status = g_runtime.state.busy
+                               ? "Searching Steam lobbies..."
+                               : "Steam lobby search could not start.";
 }
 
-bool HostLobby(const std::string& server_name,
-               const std::string& host_name,
-               const std::string& map_name,
-               std::uint32_t max_players,
-               std::uint32_t privacy,
-               bool allow_late_join,
+bool HostLobby(const std::string& server_name, const std::string& host_name,
+               const std::string& map_name, std::uint32_t max_players,
+               std::uint32_t privacy, bool allow_late_join,
                std::uint64_t password_hash) {
   std::scoped_lock lock(g_mutex);
   if (!InitializeLocked(g_runtime) || g_runtime.state.busy ||
@@ -778,13 +962,11 @@ bool HostLobby(const std::string& server_name,
     return false;
   }
   g_runtime.pending_server_name = server_name;
-  g_runtime.pending_host_name =
-      g_runtime.state.persona_name.empty()
-          ? host_name
-          : g_runtime.state.persona_name;
+  g_runtime.pending_host_name = g_runtime.state.persona_name.empty()
+                                    ? host_name
+                                    : g_runtime.state.persona_name;
   g_runtime.pending_map_name = map_name;
-  g_runtime.pending_max_players =
-      std::clamp(max_players, 2u, 100u);
+  g_runtime.pending_max_players = std::clamp(max_players, 2u, 100u);
   g_runtime.pending_privacy = std::min(privacy, 2u);
   g_runtime.pending_allow_late_join = allow_late_join;
   g_runtime.pending_password_hash = password_hash;
@@ -792,9 +974,9 @@ bool HostLobby(const std::string& server_name,
       g_runtime.matchmaking, SteamLobbyType(privacy),
       static_cast<int>(g_runtime.pending_max_players));
   g_runtime.state.busy = g_runtime.pending_create != 0;
-  g_runtime.state.status =
-      g_runtime.state.busy ? "Creating Steam lobby..."
-                           : "Steam lobby creation could not start.";
+  g_runtime.state.status = g_runtime.state.busy
+                               ? "Creating Steam lobby..."
+                               : "Steam lobby creation could not start.";
   return g_runtime.state.busy;
 }
 
@@ -815,17 +997,16 @@ bool JoinLobby(std::uint64_t lobby_id, std::uint64_t password_hash) {
   g_runtime.pending_join =
       g_runtime.api.join_lobby(g_runtime.matchmaking, lobby_id);
   g_runtime.state.busy = g_runtime.pending_join != 0;
-  g_runtime.state.status =
-      g_runtime.state.busy ? "Joining Steam lobby..."
-                           : "Steam lobby join could not start.";
+  g_runtime.state.status = g_runtime.state.busy
+                               ? "Joining Steam lobby..."
+                               : "Steam lobby join could not start.";
   return g_runtime.state.busy;
 }
 
 void LeaveLobby() {
   std::scoped_lock lock(g_mutex);
   if (g_runtime.state.initialized && g_runtime.state.lobby_id != 0) {
-    g_runtime.api.leave_lobby(
-        g_runtime.matchmaking, g_runtime.state.lobby_id);
+    g_runtime.api.leave_lobby(g_runtime.matchmaking, g_runtime.state.lobby_id);
   }
   g_runtime.state.in_lobby = false;
   g_runtime.state.is_host = false;
@@ -846,8 +1027,7 @@ void LeaveLobby() {
 void Shutdown() {
   std::scoped_lock lock(g_mutex);
   if (g_runtime.state.initialized && g_runtime.state.lobby_id != 0) {
-    g_runtime.api.leave_lobby(
-        g_runtime.matchmaking, g_runtime.state.lobby_id);
+    g_runtime.api.leave_lobby(g_runtime.matchmaking, g_runtime.state.lobby_id);
   }
   if (g_runtime.state.initialized && g_runtime.api.shutdown) {
     g_runtime.api.shutdown();
@@ -894,8 +1074,8 @@ bool SendPacketToPeer(std::uint64_t steam_id, const void* bytes,
   return g_runtime.api.send_network_message(
              g_runtime.networking, &identity, bytes,
              static_cast<std::uint32_t>(byte_count),
-             kSendUnreliableNoDelayAutoRestart, kNetworkingChannel) ==
-         kResultOk;
+             kSendUnreliableNoDelayAutoRestart,
+             kNetworkingChannel) == kResultOk;
 }
 
 std::vector<Message> ReceiveMessages(std::size_t maximum_messages) {
@@ -908,11 +1088,10 @@ std::vector<Message> ReceiveMessages(std::size_t maximum_messages) {
   constexpr std::size_t kBatchSize = 128;
   std::array<SteamNetworkingMessage*, kBatchSize> messages{};
   while (result.size() < maximum_messages) {
-    const int requested = static_cast<int>(std::min(
-        kBatchSize, maximum_messages - result.size()));
+    const int requested = static_cast<int>(
+        std::min(kBatchSize, maximum_messages - result.size()));
     const int received = g_runtime.api.receive_network_messages(
-        g_runtime.networking, kNetworkingChannel, messages.data(),
-        requested);
+        g_runtime.networking, kNetworkingChannel, messages.data(), requested);
     if (received <= 0) {
       break;
     }
@@ -923,10 +1102,8 @@ std::vector<Message> ReceiveMessages(std::size_t maximum_messages) {
         Message output;
         output.sender_steam_id =
             g_runtime.api.identity_get_steam_id(&source->identity);
-        output.bytes.resize(
-            static_cast<std::size_t>(source->byte_count));
-        std::memcpy(
-            output.bytes.data(), source->data, output.bytes.size());
+        output.bytes.resize(static_cast<std::size_t>(source->byte_count));
+        std::memcpy(output.bytes.data(), source->data, output.bytes.size());
         result.push_back(std::move(output));
       }
       if (source != nullptr) {

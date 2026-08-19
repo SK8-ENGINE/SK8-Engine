@@ -40,13 +40,28 @@ development, AppID 480 initializes Steamworks so the project can exercise:
 - Steam identities instead of local process roles.
 
 The backend loads the Steamworks flat C ABI dynamically, so compiling the
-project does not require Valve's headers or import library. A development
-install still needs Valve's redistributable `steam_api64.dll` beside
-`skate3.exe`, Steam running and signed in, and a development
-`steam_appid.txt`. Neither runtime file is committed to this repository.
+project does not require Valve's headers or import library. On a clean Windows
+installation, the game performs this development setup automatically:
 
-`steam_appid.txt` containing `480` is a development override only. It must not
-ship in public releases. A public release must use this project's own Steam
+- download the pinned Steamworks.NET standalone archive directly from its
+  [published 2025.164.1 GitHub release](https://github.com/rlabrecque/Steamworks.NET/releases/tag/2025.164.1);
+- verify the archive SHA-256 before extracting it;
+- verify the extracted `steam_api64.dll` SHA-256 before loading it;
+- cache the verified runtime under `.cel-steam`;
+- generate the local `steam_appid.txt` marker containing `480`;
+- start Steam when necessary and connect to the signed-in Steam account.
+
+The runtime DLL and App 480 marker are not committed or embedded in the public
+archive. If automatic setup fails, read `.cel-steam/bootstrap.log`; multiplayer
+falls back to the same-PC development transport instead of preventing the game
+from starting.
+
+Spacewar does not open as a second game window. When setup succeeds, Steam
+tracks the running `skate3.exe` process as App 480 and friends may see the user
+playing Spacewar.
+
+`steam_appid.txt` containing `480` remains a development override generated on
+the user's machine. A production release must use this project's own Steam
 AppID and follow Valve's setup and redistributable requirements.
 
 ## What works

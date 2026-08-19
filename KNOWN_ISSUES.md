@@ -22,6 +22,11 @@ This is an experimental preview rather than a finished standalone game engine.
 - No retail game files or retail maps are bundled. The included Feature Park
   is original project content. A legally obtained Skate 3 ISO is required on
   first start.
+- Internet multiplayer is an App 480 development preview. Its first launch
+  needs GitHub access to acquire the pinned Steam runtime and a running,
+  signed-in Steam client. If setup fails, inspect
+  `.cel-steam/bootstrap.log`; ordinary gameplay and the localhost multiplayer
+  fallback remain available.
 
 When reporting a problem, include the map name, GPU, driver version, selected
 Graphics API and Renderer, framerate cap, controller backend, and the latest
