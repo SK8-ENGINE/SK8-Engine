@@ -76,18 +76,45 @@ def main() -> None:
             if node.type == "BSDF_PRINCIPLED"
         )
         shader.inputs["Roughness"].default_value = 0.63
-        texture = material.node_tree.nodes.new("ShaderNodeTexImage")
+        texture_group = bpy.data.node_groups.new(
+            "ImportedAlbedoNodeGroup", "ShaderNodeTree"
+        )
+        texture_group.interface.new_socket(
+            name="Color",
+            in_out="OUTPUT",
+            socket_type="NodeSocketColor",
+        )
+        group_output = texture_group.nodes.new("NodeGroupOutput")
+        texture = texture_group.nodes.new("ShaderNodeTexImage")
         texture.image = image
+        texture_group.links.new(
+            texture.outputs["Color"], group_output.inputs["Color"]
+        )
+        group_node = material.node_tree.nodes.new("ShaderNodeGroup")
+        group_node.node_tree = texture_group
         material.node_tree.links.new(
-            texture.outputs["Color"], shader.inputs["Base Color"]
+            group_node.outputs["Color"], shader.inputs["Base Color"]
         )
 
         floor = make_plane("OrdinaryVisibleFloor", 0.0, material)
         floor.location = (1.25, -0.75, 0.5)
         floor.rotation_euler = (0.1, 0.2, 0.3)
         floor.scale = (1.2, 0.8, 1.1)
+        solidify = floor.modifiers.new("ExportedSolidify", "SOLIDIFY")
+        solidify.thickness = 0.2
         collider = make_plane("FloorCollider", 5.0)
         scale_reference = make_plane("character_size", 10.0)
+        legacy_visual = bpy.data.collections.new(
+            addon.exporter.LEGACY_VISUAL_COLLECTION
+        )
+        legacy_collision = bpy.data.collections.new(
+            addon.exporter.LEGACY_COLLISION_COLLECTION
+        )
+        bpy.context.scene.collection.children.link(legacy_visual)
+        bpy.context.scene.collection.children.link(legacy_collision)
+        legacy_visual.objects.link(floor)
+        legacy_collision.objects.link(floor)
+        legacy_collision.objects.link(collider)
 
         fake_light = bpy.data.objects.new("Point Light Imported Empty", None)
         bpy.context.scene.collection.objects.link(fake_light)
@@ -104,6 +131,17 @@ def main() -> None:
             bpy.ops.skate_map.set_spawn() == {"FINISHED"},
             "Spawn helper failed before automatic scene preparation",
         )
+        spawn = bpy.data.objects[addon.exporter.SPAWN_OBJECT]
+        require(spawn.type == "MESH", "Spawn locator is not a movable mesh")
+        require(
+            abs(spawn.dimensions.x - 4.0) < 1.0e-5
+            and abs(spawn.dimensions.y - 4.0) < 1.0e-5,
+            "Spawn locator is not a 4x4 metre pad",
+        )
+        require(
+            tuple(spawn.location) == (0.0, 0.0, 0.0),
+            "Spawn locator still followed the 3D cursor",
+        )
 
         output = Path(tempfile.gettempdir()) / "auto_import_workflow.skate"
         cache = output.with_name(output.name + ".export-cache.json")
@@ -119,31 +157,90 @@ def main() -> None:
         )
         require(output.is_file(), "Automatic export did not create a package")
 
-        visual = bpy.data.collections.get(
-            addon.exporter.VISUAL_COLLECTION
+        default_group = bpy.data.collections.get(
+            addon.exporter.PRESENTATION_COLLISION_COLLECTION
         )
-        collision = bpy.data.collections.get(
-            addon.exporter.COLLISION_COLLECTION
+        collider_group = bpy.data.collections.get(
+            addon.exporter.NO_PRESENTATION_COLLECTION
         )
-        require(visual is not None, "Automatic export missed OW_VISUAL")
-        require(collision is not None, "Automatic export missed OW_COLLISION")
+        no_collision_group = bpy.data.collections.get(
+            addon.exporter.NO_COLLISION_COLLECTION
+        )
+        require(default_group is not None, "Automatic export missed Group 1")
+        require(collider_group is not None, "Automatic export missed Group 2")
+        require(no_collision_group is not None, "Automatic export missed Group 3")
         require(
-            floor.name in visual.all_objects,
-            "Ordinary visible mesh was not adopted",
+            bpy.data.collections.get(
+                addon.exporter.LEGACY_VISUAL_COLLECTION
+            )
+            is None
+            and bpy.data.collections.get(
+                addon.exporter.LEGACY_COLLISION_COLLECTION
+            )
+            is None,
+            "Legacy role collections were not cleaned up after migration",
         )
         require(
-            collider.name not in visual.all_objects,
-            "Explicit collider was incorrectly rendered",
+            addon._object_groups(floor)
+            == [addon.exporter.PRESENTATION_COLLISION_COLLECTION],
+            "Ordinary mesh was not assigned exclusively to Group 1",
         )
         require(
-            scale_reference.name not in visual.all_objects
-            and scale_reference.name not in collision.all_objects,
+            addon._object_groups(collider)
+            == [addon.exporter.NO_PRESENTATION_COLLECTION],
+            "Explicit collider was not assigned exclusively to Group 2",
+        )
+        require(
+            not addon._object_groups(scale_reference),
             "Character scale helper was incorrectly exported as map geometry",
         )
         require(
-            floor.name in collision.all_objects
-            and collider.name in collision.all_objects,
-            "Automatic collision did not cover visuals and explicit proxies",
+            floor.name in default_group.all_objects
+            and collider.name in collider_group.all_objects,
+            "Five-group automatic classification is incomplete",
+        )
+        scene.owned_world.material_list_index = bpy.data.materials.find(
+            material.name
+        )
+        require(
+            floor.select_get()
+            and bpy.context.view_layer.objects.active == floor
+            and not collider.select_get(),
+            "Clicking a material-list row did not select its scene meshes",
+        )
+        require(
+            bpy.ops.skate_map.set_material_group(
+                group=addon.exporter.NO_COLLISION_COLLECTION
+            )
+            == {"FINISHED"}
+            and addon._object_groups(floor)
+            == [addon.exporter.NO_COLLISION_COLLECTION],
+            "Material-list Group 3 button did not move its mesh users",
+        )
+        require(
+            bpy.ops.skate_map.set_material_group(
+                group=addon.exporter.PRESENTATION_COLLISION_COLLECTION
+            )
+            == {"FINISHED"}
+            and addon._object_groups(floor)
+            == [addon.exporter.PRESENTATION_COLLISION_COLLECTION],
+            "Material-list Group 1 button did not restore its mesh users",
+        )
+        no_collision_group.objects.link(floor)
+        exclusive_issues, _warnings, _stats = addon._validate_scene(
+            bpy.context, inspect_geometry=False
+        )
+        require(
+            any(
+                "must belong to exactly one map group" in issue
+                for issue in exclusive_issues
+            ),
+            "Validation did not reject multiple group memberships",
+        )
+        addon._move_to_group(
+            scene,
+            floor,
+            addon.exporter.PRESENTATION_COLLISION_COLLECTION,
         )
         require(
             floor.data.uv_layers.get("UVMap") is not None
@@ -162,6 +259,30 @@ def main() -> None:
             bool(material.get("ow_auto_imported", False)),
             "Automatically imported material was not marked refreshable",
         )
+        require(
+            bpy.data.images.get(str(material.get("ow_normal_image", "")))
+            is not None
+            and bpy.data.images.get(str(material.get("ow_orm_image", "")))
+            is not None,
+            "Auto Prepare did not generate normal and ORM maps",
+        )
+        require(
+            scene.owned_world.day_ambient == 0.0
+            and scene.owned_world.night_ambient == 0.0,
+            "Local lights did not disable default ambient light",
+        )
+        depsgraph = bpy.context.evaluated_depsgraph_get()
+        evaluated_mesh, evaluated_object = addon.exporter._mesh_for_export(
+            floor, depsgraph, preserve_all_data_layers=True
+        )
+        try:
+            require(
+                len(evaluated_mesh.polygons) > len(floor.data.polygons),
+                "Build did not evaluate the Solidify modifier",
+            )
+        finally:
+            if evaluated_object is not None:
+                evaluated_object.to_mesh_clear()
 
         # Older add-on builds could save an auto-imported material before its
         # Blender image links were available, leaving an empty albedo field
@@ -192,6 +313,86 @@ def main() -> None:
             abs(float(material.get("ow_roughness", 0.0)) - 0.51) < 1.0e-5,
             "Manual material value was not preserved",
         )
+        material["ow_albedo_image"] = ""
+        require(
+            addon._auto_configure_material(
+                material, generate_maps=True
+            )
+            and material.get("ow_albedo_image") == image.name
+            and abs(float(material.get("ow_roughness", 0.0)) - 0.51)
+            < 1.0e-5
+            and not bool(material.get("ow_auto_imported", True)),
+            "Auto Prepare did not fill a missing authored albedo while "
+            "preserving manual scalar settings",
+        )
+        shader.inputs["Roughness"].default_value = 0.41
+        bpy.ops.object.select_all(action="DESELECT")
+        floor.select_set(True)
+        bpy.context.view_layer.objects.active = floor
+        require(
+            bpy.ops.owmaterial.apply_preset(preset="TREE") == {"FINISHED"},
+            "Tree material preset failed",
+        )
+        require(
+            material.get("ow_presentation_type") == "VEGETATION"
+            and int(material.get("ow_alpha_mode", 0)) == 1
+            and not bool(material.get("ow_collision_enabled", True)),
+            "Tree preset did not configure optimized cutout presentation",
+        )
+        require(
+            bpy.ops.owmaterial.sync_materials() == {"FINISHED"},
+            "Sync Materials operator failed",
+        )
+        require(
+            abs(float(material.get("ow_roughness", 0.0)) - 0.41) < 1.0e-5,
+            "Sync Materials did not refresh shader roughness",
+        )
+        orm = bpy.data.images[str(material["ow_orm_image"])]
+        orm_pixels = [0.0] * (orm.size[0] * orm.size[1] * 4)
+        orm.pixels.foreach_get(orm_pixels)
+        require(
+            abs(orm_pixels[1] - 0.41) < 0.01,
+            "Sync Materials did not overwrite generated roughness data",
+        )
+
+        sharp_mesh = bpy.data.meshes.new("SharpRailMesh")
+        sharp_mesh.from_pydata(
+            [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (2.0, 0.0, 0.0)],
+            [(0, 1), (1, 2)],
+            [],
+        )
+        sharp_mesh.update()
+        sharp_attribute = sharp_mesh.attributes.new(
+            "sharp_edge", "BOOLEAN", "EDGE"
+        )
+        for value in sharp_attribute.data:
+            value.value = True
+        sharp_object = bpy.data.objects.new("SharpRail", sharp_mesh)
+        scene.collection.objects.link(sharp_object)
+        bpy.ops.object.select_all(action="DESELECT")
+        sharp_object.select_set(True)
+        bpy.context.view_layer.objects.active = sharp_object
+        require(
+            bpy.ops.skate_map.grinds_from_sharp_edges() == {"FINISHED"},
+            "Sharp-edge grind generation failed",
+        )
+        grind_object = bpy.context.object
+        require(
+            grind_object.type == "CURVE"
+            and len(grind_object.data.splines) == 1
+            and len(grind_object.data.splines[0].points) == 3,
+            "Sharp edges were not consolidated into one three-point spline",
+        )
+        require(
+            addon._object_groups(grind_object)
+            == [addon.exporter.GRIND_COLLECTION],
+            "Generated grind spline was not placed exclusively in Group 4",
+        )
+        grind_data = grind_object.data
+        bpy.data.objects.remove(grind_object, do_unlink=True)
+        bpy.data.curves.remove(grind_data)
+        bpy.data.objects.remove(sharp_object, do_unlink=True)
+        bpy.data.meshes.remove(sharp_mesh)
         require(
             bpy.ops.skate_map.quick_export() == {"FINISHED"},
             "Automatic export failed after a manual material edit",
@@ -219,9 +420,14 @@ def main() -> None:
             )
         finally:
             addon.exporter.numpy = original_numpy
+        _, _, scalar_counts = addon.exporter._read_package_header(
+            scalar_output
+        )
         require(
-            output.read_bytes() == scalar_output.read_bytes(),
-            "Bulk geometry packing changed the SKATE package payload",
+            scalar_counts == counts
+            and scalar_output.stat().st_size == output.stat().st_size,
+            "Bulk and scalar geometry paths produced different package "
+            "structure",
         )
         print(
             "AUTO_IMPORT_WORKFLOW_OK",

@@ -44,15 +44,18 @@ An ordinary `.blend` file does not need to be rebuilt around SKATE
 collections before export:
 
 1. Open the map and save a working copy.
-2. Put the 3D cursor at the desired player start and select
-   **Set Spawn at 3D Cursor**.
+2. Select **Create / Select Spawn Locator**, then move the four-metre
+   `OW_SPAWN` pad to the desired player start and rotate its arrow to set
+   heading.
 3. Choose **Export As...**.
 
 Validate and Export automatically adopts visible mesh objects, reads normal
 Principled BSDF base-colour, normal, emission, roughness, metallic and alpha
 inputs, copies existing UVs into the required map channels, assigns sensible
-Skate contact defaults from material names, and generates static collision
-from solid visible geometry. Existing collider conventions such as
+Skate contact defaults from material names, generates subtle normal, packed
+ORM, and emissive maps where shaders only provide scalar values, and
+generates static collision from solid visible geometry. Existing collider
+conventions such as
 `Collider`, `Collision`, `UCX_`, `UBX_`, `USP_`, and `UCP_` are recognised as
 collision-only proxies. Common foliage, decal, backdrop, probe, and shadow-
 helper names remain presentation-only or are omitted as appropriate.
@@ -63,46 +66,53 @@ are not converted into invented lights. Existing `OW_*` authoring metadata is
 never replaced by automatic defaults.
 
 **Auto Prepare Blender Map** exposes the same conversion before export so its
-choices can be inspected and overridden. Automatic preparation is
-non-destructive: objects remain in their original collections, source meshes
-are not dissolved, and existing UVs and shader nodes are preserved. A mesh
-with no source UVs receives empty required layers and is reported for normal
-Blender unwrapping.
+choices can be inspected. It adds each eligible object to exactly one of the
+five map groups while preserving unrelated collection links, source meshes,
+existing UVs, and shader nodes. A mesh with no source UVs receives empty
+required layers and is reported for normal Blender unwrapping. When real
+Point, Spot, or Area lights are present, day and night ambient defaults become
+zero so the scene is not double-lit.
 
 Grind splines and experimental NPC paths remain deliberate authoring inputs;
 they cannot be inferred reliably from arbitrary visual geometry.
 
 ## New authored map: detailed UI workflow
 
-1. Select **Prepare Scene**. This creates the required visual/collision and
-   spawn structure, plus optional grind and NPC-path collections.
+1. Select **Prepare Scene**. This creates five exclusive map-group
+   collections and the movable spawn locator.
 2. Model or import your map normally.
-3. Select rendered mesh objects and choose **Visual**.
-4. Select collision mesh objects, ensure they have the matching visual
-   material, and choose **Collision**.
-5. Select curve objects representing rail centerlines and choose **Grind**.
-6. Optional/experimental: select curve objects for AI skaters and choose
-   **NPC Path (Experimental)**. In
+3. In **Material Map Groups**, highlight a material in the list and use the
+   buttons directly underneath it. **1 Presentation + Collision** is the
+   default; **2 No Presentation** is for collider-only meshes; and **3 No
+   Collision** is for decals, vegetation, support railings, and phase-through
+   geometry. A button moves every mesh using the highlighted material, making
+   material ownership visible without repeatedly selecting scene objects.
+   Clicking a material row also selects all visible meshes using it in the
+   3D View and makes the first match active.
+4. Put grind curves in **4 Grinds**. Alternatively, mark rail-top edges
+   Sharp and choose **Create Grind Splines from Sharp Edges**; connected
+   edges are consolidated into curve splines automatically.
+5. Optional/experimental: put AI-skater curves in **5 Pathing**. In
    **Object Properties > Owned World NPC Path**, choose the skater count,
    speed, and spacing. Enable **Cyclic U** on the Blender spline for a loop.
    The data exports, but reliable native AI route following is not yet part
    of the supported release feature set.
-7. If validation reports missing UV layers, select the affected meshes and
+6. If validation reports missing UV layers, select the affected meshes and
    choose **Create Missing UV Layers**. Existing UVs are copied when
    possible; a mesh with no UVs still needs a normal Blender unwrap.
-8. Put the 3D cursor where the player should appear and choose
-   **Set Spawn at 3D Cursor**.
-9. Set the map name, daylight range, sky colours, and SKATE destination.
+7. Choose **Create / Select Spawn Locator**, move its 4x4 pad where the
+   player should appear, and rotate the arrow for heading.
+8. Set the map name, daylight range, sky colours, and SKATE destination.
    Expand **Advanced Lighting** to author twilight/night palettes, sun and
    moon colours and strength, day/night ambient light, and default sky
    grading.
    Add ordinary Blender Point, Spot, or Area lights anywhere in the scene;
    their colour, power, range, softness, direction, and spot cone export
    automatically. A normal Blender Sun controls the world sunlight.
-10. Choose **Validate Map**. Every blocking problem is shown directly in the
+9. Choose **Validate Map**. Every blocking problem is shown directly in the
     panel with the object name and suggested correction. Collision validation
     scans the whole map in one pass rather than stopping at the first mesh.
-11. Choose **Quick Export**, or **Export As...** to select another
+10. Choose **Quick Export**, or **Export As...** to select another
     destination.
 
 The same exporter is also available through **File > Export > Skate 3 Custom
@@ -145,12 +155,18 @@ Select a material and open **Material Properties > Owned World Material**.
 The panel contains:
 
 - one-click concrete, asphalt, wood, metal, grass, tile, glass, ice, stair,
-  water, and instant-bail presets;
+  water, instant-bail, alpha-decal, and tree/vegetation presets;
 - Skate 3 wheel/grind sound, physics behaviour, and contact-pattern menus;
 - collision, friction, and bounce controls;
 - base colour, baked lighting, normal, ORM, and emissive image slots;
 - roughness, metallic, baked-lighting strength, emissive strength, and
   transparency controls.
+
+**Sync Materials from Shaders** deliberately refreshes the PBR Presentation
+tab from selected meshes' Principled shaders. It also overwrites maps created
+by Auto Prepare, so changing shader roughness, metallic, emission, alpha, or
+the small **Generated Normal Strength** value can be propagated later without
+touching authored texture maps.
 
 For a physical door, select the complete door-leaf mesh and open **Physics
 Properties > Owned World Physics**. Choose **Hinged Door**, place the 3D
@@ -160,19 +176,21 @@ response, friction, and bounce.
 
 ## Advanced Blender scene contract
 
-Create these collections:
+Create these exclusive collections:
 
-- `OW_VISUAL`: mesh objects rendered by the owned renderer.
-- `OW_COLLISION`: mesh objects used only for collision. Each object has an
-  `ow_material` custom property naming an exported visual material.
-- `OW_GRIND` (optional): curve objects whose splines become grind
-  centerlines.
-- `OW_NPC_PATHS` (optional/experimental): route records for native AI
+- `OW_GROUP_1_PRESENTATION_COLLISION`: default rendered and collidable meshes.
+- `OW_GROUP_2_NO_PRESENTATION`: collision-only meshes. Each object has an
+  `ow_material` custom property naming an exported presentation material.
+- `OW_GROUP_3_NO_COLLISION`: rendered decals, vegetation, support railings,
+  and phase-through meshes.
+- `OW_GROUP_4_GRINDS`: curve objects whose splines become grind centerlines.
+- `OW_GROUP_5_PATHING`: optional/experimental route records for native AI
   skaters. Object
   properties `ow_npc_skater_count`, `ow_npc_speed`, and
   `ow_npc_spawn_spacing` configure each route.
 
-Create an empty named `OW_SPAWN`. Every visual mesh needs `UVMap` and
+Create a movable mesh named `OW_SPAWN`; its world position and Z rotation
+define spawn position and heading. Every presentation mesh needs `UVMap` and
 `Lightmap` UV layers. Materials identify images with `ow_albedo_image`,
 `ow_lightmap_image`, `ow_normal_image`, `ow_orm_image`, and
 `ow_emissive_image`. Optional material properties include `ow_friction`,
@@ -185,7 +203,7 @@ zero to freeze lighting at `ow_start_hour`. Set `ow_cycle_ping_pong` with
 `ow_end_hour` to animate from the start hour to the end hour and back without
 traversing the unused part of the 24-hour clock.
 
-To author a door, keep its mesh in `OW_VISUAL`, choose **Hinged Door** in
+To author a door, keep its mesh in Group 1, choose **Hinged Door** in
 **Object Properties > Physics > Owned World Physics**, place the 3D cursor
 on the hinge line, and click **Set Hinge From 3D Cursor**. The panel also
 exports opening limits, mass, angular damping, friction, and restitution.
@@ -201,7 +219,7 @@ The extension's Material Properties panel supports:
 - all 13 native physics behaviors;
 - all 16 native contact patterns;
 - presets for concrete, asphalt, wood, metal, grass, tile, glass, ice,
-  stairs, water, and instant-bail hazards;
+  stairs, water, instant-bail hazards, alpha decals, and vegetation;
 - normal, ORM, and emissive texture slots;
 - opaque, alpha-cutout, and alpha-blended modes; and
 - an independent collision-enabled switch.
@@ -224,8 +242,12 @@ Blender is Z-up; SKATE is right-handed Y-up. The exporter applies
 it at a deterministic four-Blender-unit tile scale, so texel density does not
 change with object size. `Lightmap` remains a separate non-overlapping atlas.
 
-Collision is deliberately authored independently from render meshes. Prefer
-continuous rideable surfaces and simple exterior shells; do not stack
+Group 1 intentionally uses the same evaluated object for presentation and
+collision, while Group 2 supports independent collision proxies. During
+build, the exporter evaluates the complete modifier stack (including
+Solidify), transformed geometry, and final split/smooth loop normals without
+destructively changing the source `.blend`. Prefer continuous rideable
+surfaces and simple exterior shells; do not stack
 intersecting solid boxes to form stairs or leave bottom faces coplanar with a
 floor. Set `ow_upward_surface=true` on floor/ramp-only proxies.
 

@@ -28,10 +28,26 @@ except ImportError:
 
 MAGIC = b"SKATE08\0"
 ENDIAN_MARKER = 0x12345678
-VISUAL_COLLECTION = "OW_VISUAL"
-COLLISION_COLLECTION = "OW_COLLISION"
-GRIND_COLLECTION = "OW_GRIND"
-NPC_PATH_COLLECTION = "OW_NPC_PATHS"
+PRESENTATION_COLLISION_COLLECTION = "OW_GROUP_1_PRESENTATION_COLLISION"
+NO_PRESENTATION_COLLECTION = "OW_GROUP_2_NO_PRESENTATION"
+NO_COLLISION_COLLECTION = "OW_GROUP_3_NO_COLLISION"
+GRIND_COLLECTION = "OW_GROUP_4_GRINDS"
+NPC_PATH_COLLECTION = "OW_GROUP_5_PATHING"
+# Public aliases retained for scripts written against add-on 1.x. New scenes
+# use the five exclusive collections above.
+VISUAL_COLLECTION = PRESENTATION_COLLISION_COLLECTION
+COLLISION_COLLECTION = NO_PRESENTATION_COLLECTION
+LEGACY_VISUAL_COLLECTION = "OW_VISUAL"
+LEGACY_COLLISION_COLLECTION = "OW_COLLISION"
+LEGACY_GRIND_COLLECTION = "OW_GRIND"
+LEGACY_NPC_PATH_COLLECTION = "OW_NPC_PATHS"
+GROUP_COLLECTIONS = (
+    PRESENTATION_COLLISION_COLLECTION,
+    NO_PRESENTATION_COLLECTION,
+    NO_COLLISION_COLLECTION,
+    GRIND_COLLECTION,
+    NPC_PATH_COLLECTION,
+)
 SPAWN_OBJECT = "OW_SPAWN"
 _HELPER_OBJECT_MARKERS = (
     "character_size",
@@ -665,7 +681,7 @@ def _scene_metadata(output: Path) -> tuple[str, bytes]:
     sun_color, sun_intensity, orbit_azimuth = _sun_metadata()
     values = (
         *_to_runtime(spawn.matrix_world.translation),
-        float(spawn.get("ow_heading_radians", 0.0)),
+        _spawn_heading(spawn),
         *tuple(scene.get("ow_sky_zenith", (0.09, 0.34, 0.72))),
         *tuple(scene.get("ow_sky_horizon", (0.58, 0.78, 0.98))),
         *tuple(scene.get("ow_sky_nadir", (0.18, 0.25, 0.34))),
@@ -916,6 +932,27 @@ def _collection(name: str) -> bpy.types.Collection:
     return collection
 
 
+def _objects_from_collections(*names: str) -> list[bpy.types.Object]:
+    result: list[bpy.types.Object] = []
+    seen: set[int] = set()
+    for name in names:
+        collection = bpy.data.collections.get(name)
+        if collection is None:
+            continue
+        for obj in collection.all_objects:
+            identity = obj.as_pointer()
+            if identity not in seen:
+                seen.add(identity)
+                result.append(obj)
+    return result
+
+
+def _spawn_heading(spawn: bpy.types.Object) -> float:
+    if spawn.type == "MESH":
+        return float(spawn.matrix_world.to_euler("XYZ").z)
+    return float(spawn.get("ow_heading_radians", 0.0))
+
+
 def _is_helper_object(obj: bpy.types.Object) -> bool:
     """Reject authoring references even when an old add-on linked them."""
     identity = f"{obj.name} {getattr(obj.data, 'name', '')}".lower()
@@ -939,7 +976,7 @@ def _used_visual_materials(
                 result.append(material)
                 seen.add(identity)
     if not result:
-        raise ValueError("OW_VISUAL does not reference any materials")
+        raise ValueError("presentation groups do not reference any materials")
     return result
 
 
@@ -1269,7 +1306,7 @@ def _export_visual_geometry(
         )
 
     if not vertex_count:
-        raise ValueError("OW_VISUAL contains no exportable triangles")
+        raise ValueError("presentation groups contain no exportable triangles")
     return PackedVisualGeometry(chunks, vertex_count)
 
 
@@ -1314,7 +1351,7 @@ def audit_collision_geometry(
         ):
             issues.append(
                 f"{source_object.name}: collision material "
-                f"{material_name!r} is not exported by OW_VISUAL."
+                f"{material_name!r} is not exported by a presentation group."
             )
             continue
         material_id = (
@@ -1425,7 +1462,7 @@ def audit_collision_geometry(
             )
         surface_id += 1
     if not triangles:
-        issues.append("OW_COLLISION contains no usable collision triangles.")
+        issues.append("collision groups contain no usable collision triangles.")
     audit = CollisionGeometryAudit(
         issues=issues,
         warnings=warnings,
@@ -1846,27 +1883,29 @@ def export_scene(
 
     visual_objects = [
         obj
-        for obj in _collection(VISUAL_COLLECTION).all_objects
+        for obj in _objects_from_collections(
+            PRESENTATION_COLLISION_COLLECTION,
+            NO_COLLISION_COLLECTION,
+            LEGACY_VISUAL_COLLECTION,
+        )
         if bool(obj.get("ow_export_visual", True))
         and not _is_helper_object(obj)
     ]
     static_visual_objects = _static_visual_objects(visual_objects)
     collision_objects = [
         obj
-        for obj in _collection(COLLISION_COLLECTION).all_objects
+        for obj in _objects_from_collections(
+            PRESENTATION_COLLISION_COLLECTION,
+            NO_PRESENTATION_COLLECTION,
+            LEGACY_COLLISION_COLLECTION,
+        )
         if not _is_helper_object(obj)
     ]
-    grind_collection = bpy.data.collections.get(GRIND_COLLECTION)
-    grind_objects = (
-        list(grind_collection.all_objects)
-        if grind_collection is not None
-        else []
+    grind_objects = _objects_from_collections(
+        GRIND_COLLECTION, LEGACY_GRIND_COLLECTION
     )
-    npc_path_collection = bpy.data.collections.get(NPC_PATH_COLLECTION)
-    npc_path_objects = (
-        list(npc_path_collection.all_objects)
-        if npc_path_collection is not None
-        else []
+    npc_path_objects = _objects_from_collections(
+        NPC_PATH_COLLECTION, LEGACY_NPC_PATH_COLLECTION
     )
     materials = _used_visual_materials(visual_objects)
     images, image_ids = _referenced_images(materials)
@@ -2025,7 +2064,7 @@ def export_scene(
     if spawn is None:
         raise ValueError(f"required spawn object is missing: {SPAWN_OBJECT}")
     spawn_position = _to_runtime(spawn.matrix_world.translation)
-    heading = float(spawn.get("ow_heading_radians", 0.0))
+    heading = _spawn_heading(spawn)
     scene = bpy.context.scene
     sun_color, sun_intensity, orbit_azimuth = _sun_metadata()
 
