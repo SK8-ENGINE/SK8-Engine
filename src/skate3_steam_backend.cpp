@@ -137,6 +137,9 @@ struct Api {
   using ManualFreeLast = void (*)(int);
   using ManualGetResult = bool (*)(int, std::uint64_t, void*, int, int, bool*);
   using GetInterface = void* (*)();
+  using InputInit = bool (*)(void*, bool);
+  using InputShutdown = bool (*)(void*);
+  using InputSetActionManifest = bool (*)(void*, const char*);
   using UserGetSteamId = std::uint64_t (*)(void*);
   using FriendsGetPersonaName = const char* (*)(void*);
   using RequestLobbyList = std::uint64_t (*)(void*);
@@ -174,6 +177,10 @@ struct Api {
   GetInterface user_interface = nullptr;
   GetInterface friends_interface = nullptr;
   GetInterface networking_interface = nullptr;
+  GetInterface input_interface = nullptr;
+  InputInit input_init = nullptr;
+  InputShutdown input_shutdown = nullptr;
+  InputSetActionManifest input_set_action_manifest = nullptr;
   UserGetSteamId user_get_steam_id = nullptr;
   FriendsGetPersonaName friends_get_persona_name = nullptr;
   RequestLobbyList request_lobby_list = nullptr;
@@ -205,6 +212,8 @@ struct Runtime {
   void* user = nullptr;
   void* friends = nullptr;
   void* networking = nullptr;
+  void* input = nullptr;
+  bool input_initialized = false;
   int pipe = 0;
   std::uint64_t pending_lobby_list = 0;
   std::uint64_t pending_create = 0;
@@ -237,6 +246,137 @@ std::filesystem::path ExecutableDirectory() {
 }
 
 #if defined(_WIN32)
+std::optional<std::filesystem::path> SteamInstallDirectory() {
+  std::array<wchar_t, 32768> path{};
+  DWORD path_bytes = static_cast<DWORD>(path.size() * sizeof(wchar_t));
+  if (RegGetValueW(HKEY_CURRENT_USER, L"Software\\Valve\\Steam", L"SteamPath",
+                   RRF_RT_REG_SZ, nullptr, path.data(), &path_bytes) ==
+          ERROR_SUCCESS &&
+      path[0] != L'\0') {
+    return std::filesystem::path(path.data());
+  }
+
+  std::array<wchar_t, 32768> program_files{};
+  const DWORD size = GetEnvironmentVariableW(
+      L"ProgramFiles(x86)", program_files.data(),
+      static_cast<DWORD>(program_files.size()));
+  if (size > 0 && size < program_files.size()) {
+    const auto fallback =
+        std::filesystem::path(program_files.data()) / "Steam";
+    if (std::filesystem::is_directory(fallback)) {
+      return fallback;
+    }
+  }
+  return std::nullopt;
+}
+
+std::optional<std::filesystem::path> PrepareSteamInputManifest() {
+  struct Template {
+    std::string_view controller_type;
+    std::string_view file_name;
+  };
+  static constexpr std::array<Template, 10> kTemplates = {{
+      {"controller_xbox360", "controller_xbox360_gamepad_joystick.vdf"},
+      {"controller_xboxone", "controller_xboxone_gamepad_joystick.vdf"},
+      {"controller_ps3", "controller_ps3_gamepad_joystick.vdf"},
+      {"controller_ps4", "controller_ps4_gamepad_joystick.vdf"},
+      {"controller_ps5", "controller_ps5_gamepad_joystick.vdf"},
+      {"controller_switch_pro",
+       "controller_switch_pro_gamepad_joystick.vdf"},
+      {"controller_switch_joycon_left",
+       "controller_switch_joycon_left_gamepad_joystick.vdf"},
+      {"controller_switch_joycon_right",
+       "controller_switch_joycon_right_gamepad_joystick.vdf"},
+      {"controller_neptune", "controller_neptune_gamepad_joystick.vdf"},
+      {"controller_generic", "controller_generic_gamepad_joystick.vdf"},
+  }};
+
+  const auto steam_root = SteamInstallDirectory();
+  if (!steam_root) {
+    REXLOG_WARN(
+        "steam-input: Steam install directory unavailable; Spacewar input "
+        "override was not installed");
+    return std::nullopt;
+  }
+
+  const auto source_root = *steam_root / "controller_base" / "templates";
+  const auto output_root =
+      ExecutableDirectory() / ".cel-steam" / "input";
+  std::error_code error;
+  std::filesystem::create_directories(output_root, error);
+  if (error) {
+    REXLOG_WARN("steam-input: could not create '{}': {}",
+                output_root.string(), error.message());
+    return std::nullopt;
+  }
+
+  std::vector<Template> available;
+  available.reserve(kTemplates.size());
+  for (const auto& entry : kTemplates) {
+    const auto source = source_root / entry.file_name;
+    const auto destination = output_root / entry.file_name;
+    if (!std::filesystem::is_regular_file(source)) {
+      REXLOG_WARN("steam-input: standard template missing: {}",
+                  source.string());
+      continue;
+    }
+    error.clear();
+    std::filesystem::copy_file(
+        source, destination,
+        std::filesystem::copy_options::overwrite_existing, error);
+    if (error) {
+      REXLOG_WARN("steam-input: could not stage '{}': {}",
+                  source.string(), error.message());
+      continue;
+    }
+    available.push_back(entry);
+  }
+  if (available.empty()) {
+    return std::nullopt;
+  }
+
+  const auto manifest_path = output_root / "game_actions_480.vdf";
+  const auto temporary_path = output_root / "game_actions_480.vdf.tmp";
+  {
+    std::ofstream manifest(temporary_path, std::ios::binary | std::ios::trunc);
+    if (!manifest) {
+      REXLOG_WARN("steam-input: could not write '{}'",
+                  temporary_path.string());
+      return std::nullopt;
+    }
+    manifest << "\"Action Manifest\"\n{\n"
+                "\t\"configurations\"\n\t{\n";
+    for (const auto& entry : available) {
+      manifest << "\t\t\"" << entry.controller_type << "\"\n"
+               << "\t\t{\n"
+               << "\t\t\t\"0\"\n"
+               << "\t\t\t{\n"
+               << "\t\t\t\t\"path\"\t\"" << entry.file_name << "\"\n"
+               << "\t\t\t}\n"
+               << "\t\t}\n";
+    }
+    manifest << "\t}\n"
+                "\t\"actions\"\n\t{\n\t}\n"
+                "\t\"localization\"\n\t{\n\t}\n"
+                "}\n";
+    if (!manifest) {
+      REXLOG_WARN("steam-input: failed while writing '{}'",
+                  temporary_path.string());
+      return std::nullopt;
+    }
+  }
+  error.clear();
+  std::filesystem::remove(manifest_path, error);
+  error.clear();
+  std::filesystem::rename(temporary_path, manifest_path, error);
+  if (error) {
+    REXLOG_WARN("steam-input: could not publish '{}': {}",
+                manifest_path.string(), error.message());
+    return std::nullopt;
+  }
+  return manifest_path;
+}
+
 std::wstring QuoteWindowsArgument(std::wstring_view value) {
   std::wstring result = L"\"";
   std::size_t slashes = 0;
@@ -828,6 +968,20 @@ bool LoadApi(Runtime& runtime) {
   LOAD_STEAM(release_network_message,
              "SteamAPI_SteamNetworkingMessage_t_Release");
 #undef LOAD_STEAM
+  // Steam Input is optional for the networking backend, but AppID 480's
+  // Spacewar action layout is not compatible with the game's direct XInput
+  // reader. When these exports are available, initialize Steam Input with a
+  // local standard-gamepad manifest below so users do not need to disable it
+  // manually in Spacewar's properties.
+  LoadFunction(runtime.api.module, "SteamAPI_SteamInput_v006",
+               runtime.api.input_interface);
+  LoadFunction(runtime.api.module, "SteamAPI_ISteamInput_Init",
+               runtime.api.input_init);
+  LoadFunction(runtime.api.module, "SteamAPI_ISteamInput_Shutdown",
+               runtime.api.input_shutdown);
+  LoadFunction(runtime.api.module,
+               "SteamAPI_ISteamInput_SetInputActionManifestFilePath",
+               runtime.api.input_set_action_manifest);
   return true;
 #else
   runtime.state.status = "Steam is currently supported only on Windows.";
@@ -871,6 +1025,8 @@ bool InitializeLocked(Runtime& runtime) {
   runtime.user = runtime.api.user_interface();
   runtime.friends = runtime.api.friends_interface();
   runtime.networking = runtime.api.networking_interface();
+  runtime.input =
+      runtime.api.input_interface ? runtime.api.input_interface() : nullptr;
   runtime.pipe = runtime.api.get_pipe();
   if (runtime.matchmaking == nullptr || runtime.user == nullptr ||
       runtime.friends == nullptr || runtime.networking == nullptr ||
@@ -879,6 +1035,37 @@ bool InitializeLocked(Runtime& runtime) {
     runtime.state.status =
         "Steam initialized but required interfaces were unavailable.";
     return false;
+  }
+  if (runtime.input != nullptr && runtime.api.input_init != nullptr &&
+      runtime.api.input_set_action_manifest != nullptr) {
+#if defined(_WIN32)
+    const auto manifest = PrepareSteamInputManifest();
+    if (manifest) {
+      const std::string manifest_utf8 = manifest->string();
+      if (runtime.api.input_set_action_manifest(runtime.input,
+                                                manifest_utf8.c_str())) {
+        runtime.input_initialized =
+            runtime.api.input_init(runtime.input, false);
+        if (runtime.input_initialized) {
+          REXLOG_INFO(
+              "steam-input: AppID 480 controller layout overridden with "
+              "standard gamepad mappings from '{}'",
+              manifest_utf8);
+        } else {
+          REXLOG_WARN(
+              "steam-input: standard gamepad manifest was accepted, but "
+              "Steam Input initialization failed");
+        }
+      } else {
+        REXLOG_WARN("steam-input: Steam rejected local manifest '{}'",
+                    manifest_utf8);
+      }
+    }
+#endif
+  } else {
+    REXLOG_WARN(
+        "steam-input: runtime does not expose the optional input override; "
+        "Spacewar's per-game controller setting may still be required");
   }
   runtime.api.manual_init();
   runtime.state.local_steam_id = runtime.api.user_get_steam_id(runtime.user);
@@ -1028,6 +1215,10 @@ void Shutdown() {
   std::scoped_lock lock(g_mutex);
   if (g_runtime.state.initialized && g_runtime.state.lobby_id != 0) {
     g_runtime.api.leave_lobby(g_runtime.matchmaking, g_runtime.state.lobby_id);
+  }
+  if (g_runtime.input_initialized && g_runtime.input != nullptr &&
+      g_runtime.api.input_shutdown != nullptr) {
+    g_runtime.api.input_shutdown(g_runtime.input);
   }
   if (g_runtime.state.initialized && g_runtime.api.shutdown) {
     g_runtime.api.shutdown();

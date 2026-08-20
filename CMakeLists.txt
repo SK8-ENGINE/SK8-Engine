@@ -442,7 +442,7 @@ endif()
 
 if(WIN32)
     target_link_libraries(skate3 PRIVATE
-        comdlg32 winhttp d3d12 d3dcompiler dxgi dxguid gdiplus winmm ws2_32)
+        advapi32 comdlg32 winhttp d3d12 d3dcompiler dxgi dxguid gdiplus winmm ws2_32)
 endif()
 
 set(SKATE3_REXRUNTIME_TARGET rexruntime)
