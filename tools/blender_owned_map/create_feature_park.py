@@ -17,7 +17,7 @@ from mathutils import Vector
 
 
 TOOL_ROOT = Path(__file__).resolve().parent
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[3]
 if str(TOOL_ROOT) not in sys.path:
     sys.path.insert(0, str(TOOL_ROOT))
 
@@ -25,10 +25,10 @@ import create_bake_showcase as base  # noqa: E402
 from owned_world_material_addon.exporter import export_scene  # noqa: E402
 
 
-BLEND_PATH = ROOT / "maps" / "blender_bake_showcase.blend"
-PACKAGE_PATH = ROOT / "maps" / "blender_bake_showcase.skate"
+BLEND_PATH = ROOT / "owned" / "maps" / "source" / "blender_bake_showcase.blend"
+PACKAGE_PATH = ROOT / "owned" / "maps" / "blender_bake_showcase.skate"
 base.TEXTURE_DIR = (
-    ROOT / "maps" / "source" / "blender_bake_showcase_textures"
+    ROOT / "owned" / "maps" / "source" / "blender_bake_showcase_textures"
 )
 
 
@@ -276,7 +276,7 @@ def make_materials() -> tuple[dict[str, bpy.types.Material], list]:
         "T_DarkBrick", (0.095, 0.045, 0.04), (0.30, 0.09, 0.055), 18
     )
     metal_tex = base.make_texture(
-        "T_Metal", (0.17, 0.18, 0.19), (0.47, 0.49, 0.51), 24
+        "T_Metal", (0.16, 0.19, 0.23), (0.48, 0.53, 0.58), 24
     )
     cyan_tex = base.make_texture(
         "T_CyanEmitter", (0.015, 0.78, 1.0), (0.10, 1.0, 0.94), 4
@@ -349,23 +349,23 @@ def make_materials() -> tuple[dict[str, bpy.types.Material], list]:
             audio_surface=66, physics_surface=2, surface_pattern=12,
         ),
         "metal": base.make_material(
-            "GrindMetal", metal_tex, (0.86, 0.86, 0.86), 0.22,
+            "GrindMetal", metal_tex, (0.72, 0.78, 0.84), 0.22,
             flags=1 | 2, normal_image=normal_metal, orm_image=orm_metal,
             metallic=0.92, audio_surface=11, physics_surface=1,
         ),
         "cyan": base.make_material(
             "CyanEmitter", cyan_tex, (0.04, 0.94, 1.0), 0.16,
-            emissive=0.65, normal_image=normal_flat, orm_image=orm_glass,
+            emissive=4.2, normal_image=normal_flat, orm_image=orm_glass,
             emissive_image=cyan_tex, collision_enabled=False,
         ),
         "amber": base.make_material(
             "AmberEmitter", amber_tex, (1.0, 0.22, 0.025), 0.16,
-            emissive=0.72, normal_image=normal_flat, orm_image=orm_glass,
+            emissive=4.8, normal_image=normal_flat, orm_image=orm_glass,
             emissive_image=amber_tex, collision_enabled=False,
         ),
         "label": base.make_material(
             "SignTextEmissive", white_tex, (1.0, 1.0, 1.0), 0.28,
-            emissive=0.38, normal_image=normal_flat, orm_image=orm_tile,
+            emissive=1.6, normal_image=normal_flat, orm_image=orm_tile,
             emissive_image=white_tex, collision_enabled=False,
         ),
         "asphalt": base.make_material(
@@ -385,7 +385,7 @@ def make_materials() -> tuple[dict[str, bpy.types.Material], list]:
             audio_surface=6, physics_surface=1, surface_pattern=10,
         ),
         "metal_sheet": base.make_material(
-            "TEST_04_Metal_Sheet", metal_tex, (0.90, 0.90, 0.90), 0.22,
+            "TEST_04_Metal_Sheet", metal_tex, (0.78, 0.84, 0.90), 0.22,
             normal_image=normal_metal, orm_image=orm_metal, metallic=0.92,
             audio_surface=31, physics_surface=1,
         ),
@@ -609,12 +609,12 @@ def build_static_park(
         "AmberEmissiveWall", (44.0, -7.0, 2.5), (0.28, 8.0, 5.0),
         material["amber"], visual, None, bevel=0.06,
     )
-    for index, (x, label, surface) in enumerate(
+    for index, (x, surface) in enumerate(
         (
-            (24.0, "POLISHED CONCRETE", material["polished"]),
-            (31.0, "BRUSHED METAL", material["metal_sheet"]),
-            (38.0, "WOOD", material["wood"]),
-            (45.0, "CERAMIC TILE", material["tile"]),
+            (24.0, material["polished"]),
+            (31.0, material["metal_sheet"]),
+            (38.0, material["wood"]),
+            (45.0, material["tile"]),
         ),
         1,
     ):
@@ -628,21 +628,8 @@ def build_static_park(
         sphere = bpy.context.object
         sphere.name = f"PBRMaterialSphere_{index:02d}"
         base.move_to(sphere, visual)
-        # Lightmap smart-unwrapping splits a UV sphere into latitude strips.
-        # Sampling the static bake on those strips exposed hard horizontal
-        # seams. The sphere is a PBR response reference, so use a material
-        # copy with identical albedo/normal/ORM maps but no baked lightmap.
-        sphere_surface = surface.copy()
-        sphere_surface.name = f"{surface.name}_SphereReference"
-        sphere_surface["ow_lightmap_image"] = ""
-        sphere_surface["ow_baked_strength"] = 0.0
-        sphere.data.materials.append(sphere_surface)
-        # Blender's UV sphere already has a continuous spherical unwrap.
-        # Re-projecting each polygon independently produced horizontal bands
-        # and face seams that looked like a broken carbon-fibre texture.
-        add_text(
-            label, (x, 2.78, 0.66), material["label"], visual, size=0.38
-        )
+        sphere.data.materials.append(surface)
+        base.metric_uv(sphere, metres_per_tile=2.0)
 
     # Local light lab. Each light has a neutral pedestal and a different
     # type/colour so Point, Spot, and Area behaviour is obvious at night.
@@ -730,16 +717,7 @@ def build_scene() -> None:
         "LM_BakedIndirect_Showcase", width=1024, height=1024, alpha=True
     )
     lightmap.colorspace_settings.name = "Non-Color"
-    sphere_reference_materials = [
-        candidate
-        for candidate in bpy.data.materials
-        if candidate.name.endswith("_SphereReference")
-    ]
-    bake_materials = material_list + sphere_reference_materials
-    # Sphere references need a valid active bake target so Cycles never
-    # writes indirect lighting into their albedo maps. Their package
-    # lightmap references are removed again after the bake.
-    base.add_bake_target(bake_materials, lightmap)
+    base.add_bake_target(material_list, lightmap)
 
     world = bpy.data.worlds.new("OW_FeatureParkWorld")
     bpy.context.scene.world = world
@@ -808,19 +786,18 @@ def build_scene() -> None:
         f"maximum={max(rgb):.4f}",
         f"mean={sum(rgb) / len(rgb):.4f}",
     )
-    base.persist_lightmap(lightmap, bake_materials)
-    for sphere_surface in sphere_reference_materials:
-        sphere_surface["ow_lightmap_image"] = ""
-        sphere_surface["ow_baked_strength"] = 0.0
+    base.persist_lightmap(lightmap, material_list)
 
     # Dynamic door is added after joining and baking static geometry so it
     # remains an independent rigid body in the exported package.
     add_hinged_door(materials["door"], visual)
 
+    BLEND_PATH.parent.mkdir(parents=True, exist_ok=True)
     collision.hide_viewport = False
     grinds.hide_viewport = False
     npc_paths.hide_viewport = False
-    base.save_packed_project_and_export()
+    bpy.ops.wm.save_as_mainfile(filepath=str(BLEND_PATH), compress=True)
+    export_scene(PACKAGE_PATH, force_rebuild=True)
 
 
 if __name__ == "__main__":

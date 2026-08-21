@@ -10705,13 +10705,10 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
   uint32_t candidate_chunks = 0;
   uint32_t visible_chunks = 0;
   uint32_t draw_calls = 0;
-  const auto draw_chunk = [&](std::size_t chunk_index,
-                              bool transparent_pass) {
+  const auto draw_chunk = [&](std::size_t chunk_index) {
     const mechanics_sandbox::map::VisualChunk& chunk =
         world.chunks[chunk_index];
-    if (!transparent_pass) {
-      ++candidate_chunks;
-    }
+    ++candidate_chunks;
     float corners[8][3];
     for (int corner = 0; corner < 8; ++corner) {
       corners[corner][0] =
@@ -10727,9 +10724,7 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
     if (CornersOutsideFrustum(corners, scene.view_proj, 1.05f)) {
       return;
     }
-    if (!transparent_pass) {
-      ++visible_chunks;
-    }
+    ++visible_chunks;
     if (!EnsureSandboxMapChunk(context.device, chunk_index)) {
       return;
     }
@@ -10755,9 +10750,6 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
       const bool alpha_blend =
           draw.alpha_mode ==
           skate::world::SurfaceMaterial::AlphaMode::Blend;
-      if (alpha_blend != transparent_pass) {
-        continue;
-      }
       cmd->SetPipeline(
           alpha_blend && g_r.pso_transparent != nullptr
               ? g_r.pso_transparent
@@ -10793,7 +10785,6 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
       owned_flags |= draw.normal_texture != 0 ? 8u : 0u;
       owned_flags |= draw.orm_texture != 0 ? 16u : 0u;
       owned_flags |= draw.emissive_texture != 0 ? 32u : 0u;
-      owned_flags |= draw.indirect_lightmap != 0 ? 64u : 0u;
       constants[48] =
           imported ? -static_cast<float>(owned_flags) : draw.material[0];
       constants[49] =
@@ -10808,36 +10799,29 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
       ++draw_calls;
     }
   };
-  const auto draw_cells = [&](bool transparent_pass) {
-    // The cell table is sorted by (x,z), allowing a bounded detail-radius
-    // lookup instead of scanning every chunk in a continent-sized map.
-    for (int32_t cell_x = camera_cell_x - cell_radius;
-         cell_x <= camera_cell_x + cell_radius; ++cell_x) {
-      for (int32_t cell_z = camera_cell_z - cell_radius;
-           cell_z <= camera_cell_z + cell_radius; ++cell_z) {
-        const auto cell = std::lower_bound(
-            world.cells.begin(), world.cells.end(),
-            std::pair<int32_t, int32_t>{cell_x, cell_z},
-            [](const mechanics_sandbox::map::VisualCellRange& left,
-               const std::pair<int32_t, int32_t>& right) {
-              return std::pair<int32_t, int32_t>{
-                         left.cell_x, left.cell_z} < right;
-            });
-        if (cell == world.cells.end() || cell->cell_x != cell_x ||
-            cell->cell_z != cell_z) {
-          continue;
-        }
-        for (std::size_t offset = 0; offset < cell->chunk_count; ++offset) {
-          draw_chunk(cell->first_chunk + offset, transparent_pass);
-        }
+  // The cell table is sorted by (x,z), allowing a bounded detail-radius
+  // lookup instead of scanning every chunk in a continent-sized map.
+  for (int32_t cell_x = camera_cell_x - cell_radius;
+       cell_x <= camera_cell_x + cell_radius; ++cell_x) {
+    for (int32_t cell_z = camera_cell_z - cell_radius;
+         cell_z <= camera_cell_z + cell_radius; ++cell_z) {
+      const auto cell = std::lower_bound(
+          world.cells.begin(), world.cells.end(),
+          std::pair<int32_t, int32_t>{cell_x, cell_z},
+          [](const mechanics_sandbox::map::VisualCellRange& left,
+             const std::pair<int32_t, int32_t>& right) {
+            return std::pair<int32_t, int32_t>{
+                       left.cell_x, left.cell_z} < right;
+          });
+      if (cell == world.cells.end() || cell->cell_x != cell_x ||
+          cell->cell_z != cell_z) {
+        continue;
+      }
+      for (std::size_t offset = 0; offset < cell->chunk_count; ++offset) {
+        draw_chunk(cell->first_chunk + offset);
       }
     }
-  };
-  // Alpha-blended batches must run after all static opaque batches. The
-  // package preserves authoring/material order, which is not a valid blend
-  // order and previously let later opaque geometry erase glass.
-  draw_cells(false);
-  draw_cells(true);
+  }
 
   // Advance and upload the project-owned heightfield. The solver itself is
   // fixed-step and renderer-independent; wall-clock time is only accumulated
@@ -11125,7 +11109,6 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
       owned_flags |= draw.normal_texture != 0 ? 8u : 0u;
       owned_flags |= draw.orm_texture != 0 ? 16u : 0u;
       owned_flags |= draw.emissive_texture != 0 ? 32u : 0u;
-      owned_flags |= draw.indirect_lightmap != 0 ? 64u : 0u;
       constants[48] =
           imported ? -static_cast<float>(owned_flags)
                    : draw.material[0];

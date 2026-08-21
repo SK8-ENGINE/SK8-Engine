@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.0-preview.10 - 2026-08-21
+
+- Restored the Blender-owned map generators, included Feature Park artifacts,
+  material shader, and owned-map GPU submission behavior from the stable
+  pre-preview.9 baseline.
+- Removed the preview.9 material/rendering regression that made signs turn
+  black, washed out the world, and suppressed the expected baked-lighting
+  presentation, while retaining the preview.9 multiplayer, mechanics, and
+  character work.
+
 ## 0.1.0-preview.9 - 2026-08-21
 
 - Replaced Steam's logical-host animation relay with authenticated direct
