@@ -34,8 +34,8 @@ namespace skate3 {
 namespace {
 
 constexpr std::string_view kDefaultManifestUrl =
-    "https://raw.githubusercontent.com/chasmlol/"
-    "Skate3CustomEngineLayer/main/release/update-manifest.toml";
+    "https://raw.githubusercontent.com/SK8-ENGINE/"
+    "SK8-Engine/main/release/update-manifest.toml";
 constexpr std::uint64_t kMaximumManifestBytes = 64u * 1024u;
 constexpr std::uint64_t kMaximumReleaseBytes =
     2ull * 1024ull * 1024ull * 1024ull;
