@@ -12,7 +12,7 @@ changes must be validated before publishing Linux, Vulkan, or macOS builds.
 Before publishing a source or binary revision:
 
 1. Confirm the companion runtime submodule resolves from the public
-   `chasmlol/Skate3CustomEngineLayer-Runtime` fork.
+   `SK8-ENGINE/SK8-Engine-Runtime` fork.
 2. Confirm `generated/`, `game/`, runtime data, retail media, DLC, saves,
    `.skate` packages, Blender scenes, export caches, logs and screenshots are
    untracked.
@@ -79,7 +79,7 @@ checkout:
 
 ```powershell
 git clone --recursive `
-  https://github.com/chasmlol/Skate3CustomEngineLayer.git
+  https://github.com/SK8-ENGINE/SK8-Engine.git
 ```
 
 The build still requires the developer's own extracted Skate 3 game data.

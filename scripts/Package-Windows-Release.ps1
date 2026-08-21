@@ -216,7 +216,7 @@ $archiveSize = (Get-Item -LiteralPath $archivePath).Length
 $manifestPath = Join-Path $outputRoot 'update-manifest.toml'
 @"
 version = "$Version"
-asset_url = "https://github.com/chasmlol/Skate3CustomEngineLayer/releases/download/v$Version/$archiveBase.zip"
+asset_url = "https://github.com/SK8-ENGINE/SK8-Engine/releases/download/v$Version/$archiveBase.zip"
 sha256 = "$($archiveHash.ToLowerInvariant())"
 size = $archiveSize
 "@ | Set-Content -LiteralPath $manifestPath -Encoding ascii

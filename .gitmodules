@@ -1,5 +1,5 @@
 [submodule "third_party/rexglue-sdk"]
 	path = third_party/rexglue-sdk
-	url = https://github.com/chasmlol/Skate3CustomEngineLayer-Runtime.git
+	url = https://github.com/SK8-ENGINE/SK8-Engine-Runtime.git
 	branch = skate3-sdk-clean
 
