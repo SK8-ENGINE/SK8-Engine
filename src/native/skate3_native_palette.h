@@ -26,12 +26,23 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <vector>
 
 namespace skate3::native_scene {
 struct FrameScene;
 }  // namespace skate3::native_scene
 
 namespace skate3::native_palette {
+
+// One player-piece view of the canonical source skeleton captured at
+// Sk8::UpdateBoneTransforms. `canonical_rows` is the source Matrix44 palette
+// converted to the renderer's 3x4 [R|t] convention. `palette_to_canonical`
+// maps each row consumed by this mesh back to that source skeleton.
+struct CanonicalRigSample {
+  std::vector<float> canonical_rows;
+  std::vector<float> canonical_rows_column_vector;
+  std::vector<std::uint16_t> palette_to_canonical;
+};
 
 // cModelInstance::PackAndMultiplyMatricesForUpload EXIT: m_matrices (+0x14)
 // holds exactly the packed upload palette; snapshot it.
@@ -40,7 +51,13 @@ void OnPackPalette(uint8_t* base, uint32_t instance);
 // Sk8::UpdateBoneTransforms EXIT: parts = an ARRAY of cModelInstance part
 // records (stride 0x28), count = record count. Snapshots every part
 // (per-frame arena, unreadable by frame end).
-void OnBoneTransforms(uint8_t* base, uint32_t parts, uint32_t count);
+void OnBoneTransforms(uint8_t* base, uint32_t parts, uint32_t count,
+                      uint32_t source_palette, uint32_t remap_tables);
+
+// Resolve a current player piece to the canonical source skeleton and the
+// game's exact mesh-local remap used to build its final upload palette.
+bool LookupCanonicalRig(uint32_t ctx, uint32_t mesh,
+                        CanonicalRigSample& out);
 
 // LivingWorld batch pack writer EXIT: entity = the
 // cLivingWorldPresEntity-derived writer. Snapshots each instance's
@@ -52,6 +69,7 @@ void OnLwPack(uint8_t* base, uint32_t entity);
 // returned previous value after the original call. Snapshots taken inside
 // the bracket carry the owning entity for identity-exact serving.
 uint32_t ExchangePackOwner(uint32_t entity);
+uint32_t CurrentPackOwner();
 
 // Called from BuildFrameScene while the frame's items are finalized:
 // replaces each mapped skinned character item's captured bank palette with

@@ -733,6 +733,15 @@ std::vector<VisualMesh> BuildKinematicVisualMeshes() {
             ? -material->emissive_intensity
             : material->roughness;
     draw.material[3] = material->variation;
+    draw.albedo_texture = material->albedo_texture;
+    draw.indirect_lightmap = material->indirect_lightmap;
+    draw.normal_texture = material->normal_texture;
+    draw.orm_texture = material->orm_texture;
+    draw.emissive_texture = material->emissive_texture;
+    draw.baked_indirect_strength =
+        material->baked_indirect_strength;
+    draw.alpha_mode = material->alpha_mode;
+    draw.alpha_cutoff = material->alpha_cutoff;
     mesh.draws.push_back(draw);
     meshes.push_back(std::move(mesh));
   }
@@ -870,6 +879,15 @@ VisualMesh BuildWaterPusherVisualMesh(
           ? -material->emissive_intensity
           : material->roughness;
   draw.material[3] = material->variation;
+  draw.albedo_texture = material->albedo_texture;
+  draw.indirect_lightmap = material->indirect_lightmap;
+  draw.normal_texture = material->normal_texture;
+  draw.orm_texture = material->orm_texture;
+  draw.emissive_texture = material->emissive_texture;
+  draw.baked_indirect_strength =
+      material->baked_indirect_strength;
+  draw.alpha_mode = material->alpha_mode;
+  draw.alpha_cutoff = material->alpha_cutoff;
   mesh.draws.push_back(draw);
   return mesh;
 }

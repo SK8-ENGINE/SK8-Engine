@@ -18,9 +18,10 @@ Open **Escape → Multiplayer** to use the first complete session flow:
 
 When Steam is initialized, the browser searches worldwide for lobbies tagged
 with the Custom Engine Layer game and protocol identifiers. This prevents
-unrelated Spacewar test lobbies from appearing. Lobby ownership defines the
-logical host; packets from other members travel upstream to that host and are
-relevance-routed to the other players.
+unrelated Spacewar test lobbies from appearing. The lobby owner coordinates
+discovery and membership, but gameplay pose, animation, and appearance
+packets travel directly between authenticated Steam peers. No player's
+connection acts as a relay for the rest of the lobby.
 
 If the Steam runtime is absent or Steam is not running, the menu reports that
 status and falls back to same-PC discovery. Local discovery records live under
@@ -66,17 +67,20 @@ AppID and follow Valve's setup and redistributable requirements.
 
 ## What works
 
-- Roles 1-100 communicate through Steam Networking Messages when a Steam
-  lobby is active. Role 1 is the lobby owner/logical host; roles 2-100 send
-  one upstream stream to it.
-- Steam identities authenticate transport senders. The host rejects a client
+- Roles 1-100 communicate directly through Steam Networking Messages when a
+  Steam lobby is active. The lobby owner is role 1 for session coordination,
+  but is not a gameplay-packet relay.
+- Steam identities authenticate transport senders. Every receiver rejects a
   packet whose claimed role does not match its Steam lobby member.
 - The fallback backend uses non-blocking localhost UDP with the same packets,
   roles, interpolation, and relevance routing.
-- The host learns peer endpoints, relays packets, removes stale peers, and
-  keeps an independent interpolation/reassembly timeline for every player.
+- Localhost development still uses role 1 as a small relay because all test
+  processes share one machine. Internet Steam sessions use direct peer fan-out.
+- Every receiver keeps an independent interpolation/reassembly timeline for
+  every player and removes stale peers.
 - Each client publishes its verified local board position, orientation, and
-  board-state flags 60 times per second by default.
+  board-state flags at the selected preset rate (60 times per second for
+  Balanced).
 - Positions use custom-map coordinates rather than the hidden retail world's
   absolute coordinates.
 - Received poses use their sender simulation timestamps rather than packet
@@ -88,20 +92,41 @@ AppID and follow Valve's setup and redistributable requirements.
 - A stale remote player disappears after 1.5 seconds.
 - The sender captures Skate 3's final rendered bone palettes after its
   animation graph, IK, tricks, and bails have evaluated.
-- Character pieces retain their own mesh-specific bone remaps. Complete
-  animation frames are compacted to half-float affine components plus
-  root-relative signed translations, fragmented into bounded UDP datagrams,
-  reassembled, buffered, and interpolated at 20 frames per second by default.
-- The receiver draws the actual Skate 3 skater, clothing, accessories, and
-  board meshes. The cyan rigid proxy remains only as a startup/packet-loss
-  fallback until the first complete skeletal frame arrives.
+- The sender transmits one canonical skeleton plus compact exact-palette
+  tracks for small or post-processed attachments such as the hat and wheels.
+  Affine components use signed 16-bit fixed point with root-relative
+  translations, are fragmented into bounded datagrams, reassembled, buffered,
+  and interpolated at 20 frames per second on Balanced.
+- The sender publishes a versioned engine-owned appearance recipe. The
+  receiver resolves exact vanilla CAC bind meshes from its local asset
+  catalogue and installs the sender's body, clothing, hair, accessories,
+  materials, and board without using Skate 3's fragile retail online/NPC
+  presentation entities. The current transitional recipe includes a
+  one-time, several-MiB presentation bundle; moving the remaining data to
+  stable vanilla asset identifiers is the next format optimization.
 - Each client renders at most the nearest 12 remote players by default.
-- The host routes full skeletal animation only to each receiver's nearest
-  high-detail set inside the 80-metre relevance radius. Distant players use
-  two inexpensive root-presence updates per second.
-- The host skips skeletal decoding for players outside its own visual set,
-  caches per-frame relevance decisions, uses larger UDP buffers, and drains
-  bursty fragmented traffic without the old 256-packet frame ceiling.
+- Each sender routes full skeletal animation only to nearby peers inside the
+  selected relevance radius. Distant peers receive inexpensive root-presence
+  updates.
+- Receivers skip skeletal decoding outside their visual set, cache relevance
+  decisions, use larger UDP buffers, and drain bursty fragmented traffic
+  without the old 256-packet frame ceiling.
+
+## Network quality presets
+
+Open **Escape → Multiplayer → Network Quality**:
+
+| Preset | Root pose | Animation | Interpolation | Detail radius | Nearby players |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Bandwidth Saver | 30 Hz | 10 Hz | 100 ms | 50 m | 6 |
+| Balanced | 60 Hz | 20 Hz | 50 ms | 80 m | 12 |
+| High Fidelity | 90 Hz | 30 Hz | 35 ms | 120 m | 16 |
+
+**Auto** chooses High Fidelity for up to 4 participants, Balanced for 5-12,
+and Bandwidth Saver above 12. **Custom** exposes the individual rates,
+interpolation delay, relevance radius, attachment radius, nearby-player
+budget, and distant-presence rate. Balanced preserves the configuration used
+for the current two-client validation.
 
 Both clients currently start at the same authored map spawn and may overlap
 until one moves. Replication uses the exact collision-tested source position;
@@ -137,7 +162,7 @@ client independent writable user data, and junctions the legally supplied
 Direct boot is enabled for this developer test; add `-NoDirectBoot` to use the
 normal frontend.
 
-## Repeatable load check
+## Historical localhost load check
 
 With one real process running as role 1, synthetic root-pose peers can exercise
 the actual host socket and relay path:
@@ -149,44 +174,39 @@ the actual host socket and relay path:
 ```
 
 The first 99-peer run sustained 18,810 upstream pose packets over ten seconds.
-Every simulated peer received host/relay traffic; aggregate outgoing traffic
-received by the bots was 5.95 Mbit/s. The real host remained alive and
-responsive. This validates 100-peer root presence and relevance routing, not
-100 simultaneous full animation streams or internet conditions.
+Every simulated peer received localhost relay traffic; aggregate outgoing
+traffic received by the bots was 5.95 Mbit/s. The real process remained alive
+and responsive. This validates 100-peer root presence and the localhost test
+relay, not 100 simultaneous full animation streams or internet conditions.
 
 ## Measured skeletal-stream cost
 
-A clean three-real-client run on 2026-08-19 reported zero rejected packets
-and zero socket failures. Each sender delivered about 18-19 complete
-animation frames per second and transmitted 840 mesh-palette bone entries per
-frame. A non-host client used roughly 389-416 KiB/s upstream and received
-778-805 KiB/s for two nearby remote players. The logical host received about
-803 KiB/s and transmitted about 1.58 MiB/s while publishing itself and
-relaying both clients.
+A two-real-client protocol-v11 Balanced run on 2026-08-21 delivered about
+19.2 complete animation frames per second and settled around 69-75 KiB/s and
+123-133 packets/s in each direction for one nearby detailed skater. Both
+processes reported zero socket failures. Appearance transfer is a separate
+one-time burst when a player first joins or changes outfit.
 
-This is correct exact-pose replication, but it is not the final large-lobby
-animation format. The current stream sends every mesh-specific final 3x4 bone
-transform every animation frame. Components are already reduced from 32-bit
-floats to nine half-floats plus three root-relative signed 16-bit translations
-per palette bone, but shared skeleton transforms are repeated across clothing,
-body, shoes, hair, and board palettes. There is no temporal delta encoding.
+Steam sessions now use direct peer fan-out. With ten players all mutually
+nearby, each player uploads one detailed stream to nine peers and receives
+nine streams: using the measured Balanced localhost payload as a planning
+estimate, about 650 KiB/s (roughly 5.3 Mbit/s) in each direction before Steam
+transport overhead and appearance bootstrap traffic. No lobby owner carries
+the other players' streams. This is a far healthier ten-player topology, but
+it still grows approximately with the square of the nearby player count
+across the whole session and is not a 100-player full-detail solution.
 
-The next protocol step should send a reliable, infrequent rig/palette remap
-descriptor and one canonical skeleton pose per frame. Per-mesh palettes can
-then be reconstructed locally. Quaternion/translation quantization,
-changed-bone masks, periodic keyframes, and distance-dependent pose rates
-should follow. Until that work is measured, the 99-bot root-routing result
-must not be extrapolated to 100 full animated skaters.
+Higher population work still needs stronger skeleton LOD, lower-rate distant
+players, interest-area partitioning, and eventually dedicated authoritative
+servers or relays. The 99-bot root-presence result validates inexpensive
+presence packets only, not 100 fully animated skaters.
 
 ## Current non-goals
 
 - No remote collision, pushing, grinding, scoring, trick validation, respawn
-  authority, host migration, voice, or production security.
+  authority, voice, or production security.
 - Bails are visually replicated because they are part of the final bone pose,
   but their gameplay result is not authoritative on the other client.
-- Appearance metadata is not transmitted yet. The receiver currently reuses
-  its locally loaded character meshes and materials, so differently
-  customized players need a later asset/customization identity stream.
 - Rigid cloth uses the receiver's locally available deformed geometry while
   skeletal pieces use the sender's exact pose. A dedicated cloth stream is a
   later quality feature.
@@ -194,12 +214,11 @@ must not be extrapolated to 100 full animated skaters.
   distribution requires a project-owned Steam AppID.
 - Passwords are currently a convenience lobby filter, not production-grade
   authentication. Do not reuse an important password.
-- One user's game process is currently the logical host. A production
-  100-player session still needs transport-level reliability, admission and
-  identity, abuse limits, host migration or a dedicated-host option, and a
-  measured full-animation bandwidth test. The current work prevents rendering
-  and relaying all 99 players at full detail; it does not claim that a home
-  connection can carry an unrestricted 100-player animation fan-out.
+- A production 100-player session still needs authoritative server
+  simulation, transport-level reliability, admission and identity, abuse
+  limits, interest management, and measured internet-scale animation tests.
+  Direct P2P is the current small-session transport; it does not claim that
+  every peer can carry an unrestricted 100-player animation fan-out.
 
 ## Transport boundary
 

@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.1.0-preview.9 - 2026-08-21
+
+- Replaced Steam's logical-host animation relay with authenticated direct
+  peer-to-peer fan-out so every nearby player contributes their own upload
+  instead of concentrating the complete session on one player's connection.
+- Added **Auto**, **Bandwidth Saver**, **Balanced**, **High Fidelity**, and
+  **Custom** multiplayer network-quality controls under the in-game
+  Multiplayer settings page.
+- Added sender-owned remote appearances for the Custom Engine Layer,
+  including animated vanilla clothing, hair, body, board, and accessories.
+  Exact CAC bind meshes are resolved from the local vanilla asset catalogue;
+  the current bootstrap bundle supplies the remaining presentation data
+  without using Skate 3's retail online/NPC presentation entities.
+- Fixed local presentation ownership so installing or updating a remote
+  appearance cannot replace, detach, or move the local player's clothing and
+  hair.
+- Added canonical skeleton and attachment-track replication with
+  root-relative quantization, changed-bone keyframes, interpolation, and
+  distance-aware animation/attachment routing.
+- Expanded the included Feature Park and Blender showcase with richer
+  self-contained PBR materials, improved normal/ORM generation, authored
+  lights, metallic environment response, and corrected lightmap handling.
+- Propagated complete material, texture, lightmap, normal, ORM, emissive, and
+  alpha metadata to kinematic and water meshes.
+
+## 0.1.0-preview.8 - 2026-08-20
+
+- Expanded the Blender owned-world authoring tools and ordinary-scene import
+  workflow.
+- Fixed controller input while multiplayer runs through Spacewar (App 480) by
+  installing a local standard-gamepad Steam Input action manifest.
+
 ## 0.1.0-preview.7 - 2026-08-19
 
 - Fixed the immediate startup termination after installing the bundled TU3

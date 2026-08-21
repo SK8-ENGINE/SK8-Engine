@@ -11,6 +11,7 @@ namespace skate3::trick_pipeline {
 
 struct LiveSpatialSnapshot {
   uint64_t frame{};
+  uint64_t sample_time_us{};
   uint32_t phys_out{};
   uint32_t board_controller{};
   uint32_t board_body{};

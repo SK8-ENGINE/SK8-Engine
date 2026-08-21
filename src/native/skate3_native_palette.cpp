@@ -68,6 +68,18 @@ bool LoadU32(uint8_t* base, uint32_t addr, uint32_t* out) {
   return true;
 }
 
+bool LoadU16(uint8_t* base, uint32_t addr, uint16_t* out) {
+  if (addr < 0x10000) {
+    return false;
+  }
+  uint16_t raw;
+  if (!GuestTryCopy(&raw, base + addr, sizeof(raw))) {
+    return false;
+  }
+  *out = __builtin_bswap16(raw);
+  return true;
+}
+
 // Plausible guest heap/image pointer (the guest address space tops out under
 // 0x84A10000).
 bool PlausiblePtr(uint32_t p) { return p >= 0x10000 && p < 0x84A10000 && (p & 3) == 0; }
@@ -102,6 +114,23 @@ std::vector<float> g_pack_rows;  // host-order floats, 12 per row (arena)
 // packed during frame N-1 (pack at frame end, upload next frame).
 std::vector<PackSnap> g_packs_prev;
 std::vector<float> g_pack_rows_prev;
+
+struct CanonicalRigPiece {
+  uint32_t ctx = 0;
+  uint32_t mesh = 0;
+  std::vector<uint16_t> palette_to_canonical;
+};
+
+struct CanonicalRigSnap {
+  std::vector<float> canonical_rows;
+  std::vector<float> canonical_rows_column_vector;
+  std::vector<CanonicalRigPiece> pieces;
+};
+
+// UpdateBoneTransforms source skeletons and exact mesh remaps. They rotate
+// with the palette snapshots because the render thread consumes frame N-1.
+std::vector<CanonicalRigSnap> g_canonical_rigs;
+std::vector<CanonicalRigSnap> g_canonical_rigs_prev;
 
 uint64_t g_frames = 0;  // OnFrameBuilt calls (serve-history clock)
 
@@ -450,6 +479,168 @@ void Convert44Rows(const float* in, uint32_t rows_n, float* out) {
     o[0] = m[0]; o[1] = m[4]; o[2] = m[8];  o[3] = m[12];
     o[4] = m[1]; o[5] = m[5]; o[6] = m[9];  o[7] = m[13];
     o[8] = m[2]; o[9] = m[6]; o[10] = m[10]; o[11] = m[14];
+  }
+}
+
+// 64-byte column-vector Matrix44 (translation in column 3) -> the
+// renderer's [R|t] 3x4 rows. UpdateBoneTransforms copies source matrices
+// without arithmetic; the live renderer palette resolves which Matrix44
+// convention this image uses.
+void Convert44ColumnVectorRows(
+    const float* in, uint32_t rows_n, float* out) {
+  for (uint32_t r = 0; r < rows_n; ++r) {
+    const float* m = in + r * 16;
+    std::memcpy(out + r * 12, m, 12 * sizeof(float));
+  }
+}
+
+void SnapshotCanonicalRig(uint8_t* base, uint32_t parts, uint32_t count,
+                          uint32_t source_palette,
+                          uint32_t remap_tables) {
+  // The vanilla CAC/ABIN hierarchy has 131 entries (indices 0..130).
+  // Capturing only through the highest row referenced by the currently
+  // submitted non-ROPA pieces truncated face/hair rows 128..130. Those rows
+  // are still valid source-palette entries and are referenced by vanilla
+  // bind meshes resolved independently from RX2.
+  constexpr uint32_t kCanonicalHierarchyBones = 131;
+  if (!PlausiblePtr(source_palette) || !PlausiblePtr(remap_tables)) {
+    return;
+  }
+
+  CanonicalRigSnap snap;
+  bool have_index = false;
+  for (uint32_t part_index = 0; part_index < count; ++part_index) {
+    const uint32_t part = parts + part_index * 0x28;
+    uint32_t model = 0;
+    uint32_t ctx_begin = 0;
+    uint32_t output_matrices = 0;
+    uint32_t remap_table = 0;
+    uint32_t mesh_table = 0;
+    uint16_t mesh_count = 0;
+    if (!LoadU32(base, part + kInstModel, &model) ||
+        !LoadU32(base, part + kInstArrCtx, &ctx_begin) ||
+        !LoadU32(base, part + kInstMatrices, &output_matrices) ||
+        !LoadU32(base, remap_tables + part_index * 4, &remap_table) ||
+        !PlausiblePtr(model) || !PlausiblePtr(ctx_begin) ||
+        !PlausiblePtr(output_matrices) ||
+        !PlausiblePtr(remap_table) ||
+        !LoadU32(base, model + 0x24, &mesh_table) ||
+        !LoadU16(base, model + 0x32, &mesh_count) ||
+        !PlausiblePtr(mesh_table)) {
+      continue;
+    }
+    if (mesh_count == 0 || mesh_count > 16) {
+      continue;
+    }
+    uint32_t output_row = 0;
+    for (uint32_t mesh_index = 0; mesh_index < mesh_count; ++mesh_index) {
+      uint32_t mesh = 0;
+      uint32_t palette_count = 0;
+      uint32_t palette_indices = 0;
+      // UpdateBoneTransforms advances this table by 8 bytes per mesh
+      // (r30 += 8 at 0x827A5374). The second word is not another mesh
+      // pointer. Walking it at four-byte stride aliases unrelated records
+      // into the canonical map and makes pieces such as the face consume
+      // another garment's bones.
+      if (!LoadU32(base, mesh_table + mesh_index * 8, &mesh) ||
+          !PlausiblePtr(mesh) ||
+          !LoadU32(base, mesh + 0x48, &palette_count) ||
+          !LoadU32(base, mesh + 0x4C, &palette_indices) ||
+          palette_count == 0 ||
+          palette_count > kCanonicalHierarchyBones ||
+          !PlausiblePtr(palette_indices)) {
+        continue;
+      }
+      CanonicalRigPiece piece;
+      // Player UBT part records own one MeshContext even when their model
+      // contains several mesh palette slices. The output matrices are
+      // concatenated, but every slice belongs to the part's same ctx.
+      piece.ctx = ctx_begin;
+      piece.mesh = mesh;
+      piece.palette_to_canonical.reserve(palette_count);
+      bool valid = true;
+      for (uint32_t palette_index = 0;
+           palette_index < palette_count; ++palette_index) {
+        uint16_t remap_slot = 0;
+        uint32_t canonical_index = 0;
+        if (!LoadU16(base, palette_indices + palette_index * 2,
+                     &remap_slot) ||
+            remap_slot >= kCanonicalHierarchyBones ||
+            !LoadU32(base, remap_table + uint32_t(remap_slot) * 4,
+                     &canonical_index) ||
+            canonical_index >= kCanonicalHierarchyBones) {
+          valid = false;
+          break;
+        }
+        // The game copies this canonical Matrix44 byte-for-byte into the
+        // part's output palette. Prove the recovered table/remap shape
+        // against that settled output before publishing it to multiplayer.
+        // A bad pointer, stride, or part association therefore degrades to
+        // no remap instead of producing a plausible but detached mesh.
+        std::uint8_t source_bytes[64];
+        std::uint8_t output_bytes[64];
+        if (!GuestTryCopy(
+                source_bytes,
+                base + source_palette + canonical_index * 64,
+                sizeof(source_bytes)) ||
+            !GuestTryCopy(
+                output_bytes,
+                base + output_matrices +
+                    (output_row + palette_index) * 64,
+                sizeof(output_bytes)) ||
+            std::memcmp(
+                source_bytes, output_bytes,
+                sizeof(source_bytes)) != 0) {
+          valid = false;
+          break;
+        }
+        piece.palette_to_canonical.push_back(
+            static_cast<uint16_t>(canonical_index));
+        have_index = true;
+      }
+      if (valid) {
+        snap.pieces.push_back(std::move(piece));
+      }
+      output_row += palette_count;
+    }
+  }
+  if (!have_index || snap.pieces.empty()) {
+    return;
+  }
+
+  // Publish the complete hierarchy, not merely the prefix referenced by
+  // this frame's ordinary draw pieces. RX2 hair can legitimately reference
+  // the facial tail even when no live GPU palette in the frame does.
+  const uint32_t canonical_count = kCanonicalHierarchyBones;
+  uint32_t raw[kCanonicalHierarchyBones * 16];
+  if (!GuestTryCopy(raw, base + source_palette,
+                    size_t(canonical_count) * 64)) {
+    return;
+  }
+  float source_rows[kCanonicalHierarchyBones * 16];
+  for (uint32_t index = 0; index < canonical_count * 16; ++index) {
+    source_rows[index] =
+        std::bit_cast<float>(__builtin_bswap32(raw[index]));
+  }
+  snap.canonical_rows.resize(size_t(canonical_count) * 12);
+  Convert44Rows(
+      source_rows, canonical_count, snap.canonical_rows.data());
+  snap.canonical_rows_column_vector.resize(
+      size_t(canonical_count) * 12);
+  Convert44ColumnVectorRows(
+      source_rows, canonical_count,
+      snap.canonical_rows_column_vector.data());
+  if (!ServedRowsUsable(
+          snap.canonical_rows.data(), canonical_count) &&
+      !ServedRowsUsable(
+          snap.canonical_rows_column_vector.data(),
+          canonical_count)) {
+    return;
+  }
+
+  std::lock_guard<std::mutex> lock(g_mu);
+  if (g_canonical_rigs.size() < 128) {
+    g_canonical_rigs.push_back(std::move(snap));
   }
 }
 
@@ -889,6 +1080,10 @@ uint32_t ExchangePackOwner(uint32_t entity) {
   return prev;
 }
 
+uint32_t CurrentPackOwner() {
+  return tl_pack_owner;
+}
+
 void OnPackPalette(uint8_t* base, uint32_t instance) {
   if (instance == 0 || !CaptureActive()) {
     return;
@@ -896,7 +1091,9 @@ void OnPackPalette(uint8_t* base, uint32_t instance) {
   SnapshotPack(base, instance);
 }
 
-void OnBoneTransforms(uint8_t* base, uint32_t parts, uint32_t count) {
+void OnBoneTransforms(uint8_t* base, uint32_t parts, uint32_t count,
+                      uint32_t source_palette,
+                      uint32_t remap_tables) {
   if (parts == 0 || count == 0 || count > 64 || !CaptureActive()) {
     return;
   }
@@ -909,6 +1106,48 @@ void OnBoneTransforms(uint8_t* base, uint32_t parts, uint32_t count) {
   for (uint32_t k = 0; k < count; ++k) {
     SnapshotPack(base, parts + k * 0x28, /*ubt=*/true);
   }
+  SnapshotCanonicalRig(
+      base, parts, count, source_palette, remap_tables);
+}
+
+bool LookupCanonicalRig(uint32_t ctx, uint32_t mesh,
+                        CanonicalRigSample& out) {
+  if (ctx == 0 || mesh == 0) {
+    return false;
+  }
+  std::lock_guard<std::mutex> lock(g_mu);
+  for (auto rig = g_canonical_rigs_prev.rbegin();
+       rig != g_canonical_rigs_prev.rend(); ++rig) {
+    for (const CanonicalRigPiece& piece : rig->pieces) {
+      if (piece.ctx == ctx && piece.mesh == mesh &&
+          !piece.palette_to_canonical.empty() &&
+          !rig->canonical_rows.empty()) {
+        out.canonical_rows = rig->canonical_rows;
+        out.canonical_rows_column_vector =
+            rig->canonical_rows_column_vector;
+        out.palette_to_canonical = piece.palette_to_canonical;
+        return true;
+      }
+    }
+  }
+  // The mesh's remap is immutable asset data. UBT's per-frame part arena can
+  // recycle its one ctx before the render thread consumes the snapshot, so
+  // fall back to the exact mesh object when containment identity has moved.
+  for (auto rig = g_canonical_rigs_prev.rbegin();
+       rig != g_canonical_rigs_prev.rend(); ++rig) {
+    for (const CanonicalRigPiece& piece : rig->pieces) {
+      if (piece.mesh == mesh &&
+          !piece.palette_to_canonical.empty() &&
+          !rig->canonical_rows.empty()) {
+        out.canonical_rows = rig->canonical_rows;
+        out.canonical_rows_column_vector =
+            rig->canonical_rows_column_vector;
+        out.palette_to_canonical = piece.palette_to_canonical;
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 void OnLwPack(uint8_t* base, uint32_t entity) {
@@ -928,6 +1167,14 @@ void OnFrameBuilt() {
     g_pack_rows_prev = std::move(g_pack_rows);
     g_packs.clear();
     g_pack_rows.clear();
+    // UBT jobs do not necessarily finish in every rendered frame. Keep the
+    // most recent complete rig/remap snapshot across an empty capture frame;
+    // the source pose is refreshed on the next job, while immutable mesh
+    // remaps remain valid and remote clothing must not blink back to proxy.
+    if (!g_canonical_rigs.empty()) {
+      g_canonical_rigs_prev = std::move(g_canonical_rigs);
+    }
+    g_canonical_rigs.clear();
   }
   MaybeLog();
 }

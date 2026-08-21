@@ -29,13 +29,22 @@ constexpr int kCallbackLobbyMatchList = 510;
 constexpr int kCallbackLobbyCreated = 513;
 constexpr int kCallbackNetworkingSessionRequest = 1251;
 constexpr int kResultOk = 1;
-constexpr std::uint32_t kProtocolVersion = 2;
+constexpr std::uint32_t kProtocolVersion = 7;
 constexpr int kLobbyPrivate = 0;
 constexpr int kLobbyFriendsOnly = 1;
 constexpr int kLobbyPublic = 2;
 constexpr int kLobbyComparisonEqual = 0;
 constexpr int kLobbyDistanceWorldwide = 3;
-constexpr int kSendUnreliableNoDelayAutoRestart = 1 | 4 | 32;
+// k_nSteamNetworkingSend_NoDelay makes SendMessageToUser fail whenever the
+// connection cannot accept a packet immediately. A skater frame is emitted
+// as a short burst of palette fragments, so internet sessions (especially
+// the host while relaying several customized skaters) routinely filled that
+// immediate-send window and dropped most of each frame. Let Steam queue the
+// unreliable messages briefly; newer unreliable traffic can still supersede
+// stale traffic, but a normal frame burst is no longer rejected at the API
+// boundary.
+constexpr int kSendUnreliableAutoRestart = 1 | 32;
+constexpr int kSendReliableAutoRestart = 8 | 32;
 constexpr int kNetworkingChannel = 0;
 constexpr std::string_view kGameKey = "skate3-custom-engine-layer";
 constexpr std::string_view kDevelopmentAppId = "480";
@@ -1253,7 +1262,7 @@ std::vector<Peer> LobbyPeers() {
 }
 
 bool SendPacketToPeer(std::uint64_t steam_id, const void* bytes,
-                      std::size_t byte_count) {
+                      std::size_t byte_count, bool reliable) {
   std::scoped_lock lock(g_mutex);
   if (!g_runtime.state.initialized || !g_runtime.state.in_lobby ||
       steam_id == 0 || bytes == nullptr || byte_count == 0 ||
@@ -1265,7 +1274,8 @@ bool SendPacketToPeer(std::uint64_t steam_id, const void* bytes,
   return g_runtime.api.send_network_message(
              g_runtime.networking, &identity, bytes,
              static_cast<std::uint32_t>(byte_count),
-             kSendUnreliableNoDelayAutoRestart,
+             reliable ? kSendReliableAutoRestart
+                      : kSendUnreliableAutoRestart,
              kNetworkingChannel) == kResultOk;
 }
 

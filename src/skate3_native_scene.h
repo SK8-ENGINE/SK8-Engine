@@ -285,6 +285,13 @@ struct DrawItem {
   // every later copy (merges, rescues, retention re-publishes) inherits it;
   // the build-up showcase's dynamic-entities layer keys off it.
   bool dyn_entity = false;
+  // Multiplayer-only identity of the sender's appearance piece. Remote
+  // appearance meshes use a process-local synthetic `mesh` cache key, while
+  // exact animation tracks retain the sender's piece key on the wire.
+  uint32_t multiplayer_track_key = 0;
+  // Sender-captured palette remap for a streamed remote clothing mesh.
+  // Local guest items leave this empty and resolve through native_palette.
+  std::vector<uint16_t> multiplayer_palette_to_canonical;
   // Bone palette snapshot taken on the game thread: raw staged rows, 3
   // float4s per bone (column-vector affine [R | t], model -> world). The
   // guest staging bank is reused draw to draw, hence the copy.
@@ -301,6 +308,11 @@ struct DrawItem {
 
 struct FrameScene {
   uint64_t generation = 0;
+  // Steady-clock time represented by the dynamic pose in this scene. When
+  // native dynamic smoothing is active this is its playback time; otherwise
+  // it is the scene publication time. Multiplayer animation must carry this
+  // effective time rather than making a re-timed skeleton look freshly sampled.
+  uint64_t sample_time_us = 0;
   float view_proj[16] = {};
   float cam_pos[3] = {};
   // Raw guest projection matrix (viewcam +0x60, row-vector, m23 = 1),

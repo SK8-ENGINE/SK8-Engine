@@ -227,7 +227,11 @@ float3 OwnedMovingLightContribution(
         max(1.0, distance_squared * 0.22);
     const float3 radiance =
         owned_authored_light_color[light_index].rgb *
-        owned_authored_light_color[light_index].w * attenuation;
+        // Blender exports Point/Spot/Area power in watts. Convert that
+        // authoring scale into the renderer's scene-radiance range; treating
+        // watts as direct radiance caused 900-1450 W test lights to clip the
+        // entire material lab to white.
+        (owned_authored_light_color[light_index].w * 0.01) * attenuation;
     const float3 halfway =
         normalize(direction + view_direction);
     const float specular =
@@ -374,6 +378,7 @@ float4 ShadePixel(VSOut i) {
     bool has_normal_map = (owned_flags & 8) != 0;
     bool has_orm_map = (owned_flags & 16) != 0;
     bool has_emissive_map = (owned_flags & 32) != 0;
+    bool has_indirect_lightmap = (owned_flags & 64) != 0;
     int pattern = (int)(misc.x + 0.5);
     float emissive_intensity =
         imported_material ? max(misc.w, 0.0) : max(-misc.z, 0.0);
@@ -436,7 +441,7 @@ float4 ShadePixel(VSOut i) {
                            float3(0.35, 0.47, 0.64), sky_amount);
     float3 ambient_light =
         sky_fill * (mat_tint.w * lerp(0.72, 1.12, sky_amount));
-    if (imported_material) {
+    if (imported_material && has_indirect_lightmap) {
       // UV1 holds static indirect illumination baked in Blender. It remains
       // stable as the sun/moon move, while a restrained exposure response
       // lets the same bounce lighting settle naturally at night.
@@ -481,6 +486,26 @@ float4 ShadePixel(VSOut i) {
             orientation_ao * ao +
         overlay.rgb * f0 * specular +
         sky_fill * f0 * edge_fill;
+    // Metals have little or no diffuse response, so direct highlights alone
+    // made them read as black whenever the sun was outside the reflection
+    // lobe. Approximate the owned sky hemisphere as a prefiltered
+    // environment source. Rough surfaces receive a broad, dim response while
+    // polished surfaces retain the sky colour and material-tinted F0.
+    float3 reflected_view = reflect(-view_dir, normal);
+    float reflected_sky =
+        saturate(reflected_view.y * 0.5 + 0.5);
+    float3 environment =
+        lerp(float3(0.055, 0.065, 0.085),
+             float3(0.32, 0.48, 0.70), reflected_sky);
+    float fresnel5 =
+        pow(1.0 - saturate(dot(normal, view_dir)), 5.0);
+    float3 environment_fresnel =
+        f0 + (1.0 - f0) * fresnel5;
+    float environment_strength =
+        lerp(0.82, 0.16, roughness) *
+        lerp(0.52, 1.0, metallic);
+    lit += environment * environment_fresnel *
+           environment_strength * ao;
     lit += OwnedMovingLightContribution(
         world_pos, normal, view_dir, albedo, roughness);
     float3 emissive_color =

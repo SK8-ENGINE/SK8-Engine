@@ -58,6 +58,11 @@ bool Active();
 const char* StateName();
 uint32_t LocalActor();
 uint32_t LocalPresentationEntity();
+// Provisional render-side PresentationEntity selected from the first plain
+// local skater after player-0 activation. Unlike LocalPresentationEntity
+// (the verified PhysOut), this value is directly comparable with
+// native_entity::CtxInfo::entity.
+uint32_t LocalPresentationCandidate();
 
 bool VisualMapEnabled();
 bool NativeCollisionObserverEnabled();

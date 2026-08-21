@@ -27,6 +27,13 @@ This is an experimental preview rather than a finished standalone game engine.
   signed-in Steam client. If setup fails, inspect
   `.cel-steam/bootstrap.log`; ordinary gameplay and the localhost multiplayer
   fallback remain available.
+- Remote skeletal animation can retain a small, rapid movement jitter even
+  when packet delivery is stable. Root position, rotation, and independent
+  player animation are functional, but this presentation defect remains open.
+- Remote skateboard wheels can remain slightly misaligned or deform during
+  skating. Their final procedural transforms are replicated independently
+  from the canonical body skeleton; the major wheel/hat separation is fixed,
+  but this smaller wheel presentation defect remains open.
 
 When reporting a problem, include the map name, GPU, driver version, selected
 Graphics API and Renderer, framerate cap, controller backend, and the latest

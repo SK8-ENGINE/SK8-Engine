@@ -285,6 +285,7 @@ set(SKATE3_COMMON_SOURCES
     src/skate3_mechanics_sandbox.cpp
     src/skate3_mechanics_sandbox_map.cpp
     src/skate3_multiplayer.cpp
+    src/skate3_multiplayer_assets.cpp
     src/skate3_multiplayer_session.cpp
     src/skate3_steam_backend.cpp
     src/skate3_owned_world_boundary.cpp

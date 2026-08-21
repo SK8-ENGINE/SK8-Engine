@@ -20,6 +20,7 @@
 #include <array>
 #include <atomic>
 #include <bit>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <iomanip>
@@ -303,7 +304,13 @@ std::atomic<uint32_t> g_custom_scorable_publish_last_after{0};
 thread_local uint32_t g_air_collector_update_custom_id = 0;
 std::atomic<uint64_t> g_local_score_collector_transition_event_count{0};
 std::atomic<uint64_t> g_local_score_grind_exit_event_count{0};
+// Sequence lock for the board transform below. Odd means the sim thread is
+// publishing a new sample; even means every field belongs to one coherent
+// sample. Individual atomics prevent data races but do not prevent a reader
+// from combining position/axes from adjacent simulation updates.
+std::atomic<uint64_t> g_local_spatial_revision{0};
 std::atomic<uint64_t> g_local_spatial_frame{0};
+std::atomic<uint64_t> g_local_spatial_sample_time_us{0};
 std::atomic<uint32_t> g_local_board_controller{0};
 std::atomic<uint32_t> g_local_board_body{0};
 std::atomic<uint32_t> g_local_board_transform_state{0};
@@ -1007,7 +1014,13 @@ bool ResolveLocalPhysOut(uint8_t *base, uint32_t phys_out) {
   // pin the pre-freeroam component: promote a replacement only when it is
   // independently found in that actor's verified component table.
   if (resolved != phys_out || resolved_actor != actor) {
-    g_local_spatial_frame.store(0, std::memory_order_release);
+    g_local_spatial_revision.fetch_add(
+        1, std::memory_order_acq_rel);
+    g_local_spatial_frame.store(0, std::memory_order_relaxed);
+    g_local_spatial_sample_time_us.store(
+        0, std::memory_order_relaxed);
+    g_local_spatial_revision.fetch_add(
+        1, std::memory_order_release);
   }
   g_local_phys_out_actor.store(actor, std::memory_order_release);
   g_local_phys_out_root_offset.store(path->root_offset,
@@ -3515,57 +3528,73 @@ uint32_t CurrentLocalPhysOut() {
 }
 
 bool CurrentLocalBoardPosition(float out_position[3]) {
-  if (out_position == nullptr ||
-      g_local_spatial_frame.load(std::memory_order_acquire) == 0 ||
-      g_local_phys_out.load(std::memory_order_acquire) == 0) {
+  if (out_position == nullptr) {
     return false;
   }
-  out_position[0] = std::bit_cast<float>(
-      g_local_board_position_x_bits.load(std::memory_order_acquire));
-  out_position[1] = std::bit_cast<float>(
-      g_local_board_position_y_bits.load(std::memory_order_acquire));
-  out_position[2] = std::bit_cast<float>(
-      g_local_board_position_z_bits.load(std::memory_order_acquire));
+  LiveSpatialSnapshot snapshot;
+  if (!CurrentLiveSpatialSnapshot(snapshot)) {
+    return false;
+  }
+  out_position[0] =
+      std::bit_cast<float>(snapshot.position_bits[0]);
+  out_position[1] =
+      std::bit_cast<float>(snapshot.position_bits[1]);
+  out_position[2] =
+      std::bit_cast<float>(snapshot.position_bits[2]);
   return std::isfinite(out_position[0]) && std::isfinite(out_position[1]) &&
          std::isfinite(out_position[2]);
 }
 
 bool CurrentLiveSpatialSnapshot(LiveSpatialSnapshot &out) {
-  const uint64_t frame =
-      g_local_spatial_frame.load(std::memory_order_acquire);
-  const uint32_t phys_out =
-      g_local_phys_out.load(std::memory_order_acquire);
-  if (frame == 0 || phys_out == 0) {
-    return false;
+  for (int attempt = 0; attempt < 8; ++attempt) {
+    const uint64_t revision_before =
+        g_local_spatial_revision.load(std::memory_order_acquire);
+    if ((revision_before & 1u) != 0) {
+      continue;
+    }
+    LiveSpatialSnapshot snapshot{};
+    snapshot.frame =
+        g_local_spatial_frame.load(std::memory_order_relaxed);
+    snapshot.sample_time_us =
+        g_local_spatial_sample_time_us.load(
+            std::memory_order_relaxed);
+    snapshot.phys_out =
+        g_local_phys_out.load(std::memory_order_relaxed);
+    snapshot.board_controller =
+        g_local_board_controller.load(std::memory_order_relaxed);
+    snapshot.board_body =
+        g_local_board_body.load(std::memory_order_relaxed);
+    snapshot.transform_state =
+        g_local_board_transform_state.load(std::memory_order_relaxed);
+    snapshot.position_bits = {
+        g_local_board_position_x_bits.load(std::memory_order_relaxed),
+        g_local_board_position_y_bits.load(std::memory_order_relaxed),
+        g_local_board_position_z_bits.load(std::memory_order_relaxed),
+    };
+    snapshot.x_axis_bits = {
+        g_local_board_x_axis_x_bits.load(std::memory_order_relaxed),
+        g_local_board_x_axis_y_bits.load(std::memory_order_relaxed),
+        g_local_board_x_axis_z_bits.load(std::memory_order_relaxed),
+    };
+    snapshot.z_axis_bits = {
+        g_local_board_z_axis_x_bits.load(std::memory_order_relaxed),
+        g_local_board_z_axis_y_bits.load(std::memory_order_relaxed),
+        g_local_board_z_axis_z_bits.load(std::memory_order_relaxed),
+    };
+    snapshot.board_state_flags =
+        g_board_state_last_packed.load(std::memory_order_relaxed);
+    const uint64_t revision_after =
+        g_local_spatial_revision.load(std::memory_order_acquire);
+    if (revision_before == revision_after &&
+        (revision_after & 1u) == 0) {
+      if (snapshot.frame == 0 || snapshot.phys_out == 0) {
+        return false;
+      }
+      out = snapshot;
+      return true;
+    }
   }
-
-  LiveSpatialSnapshot snapshot{};
-  snapshot.frame = frame;
-  snapshot.phys_out = phys_out;
-  snapshot.board_controller =
-      g_local_board_controller.load(std::memory_order_acquire);
-  snapshot.board_body = g_local_board_body.load(std::memory_order_acquire);
-  snapshot.transform_state =
-      g_local_board_transform_state.load(std::memory_order_acquire);
-  snapshot.position_bits = {
-      g_local_board_position_x_bits.load(std::memory_order_acquire),
-      g_local_board_position_y_bits.load(std::memory_order_acquire),
-      g_local_board_position_z_bits.load(std::memory_order_acquire),
-  };
-  snapshot.x_axis_bits = {
-      g_local_board_x_axis_x_bits.load(std::memory_order_acquire),
-      g_local_board_x_axis_y_bits.load(std::memory_order_acquire),
-      g_local_board_x_axis_z_bits.load(std::memory_order_acquire),
-  };
-  snapshot.z_axis_bits = {
-      g_local_board_z_axis_x_bits.load(std::memory_order_acquire),
-      g_local_board_z_axis_y_bits.load(std::memory_order_acquire),
-      g_local_board_z_axis_z_bits.load(std::memory_order_acquire),
-  };
-  snapshot.board_state_flags =
-      g_board_state_last_packed.load(std::memory_order_acquire);
-  out = snapshot;
-  return true;
+  return false;
 }
 
 OwnedWorldCollisionBridgeScope::OwnedWorldCollisionBridgeScope(
@@ -3602,6 +3631,11 @@ void ObserveLocalSkateboardSpatialState(PPCContext &ctx, uint8_t *base) {
   const uint32_t z_axis_x_bits = LoadU32(base, transform + 32);
   const uint32_t z_axis_y_bits = LoadU32(base, transform + 36);
   const uint32_t z_axis_z_bits = LoadU32(base, transform + 40);
+  const uint64_t sample_time_us =
+      static_cast<uint64_t>(
+          std::chrono::duration_cast<std::chrono::microseconds>(
+              std::chrono::steady_clock::now().time_since_epoch())
+              .count());
   {
     std::lock_guard lock(g_event_mutex);
     g_actor_spatial_snapshots[phys_out] = {frame, controller, position_x_bits,
@@ -3612,22 +3646,28 @@ void ObserveLocalSkateboardSpatialState(PPCContext &ctx, uint8_t *base) {
     return;
   }
 
-  g_local_spatial_frame.store(frame, std::memory_order_release);
-  g_local_board_controller.store(controller, std::memory_order_release);
-  g_local_board_body.store(board_body, std::memory_order_release);
-  g_local_board_transform_state.store(state, std::memory_order_release);
+  g_local_spatial_revision.fetch_add(
+      1, std::memory_order_acq_rel);
+  g_local_board_controller.store(controller, std::memory_order_relaxed);
+  g_local_board_body.store(board_body, std::memory_order_relaxed);
+  g_local_board_transform_state.store(state, std::memory_order_relaxed);
   g_local_board_position_x_bits.store(position_x_bits,
-                                      std::memory_order_release);
+                                      std::memory_order_relaxed);
   g_local_board_position_y_bits.store(position_y_bits,
-                                      std::memory_order_release);
+                                      std::memory_order_relaxed);
   g_local_board_position_z_bits.store(position_z_bits,
-                                      std::memory_order_release);
-  g_local_board_x_axis_x_bits.store(x_axis_x_bits, std::memory_order_release);
-  g_local_board_x_axis_y_bits.store(x_axis_y_bits, std::memory_order_release);
-  g_local_board_x_axis_z_bits.store(x_axis_z_bits, std::memory_order_release);
-  g_local_board_z_axis_x_bits.store(z_axis_x_bits, std::memory_order_release);
-  g_local_board_z_axis_y_bits.store(z_axis_y_bits, std::memory_order_release);
-  g_local_board_z_axis_z_bits.store(z_axis_z_bits, std::memory_order_release);
+                                      std::memory_order_relaxed);
+  g_local_board_x_axis_x_bits.store(x_axis_x_bits, std::memory_order_relaxed);
+  g_local_board_x_axis_y_bits.store(x_axis_y_bits, std::memory_order_relaxed);
+  g_local_board_x_axis_z_bits.store(x_axis_z_bits, std::memory_order_relaxed);
+  g_local_board_z_axis_x_bits.store(z_axis_x_bits, std::memory_order_relaxed);
+  g_local_board_z_axis_y_bits.store(z_axis_y_bits, std::memory_order_relaxed);
+  g_local_board_z_axis_z_bits.store(z_axis_z_bits, std::memory_order_relaxed);
+  g_local_spatial_sample_time_us.store(
+      sample_time_us, std::memory_order_relaxed);
+  g_local_spatial_frame.store(frame, std::memory_order_relaxed);
+  g_local_spatial_revision.fetch_add(
+      1, std::memory_order_release);
 
   if (!g_focused.load(std::memory_order_acquire)) {
     return;
@@ -5066,7 +5106,11 @@ void ResetAndArm() {
   g_local_score_collector_transition_event_count.store(
       0, std::memory_order_relaxed);
   g_local_score_grind_exit_event_count.store(0, std::memory_order_relaxed);
+  g_local_spatial_revision.fetch_add(
+      1, std::memory_order_acq_rel);
   g_local_spatial_frame.store(0, std::memory_order_relaxed);
+  g_local_spatial_sample_time_us.store(
+      0, std::memory_order_relaxed);
   g_local_board_controller.store(0, std::memory_order_relaxed);
   g_local_board_body.store(0, std::memory_order_relaxed);
   g_local_board_transform_state.store(0, std::memory_order_relaxed);
@@ -5079,6 +5123,8 @@ void ResetAndArm() {
   g_local_board_z_axis_x_bits.store(0, std::memory_order_relaxed);
   g_local_board_z_axis_y_bits.store(0, std::memory_order_relaxed);
   g_local_board_z_axis_z_bits.store(0, std::memory_order_relaxed);
+  g_local_spatial_revision.fetch_add(
+      1, std::memory_order_release);
   g_custom_animation_asset_stream_eval_count.store(0,
                                                    std::memory_order_relaxed);
   g_animation_leaf_replacement_eval_count.store(

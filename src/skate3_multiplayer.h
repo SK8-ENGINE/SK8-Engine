@@ -2,9 +2,12 @@
 
 #include <cstdint>
 #include <iosfwd>
+#include <memory>
 #include <vector>
 
 namespace skate3::multiplayer {
+
+inline constexpr std::uint32_t kCanonicalSkeletonTrackKey = 0x314E4143u;
 
 // Renderer-neutral replicated pose. Positions are expressed in the active
 // custom map's local coordinate frame so two recomp processes do not need to
@@ -17,11 +20,11 @@ struct RemotePose {
   std::uint32_t board_state_flags = 0xFFFFFFFFu;
 };
 
-// Final model-to-world palettes produced by Skate 3's animation renderer.
-// Character pieces can use different bone remaps, so each mesh carries its
-// own palette instead of sharing one guessed "master" skeleton. Each bone is
-// three float4 affine rows; translations are map-local while in transit and
-// are restored to the receiver's active map origin on output.
+// Canonical model-to-world skeleton produced by Skate 3 before per-mesh bone
+// remapping. Protocol v6 sends one kCanonicalSkeletonTrackKey track; each
+// receiver rebuilds its locally loaded clothing palettes with the game's own
+// captured mesh remaps. Each bone is three float4 affine rows; translations
+// are map-local while in transit and restored to the active map origin.
 struct AnimationTrack {
   std::uint32_t mesh_key = 0;
   std::vector<float> bone_rows;
@@ -30,14 +33,33 @@ struct AnimationTrack {
 struct AnimationPose {
   std::uint64_t sender_time_us = 0;
   std::uint32_t sequence = 0;
+  std::uint16_t root_bone = 0xFFFFu;
   float root_position[3] = {};
+  // Final rendered character root used by the lightweight pose stream and
+  // receiver-side clone mapping. This deliberately stays separate from
+  // root_position, which is the translation reference for encoded bones.
+  bool presentation_root_valid = false;
+  float presentation_root_position[3] = {};
+  float presentation_root_x_axis[3] = {1.0f, 0.0f, 0.0f};
+  float presentation_root_z_axis[3] = {0.0f, 0.0f, 1.0f};
   std::vector<AnimationTrack> tracks;
+};
+
+// Versioned engine-owned appearance payload. The current bootstrap format is
+// a one-time bundle of the sender's assembled vanilla meshes and textures.
+// Runtime animation remains a separate compact stream. A local vanilla asset
+// catalogue will replace this bundle with asset IDs without changing remote
+// renderer ownership.
+struct AppearanceBlob {
+  std::uint64_t identity = 0;
+  std::shared_ptr<const std::vector<std::uint8_t>> bytes;
 };
 
 struct RemotePlayer {
   std::uint32_t role = 0;
   RemotePose pose;
   AnimationPose animation;
+  AppearanceBlob appearance;
 };
 
 // Samples the verified local board, services the current transport, and
@@ -47,6 +69,7 @@ struct RemotePlayer {
 bool TickLocalVisuals(const char* map_name,
                       const float map_render_origin[3],
                       const AnimationPose* local_animation,
+                      const AppearanceBlob* local_appearance,
                       std::vector<RemotePlayer>& out_remotes);
 
 void AppendTelemetry(std::ostream& out);

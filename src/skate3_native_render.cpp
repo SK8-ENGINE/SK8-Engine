@@ -469,9 +469,12 @@ extern "C" REX_FUNC(sub_827E5B30) {
 extern "C" REX_FUNC(sub_827A52C8) {
   const uint32_t parts = ctx.r3.u32;
   const uint32_t count = ctx.r4.u32;
+  const uint32_t remap_tables = ctx.r6.u32;
+  const uint32_t source_palette = ctx.r5.u32;
   __imp__sub_827A52C8(ctx, base);
   if (skate3::native_render::Enabled()) {
-    skate3::native_palette::OnBoneTransforms(base, parts, count);
+    skate3::native_palette::OnBoneTransforms(
+        base, parts, count, source_palette, remap_tables);
   }
 }
 
@@ -490,7 +493,9 @@ extern "C" REX_FUNC(sub_827C1188) {
 // Sk8::SkaterPresEntity::StartJobs, bracketed as a pack owner:
 // UpdateBoneTransforms calls inside stamp their snapshots with this entity.
 extern "C" REX_FUNC(sub_827825B0) {
-  const uint32_t prev_owner = skate3::native_palette::ExchangePackOwner(ctx.r3.u32);
+  const uint32_t entity = ctx.r3.u32;
+  const uint32_t prev_owner =
+      skate3::native_palette::ExchangePackOwner(entity);
   __imp__sub_827825B0(ctx, base);
   skate3::native_palette::ExchangePackOwner(prev_owner);
 }
@@ -1012,4 +1017,3 @@ extern "C" REX_FUNC(sub_827C1D38) {
     skate3::native_palette::OnLwPack(base, entity);
   }
 }
-

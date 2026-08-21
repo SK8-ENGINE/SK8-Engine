@@ -510,6 +510,10 @@ uint32_t LocalPresentationEntity() {
   return g_local_presentation_entity.load(std::memory_order_acquire);
 }
 
+uint32_t LocalPresentationCandidate() {
+  return g_presentation_candidate.load(std::memory_order_acquire);
+}
+
 bool VisualMapEnabled() {
   return Active() && REXCVAR_GET(skate3_mechanics_sandbox_visual_map);
 }

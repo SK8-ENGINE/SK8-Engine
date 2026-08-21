@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import math
+import shutil
 import sys
 
 import bpy
@@ -18,9 +19,9 @@ import owned_world_material_addon as owned_world_materials  # noqa: E402
 owned_world_materials.register()
 
 
-BLEND_PATH = ROOT / "owned" / "maps" / "source" / "blender_bake_showcase.blend"
-PACKAGE_PATH = ROOT / "owned" / "maps" / "blender_bake_showcase.skate"
-TEXTURE_DIR = ROOT / "owned" / "maps" / "source" / "blender_bake_showcase_textures"
+BLEND_PATH = ROOT / "maps" / "blender_bake_showcase.blend"
+PACKAGE_PATH = ROOT / "maps" / "blender_bake_showcase.skate"
+TEXTURE_DIR = ROOT / "maps" / "source" / "blender_bake_showcase_textures"
 
 
 def reset_scene() -> None:
@@ -66,11 +67,55 @@ def make_texture(
     pixels = [0.0] * (size * size * 4)
     for y in range(size):
         for x in range(size):
-            checker = ((x * cells // size) + (y * cells // size)) & 1
-            color = second if checker else first
-            if stripe:
-                color = second if ((x + y) // 28) & 1 else first
-            grain = (((x * 17 + y * 31) % 29) / 28.0 - 0.5) * 0.055
+            u = x / size
+            v = y / size
+            fine = ((x * 17 + y * 31) % 29) / 28.0
+            coarse = (
+                math.sin(u * math.tau * cells) *
+                math.cos(v * math.tau * max(cells * 0.73, 1.0)) * 0.5 + 0.5
+            )
+            amount = 0.28 + coarse * 0.18 + fine * 0.12
+            lower_name = name.lower()
+            if "brick" in lower_name:
+                row = int(v * cells)
+                brick_u = (u * cells * 0.5 + (0.5 if row & 1 else 0.0)) % 1.0
+                brick_v = (v * cells) % 1.0
+                mortar = brick_u < 0.035 or brick_v < 0.07
+                amount = 0.03 if mortar else 0.42 + fine * 0.20
+            elif "wood" in lower_name:
+                board_v = (v * max(cells * 0.45, 2.0)) % 1.0
+                grain = math.sin(
+                    u * math.tau * cells +
+                    math.sin(v * math.tau * 3.0) * 1.8
+                ) * 0.5 + 0.5
+                amount = 0.28 + grain * 0.42
+                if board_v < 0.025:
+                    amount *= 0.30
+            elif "ceramic" in lower_name:
+                tile_u = (u * cells) % 1.0
+                tile_v = (v * cells) % 1.0
+                grout = min(tile_u, tile_v, 1.0 - tile_u, 1.0 - tile_v)
+                amount = 0.05 if grout < 0.055 else 0.64 + coarse * 0.16
+            elif "metal" in lower_name:
+                amount = 0.40 + fine * 0.20 + math.sin(v * 900.0) * 0.025
+            elif "grass" in lower_name:
+                blades = abs(math.sin((x * 0.71 + y * 1.93) * 0.45))
+                amount = 0.24 + fine * 0.28 + blades * 0.12
+            elif "ice" in lower_name:
+                amount = 0.46 + coarse * 0.28
+            elif "glass" in lower_name:
+                amount = 0.48 + coarse * 0.07
+            elif "emitter" in lower_name or "sign" in lower_name:
+                amount = 0.56
+            elif stripe:
+                stripe_wave = math.sin((u + v) * math.tau * cells)
+                amount = 0.18 if stripe_wave < -0.32 else 0.66
+            color = tuple(
+                first[channel] +
+                (second[channel] - first[channel]) * amount
+                for channel in range(3)
+            )
+            grain = (fine - 0.5) * 0.025
             offset = (y * size + x) * 4
             pixels[offset + 0] = max(0.0, min(1.0, color[0] + grain))
             pixels[offset + 1] = max(0.0, min(1.0, color[1] + grain))
@@ -111,8 +156,18 @@ def make_normal_texture(
         for x in range(size):
             u = x / size * math.tau * frequency
             v = y / size * math.tau * frequency
-            nx = math.sin(u) * strength
-            ny = math.cos(v) * strength
+            # Avoid the old orthogonal sine/cosine field: under anisotropic
+            # sampling it read as a square moire grid across every material.
+            # Cross-coupled waves retain deterministic surface detail without
+            # exposing the texture axes.
+            nx = (
+                math.sin(u + math.sin(v * 0.37) * 1.7) * 0.58 +
+                math.sin((u + v) * 0.61 + 0.8) * 0.42
+            ) * strength
+            ny = (
+                math.cos(v * 0.83 + math.sin(u * 0.29) * 1.5) * 0.56 +
+                math.sin((v - u) * 0.53 - 0.4) * 0.44
+            ) * strength
             nz = math.sqrt(max(0.0, 1.0 - nx * nx - ny * ny))
             offset = (y * size + x) * 4
             pixels[offset:offset + 4] = (
@@ -259,6 +314,11 @@ def make_material(
     settings.alpha_cutoff = alpha_cutoff
     settings.roughness = roughness
     settings.metallic = metallic
+    settings.friction = 0.84
+    settings.restitution = 0.0
+    settings.emissive_strength = emissive
+    settings.baked_strength = 0.92
+    settings.albedo_image = image
     settings.normal_image = normal_image
     settings.orm_image = orm_image
     settings.emissive_image = emissive_image
@@ -709,6 +769,24 @@ def persist_lightmap(
     return loaded
 
 
+def save_packed_project_and_export() -> None:
+    """Save one self-contained authoring file without generated bake debris."""
+    BLEND_PATH.parent.mkdir(parents=True, exist_ok=True)
+    bpy.ops.file.pack_all()
+    bpy.ops.wm.save_as_mainfile(filepath=str(BLEND_PATH), compress=True)
+    export_scene(PACKAGE_PATH, force_rebuild=True)
+    generated_root = TEXTURE_DIR.resolve()
+    expected_parent = (ROOT / "maps" / "source").resolve()
+    if generated_root.parent != expected_parent:
+        raise RuntimeError(
+            f"refusing to clean unexpected texture path {generated_root}"
+        )
+    if generated_root.is_dir():
+        shutil.rmtree(generated_root)
+    if expected_parent.is_dir() and not any(expected_parent.iterdir()):
+        expected_parent.rmdir()
+
+
 def configure_bake(joined: bpy.types.Object) -> None:
     scene = bpy.context.scene
     scene.render.engine = "BLENDER_EEVEE"
@@ -1087,11 +1165,9 @@ def build_scene() -> None:
     )
     lightmap = persist_lightmap(lightmap, materials)
 
-    BLEND_PATH.parent.mkdir(parents=True, exist_ok=True)
     collision.hide_viewport = False
     grinds.hide_viewport = False
-    bpy.ops.wm.save_as_mainfile(filepath=str(BLEND_PATH))
-    export_scene(PACKAGE_PATH)
+    save_packed_project_and_export()
 
 
 if __name__ == "__main__":

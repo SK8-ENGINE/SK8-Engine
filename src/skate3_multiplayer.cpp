@@ -55,27 +55,43 @@ REXCVAR_DEFINE_DOUBLE(
     .range(0.0, 20.0)
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 REXCVAR_DEFINE_INT32(
+    skate3_multiplayer_quality_preset, 2, "Skate 3",
+    "Multiplayer network quality: 0=Auto, 1=Bandwidth Saver, 2=Balanced, "
+    "3=High Fidelity, 4=Custom. Auto selects a preset from the live session "
+    "size; Custom uses the individual multiplayer tuning cvars.")
+    .range(0, 4)
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+REXCVAR_DEFINE_INT32(
     skate3_multiplayer_local_send_rate, 60, "Skate 3",
-    "Pose packets sent per second by the localhost multiplayer transport.")
+    "Custom-preset root pose packets sent per second by the multiplayer "
+    "transport.")
     .range(10, 120)
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 REXCVAR_DEFINE_INT32(
     skate3_multiplayer_local_animation_rate, 20, "Skate 3",
-    "Completed skeletal-pose frames sent per second by the localhost "
+    "Custom-preset completed skeletal-pose frames sent per second by the "
     "multiplayer transport.")
     .range(10, 60)
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 REXCVAR_DEFINE_INT32(
     skate3_multiplayer_local_interpolation_ms, 50, "Skate 3",
-    "Remote-pose buffer duration. Larger values tolerate more jitter but make "
-    "the other player appear further behind.")
+    "Minimum remote-pose buffer duration. Skeletal animation automatically "
+    "retains at least two animation frames plus measured network jitter; "
+    "larger values trade responsiveness for additional stability.")
     .range(0, 250)
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 REXCVAR_DEFINE_DOUBLE(
     skate3_multiplayer_relevance_radius, 80.0, "Skate 3",
     "Maximum map-space distance for high-detail remote animation routing by "
-    "the logical host.")
+    "the transport.")
     .range(5.0, 1000.0)
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+REXCVAR_DEFINE_DOUBLE(
+    skate3_multiplayer_attachment_radius, 35.0, "Skate 3",
+    "Distance inside which exact hat, hair, board and wheel attachment "
+    "tracks are sent. More distant skaters retain the canonical body "
+    "skeleton and use receiver-side attachment remaps.")
+    .range(5.0, 250.0)
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 REXCVAR_DEFINE_INT32(
     skate3_multiplayer_relevance_players, 12, "Skate 3",
@@ -95,16 +111,152 @@ namespace {
 
 using Clock = std::chrono::steady_clock;
 
+enum class NetworkQualityPreset : std::int32_t {
+  kAuto = 0,
+  kBandwidthSaver = 1,
+  kBalanced = 2,
+  kHighFidelity = 3,
+  kCustom = 4,
+};
+
+struct NetworkTuning {
+  std::int32_t pose_rate = 60;
+  std::int32_t animation_rate = 20;
+  std::int32_t interpolation_ms = 50;
+  float relevance_radius = 80.0f;
+  float attachment_radius = 35.0f;
+  std::int32_t relevance_players = 12;
+  std::int32_t far_presence_rate = 2;
+  NetworkQualityPreset selected = NetworkQualityPreset::kBalanced;
+  NetworkQualityPreset effective = NetworkQualityPreset::kBalanced;
+};
+
+NetworkTuning ResolveNetworkTuning(std::size_t participant_count) {
+  const auto selected = static_cast<NetworkQualityPreset>(
+      std::clamp(
+          REXCVAR_GET(skate3_multiplayer_quality_preset),
+          static_cast<std::int32_t>(NetworkQualityPreset::kAuto),
+          static_cast<std::int32_t>(NetworkQualityPreset::kCustom)));
+  NetworkQualityPreset effective = selected;
+  if (effective == NetworkQualityPreset::kAuto) {
+    if (participant_count <= 4) {
+      effective = NetworkQualityPreset::kHighFidelity;
+    } else if (participant_count <= 12) {
+      effective = NetworkQualityPreset::kBalanced;
+    } else {
+      effective = NetworkQualityPreset::kBandwidthSaver;
+    }
+  }
+
+  NetworkTuning tuning;
+  tuning.selected = selected;
+  tuning.effective = effective;
+  switch (effective) {
+    case NetworkQualityPreset::kBandwidthSaver:
+      tuning.pose_rate = 30;
+      tuning.animation_rate = 10;
+      tuning.interpolation_ms = 100;
+      tuning.relevance_radius = 50.0f;
+      tuning.attachment_radius = 20.0f;
+      tuning.relevance_players = 6;
+      tuning.far_presence_rate = 1;
+      break;
+    case NetworkQualityPreset::kHighFidelity:
+      tuning.pose_rate = 90;
+      tuning.animation_rate = 30;
+      tuning.interpolation_ms = 35;
+      tuning.relevance_radius = 120.0f;
+      tuning.attachment_radius = 50.0f;
+      tuning.relevance_players = 16;
+      tuning.far_presence_rate = 3;
+      break;
+    case NetworkQualityPreset::kCustom:
+      tuning.pose_rate = std::clamp(
+          REXCVAR_GET(skate3_multiplayer_local_send_rate), 10, 120);
+      tuning.animation_rate = std::clamp(
+          REXCVAR_GET(skate3_multiplayer_local_animation_rate), 10, 60);
+      tuning.interpolation_ms = std::clamp(
+          REXCVAR_GET(skate3_multiplayer_local_interpolation_ms), 0, 250);
+      tuning.relevance_radius = static_cast<float>(std::clamp(
+          REXCVAR_GET(skate3_multiplayer_relevance_radius), 5.0, 1000.0));
+      tuning.attachment_radius = static_cast<float>(std::clamp(
+          REXCVAR_GET(skate3_multiplayer_attachment_radius), 5.0, 250.0));
+      tuning.relevance_players = std::clamp(
+          REXCVAR_GET(skate3_multiplayer_relevance_players), 1, 32);
+      tuning.far_presence_rate = std::clamp(
+          REXCVAR_GET(skate3_multiplayer_far_presence_rate), 1, 10);
+      break;
+    case NetworkQualityPreset::kAuto:
+      // Auto is resolved to one of the concrete presets above.
+      break;
+    case NetworkQualityPreset::kBalanced:
+    default:
+      // These defaults deliberately preserve the settings used by the
+      // visually verified multiplayer build.
+      break;
+  }
+  return tuning;
+}
+
+const char* NetworkQualityName(const NetworkTuning& tuning) {
+  if (tuning.selected == NetworkQualityPreset::kAuto) {
+    switch (tuning.effective) {
+      case NetworkQualityPreset::kBandwidthSaver:
+        return "Auto/Bandwidth Saver";
+      case NetworkQualityPreset::kHighFidelity:
+        return "Auto/High Fidelity";
+      case NetworkQualityPreset::kBalanced:
+      default:
+        return "Auto/Balanced";
+    }
+  }
+  switch (tuning.effective) {
+    case NetworkQualityPreset::kBandwidthSaver:
+      return "Bandwidth Saver";
+    case NetworkQualityPreset::kHighFidelity:
+      return "High Fidelity";
+    case NetworkQualityPreset::kCustom:
+      return "Custom";
+    case NetworkQualityPreset::kBalanced:
+    default:
+      return "Balanced";
+  }
+}
+
 constexpr std::uint32_t kPacketMagic = 0x504D334Bu;  // "K3MP"
 constexpr std::uint32_t kAnimationPacketMagic = 0x414D334Bu;  // "K3MA"
-constexpr std::uint16_t kProtocolVersion = 2;
+constexpr std::uint32_t kAppearancePacketMagic = 0x5041334Bu;  // "K3AP"
+constexpr std::uint16_t kProtocolVersion = 11;
 constexpr auto kRemoteTimeout = std::chrono::milliseconds(1500);
 constexpr std::size_t kMaximumBufferedSamples = 16;
 constexpr std::size_t kMaximumBufferedAnimationSamples = 8;
-constexpr std::uint16_t kMaximumAnimationBones = 128;
+// Complete vanilla CAC/ABIN hierarchy (indices 0..130). Keeping this at 128
+// silently omitted hair/facial rows that are not referenced by the ordinary
+// body pieces used to discover the runtime canonical palette.
+constexpr std::uint16_t kMaximumAnimationBones = 131;
 constexpr std::uint16_t kMaximumAnimationTracks = 32;
-constexpr std::uint16_t kAnimationFragmentComponents = 480;
-constexpr float kAnimationTranslationScale = 1024.0f;
+constexpr std::uint16_t kAnimationFragmentWords = 520;
+constexpr std::uint16_t kMaximumAnimationFrameWords = 8192;
+constexpr std::uint16_t kMaximumAnimationFragments =
+    (kMaximumAnimationFrameWords + kAnimationFragmentWords - 1) /
+    kAnimationFragmentWords;
+constexpr std::uint32_t kAnimationKeyframeInterval = 20;
+constexpr std::uint16_t kAppearanceChunkBytes = 1024;
+// Transitional engine-owned appearance bundles can contain the sender's
+// already-decoded vanilla meshes and textures. This cap will shrink again
+// when the local vanilla asset catalogue replaces bundle transfer.
+constexpr std::uint32_t kMaximumAppearanceBytes = 16 * 1024 * 1024;
+// Animation matrices stay inside a compact character-relative range. Fixed
+// point gives substantially more stable per-frame values than half floats at
+// the same 16-bit wire size, avoiding pose-dependent mantissa precision.
+constexpr float kAnimationTranslationScale = 4096.0f;
+constexpr float kAnimationBasisScale = 8192.0f;
+constexpr float kAnimationQuaternionScale = 32767.0f;
+
+enum class AnimationTrackEncoding : std::uint16_t {
+  kAffineRows = 0,
+  kRigidQuaternion = 1,
+};
 
 #pragma pack(push, 1)
 struct PosePacket {
@@ -132,20 +284,37 @@ struct AnimationFragmentPacket {
   std::uint32_t map_hash = 0;
   std::uint64_t sender_time_us = 0;
   float root_position[3] = {};
-  std::uint32_t mesh_key = 0;
-  std::uint16_t bone_count = 0;
-  std::uint16_t track_index = 0;
-  std::uint16_t track_count = 0;
+  std::uint16_t root_bone = 0xFFFFu;
   std::uint16_t fragment_index = 0;
   std::uint16_t fragment_count = 0;
-  std::uint16_t float_count = 0;
-  std::uint16_t rows[kAnimationFragmentComponents] = {};
+  std::uint16_t word_offset = 0;
+  std::uint16_t total_words = 0;
+  std::uint16_t word_count = 0;
+  std::uint16_t words[kAnimationFragmentWords] = {};
+};
+
+struct AppearanceFragmentPacket {
+  std::uint32_t magic = kAppearancePacketMagic;
+  std::uint16_t version = kProtocolVersion;
+  std::uint16_t byte_count = 0;
+  std::uint32_t sender_role = 0;
+  std::uint32_t sender_session = 0;
+  std::uint32_t map_hash = 0;
+  std::uint64_t appearance_id = 0;
+  std::uint32_t total_bytes = 0;
+  std::uint16_t chunk_index = 0;
+  std::uint16_t chunk_count = 0;
+  std::uint16_t chunk_bytes = 0;
+  std::uint8_t bytes[kAppearanceChunkBytes] = {};
 };
 #pragma pack(pop)
 
 static_assert(sizeof(PosePacket) == 72);
-static_assert(offsetof(AnimationFragmentPacket, rows) == 60);
-static_assert(sizeof(AnimationFragmentPacket) == 1020);
+static_assert(offsetof(AnimationFragmentPacket, words) == 56);
+static_assert(sizeof(AnimationFragmentPacket) == 1096);
+static_assert(
+    offsetof(AppearanceFragmentPacket, bytes) == 38);
+static_assert(sizeof(AppearanceFragmentPacket) == 1062);
 
 struct ReceivedSample {
   Clock::time_point received_at{};
@@ -159,12 +328,17 @@ struct ReceivedAnimationSample {
   AnimationPose pose{};
 };
 
-struct AnimationTrackAssembly {
+struct QuantizedAnimationTrack {
   std::uint32_t mesh_key = 0;
   std::uint16_t bone_count = 0;
-  std::uint16_t fragment_count = 0;
-  std::uint64_t received_fragments = 0;
-  std::vector<float> rows;
+  AnimationTrackEncoding encoding =
+      AnimationTrackEncoding::kAffineRows;
+  std::vector<std::uint16_t> words;
+};
+
+struct QuantizedAnimationFrame {
+  std::uint32_t sequence = 0;
+  std::vector<QuantizedAnimationTrack> tracks;
 };
 
 struct AnimationAssembly {
@@ -172,20 +346,72 @@ struct AnimationAssembly {
   std::uint32_t session = 0;
   std::uint32_t sequence = 0;
   std::uint64_t sender_time_us = 0;
-  std::uint16_t track_count = 0;
-  std::uint64_t received_tracks = 0;
-  std::vector<AnimationTrackAssembly> tracks;
+  std::uint16_t root_bone = 0xFFFFu;
+  float root_position[3] = {};
+  std::uint16_t fragment_count = 0;
+  std::uint16_t total_words = 0;
+  std::uint32_t received_fragments = 0;
+  std::vector<std::uint16_t> words;
+};
+
+struct AppearanceAssembly {
+  std::uint64_t identity = 0;
+  std::uint32_t total_bytes = 0;
+  std::uint16_t chunk_count = 0;
+  std::uint16_t received_chunks = 0;
+  std::vector<std::uint8_t> bytes;
+  std::vector<bool> received;
 };
 
 struct RemotePeerState {
   std::uint32_t session = 0;
   std::int64_t clock_offset_us = 0;
+  std::int64_t minimum_clock_offset_us =
+      std::numeric_limits<std::int64_t>::max();
   bool clock_offset_valid = false;
   bool announced = false;
+  std::int64_t animation_period_us = 50000;
+  std::int64_t animation_jitter_us = 0;
+  std::uint64_t last_animation_sender_time_us = 0;
+  std::uint64_t last_animation_arrival_time_us = 0;
+  std::uint32_t last_animation_sequence = 0;
   std::deque<ReceivedSample> samples;
   std::deque<ReceivedAnimationSample> animation_samples;
   AnimationAssembly animation_assembly;
+  QuantizedAnimationFrame animation_keyframe;
+  AppearanceAssembly appearance_assembly;
+  AppearanceBlob appearance;
 };
+
+struct OutboundAppearanceState {
+  std::uint64_t identity = 0;
+  std::uint16_t next_chunk = 0;
+  std::uint8_t completed_passes = 0;
+  Clock::time_point retry_after{};
+};
+
+std::int64_t PresentationDelayMicroseconds(
+    const RemotePeerState& peer, std::int32_t interpolation_ms) {
+  const std::int64_t configured_delay_us =
+      std::int64_t{std::clamp(interpolation_ms, 0, 250)} * 1000;
+  if (peer.animation_samples.empty()) {
+    return configured_delay_us;
+  }
+  const std::int64_t stable_period_us =
+      std::clamp<std::int64_t>(
+          peer.animation_period_us, 8000, 150000);
+  const std::int64_t stable_jitter_us =
+      std::clamp<std::int64_t>(
+          peer.animation_jitter_us, 0, 50000);
+  // Root and skeleton must be sampled from one sender-time point. Presenting
+  // the higher-rate root 50 ms ahead of the skeleton makes a clone oscillate
+  // between two moments even when both individual streams are smooth.
+  return std::clamp<std::int64_t>(
+      std::max(
+          configured_delay_us,
+          stable_period_us * 2 + stable_jitter_us * 3),
+      0, 250000);
+}
 
 #if defined(_WIN32)
 struct PacketEndpoint {
@@ -226,6 +452,12 @@ struct TelemetrySnapshot {
   std::uint64_t relayed_packets = 0;
   std::uint64_t relevance_drops = 0;
   std::uint64_t far_presence_packets = 0;
+  std::uint64_t animation_present_interpolated = 0;
+  std::uint64_t animation_present_held_latest = 0;
+  std::uint64_t animation_present_held_oldest = 0;
+  std::int64_t animation_period_us = 0;
+  std::int64_t animation_jitter_us = 0;
+  std::uint32_t animation_buffered_samples = 0;
   float remote_position[3] = {};
 };
 
@@ -255,6 +487,901 @@ bool Normalize(float value[3]) {
 bool Finite3(const float value[3]) {
   return std::isfinite(value[0]) && std::isfinite(value[1]) &&
          std::isfinite(value[2]);
+}
+
+struct Quaternion {
+  float x = 0.0f;
+  float y = 0.0f;
+  float z = 0.0f;
+  float w = 1.0f;
+};
+
+bool NormalizeQuaternion(Quaternion& value) {
+  const float length_squared =
+      value.x * value.x + value.y * value.y +
+      value.z * value.z + value.w * value.w;
+  if (!std::isfinite(length_squared) ||
+      length_squared < 1.0e-10f) {
+    return false;
+  }
+  const float inverse_length =
+      1.0f / std::sqrt(length_squared);
+  value.x *= inverse_length;
+  value.y *= inverse_length;
+  value.z *= inverse_length;
+  value.w *= inverse_length;
+  return true;
+}
+
+bool QuaternionFromRotation(
+    const float matrix[9], Quaternion& out) {
+  for (std::size_t index = 0; index < 9; ++index) {
+    if (!std::isfinite(matrix[index])) {
+      return false;
+    }
+  }
+  const float trace =
+      matrix[0] + matrix[4] + matrix[8];
+  if (trace > 0.0f) {
+    const float scale =
+        std::sqrt(std::max(trace + 1.0f, 0.0f)) * 2.0f;
+    if (scale < 1.0e-6f) {
+      return false;
+    }
+    out.w = 0.25f * scale;
+    out.x = (matrix[7] - matrix[5]) / scale;
+    out.y = (matrix[2] - matrix[6]) / scale;
+    out.z = (matrix[3] - matrix[1]) / scale;
+  } else if (matrix[0] > matrix[4] &&
+             matrix[0] > matrix[8]) {
+    const float scale = std::sqrt(std::max(
+                            1.0f + matrix[0] -
+                                matrix[4] - matrix[8],
+                            0.0f)) *
+                        2.0f;
+    if (scale < 1.0e-6f) {
+      return false;
+    }
+    out.w = (matrix[7] - matrix[5]) / scale;
+    out.x = 0.25f * scale;
+    out.y = (matrix[1] + matrix[3]) / scale;
+    out.z = (matrix[2] + matrix[6]) / scale;
+  } else if (matrix[4] > matrix[8]) {
+    const float scale = std::sqrt(std::max(
+                            1.0f + matrix[4] -
+                                matrix[0] - matrix[8],
+                            0.0f)) *
+                        2.0f;
+    if (scale < 1.0e-6f) {
+      return false;
+    }
+    out.w = (matrix[2] - matrix[6]) / scale;
+    out.x = (matrix[1] + matrix[3]) / scale;
+    out.y = 0.25f * scale;
+    out.z = (matrix[5] + matrix[7]) / scale;
+  } else {
+    const float scale = std::sqrt(std::max(
+                            1.0f + matrix[8] -
+                                matrix[0] - matrix[4],
+                            0.0f)) *
+                        2.0f;
+    if (scale < 1.0e-6f) {
+      return false;
+    }
+    out.w = (matrix[3] - matrix[1]) / scale;
+    out.x = (matrix[2] + matrix[6]) / scale;
+    out.y = (matrix[5] + matrix[7]) / scale;
+    out.z = 0.25f * scale;
+  }
+  return NormalizeQuaternion(out);
+}
+
+void RotationFromQuaternion(
+    const Quaternion& value, float out[9]) {
+  const float xx = value.x * value.x;
+  const float yy = value.y * value.y;
+  const float zz = value.z * value.z;
+  const float xy = value.x * value.y;
+  const float xz = value.x * value.z;
+  const float yz = value.y * value.z;
+  const float wx = value.w * value.x;
+  const float wy = value.w * value.y;
+  const float wz = value.w * value.z;
+  out[0] = 1.0f - 2.0f * (yy + zz);
+  out[1] = 2.0f * (xy - wz);
+  out[2] = 2.0f * (xz + wy);
+  out[3] = 2.0f * (xy + wz);
+  out[4] = 1.0f - 2.0f * (xx + zz);
+  out[5] = 2.0f * (yz - wx);
+  out[6] = 2.0f * (xz - wy);
+  out[7] = 2.0f * (yz + wx);
+  out[8] = 1.0f - 2.0f * (xx + yy);
+}
+
+Quaternion NlerpQuaternion(
+    const Quaternion& first, const Quaternion& second,
+    float amount) {
+  Quaternion aligned = second;
+  const float dot =
+      first.x * second.x + first.y * second.y +
+      first.z * second.z + first.w * second.w;
+  if (dot < 0.0f) {
+    aligned.x = -aligned.x;
+    aligned.y = -aligned.y;
+    aligned.z = -aligned.z;
+    aligned.w = -aligned.w;
+  }
+  Quaternion result{
+      first.x + (aligned.x - first.x) * amount,
+      first.y + (aligned.y - first.y) * amount,
+      first.z + (aligned.z - first.z) * amount,
+      first.w + (aligned.w - first.w) * amount};
+  if (!NormalizeQuaternion(result)) {
+    return aligned;
+  }
+  return result;
+}
+
+bool DecomposeAffineRotationScale(
+    const float matrix[12], Quaternion& rotation,
+    float scale[3]) {
+  float x[3] = {matrix[0], matrix[4], matrix[8]};
+  float y[3] = {matrix[1], matrix[5], matrix[9]};
+  const float original_z[3] = {
+      matrix[2], matrix[6], matrix[10]};
+  scale[0] = std::sqrt(Dot(x, x));
+  if (!std::isfinite(scale[0]) || scale[0] < 1.0e-6f ||
+      !Normalize(x)) {
+    return false;
+  }
+  const float xy = Dot(y, x);
+  for (std::size_t component = 0; component < 3; ++component) {
+    y[component] -= x[component] * xy;
+  }
+  scale[1] = std::sqrt(Dot(y, y));
+  if (!std::isfinite(scale[1]) || scale[1] < 1.0e-6f ||
+      !Normalize(y)) {
+    return false;
+  }
+  float z[3];
+  Cross(x, y, z);
+  if (!Normalize(z)) {
+    return false;
+  }
+  scale[2] = Dot(original_z, z);
+  if (!std::isfinite(scale[2]) ||
+      std::fabs(scale[2]) < 1.0e-6f) {
+    return false;
+  }
+  const float rotation_matrix[9] = {
+      x[0], y[0], z[0],
+      x[1], y[1], z[1],
+      x[2], y[2], z[2]};
+  return QuaternionFromRotation(rotation_matrix, rotation);
+}
+
+std::uint16_t QuantizeSigned(float value, float scale) {
+  return static_cast<std::uint16_t>(
+      static_cast<std::int16_t>(
+          std::clamp(std::lround(value * scale), -32768l, 32767l)));
+}
+
+float DequantizeSigned(std::uint16_t value, float scale) {
+  return static_cast<float>(
+             static_cast<std::int16_t>(value)) /
+         scale;
+}
+
+std::size_t TrackWordStride(AnimationTrackEncoding encoding) {
+  return encoding == AnimationTrackEncoding::kRigidQuaternion ? 7u : 12u;
+}
+
+bool QuantizeAnimationTrack(
+    const AnimationTrack& source, const float root_position[3],
+    QuantizedAnimationTrack& output) {
+  if (source.mesh_key == 0 || source.bone_rows.size() < 12 ||
+      source.bone_rows.size() % 12 != 0 ||
+      !Finite3(root_position)) {
+    return false;
+  }
+  output = {};
+  output.mesh_key = source.mesh_key;
+  output.bone_count = static_cast<std::uint16_t>(
+      std::min<std::size_t>(
+          source.bone_rows.size() / 12,
+          kMaximumAnimationBones));
+  bool rigid = true;
+  std::vector<Quaternion> rotations(output.bone_count);
+  for (std::size_t bone = 0; bone < output.bone_count; ++bone) {
+    float scale[3];
+    if (!DecomposeAffineRotationScale(
+            source.bone_rows.data() + bone * 12,
+            rotations[bone], scale) ||
+        std::fabs(scale[0] - 1.0f) > 0.01f ||
+        std::fabs(scale[1] - 1.0f) > 0.01f ||
+        std::fabs(scale[2] - 1.0f) > 0.01f) {
+      rigid = false;
+      break;
+    }
+  }
+  output.encoding =
+      rigid ? AnimationTrackEncoding::kRigidQuaternion
+            : AnimationTrackEncoding::kAffineRows;
+  output.words.reserve(
+      std::size_t(output.bone_count) *
+      TrackWordStride(output.encoding));
+  for (std::size_t bone = 0; bone < output.bone_count; ++bone) {
+    const float* rows = source.bone_rows.data() + bone * 12;
+    if (rigid) {
+      const Quaternion& rotation = rotations[bone];
+      output.words.push_back(
+          QuantizeSigned(rotation.x, kAnimationQuaternionScale));
+      output.words.push_back(
+          QuantizeSigned(rotation.y, kAnimationQuaternionScale));
+      output.words.push_back(
+          QuantizeSigned(rotation.z, kAnimationQuaternionScale));
+      output.words.push_back(
+          QuantizeSigned(rotation.w, kAnimationQuaternionScale));
+      output.words.push_back(QuantizeSigned(
+          rows[3] - root_position[0],
+          kAnimationTranslationScale));
+      output.words.push_back(QuantizeSigned(
+          rows[7] - root_position[1],
+          kAnimationTranslationScale));
+      output.words.push_back(QuantizeSigned(
+          rows[11] - root_position[2],
+          kAnimationTranslationScale));
+      continue;
+    }
+    for (std::size_t component = 0; component < 12; ++component) {
+      if (!std::isfinite(rows[component])) {
+        return false;
+      }
+      if (component == 3 || component == 7 || component == 11) {
+        output.words.push_back(QuantizeSigned(
+            rows[component] -
+                root_position[(component - 3) / 4],
+            kAnimationTranslationScale));
+      } else {
+        output.words.push_back(
+            QuantizeSigned(rows[component], kAnimationBasisScale));
+      }
+    }
+  }
+  return true;
+}
+
+void AppendU32(std::vector<std::uint16_t>& words,
+               std::uint32_t value) {
+  words.push_back(static_cast<std::uint16_t>(value));
+  words.push_back(static_cast<std::uint16_t>(value >> 16));
+}
+
+bool ReadU32(const std::vector<std::uint16_t>& words,
+             std::size_t& cursor, std::uint32_t& value) {
+  if (cursor + 2 > words.size()) {
+    return false;
+  }
+  value =
+      static_cast<std::uint32_t>(words[cursor]) |
+      (static_cast<std::uint32_t>(words[cursor + 1]) << 16);
+  cursor += 2;
+  return true;
+}
+
+bool SameTrackLayout(const QuantizedAnimationTrack& left,
+                     const QuantizedAnimationTrack& right) {
+  return left.mesh_key == right.mesh_key &&
+         left.bone_count == right.bone_count &&
+         left.encoding == right.encoding &&
+         left.words.size() == right.words.size();
+}
+
+bool BuildAnimationFrameWords(
+    const AnimationPose& pose,
+    const std::vector<const AnimationTrack*>& tracks,
+    std::uint32_t sequence,
+    QuantizedAnimationFrame& keyframe,
+    std::vector<std::uint16_t>& words) {
+  QuantizedAnimationFrame current;
+  current.sequence = sequence;
+  current.tracks.reserve(tracks.size());
+  for (const AnimationTrack* track : tracks) {
+    QuantizedAnimationTrack quantized;
+    if (track != nullptr &&
+        QuantizeAnimationTrack(
+            *track, pose.root_position, quantized)) {
+      current.tracks.push_back(std::move(quantized));
+    }
+  }
+  if (current.tracks.empty() ||
+      current.tracks.size() > kMaximumAnimationTracks) {
+    return false;
+  }
+  bool keyframe_required =
+      keyframe.tracks.size() != current.tracks.size() ||
+      keyframe.sequence == 0 ||
+      sequence - keyframe.sequence >= kAnimationKeyframeInterval;
+  if (!keyframe_required) {
+    for (std::size_t index = 0;
+         index < current.tracks.size(); ++index) {
+      if (!SameTrackLayout(
+              current.tracks[index], keyframe.tracks[index])) {
+        keyframe_required = true;
+        break;
+      }
+    }
+  }
+
+  words.clear();
+  words.reserve(4096);
+  words.push_back(keyframe_required ? 1u : 0u);
+  words.push_back(
+      static_cast<std::uint16_t>(current.tracks.size()));
+  AppendU32(
+      words,
+      keyframe_required ? sequence : keyframe.sequence);
+  for (std::size_t track_index = 0;
+       track_index < current.tracks.size(); ++track_index) {
+    const QuantizedAnimationTrack& track =
+        current.tracks[track_index];
+    AppendU32(words, track.mesh_key);
+    words.push_back(track.bone_count);
+    words.push_back(
+        static_cast<std::uint16_t>(track.encoding));
+    const std::size_t stride =
+        TrackWordStride(track.encoding);
+    if (keyframe_required) {
+      words.push_back(0);
+      words.insert(
+          words.end(), track.words.begin(), track.words.end());
+      continue;
+    }
+    const QuantizedAnimationTrack& base =
+        keyframe.tracks[track_index];
+    const std::size_t mask_words =
+        (std::size_t(track.bone_count) + 15) / 16;
+    words.push_back(
+        static_cast<std::uint16_t>(mask_words));
+    const std::size_t mask_start = words.size();
+    words.resize(words.size() + mask_words, 0);
+    for (std::size_t bone = 0; bone < track.bone_count; ++bone) {
+      const std::size_t offset = bone * stride;
+      const bool changed =
+          !std::equal(
+              track.words.begin() + offset,
+              track.words.begin() + offset + stride,
+              base.words.begin() + offset);
+      if (!changed) {
+        continue;
+      }
+      words[mask_start + bone / 16] |=
+          static_cast<std::uint16_t>(1u << (bone % 16));
+      words.insert(
+          words.end(),
+          track.words.begin() + offset,
+          track.words.begin() + offset + stride);
+    }
+  }
+  if (words.size() > kMaximumAnimationFrameWords) {
+    return false;
+  }
+  if (keyframe_required) {
+    keyframe = std::move(current);
+  }
+  return true;
+}
+
+bool DecodeAnimationFrameWords(
+    const std::vector<std::uint16_t>& words,
+    std::uint32_t sequence, const float root_position[3],
+    QuantizedAnimationFrame& keyframe,
+    std::vector<AnimationTrack>& output,
+    std::uint32_t& total_bones) {
+  if (words.size() < 4 || !Finite3(root_position)) {
+    return false;
+  }
+  std::size_t cursor = 0;
+  const bool is_keyframe = (words[cursor++] & 1u) != 0;
+  const std::size_t track_count = words[cursor++];
+  std::uint32_t base_sequence = 0;
+  if (!ReadU32(words, cursor, base_sequence) ||
+      track_count == 0 ||
+      track_count > kMaximumAnimationTracks ||
+      (is_keyframe && base_sequence != sequence) ||
+      (!is_keyframe &&
+       (keyframe.sequence != base_sequence ||
+        keyframe.tracks.size() != track_count))) {
+    return false;
+  }
+  QuantizedAnimationFrame current;
+  current.sequence = sequence;
+  current.tracks.reserve(track_count);
+  for (std::size_t track_index = 0;
+       track_index < track_count; ++track_index) {
+    QuantizedAnimationTrack track;
+    std::uint32_t mesh_key = 0;
+    if (!ReadU32(words, cursor, mesh_key) ||
+        cursor + 3 > words.size()) {
+      return false;
+    }
+    track.mesh_key = mesh_key;
+    track.bone_count = words[cursor++];
+    track.encoding =
+        static_cast<AnimationTrackEncoding>(words[cursor++]);
+    const std::size_t mask_words = words[cursor++];
+    if (track.mesh_key == 0 || track.bone_count == 0 ||
+        track.bone_count > kMaximumAnimationBones ||
+        (track.encoding != AnimationTrackEncoding::kAffineRows &&
+         track.encoding !=
+             AnimationTrackEncoding::kRigidQuaternion)) {
+      return false;
+    }
+    const std::size_t stride =
+        TrackWordStride(track.encoding);
+    const std::size_t track_words =
+        std::size_t(track.bone_count) * stride;
+    if (is_keyframe) {
+      if (mask_words != 0 ||
+          cursor + track_words > words.size()) {
+        return false;
+      }
+      track.words.assign(
+          words.begin() + cursor,
+          words.begin() + cursor + track_words);
+      cursor += track_words;
+    } else {
+      const QuantizedAnimationTrack& base =
+          keyframe.tracks[track_index];
+      const std::size_t expected_mask_words =
+          (std::size_t(track.bone_count) + 15) / 16;
+      if (track.mesh_key != base.mesh_key ||
+          track.bone_count != base.bone_count ||
+          track.encoding != base.encoding ||
+          base.words.size() != track_words ||
+          mask_words != expected_mask_words ||
+          cursor + mask_words > words.size()) {
+        return false;
+      }
+      track.words = base.words;
+      const std::size_t mask_start = cursor;
+      cursor += mask_words;
+      for (std::size_t bone = 0;
+           bone < track.bone_count; ++bone) {
+        if ((words[mask_start + bone / 16] &
+             static_cast<std::uint16_t>(
+                 1u << (bone % 16))) == 0) {
+          continue;
+        }
+        if (cursor + stride > words.size()) {
+          return false;
+        }
+        std::copy_n(
+            words.begin() + cursor, stride,
+            track.words.begin() + bone * stride);
+        cursor += stride;
+      }
+    }
+    current.tracks.push_back(std::move(track));
+  }
+  if (cursor != words.size()) {
+    return false;
+  }
+  if (is_keyframe) {
+    keyframe = current;
+  }
+
+  output.clear();
+  output.reserve(current.tracks.size());
+  total_bones = 0;
+  for (const QuantizedAnimationTrack& track : current.tracks) {
+    AnimationTrack decoded;
+    decoded.mesh_key = track.mesh_key;
+    decoded.bone_rows.resize(
+        std::size_t(track.bone_count) * 12);
+    const std::size_t stride =
+        TrackWordStride(track.encoding);
+    for (std::size_t bone = 0; bone < track.bone_count; ++bone) {
+      const std::uint16_t* source =
+          track.words.data() + bone * stride;
+      float* rows =
+          decoded.bone_rows.data() + bone * 12;
+      if (track.encoding ==
+          AnimationTrackEncoding::kRigidQuaternion) {
+        Quaternion rotation{
+            DequantizeSigned(
+                source[0], kAnimationQuaternionScale),
+            DequantizeSigned(
+                source[1], kAnimationQuaternionScale),
+            DequantizeSigned(
+                source[2], kAnimationQuaternionScale),
+            DequantizeSigned(
+                source[3], kAnimationQuaternionScale)};
+        if (!NormalizeQuaternion(rotation)) {
+          return false;
+        }
+        float rotation_matrix[9];
+        RotationFromQuaternion(rotation, rotation_matrix);
+        for (std::size_t row = 0; row < 3; ++row) {
+          for (std::size_t column = 0;
+               column < 3; ++column) {
+            rows[row * 4 + column] =
+                rotation_matrix[row * 3 + column];
+          }
+          rows[row * 4 + 3] =
+              root_position[row] +
+              DequantizeSigned(
+                  source[4 + row],
+                  kAnimationTranslationScale);
+        }
+      } else {
+        for (std::size_t component = 0;
+             component < 12; ++component) {
+          if (component == 3 || component == 7 ||
+              component == 11) {
+            rows[component] =
+                root_position[(component - 3) / 4] +
+                DequantizeSigned(
+                    source[component],
+                    kAnimationTranslationScale);
+          } else {
+            rows[component] =
+                DequantizeSigned(
+                    source[component],
+                    kAnimationBasisScale);
+          }
+        }
+      }
+    }
+    total_bones += track.bone_count;
+    output.push_back(std::move(decoded));
+  }
+  return true;
+}
+
+void InterpolateAffine(
+    const float first[12], const float second[12],
+    float amount, float out[12]) {
+  Quaternion first_rotation;
+  Quaternion second_rotation;
+  float first_scale[3];
+  float second_scale[3];
+  if (!DecomposeAffineRotationScale(
+          first, first_rotation, first_scale) ||
+      !DecomposeAffineRotationScale(
+          second, second_rotation, second_scale)) {
+    for (std::size_t component = 0;
+         component < 12; ++component) {
+      out[component] =
+          first[component] +
+          (second[component] - first[component]) * amount;
+    }
+    return;
+  }
+  const Quaternion rotation =
+      NlerpQuaternion(first_rotation, second_rotation, amount);
+  float rotation_matrix[9];
+  RotationFromQuaternion(rotation, rotation_matrix);
+  for (std::size_t column = 0; column < 3; ++column) {
+    const float interpolated_scale =
+        first_scale[column] +
+        (second_scale[column] - first_scale[column]) * amount;
+    for (std::size_t row = 0; row < 3; ++row) {
+      out[row * 4 + column] =
+          rotation_matrix[row * 3 + column] *
+          interpolated_scale;
+    }
+  }
+  out[3] = first[3] + (second[3] - first[3]) * amount;
+  out[7] = first[7] + (second[7] - first[7]) * amount;
+  out[11] = first[11] + (second[11] - first[11]) * amount;
+}
+
+void InterpolateAttachmentAffine(
+    const float first[12], const float second[12],
+    float amount, float out[12]) {
+  Quaternion first_rotation;
+  Quaternion second_rotation;
+  float first_scale[3];
+  float second_scale[3];
+  if (!DecomposeAffineRotationScale(
+          first, first_rotation, first_scale) ||
+      !DecomposeAffineRotationScale(
+          second, second_rotation, second_scale)) {
+    for (std::size_t component = 0;
+         component < 12; ++component) {
+      out[component] =
+          first[component] +
+          (second[component] - first[component]) * amount;
+    }
+    return;
+  }
+  // A skinning affine's translation is not an independent bone position.
+  // It includes the inverse-bind pivot compensation (p - R*p). Slerping R
+  // while linearly interpolating t therefore moves a rigidly weighted
+  // attachment away from its pivot; the error is subtle on a hat and huge
+  // on fast-spinning skateboard wheels. Interpolate the rigid part on SE(3)
+  // instead, so rotation and translation follow one screw transform.
+  Quaternion aligned_second = second_rotation;
+  const float rotation_dot =
+      first_rotation.x * second_rotation.x +
+      first_rotation.y * second_rotation.y +
+      first_rotation.z * second_rotation.z +
+      first_rotation.w * second_rotation.w;
+  if (rotation_dot < 0.0f) {
+    aligned_second.x = -aligned_second.x;
+    aligned_second.y = -aligned_second.y;
+    aligned_second.z = -aligned_second.z;
+    aligned_second.w = -aligned_second.w;
+  }
+  const auto multiply_quaternion =
+      [](const Quaternion& left,
+         const Quaternion& right) {
+        return Quaternion{
+            left.w * right.x + left.x * right.w +
+                left.y * right.z - left.z * right.y,
+            left.w * right.y - left.x * right.z +
+                left.y * right.w + left.z * right.x,
+            left.w * right.z + left.x * right.y -
+                left.y * right.x + left.z * right.w,
+            left.w * right.w - left.x * right.x -
+                left.y * right.y - left.z * right.z};
+      };
+  const Quaternion inverse_first{
+      -first_rotation.x, -first_rotation.y,
+      -first_rotation.z, first_rotation.w};
+  Quaternion relative_rotation =
+      multiply_quaternion(inverse_first, aligned_second);
+  if (!NormalizeQuaternion(relative_rotation)) {
+    relative_rotation = {0.0f, 0.0f, 0.0f, 1.0f};
+  }
+  if (relative_rotation.w < 0.0f) {
+    relative_rotation.x = -relative_rotation.x;
+    relative_rotation.y = -relative_rotation.y;
+    relative_rotation.z = -relative_rotation.z;
+    relative_rotation.w = -relative_rotation.w;
+  }
+  const double relative_w =
+      std::clamp<double>(
+          relative_rotation.w, -1.0, 1.0);
+  const double theta = 2.0 * std::acos(relative_w);
+  double phi[3] = {};
+  const double half_sine =
+      std::sqrt(std::max(
+          1.0 - relative_w * relative_w, 0.0));
+  if (theta > 1.0e-8 && half_sine > 1.0e-8) {
+    const double factor = theta / half_sine;
+    phi[0] = double(relative_rotation.x) * factor;
+    phi[1] = double(relative_rotation.y) * factor;
+    phi[2] = double(relative_rotation.z) * factor;
+  }
+  const auto skew = [](const double vector[3],
+                       double matrix[9]) {
+    matrix[0] = 0.0;
+    matrix[1] = -vector[2];
+    matrix[2] = vector[1];
+    matrix[3] = vector[2];
+    matrix[4] = 0.0;
+    matrix[5] = -vector[0];
+    matrix[6] = -vector[1];
+    matrix[7] = vector[0];
+    matrix[8] = 0.0;
+  };
+  const auto multiply_matrix3 =
+      [](const double left[9], const double right[9],
+         double result[9]) {
+        for (std::size_t row = 0; row < 3; ++row) {
+          for (std::size_t column = 0; column < 3;
+               ++column) {
+            result[row * 3 + column] = 0.0;
+            for (std::size_t inner = 0; inner < 3;
+                 ++inner) {
+              result[row * 3 + column] +=
+                  left[row * 3 + inner] *
+                  right[inner * 3 + column];
+            }
+          }
+        }
+      };
+  double omega[9];
+  double omega_squared[9];
+  skew(phi, omega);
+  multiply_matrix3(omega, omega, omega_squared);
+  double inverse_left_jacobian[9] = {
+      1.0, 0.0, 0.0,
+      0.0, 1.0, 0.0,
+      0.0, 0.0, 1.0};
+  double inverse_coefficient = 1.0 / 12.0;
+  if (theta > 1.0e-5) {
+    const double sine = std::sin(theta);
+    const double cosine = std::cos(theta);
+    inverse_coefficient =
+        std::fabs(sine) < 1.0e-8
+            ? 1.0 / (theta * theta)
+            : 1.0 / (theta * theta) -
+                  (1.0 + cosine) /
+                      (2.0 * theta * sine);
+  }
+  for (std::size_t component = 0; component < 9;
+       ++component) {
+    inverse_left_jacobian[component] +=
+        -0.5 * omega[component] +
+        inverse_coefficient * omega_squared[component];
+  }
+  float first_rotation_matrix[9];
+  RotationFromQuaternion(
+      first_rotation, first_rotation_matrix);
+  const double translation_delta[3] = {
+      double(second[3]) - first[3],
+      double(second[7]) - first[7],
+      double(second[11]) - first[11]};
+  double relative_translation[3] = {};
+  for (std::size_t row = 0; row < 3; ++row) {
+    for (std::size_t column = 0; column < 3;
+         ++column) {
+      relative_translation[row] +=
+          double(first_rotation_matrix[column * 3 + row]) *
+          translation_delta[column];
+    }
+  }
+  double twist_translation[3] = {};
+  for (std::size_t row = 0; row < 3; ++row) {
+    for (std::size_t column = 0; column < 3;
+         ++column) {
+      twist_translation[row] +=
+          inverse_left_jacobian[row * 3 + column] *
+          relative_translation[column];
+    }
+  }
+  const double interpolated_theta =
+      theta * double(amount);
+  const double scaled_phi[3] = {
+      phi[0] * double(amount),
+      phi[1] * double(amount),
+      phi[2] * double(amount)};
+  double scaled_omega[9];
+  double scaled_omega_squared[9];
+  skew(scaled_phi, scaled_omega);
+  multiply_matrix3(
+      scaled_omega, scaled_omega,
+      scaled_omega_squared);
+  double left_jacobian[9] = {
+      1.0, 0.0, 0.0,
+      0.0, 1.0, 0.0,
+      0.0, 0.0, 1.0};
+  double first_coefficient = 0.5;
+  double second_coefficient = 1.0 / 6.0;
+  if (interpolated_theta > 1.0e-5) {
+    first_coefficient =
+        (1.0 - std::cos(interpolated_theta)) /
+        (interpolated_theta * interpolated_theta);
+    second_coefficient =
+        (interpolated_theta -
+         std::sin(interpolated_theta)) /
+        (interpolated_theta * interpolated_theta *
+         interpolated_theta);
+  }
+  for (std::size_t component = 0; component < 9;
+       ++component) {
+    left_jacobian[component] +=
+        first_coefficient * scaled_omega[component] +
+        second_coefficient *
+            scaled_omega_squared[component];
+  }
+  const double scaled_twist_translation[3] = {
+      twist_translation[0] * double(amount),
+      twist_translation[1] * double(amount),
+      twist_translation[2] * double(amount)};
+  double interpolated_relative_translation[3] = {};
+  for (std::size_t row = 0; row < 3; ++row) {
+    for (std::size_t column = 0; column < 3;
+         ++column) {
+      interpolated_relative_translation[row] +=
+          left_jacobian[row * 3 + column] *
+          scaled_twist_translation[column];
+    }
+  }
+  Quaternion relative_step{
+      0.0f, 0.0f, 0.0f, 1.0f};
+  if (interpolated_theta > 1.0e-8 &&
+      theta > 1.0e-8) {
+    const double sine =
+        std::sin(interpolated_theta * 0.5);
+    const double factor = sine / theta;
+    relative_step.x =
+        static_cast<float>(phi[0] * factor);
+    relative_step.y =
+        static_cast<float>(phi[1] * factor);
+    relative_step.z =
+        static_cast<float>(phi[2] * factor);
+    relative_step.w = static_cast<float>(
+        std::cos(interpolated_theta * 0.5));
+  }
+  Quaternion rotation =
+      multiply_quaternion(first_rotation, relative_step);
+  NormalizeQuaternion(rotation);
+  float rotation_matrix[9];
+  RotationFromQuaternion(rotation, rotation_matrix);
+  for (std::size_t column = 0; column < 3; ++column) {
+    const float interpolated_scale =
+        first_scale[column] +
+        (second_scale[column] - first_scale[column]) * amount;
+    for (std::size_t row = 0; row < 3; ++row) {
+      out[row * 4 + column] =
+          rotation_matrix[row * 3 + column] *
+          interpolated_scale;
+    }
+  }
+  for (std::size_t row = 0; row < 3; ++row) {
+    double translation =
+        first[row * 4 + 3];
+    for (std::size_t column = 0; column < 3;
+         ++column) {
+      translation +=
+          double(first_rotation_matrix[row * 3 + column]) *
+          interpolated_relative_translation[column];
+    }
+    out[row * 4 + 3] =
+        static_cast<float>(translation);
+  }
+}
+
+float InterpolateHermite(
+    float previous, float first, float second, float next,
+    std::uint64_t previous_time, std::uint64_t first_time,
+    std::uint64_t second_time, std::uint64_t next_time,
+    float amount) {
+  const double segment =
+      static_cast<double>(second_time - first_time);
+  if (!(segment > 0.0)) {
+    return second;
+  }
+  const double first_span =
+      static_cast<double>(second_time - previous_time);
+  const double second_span =
+      static_cast<double>(next_time - first_time);
+  const double first_tangent =
+      first_span > 0.0
+          ? (static_cast<double>(second) -
+             static_cast<double>(previous)) *
+                segment / first_span
+          : static_cast<double>(second) -
+                static_cast<double>(first);
+  const double second_tangent =
+      second_span > 0.0
+          ? (static_cast<double>(next) -
+             static_cast<double>(first)) *
+                segment / second_span
+          : static_cast<double>(second) -
+                static_cast<double>(first);
+  const double t = std::clamp(
+      static_cast<double>(amount), 0.0, 1.0);
+  const double t2 = t * t;
+  const double t3 = t2 * t;
+  const double h00 = 2.0 * t3 - 3.0 * t2 + 1.0;
+  const double h10 = t3 - 2.0 * t2 + t;
+  const double h01 = -2.0 * t3 + 3.0 * t2;
+  const double h11 = t3 - t2;
+  return static_cast<float>(
+      h00 * static_cast<double>(first) +
+      h10 * first_tangent +
+      h01 * static_cast<double>(second) +
+      h11 * second_tangent);
+}
+
+void InterpolateAffineHermite(
+    const float previous[12], const float first[12],
+    const float second[12], const float next[12],
+    std::uint64_t previous_time, std::uint64_t first_time,
+    std::uint64_t second_time, std::uint64_t next_time,
+    float amount, float out[12]) {
+  for (std::size_t component = 0; component < 12; ++component) {
+    out[component] = InterpolateHermite(
+        previous[component], first[component],
+        second[component], next[component],
+        previous_time, first_time, second_time, next_time,
+        amount);
+  }
 }
 
 std::uint16_t FloatToHalf(float value) {
@@ -378,44 +1505,146 @@ RemotePose InterpolatePose(const RemotePose& first,
     result.position[component] =
         first.position[component] +
         (second.position[component] - first.position[component]) * amount;
-    result.x_axis[component] =
-        first.x_axis[component] +
-        (second.x_axis[component] - first.x_axis[component]) * amount;
-    result.z_axis[component] =
-        first.z_axis[component] +
-        (second.z_axis[component] - first.z_axis[component]) * amount;
   }
-  if (!Normalize(result.x_axis)) {
-    std::memcpy(result.x_axis, second.x_axis, sizeof(result.x_axis));
+  const float first_matrix[9] = {
+      first.x_axis[0], first.x_axis[1], first.x_axis[2],
+      first.y_axis[0], first.y_axis[1], first.y_axis[2],
+      first.z_axis[0], first.z_axis[1], first.z_axis[2]};
+  const float second_matrix[9] = {
+      second.x_axis[0], second.x_axis[1], second.x_axis[2],
+      second.y_axis[0], second.y_axis[1], second.y_axis[2],
+      second.z_axis[0], second.z_axis[1], second.z_axis[2]};
+  Quaternion first_rotation;
+  Quaternion second_rotation;
+  if (QuaternionFromRotation(first_matrix, first_rotation) &&
+      QuaternionFromRotation(second_matrix, second_rotation)) {
+    const Quaternion rotation = NlerpQuaternion(
+        first_rotation, second_rotation, amount);
+    float matrix[9];
+    RotationFromQuaternion(rotation, matrix);
+    std::copy_n(matrix, 3, result.x_axis);
+    std::copy_n(matrix + 3, 3, result.y_axis);
+    std::copy_n(matrix + 6, 3, result.z_axis);
+  } else {
+    for (std::size_t component = 0; component < 3; ++component) {
+      result.x_axis[component] =
+          first.x_axis[component] +
+          (second.x_axis[component] -
+           first.x_axis[component]) *
+              amount;
+      result.z_axis[component] =
+          first.z_axis[component] +
+          (second.z_axis[component] -
+           first.z_axis[component]) *
+              amount;
+    }
+    if (!Normalize(result.x_axis)) {
+      std::memcpy(
+          result.x_axis, second.x_axis,
+          sizeof(result.x_axis));
+    }
+    const float projection =
+        Dot(result.z_axis, result.x_axis);
+    for (std::size_t component = 0; component < 3; ++component) {
+      result.z_axis[component] -=
+          result.x_axis[component] * projection;
+    }
+    if (!Normalize(result.z_axis)) {
+      std::memcpy(
+          result.z_axis, second.z_axis,
+          sizeof(result.z_axis));
+    }
+    Cross(result.z_axis, result.x_axis, result.y_axis);
+    Normalize(result.y_axis);
   }
-  const float projection = Dot(result.z_axis, result.x_axis);
-  for (std::size_t component = 0; component < 3; ++component) {
-    result.z_axis[component] -= result.x_axis[component] * projection;
-  }
-  if (!Normalize(result.z_axis)) {
-    std::memcpy(result.z_axis, second.z_axis, sizeof(result.z_axis));
-  }
-  Cross(result.z_axis, result.x_axis, result.y_axis);
-  Normalize(result.y_axis);
   result.board_state_flags = second.board_state_flags;
   return result;
 }
 
+RemotePose ExtrapolatePose(
+    const RemotePose& previous, const RemotePose& latest,
+    float intervals_ahead) {
+  RemotePose result;
+  for (std::size_t component = 0; component < 3; ++component) {
+    result.position[component] =
+        latest.position[component] +
+        (latest.position[component] -
+         previous.position[component]) *
+            intervals_ahead;
+  }
+  const float previous_matrix[9] = {
+      previous.x_axis[0], previous.x_axis[1], previous.x_axis[2],
+      previous.y_axis[0], previous.y_axis[1], previous.y_axis[2],
+      previous.z_axis[0], previous.z_axis[1], previous.z_axis[2]};
+  const float latest_matrix[9] = {
+      latest.x_axis[0], latest.x_axis[1], latest.x_axis[2],
+      latest.y_axis[0], latest.y_axis[1], latest.y_axis[2],
+      latest.z_axis[0], latest.z_axis[1], latest.z_axis[2]};
+  Quaternion previous_rotation;
+  Quaternion latest_rotation;
+  if (QuaternionFromRotation(
+          previous_matrix, previous_rotation) &&
+      QuaternionFromRotation(
+          latest_matrix, latest_rotation)) {
+    const Quaternion rotation = NlerpQuaternion(
+        previous_rotation, latest_rotation,
+        1.0f + intervals_ahead);
+    float matrix[9];
+    RotationFromQuaternion(rotation, matrix);
+    std::copy_n(matrix, 3, result.x_axis);
+    std::copy_n(matrix + 3, 3, result.y_axis);
+    std::copy_n(matrix + 6, 3, result.z_axis);
+  } else {
+    std::memcpy(
+        result.x_axis, latest.x_axis,
+        sizeof(result.x_axis));
+    std::memcpy(
+        result.y_axis, latest.y_axis,
+        sizeof(result.y_axis));
+    std::memcpy(
+        result.z_axis, latest.z_axis,
+        sizeof(result.z_axis));
+  }
+  result.board_state_flags = latest.board_state_flags;
+  return result;
+}
+
 bool SampleLocalPose(const float map_origin[3], std::int32_t role,
+                     const AnimationPose* presentation,
                      PosePacket& packet) {
   trick_pipeline::LiveSpatialSnapshot snapshot;
-  if (map_origin == nullptr ||
-      !trick_pipeline::CurrentLiveSpatialSnapshot(snapshot)) {
+  if (map_origin == nullptr) {
     return false;
   }
-  for (std::size_t component = 0; component < 3; ++component) {
-    packet.position[component] =
-        std::bit_cast<float>(snapshot.position_bits[component]) -
-        map_origin[component];
-    packet.x_axis[component] =
-        std::bit_cast<float>(snapshot.x_axis_bits[component]);
-    packet.z_axis[component] =
-        std::bit_cast<float>(snapshot.z_axis_bits[component]);
+  if (presentation != nullptr &&
+      presentation->presentation_root_valid) {
+    for (std::size_t component = 0; component < 3; ++component) {
+      packet.position[component] =
+          presentation->presentation_root_position[component] -
+          map_origin[component];
+      packet.x_axis[component] =
+          presentation->presentation_root_x_axis[component];
+      packet.z_axis[component] =
+          presentation->presentation_root_z_axis[component];
+    }
+    packet.sender_time_us = presentation->sender_time_us;
+  } else {
+    if (!trick_pipeline::CurrentLiveSpatialSnapshot(snapshot)) {
+      return false;
+    }
+    for (std::size_t component = 0; component < 3; ++component) {
+      packet.position[component] =
+          std::bit_cast<float>(
+              snapshot.position_bits[component]) -
+          map_origin[component];
+      packet.x_axis[component] =
+          std::bit_cast<float>(
+              snapshot.x_axis_bits[component]);
+      packet.z_axis[component] =
+          std::bit_cast<float>(
+              snapshot.z_axis_bits[component]);
+    }
+    packet.sender_time_us = snapshot.sample_time_us;
   }
   if (!Finite3(packet.position) || !Finite3(packet.x_axis) ||
       !Finite3(packet.z_axis)) {
@@ -423,8 +1652,12 @@ bool SampleLocalPose(const float map_origin[3], std::int32_t role,
   }
   const float lane_spacing =
       static_cast<float>(REXCVAR_GET(skate3_multiplayer_local_lane_spacing));
-  packet.position[0] +=
+  const float lane_offset =
       role == 1 ? -lane_spacing * 0.5f : lane_spacing * 0.5f;
+  for (std::size_t component = 0; component < 3; ++component) {
+    packet.position[component] +=
+        packet.x_axis[component] * lane_offset;
+  }
   packet.board_state_flags = snapshot.board_state_flags;
   return true;
 }
@@ -435,13 +1668,20 @@ class Runtime {
 
   bool Tick(const char* map_name, const float map_origin[3],
             const AnimationPose* local_animation,
+            const AppearanceBlob* local_appearance,
             std::vector<RemotePlayer>& out_remotes) {
     steam::Tick();
     std::scoped_lock lock(mutex_);
-    const bool steam_active = steam::TransportActive();
-    const bool enabled =
-        steam_active ||
+    // The explicit local-visuals mode is the isolated multi-process test
+    // transport. Steam can still be active in both portable clients under
+    // the same account, which would otherwise make them choose the same
+    // lobby role and never exercise localhost replication.
+    const bool local_test_active =
         REXCVAR_GET(skate3_multiplayer_local_visuals);
+    const bool steam_active =
+        steam::TransportActive() && !local_test_active;
+    const bool enabled =
+        steam_active || local_test_active;
     const std::int32_t role = steam_active
                                   ? static_cast<std::int32_t>(
                                         steam::LocalRole())
@@ -467,37 +1707,70 @@ class Runtime {
 
     const auto now = Clock::now();
     const std::uint32_t map_hash = HashMapName(map_name);
+    std::size_t participant_count = remote_peers_.size() + 1;
+#if defined(_WIN32)
+    if (using_steam_) {
+      participant_count =
+          std::max(participant_count, steam_id_by_role_.size());
+    } else if (bound_role_ == 1) {
+      participant_count =
+          std::max(participant_count, host_peers_.size() + 1);
+    }
+#endif
+    network_tuning_ = ResolveNetworkTuning(participant_count);
     relevance_cache_.clear();
     ReceivePackets(now, map_hash);
     PrunePeers(now);
-    const std::int32_t send_rate =
-        REXCVAR_GET(skate3_multiplayer_local_send_rate);
+    const std::int32_t send_rate = network_tuning_.pose_rate;
     const auto send_interval = std::chrono::microseconds(
         1000000 / std::max(send_rate, 1));
     if (last_send_ == Clock::time_point{} ||
         now - last_send_ >= send_interval) {
       PosePacket packet;
-      if (SampleLocalPose(map_origin, role, packet)) {
+      if (SampleLocalPose(
+              map_origin, role, local_animation, packet) &&
+          (packet.sender_time_us == 0 ||
+           packet.sender_time_us !=
+               last_pose_sample_time_us_)) {
         packet.sender_role = static_cast<std::uint32_t>(role);
         packet.sender_session = session_id_;
         packet.sequence = ++send_sequence_;
         packet.map_hash = map_hash;
-        packet.sender_time_us = NowMicroseconds();
+        if (packet.sender_time_us == 0) {
+          packet.sender_time_us = NowMicroseconds();
+        }
         SendPacket(packet, role, base_port);
+        last_pose_sample_time_us_ = packet.sender_time_us;
         last_send_ = now;
       }
     }
     const std::int32_t animation_rate =
-        REXCVAR_GET(skate3_multiplayer_local_animation_rate);
+        network_tuning_.animation_rate;
     const auto animation_interval = std::chrono::microseconds(
         1000000 / std::max(animation_rate, 1));
     if (local_animation != nullptr &&
         !local_animation->tracks.empty() &&
+        (local_animation->sender_time_us == 0 ||
+         local_animation->sender_time_us !=
+             last_animation_sample_time_us_) &&
         (last_animation_send_ == Clock::time_point{} ||
          now - last_animation_send_ >= animation_interval)) {
       SendAnimation(
           *local_animation, map_origin, map_hash, role, base_port);
+      last_animation_sample_time_us_ =
+          local_animation->sender_time_us;
       last_animation_send_ = now;
+    }
+    if (local_appearance != nullptr &&
+        local_appearance->identity != 0 &&
+        local_appearance->bytes != nullptr &&
+        !local_appearance->bytes->empty() &&
+        (last_appearance_send_ == Clock::time_point{} ||
+         now - last_appearance_send_ >=
+             std::chrono::milliseconds(4))) {
+      SendAppearance(
+          *local_appearance, map_hash, role, base_port);
+      last_appearance_send_ = now;
     }
 
     std::vector<std::pair<float, std::uint32_t>> visible_candidates;
@@ -524,8 +1797,7 @@ class Runtime {
                                           : left.first < right.first;
         });
     const std::size_t visual_budget = static_cast<std::size_t>(
-        std::max(
-            REXCVAR_GET(skate3_multiplayer_relevance_players), 1));
+        std::max(network_tuning_.relevance_players, 1));
     if (visible_candidates.size() > visual_budget) {
       visible_candidates.resize(visual_budget);
     }
@@ -544,6 +1816,7 @@ class Runtime {
       }
       SmoothRemoteAnimation(
           peer, now, map_origin, remote.animation);
+      remote.appearance = peer.appearance;
       if (first_visible) {
         std::memcpy(
             telemetry_.remote_position, remote.pose.position,
@@ -607,6 +1880,18 @@ class Runtime {
         << telemetry_.relevance_drops
         << " multiplayer_far_presence_packets="
         << telemetry_.far_presence_packets
+        << " multiplayer_animation_present_interpolated="
+        << telemetry_.animation_present_interpolated
+        << " multiplayer_animation_present_held_latest="
+        << telemetry_.animation_present_held_latest
+        << " multiplayer_animation_present_held_oldest="
+        << telemetry_.animation_present_held_oldest
+        << " multiplayer_animation_period_us="
+        << telemetry_.animation_period_us
+        << " multiplayer_animation_jitter_us="
+        << telemetry_.animation_jitter_us
+        << " multiplayer_animation_buffered_samples="
+        << telemetry_.animation_buffered_samples
         << " multiplayer_remote_x_bits="
         << std::bit_cast<std::uint32_t>(telemetry_.remote_position[0])
         << " multiplayer_remote_y_bits="
@@ -657,16 +1942,34 @@ class Runtime {
     const double drop_pps = per_second(
         telemetry_.relevance_drops,
         last_rate_snapshot_.relevance_drops);
+    const double animation_interpolated_fps = per_second(
+        telemetry_.animation_present_interpolated,
+        last_rate_snapshot_.animation_present_interpolated);
+    const double animation_held_latest_fps = per_second(
+        telemetry_.animation_present_held_latest,
+        last_rate_snapshot_.animation_present_held_latest);
+    const double animation_held_oldest_fps = per_second(
+        telemetry_.animation_present_held_oldest,
+        last_rate_snapshot_.animation_present_held_oldest);
     REXLOG_INFO(
-        "multiplayer-net: role={} peers={} visible={} tx={:.1f}KiB/s "
+        "multiplayer-net: role={} peers={} visible={} quality={} "
+        "rates={}/{}Hz tx={:.1f}KiB/s "
         "rx={:.1f}KiB/s tx={:.1f}pps rx={:.1f}pps anim={:.1f}/{:.1f}fps "
         "bones={} relay={:.1f}pps relevance_drop={:.1f}pps rejected={} "
-        "failures={}",
+        "failures={} present={:.1f}i/{:.1f}new/{:.1f}old fps "
+        "timing={:.1f}ms jitter={:.1f}ms buffered={}",
         bound_role_, telemetry_.known_peers,
-        telemetry_.visible_players, tx_kib, rx_kib, tx_pps, rx_pps,
+        telemetry_.visible_players, NetworkQualityName(network_tuning_),
+        network_tuning_.pose_rate, network_tuning_.animation_rate,
+        tx_kib, rx_kib, tx_pps, rx_pps,
         animation_tx_fps, animation_rx_fps,
         telemetry_.remote_animation_bones, relay_pps, drop_pps,
-        telemetry_.rejected_packets, telemetry_.socket_failures);
+        telemetry_.rejected_packets, telemetry_.socket_failures,
+        animation_interpolated_fps, animation_held_latest_fps,
+        animation_held_oldest_fps,
+        static_cast<double>(telemetry_.animation_period_us) / 1000.0,
+        static_cast<double>(telemetry_.animation_jitter_us) / 1000.0,
+        telemetry_.animation_buffered_samples);
     last_rate_log_ = now;
     last_rate_snapshot_ = telemetry_;
   }
@@ -879,16 +2182,9 @@ class Runtime {
     if (!sender.steam) {
       return true;
     }
-    if (bound_role_ == 1) {
-      const auto found = steam_role_by_id_.find(sender.steam_id);
-      return found != steam_role_by_id_.end() &&
-             found->second == sender_role;
-    }
-    const auto host = steam_id_by_role_.find(1);
-    // Clients receive both the host's own packets and client packets relayed
-    // by that host, so the authenticated transport sender must be the owner.
-    return host != steam_id_by_role_.end() &&
-           host->second == sender.steam_id;
+    const auto found = steam_role_by_id_.find(sender.steam_id);
+    return found != steam_role_by_id_.end() &&
+           found->second == sender_role;
   }
 
   void ProcessReceivedPacket(Clock::time_point now,
@@ -923,7 +2219,7 @@ class Runtime {
     } else if (
         magic == kAnimationPacketMagic &&
         received >= static_cast<int>(
-                        offsetof(AnimationFragmentPacket, rows))) {
+                        offsetof(AnimationFragmentPacket, words))) {
       AnimationFragmentPacket packet;
       std::memcpy(
           &packet, bytes,
@@ -934,6 +2230,28 @@ class Runtime {
         return;
       }
       if (ReceiveAnimationPacket(now, map_hash, packet, received)) {
+        RegisterPeer(
+            packet.sender_role, packet.sender_session, sender, now,
+            nullptr);
+        RelayPacket(
+            bytes, received, packet.sender_role,
+            /*animation=*/true, now);
+      }
+    } else if (
+        magic == kAppearancePacketMagic &&
+        received >= static_cast<int>(
+                        offsetof(AppearanceFragmentPacket, bytes))) {
+      AppearanceFragmentPacket packet;
+      std::memcpy(
+          &packet, bytes,
+          std::min<std::size_t>(
+              static_cast<std::size_t>(received), sizeof(packet)));
+      if (!SteamSenderValid(packet.sender_role, sender)) {
+        ++telemetry_.rejected_packets;
+        return;
+      }
+      if (ReceiveAppearancePacket(
+              now, map_hash, packet, received)) {
         RegisterPeer(
             packet.sender_role, packet.sender_session, sender, now,
             nullptr);
@@ -997,16 +2315,23 @@ class Runtime {
         static_cast<std::int64_t>(packet.sender_time_us);
     if (!peer.clock_offset_valid) {
       peer.clock_offset_us = observed_clock_offset;
+      peer.minimum_clock_offset_us = observed_clock_offset;
       peer.clock_offset_valid = true;
-    } else if (observed_clock_offset < peer.clock_offset_us) {
-      // A new minimum is the best available estimate of clock offset:
-      // queueing can only make a packet arrive later, never earlier.
-      peer.clock_offset_us = observed_clock_offset;
     } else {
-      // Follow slow clock drift without letting one delayed packet shift
-      // the entire presentation timeline.
+      // One-way queueing only increases the observed offset. Retain the
+      // session minimum instead of slowly following delayed packets upward
+      // and then snapping down on the next clean arrival. Slew toward a new
+      // minimum so even startup path improvements cannot jump the playhead.
+      peer.minimum_clock_offset_us =
+          std::min(
+              peer.minimum_clock_offset_us,
+              observed_clock_offset);
+      const std::int64_t correction =
+          peer.minimum_clock_offset_us -
+          peer.clock_offset_us;
       peer.clock_offset_us +=
-          (observed_clock_offset - peer.clock_offset_us) / 128;
+          std::clamp<std::int64_t>(
+              correction, -250, 250);
     }
     peer.samples.push_back(
         {now, packet.sender_time_us, pose, packet.sequence});
@@ -1030,29 +2355,32 @@ class Runtime {
       Clock::time_point now, std::uint32_t map_hash,
       const AnimationFragmentPacket& packet, int received_bytes) {
     const std::size_t expected_bytes =
-        offsetof(AnimationFragmentPacket, rows) +
-        std::size_t(packet.float_count) * sizeof(std::uint16_t);
-    const std::size_t total_floats =
-        std::size_t(packet.bone_count) * 12;
-    const std::size_t fragment_offset =
-        std::size_t(packet.fragment_index) *
-        kAnimationFragmentComponents;
+        offsetof(AnimationFragmentPacket, words) +
+        std::size_t(packet.word_count) *
+            sizeof(std::uint16_t);
     if (!CommonPacketValid(
             packet.version, packet.sender_role, packet.sender_session,
             packet.map_hash, map_hash) ||
         packet.byte_count != expected_bytes ||
         received_bytes != static_cast<int>(expected_bytes) ||
-        packet.bone_count == 0 ||
-        packet.bone_count > kMaximumAnimationBones ||
-        packet.track_count == 0 ||
-        packet.track_count > kMaximumAnimationTracks ||
-        packet.track_index >= packet.track_count ||
-        packet.fragment_count == 0 || packet.fragment_count > 8 ||
+        packet.fragment_count == 0 ||
+        packet.fragment_count > kMaximumAnimationFragments ||
         packet.fragment_index >= packet.fragment_count ||
-        packet.float_count == 0 ||
-        packet.float_count > kAnimationFragmentComponents ||
+        packet.total_words == 0 ||
+        packet.total_words > kMaximumAnimationFrameWords ||
+        packet.word_count == 0 ||
+        packet.word_count > kAnimationFragmentWords ||
+        packet.word_offset !=
+            std::size_t(packet.fragment_index) *
+                kAnimationFragmentWords ||
+        std::size_t(packet.word_offset) +
+                packet.word_count >
+            packet.total_words ||
         !Finite3(packet.root_position) ||
-        fragment_offset + packet.float_count > total_floats) {
+        packet.fragment_count !=
+            (std::size_t(packet.total_words) +
+                 kAnimationFragmentWords - 1) /
+                kAnimationFragmentWords) {
       ++telemetry_.rejected_packets;
       return false;
     }
@@ -1071,6 +2399,14 @@ class Runtime {
             peer.animation_samples.back().pose.sequence) {
       return false;
     }
+    if (peer.animation_assembly.session == packet.sender_session &&
+        peer.animation_assembly.sequence != 0 &&
+        packet.sequence < peer.animation_assembly.sequence) {
+      // Unreliable internet delivery can put a late fragment from an
+      // abandoned frame behind fragments of the next frame. Never let that
+      // stale fragment replace the newer in-progress assembly.
+      return false;
+    }
     if (peer.animation_assembly.session != packet.sender_session ||
         peer.animation_assembly.sequence != packet.sequence) {
       peer.animation_assembly = {};
@@ -1078,67 +2414,46 @@ class Runtime {
       peer.animation_assembly.session = packet.sender_session;
       peer.animation_assembly.sequence = packet.sequence;
       peer.animation_assembly.sender_time_us = packet.sender_time_us;
-      peer.animation_assembly.track_count = packet.track_count;
-      peer.animation_assembly.tracks.resize(packet.track_count);
+      peer.animation_assembly.root_bone = packet.root_bone;
+      std::copy_n(
+          packet.root_position, 3,
+          peer.animation_assembly.root_position);
+      peer.animation_assembly.fragment_count =
+          packet.fragment_count;
+      peer.animation_assembly.total_words =
+          packet.total_words;
+      peer.animation_assembly.words.resize(
+          packet.total_words);
     }
-    if (peer.animation_assembly.track_count != packet.track_count ||
-        peer.animation_assembly.sender_time_us != packet.sender_time_us) {
+    if (peer.animation_assembly.sender_time_us !=
+            packet.sender_time_us ||
+        peer.animation_assembly.root_bone != packet.root_bone ||
+        peer.animation_assembly.fragment_count !=
+            packet.fragment_count ||
+        peer.animation_assembly.total_words != packet.total_words ||
+        !std::equal(
+            peer.animation_assembly.root_position,
+            peer.animation_assembly.root_position + 3,
+            packet.root_position)) {
       ++telemetry_.rejected_packets;
       peer.animation_assembly = {};
       return false;
     }
-    AnimationTrackAssembly& track =
-        peer.animation_assembly.tracks[packet.track_index];
-    if (track.rows.empty()) {
-      track.mesh_key = packet.mesh_key;
-      track.bone_count = packet.bone_count;
-      track.fragment_count = packet.fragment_count;
-      track.rows.resize(total_floats);
+    const std::uint32_t fragment_bit =
+        std::uint32_t{1} << packet.fragment_index;
+    if ((peer.animation_assembly.received_fragments &
+         fragment_bit) == 0) {
+      std::copy_n(
+          packet.words, packet.word_count,
+          peer.animation_assembly.words.begin() +
+              packet.word_offset);
+      peer.animation_assembly.received_fragments |=
+          fragment_bit;
     }
-    if (track.mesh_key != packet.mesh_key ||
-        track.bone_count != packet.bone_count ||
-        track.fragment_count != packet.fragment_count) {
-      ++telemetry_.rejected_packets;
-      peer.animation_assembly = {};
-      return false;
-    }
-    const std::uint64_t fragment_bit =
-        std::uint64_t{1} << packet.fragment_index;
-    if ((track.received_fragments & fragment_bit) == 0) {
-      for (std::size_t index = 0; index < packet.float_count; ++index) {
-        const std::size_t palette_index = fragment_offset + index;
-        const std::size_t row_component = palette_index % 12;
-        float value = 0.0f;
-        if (row_component == 3 || row_component == 7 ||
-            row_component == 11) {
-          const auto quantized =
-              static_cast<std::int16_t>(packet.rows[index]);
-          value =
-              packet.root_position[(row_component - 3) / 4] +
-              static_cast<float>(quantized) /
-                  kAnimationTranslationScale;
-        } else {
-          value = HalfToFloat(packet.rows[index]);
-        }
-        if (!std::isfinite(value)) {
-          ++telemetry_.rejected_packets;
-          peer.animation_assembly = {};
-          return false;
-        }
-        track.rows[palette_index] = value;
-      }
-      track.received_fragments |= fragment_bit;
-    }
-    const std::uint64_t complete_mask =
-        (std::uint64_t{1} << packet.fragment_count) - 1;
-    if (track.received_fragments != complete_mask) {
-      return true;
-    }
-    peer.animation_assembly.received_tracks |=
-        std::uint64_t{1} << packet.track_index;
-    const std::uint64_t complete_tracks =
-        (std::uint64_t{1} << packet.track_count) - 1;
-    if (peer.animation_assembly.received_tracks != complete_tracks) {
+    const std::uint32_t complete_mask =
+        (std::uint32_t{1} << packet.fragment_count) - 1;
+    if (peer.animation_assembly.received_fragments !=
+        complete_mask) {
       return true;
     }
     ReceivedAnimationSample complete;
@@ -1146,18 +2461,66 @@ class Runtime {
     complete.pose.sender_time_us =
         peer.animation_assembly.sender_time_us;
     complete.pose.sequence = peer.animation_assembly.sequence;
+    complete.pose.root_bone =
+        peer.animation_assembly.root_bone;
     std::memcpy(
-        complete.pose.root_position, packet.root_position,
+        complete.pose.root_position,
+        peer.animation_assembly.root_position,
         sizeof(complete.pose.root_position));
-    complete.pose.tracks.reserve(
-        peer.animation_assembly.tracks.size());
     std::uint32_t total_bones = 0;
-    for (AnimationTrackAssembly& assembled :
-         peer.animation_assembly.tracks) {
-      complete.pose.tracks.push_back(
-          {assembled.mesh_key, std::move(assembled.rows)});
-      total_bones += assembled.bone_count;
+    if (!DecodeAnimationFrameWords(
+            peer.animation_assembly.words,
+            peer.animation_assembly.sequence,
+            peer.animation_assembly.root_position,
+            peer.animation_keyframe,
+            complete.pose.tracks, total_bones)) {
+      ++telemetry_.rejected_packets;
+      peer.animation_assembly = {};
+      return false;
     }
+    const std::uint64_t arrival_time_us = NowMicroseconds();
+    if (peer.last_animation_sender_time_us != 0 &&
+        peer.last_animation_arrival_time_us != 0 &&
+        complete.pose.sender_time_us >
+            peer.last_animation_sender_time_us &&
+        complete.pose.sequence >
+            peer.last_animation_sequence) {
+      const std::uint64_t sender_delta =
+          complete.pose.sender_time_us -
+          peer.last_animation_sender_time_us;
+      const std::uint64_t arrival_delta =
+          arrival_time_us -
+          peer.last_animation_arrival_time_us;
+      const std::uint32_t sequence_delta =
+          complete.pose.sequence -
+          peer.last_animation_sequence;
+      const std::int64_t period_sample =
+          static_cast<std::int64_t>(
+              sender_delta / sequence_delta);
+      if (period_sample >= 8000 &&
+          period_sample <= 150000) {
+        peer.animation_period_us +=
+            (period_sample -
+             peer.animation_period_us) /
+            8;
+      }
+      const std::int64_t timing_variation =
+          arrival_delta >= sender_delta
+              ? static_cast<std::int64_t>(
+                    arrival_delta - sender_delta)
+              : static_cast<std::int64_t>(
+                    sender_delta - arrival_delta);
+      peer.animation_jitter_us +=
+          (timing_variation -
+           peer.animation_jitter_us) /
+          16;
+    }
+    peer.last_animation_sender_time_us =
+        complete.pose.sender_time_us;
+    peer.last_animation_arrival_time_us =
+        arrival_time_us;
+    peer.last_animation_sequence =
+        complete.pose.sequence;
     peer.animation_samples.push_back(std::move(complete));
     while (peer.animation_samples.size() >
            kMaximumBufferedAnimationSamples) {
@@ -1166,6 +2529,81 @@ class Runtime {
     ++telemetry_.received_animation_frames;
     telemetry_.remote_animation_bones = total_bones;
     peer.animation_assembly = {};
+    return true;
+  }
+
+  bool ReceiveAppearancePacket(
+      Clock::time_point now, std::uint32_t map_hash,
+      const AppearanceFragmentPacket& packet,
+      int received_bytes) {
+    const std::size_t expected_bytes =
+        offsetof(AppearanceFragmentPacket, bytes) +
+        packet.chunk_bytes;
+    const std::size_t expected_chunks =
+        (std::size_t(packet.total_bytes) +
+             kAppearanceChunkBytes - 1) /
+        kAppearanceChunkBytes;
+    const std::size_t offset =
+        std::size_t(packet.chunk_index) *
+        kAppearanceChunkBytes;
+    const std::size_t expected_chunk_bytes =
+        std::min<std::size_t>(
+            kAppearanceChunkBytes,
+            std::size_t(packet.total_bytes) - offset);
+    if (!CommonPacketValid(
+            packet.version, packet.sender_role,
+            packet.sender_session, packet.map_hash, map_hash) ||
+        packet.byte_count != expected_bytes ||
+        received_bytes != static_cast<int>(expected_bytes) ||
+        packet.appearance_id == 0 ||
+        packet.total_bytes == 0 ||
+        packet.total_bytes > kMaximumAppearanceBytes ||
+        packet.chunk_count == 0 ||
+        packet.chunk_count != expected_chunks ||
+        packet.chunk_index >= packet.chunk_count ||
+        packet.chunk_bytes == 0 ||
+        packet.chunk_bytes > kAppearanceChunkBytes ||
+        offset >= packet.total_bytes ||
+        packet.chunk_bytes != expected_chunk_bytes) {
+      ++telemetry_.rejected_packets;
+      return false;
+    }
+    RemotePeerState& peer =
+        remote_peers_[packet.sender_role];
+    BeginRemoteSession(peer, packet.sender_session);
+    ++telemetry_.received_packets;
+    AppearanceAssembly& assembly =
+        peer.appearance_assembly;
+    if (assembly.identity != packet.appearance_id ||
+        assembly.total_bytes != packet.total_bytes ||
+        assembly.chunk_count != packet.chunk_count) {
+      assembly = {};
+      assembly.identity = packet.appearance_id;
+      assembly.total_bytes = packet.total_bytes;
+      assembly.chunk_count = packet.chunk_count;
+      assembly.bytes.resize(packet.total_bytes);
+      assembly.received.resize(packet.chunk_count);
+    }
+    if (!assembly.received[packet.chunk_index]) {
+      std::copy_n(
+          packet.bytes, packet.chunk_bytes,
+          assembly.bytes.begin() + offset);
+      assembly.received[packet.chunk_index] = true;
+      ++assembly.received_chunks;
+    }
+    if (assembly.received_chunks == assembly.chunk_count) {
+      peer.appearance.identity = assembly.identity;
+      peer.appearance.bytes =
+          std::make_shared<const std::vector<std::uint8_t>>(
+              std::move(assembly.bytes));
+      REXLOG_INFO(
+          "multiplayer: received appearance role={} id={:016X} "
+          "bytes={} chunks={}",
+          packet.sender_role, packet.appearance_id,
+          packet.total_bytes, packet.chunk_count);
+      assembly = {};
+    }
+    (void)now;
     return true;
   }
 
@@ -1204,8 +2642,15 @@ class Runtime {
 
   bool PositionForRole(std::uint32_t role, const float*& out) const {
 #if defined(_WIN32)
-    if (role == 1 && local_position_valid_) {
+    if (role == static_cast<std::uint32_t>(bound_role_) &&
+        local_position_valid_) {
       out = local_position_;
+      return true;
+    }
+    const auto remote = remote_peers_.find(role);
+    if (remote != remote_peers_.end() &&
+        !remote->second.samples.empty()) {
+      out = remote->second.samples.back().pose.position;
       return true;
     }
     const auto found = host_peers_.find(role);
@@ -1240,27 +2685,29 @@ class Runtime {
     };
     const float source_distance_squared =
         distance_squared(source_position, target_position);
-    const float radius = static_cast<float>(
-        REXCVAR_GET(skate3_multiplayer_relevance_radius));
+    const float radius = network_tuning_.relevance_radius;
     if (source_distance_squared > radius * radius) {
       return false;
     }
     const std::size_t budget = static_cast<std::size_t>(
-        std::max(
-            REXCVAR_GET(skate3_multiplayer_relevance_players), 1));
+        std::max(network_tuning_.relevance_players, 1));
     std::size_t closer = 0;
-    if (source_role != 1 && local_position_valid_ &&
+    if (source_role != static_cast<std::uint32_t>(bound_role_) &&
+        target_role != static_cast<std::uint32_t>(bound_role_) &&
+        local_position_valid_ &&
         distance_squared(local_position_, target_position) <
             source_distance_squared) {
       ++closer;
     }
-    for (const auto& [candidate_role, candidate] : host_peers_) {
+    for (const auto& [candidate_role, candidate] : remote_peers_) {
       if (candidate_role == source_role ||
           candidate_role == target_role ||
-          !candidate.position_valid) {
+          candidate.samples.empty()) {
         continue;
       }
-      if (distance_squared(candidate.position, target_position) <
+      if (distance_squared(
+              candidate.samples.back().pose.position,
+              target_position) <
           source_distance_squared) {
         ++closer;
       }
@@ -1294,7 +2741,7 @@ class Runtime {
         (static_cast<std::uint64_t>(source_role) << 32) |
         target_role;
     const std::int32_t rate =
-        REXCVAR_GET(skate3_multiplayer_far_presence_rate);
+        network_tuning_.far_presence_rate;
     const auto interval = std::chrono::microseconds(
         1000000 / std::max(rate, 1));
     Clock::time_point& last = far_presence_times_[key];
@@ -1308,12 +2755,13 @@ class Runtime {
 
 #if defined(_WIN32)
   bool SendBytes(const void* bytes, int byte_count,
-                 const PacketEndpoint& target, bool relayed) {
+                 const PacketEndpoint& target, bool animation,
+                 bool relayed) {
     bool success = false;
     if (target.steam) {
       success = steam::SendPacketToPeer(
           target.steam_id, bytes,
-          static_cast<std::size_t>(byte_count));
+          static_cast<std::size_t>(byte_count), animation);
     } else {
       const int sent = sendto(
           socket_, reinterpret_cast<const char*>(bytes), byte_count, 0,
@@ -1346,19 +2794,10 @@ class Runtime {
                      Clock::time_point now) {
     std::vector<std::pair<std::uint32_t, PacketEndpoint>> targets;
     if (using_steam_) {
-      if (bound_role_ != 1) {
-        const auto host = steam_id_by_role_.find(1);
-        if (host != steam_id_by_role_.end()) {
-          PacketEndpoint target;
-          target.steam = true;
-          target.steam_id = host->second;
-          targets.push_back({1, target});
-        }
-        return targets;
-      }
       for (const auto& [target_role, steam_id] : steam_id_by_role_) {
-        if (target_role == 1 ||
-            target_role == static_cast<std::uint32_t>(bound_role_)) {
+        if (target_role ==
+                static_cast<std::uint32_t>(bound_role_) ||
+            target_role == source_role) {
           continue;
         }
         const bool detailed =
@@ -1416,13 +2855,19 @@ class Runtime {
     if (bound_role_ != 1) {
       return;
     }
+    // Steam peers exchange authenticated packets directly. Relaying the
+    // same stream through the lobby owner multiplied its upload by every
+    // source/receiver pair and duplicated packets after direct fan-out.
+    if (using_steam_) {
+      return;
+    }
     const auto targets =
         LocalPacketTargets(source_role, animation, now);
     for (const auto& [target_role, endpoint] : targets) {
       if (target_role == source_role) {
         continue;
       }
-      SendBytes(bytes, byte_count, endpoint, true);
+      SendBytes(bytes, byte_count, endpoint, animation, true);
     }
 #else
     (void)bytes;
@@ -1446,7 +2891,8 @@ class Runtime {
     for (const auto& [target_role, target] : targets) {
       (void)target_role;
       sent_any |= SendBytes(
-          &packet, static_cast<int>(sizeof(packet)), target, false);
+          &packet, static_cast<int>(sizeof(packet)), target,
+          /*animation=*/false, /*relayed=*/false);
     }
     if (sent_any) {
       telemetry_.sent_sequence = packet.sequence;
@@ -1483,7 +2929,10 @@ class Runtime {
       return;
     }
     const std::uint32_t sequence = ++animation_send_sequence_;
-    const std::uint64_t sender_time_us = NowMicroseconds();
+    const std::uint64_t sender_time_us =
+        pose.sender_time_us != 0
+            ? pose.sender_time_us
+            : NowMicroseconds();
     (void)base_port;
     const auto targets = LocalPacketTargets(
         static_cast<std::uint32_t>(role), true, Clock::now());
@@ -1491,16 +2940,46 @@ class Runtime {
       return;
     }
     bool complete = true;
-    for (std::size_t track_index = 0;
-         track_index < tracks.size(); ++track_index) {
-      const AnimationTrack& track = *tracks[track_index];
-      const std::size_t bone_count =
-          std::min<std::size_t>(
-              track.bone_rows.size() / 12, kMaximumAnimationBones);
-      const std::size_t total_floats = bone_count * 12;
+    for (const auto& [target_role, target] : targets) {
+      std::vector<const AnimationTrack*> target_tracks = tracks;
+      const float* target_position = nullptr;
+      if (local_position_valid_ &&
+          PositionForRole(target_role, target_position)) {
+        const float dx =
+            local_position_[0] - target_position[0];
+        const float dy =
+            local_position_[1] - target_position[1];
+        const float dz =
+            local_position_[2] - target_position[2];
+        const float attachment_radius =
+            network_tuning_.attachment_radius;
+        if (dx * dx + dy * dy + dz * dz >
+            attachment_radius * attachment_radius) {
+          target_tracks.erase(
+              std::remove_if(
+                  target_tracks.begin(), target_tracks.end(),
+                  [](const AnimationTrack* track) {
+                    return track == nullptr ||
+                           track->mesh_key !=
+                               kCanonicalSkeletonTrackKey;
+                  }),
+              target_tracks.end());
+        }
+      }
+      QuantizedAnimationFrame proposed_keyframe =
+          outbound_animation_keyframes_[target_role];
+      std::vector<std::uint16_t> frame_words;
+      if (!BuildAnimationFrameWords(
+              pose, target_tracks, sequence, proposed_keyframe,
+              frame_words)) {
+        complete = false;
+        continue;
+      }
       const std::size_t fragment_count =
-          (total_floats + kAnimationFragmentComponents - 1) /
-          kAnimationFragmentComponents;
+          (frame_words.size() +
+               kAnimationFragmentWords - 1) /
+          kAnimationFragmentWords;
+      bool target_complete = true;
       for (std::size_t fragment_index = 0;
            fragment_index < fragment_count; ++fragment_index) {
         AnimationFragmentPacket packet;
@@ -1515,51 +2994,37 @@ class Runtime {
               pose.root_position[component] -
               map_origin[component];
         }
-        packet.mesh_key = track.mesh_key;
-        packet.bone_count = static_cast<std::uint16_t>(bone_count);
-        packet.track_index =
-            static_cast<std::uint16_t>(track_index);
-        packet.track_count =
-            static_cast<std::uint16_t>(tracks.size());
+        packet.root_bone = pose.root_bone;
         packet.fragment_index =
             static_cast<std::uint16_t>(fragment_index);
         packet.fragment_count =
             static_cast<std::uint16_t>(fragment_count);
         const std::size_t offset =
-            fragment_index * kAnimationFragmentComponents;
-        packet.float_count = static_cast<std::uint16_t>(
+            fragment_index * kAnimationFragmentWords;
+        packet.word_offset =
+            static_cast<std::uint16_t>(offset);
+        packet.total_words =
+            static_cast<std::uint16_t>(frame_words.size());
+        packet.word_count = static_cast<std::uint16_t>(
             std::min<std::size_t>(
-                kAnimationFragmentComponents, total_floats - offset));
-        for (std::size_t index = 0; index < packet.float_count;
-             ++index) {
-          const std::size_t palette_index = offset + index;
-          float value = track.bone_rows[palette_index];
-          const std::size_t row_component = palette_index % 12;
-          if (row_component == 3 || row_component == 7 ||
-              row_component == 11) {
-            const float relative =
-                (value -
-                 pose.root_position[(row_component - 3) / 4]) *
-                kAnimationTranslationScale;
-            const auto quantized = static_cast<std::int16_t>(
-                std::clamp(
-                    std::lround(relative), -32768l, 32767l));
-            packet.rows[index] =
-                static_cast<std::uint16_t>(quantized);
-          } else {
-            packet.rows[index] = FloatToHalf(value);
-          }
-        }
+                kAnimationFragmentWords,
+                frame_words.size() - offset));
+        std::copy_n(
+            frame_words.begin() + offset,
+            packet.word_count, packet.words);
         packet.byte_count = static_cast<std::uint16_t>(
-            offsetof(AnimationFragmentPacket, rows) +
-            std::size_t(packet.float_count) *
+            offsetof(AnimationFragmentPacket, words) +
+            std::size_t(packet.word_count) *
                 sizeof(std::uint16_t));
-        for (const auto& [target_role, target] : targets) {
-          (void)target_role;
-          complete &=
-              SendBytes(&packet, packet.byte_count, target, false);
-        }
+        target_complete &=
+            SendBytes(&packet, packet.byte_count, target,
+                      /*animation=*/true, /*relayed=*/false);
       }
+      if (target_complete) {
+        outbound_animation_keyframes_[target_role] =
+            std::move(proposed_keyframe);
+      }
+      complete &= target_complete;
     }
     if (complete) {
       ++telemetry_.sent_animation_frames;
@@ -1573,10 +3038,107 @@ class Runtime {
 #endif
   }
 
+  void SendAppearance(
+      const AppearanceBlob& appearance,
+      std::uint32_t map_hash, std::int32_t role,
+      std::int32_t base_port) {
+#if defined(_WIN32)
+    (void)base_port;
+    if (appearance.identity == 0 ||
+        appearance.bytes == nullptr ||
+        appearance.bytes->empty() ||
+        appearance.bytes->size() >
+            kMaximumAppearanceBytes) {
+      return;
+    }
+    const auto targets = LocalPacketTargets(
+        static_cast<std::uint32_t>(role),
+        /*animation=*/true, Clock::now());
+    const std::size_t chunk_count =
+        (appearance.bytes->size() +
+             kAppearanceChunkBytes - 1) /
+        kAppearanceChunkBytes;
+    const Clock::time_point now = Clock::now();
+    for (const auto& [target_role, target] : targets) {
+      OutboundAppearanceState& state =
+          outbound_appearance_[target_role];
+      if (state.identity != appearance.identity) {
+        state = {};
+        state.identity = appearance.identity;
+      }
+      if (state.next_chunk >= chunk_count) {
+        // Steam's reliable channel needs one pass. Localhost UDP is allowed
+        // to drop datagrams, and a multi-thousand-chunk appearance cannot
+        // require perfect delivery. Repeat the complete stream twice; the
+        // receiver keeps its chunk bitmap, so either retry fills only the
+        // holes from the previous pass.
+        if (using_steam_ ||
+            state.completed_passes >= 3 ||
+            now < state.retry_after) {
+          continue;
+        }
+        state.next_chunk = 0;
+      }
+      // Burst localhost transfers so the fallback is visible for seconds,
+      // not tens of seconds. Steam stays at one chunk per tick per peer to
+      // keep a ten-player join from multiplying every sender's upload.
+      const std::size_t burst_chunks =
+          using_steam_ ? 1u : 4u;
+      for (std::size_t burst = 0;
+           burst < burst_chunks &&
+           state.next_chunk < chunk_count;
+           ++burst) {
+        const std::size_t offset =
+            std::size_t(state.next_chunk) *
+            kAppearanceChunkBytes;
+        AppearanceFragmentPacket packet;
+        packet.sender_role =
+            static_cast<std::uint32_t>(role);
+        packet.sender_session = session_id_;
+        packet.map_hash = map_hash;
+        packet.appearance_id = appearance.identity;
+        packet.total_bytes = static_cast<std::uint32_t>(
+            appearance.bytes->size());
+        packet.chunk_index = state.next_chunk;
+        packet.chunk_count =
+            static_cast<std::uint16_t>(chunk_count);
+        packet.chunk_bytes =
+            static_cast<std::uint16_t>(
+                std::min<std::size_t>(
+                    kAppearanceChunkBytes,
+                    appearance.bytes->size() - offset));
+        std::copy_n(
+            appearance.bytes->begin() + offset,
+            packet.chunk_bytes, packet.bytes);
+        packet.byte_count = static_cast<std::uint16_t>(
+            offsetof(AppearanceFragmentPacket, bytes) +
+            packet.chunk_bytes);
+        if (!SendBytes(
+                &packet, packet.byte_count, target,
+                /*animation=*/true, /*relayed=*/false)) {
+          break;
+        }
+        ++state.next_chunk;
+      }
+      if (state.next_chunk >= chunk_count) {
+        ++state.completed_passes;
+        state.retry_after =
+            now + std::chrono::milliseconds(250);
+      }
+    }
+#else
+    (void)appearance;
+    (void)map_hash;
+    (void)role;
+    (void)base_port;
+#endif
+  }
+
   bool SmoothRemote(RemotePeerState& peer, Clock::time_point now,
                     RemotePose& out) {
-    const auto interpolation_delay = std::chrono::milliseconds(
-        REXCVAR_GET(skate3_multiplayer_local_interpolation_ms));
+    const auto interpolation_delay = std::chrono::microseconds(
+        PresentationDelayMicroseconds(
+            peer, network_tuning_.interpolation_ms));
     while (!peer.samples.empty() &&
            now - peer.samples.front().received_at >
                kRemoteTimeout + interpolation_delay) {
@@ -1621,6 +3183,33 @@ class Runtime {
         return true;
       }
     }
+    if (peer.samples.size() >= 2) {
+      const ReceivedSample& previous =
+          peer.samples[peer.samples.size() - 2];
+      const ReceivedSample& latest =
+          peer.samples.back();
+      const std::uint64_t span =
+          latest.sender_time_us - previous.sender_time_us;
+      const std::int64_t ahead =
+          target_sender_time_us -
+          static_cast<std::int64_t>(
+              latest.sender_time_us);
+      // Keep short network stalls moving without allowing prediction to
+      // run away. At the normal 60 Hz root rate this covers at most two
+      // missing samples; low-rate far-presence updates are capped at 100 ms.
+      const std::int64_t maximum_ahead =
+          std::min<std::int64_t>(
+              100000,
+              static_cast<std::int64_t>(span) * 2);
+      if (span != 0 && ahead > 0 &&
+          ahead <= maximum_ahead) {
+        out = ExtrapolatePose(
+            previous.pose, latest.pose,
+            static_cast<float>(ahead) /
+                static_cast<float>(span));
+        return true;
+      }
+    }
     out = peer.samples.back().pose;
     return true;
   }
@@ -1629,8 +3218,10 @@ class Runtime {
                              Clock::time_point now,
                              const float map_origin[3],
                              AnimationPose& out) {
-    const auto interpolation_delay = std::chrono::milliseconds(
-        REXCVAR_GET(skate3_multiplayer_local_interpolation_ms));
+    const auto interpolation_delay =
+        std::chrono::microseconds(
+            PresentationDelayMicroseconds(
+                peer, network_tuning_.interpolation_ms));
     while (!peer.animation_samples.empty() &&
            now - peer.animation_samples.front().received_at >
                kRemoteTimeout + interpolation_delay) {
@@ -1651,11 +3242,23 @@ class Runtime {
     const AnimationPose* first =
         &peer.animation_samples.front().pose;
     const AnimationPose* second = first;
+    const AnimationPose* previous = first;
+    const AnimationPose* next = second;
     float amount = 0.0f;
-    if (target_sender_time_us >=
+    telemetry_.animation_period_us = peer.animation_period_us;
+    telemetry_.animation_jitter_us = peer.animation_jitter_us;
+    telemetry_.animation_buffered_samples =
+        static_cast<std::uint32_t>(peer.animation_samples.size());
+    if (target_sender_time_us <=
+        static_cast<std::int64_t>(
+            peer.animation_samples.front().pose.sender_time_us)) {
+      ++telemetry_.animation_present_held_oldest;
+    } else if (target_sender_time_us >=
         static_cast<std::int64_t>(
             peer.animation_samples.back().pose.sender_time_us)) {
       first = second = &peer.animation_samples.back().pose;
+      previous = next = second;
+      ++telemetry_.animation_present_held_latest;
     } else {
       for (std::size_t index = 1;
            index < peer.animation_samples.size(); ++index) {
@@ -1665,6 +3268,14 @@ class Runtime {
             static_cast<std::int64_t>(candidate.sender_time_us)) {
           first = &peer.animation_samples[index - 1].pose;
           second = &candidate;
+          previous =
+              index >= 2
+                  ? &peer.animation_samples[index - 2].pose
+                  : first;
+          next =
+              index + 1 < peer.animation_samples.size()
+                  ? &peer.animation_samples[index + 1].pose
+                  : second;
           const std::uint64_t span =
               second->sender_time_us - first->sender_time_us;
           const std::int64_t elapsed =
@@ -1676,6 +3287,7 @@ class Runtime {
                              static_cast<float>(elapsed) /
                                  static_cast<float>(span),
                              0.0f, 1.0f);
+          ++telemetry_.animation_present_interpolated;
           break;
         }
       }
@@ -1685,6 +3297,7 @@ class Runtime {
     }
     out.sender_time_us = second->sender_time_us;
     out.sequence = second->sequence;
+    out.root_bone = second->root_bone;
     for (std::size_t component = 0; component < 3; ++component) {
       out.root_position[component] =
           first->root_position[component] +
@@ -1697,6 +3310,8 @@ class Runtime {
     out.tracks.reserve(second->tracks.size());
     for (const AnimationTrack& second_track : second->tracks) {
       const AnimationTrack* first_track = nullptr;
+      const AnimationTrack* previous_track = nullptr;
+      const AnimationTrack* next_track = nullptr;
       for (const AnimationTrack& candidate : first->tracks) {
         if (candidate.mesh_key == second_track.mesh_key &&
             candidate.bone_rows.size() ==
@@ -1705,24 +3320,58 @@ class Runtime {
           break;
         }
       }
+      for (const AnimationTrack& candidate : previous->tracks) {
+        if (candidate.mesh_key == second_track.mesh_key &&
+            candidate.bone_rows.size() ==
+                second_track.bone_rows.size()) {
+          previous_track = &candidate;
+          break;
+        }
+      }
+      for (const AnimationTrack& candidate : next->tracks) {
+        if (candidate.mesh_key == second_track.mesh_key &&
+            candidate.bone_rows.size() ==
+                second_track.bone_rows.size()) {
+          next_track = &candidate;
+          break;
+        }
+      }
       AnimationTrack output;
       output.mesh_key = second_track.mesh_key;
       output.bone_rows.resize(second_track.bone_rows.size());
-      for (std::size_t index = 0;
-           index < output.bone_rows.size(); ++index) {
-        float value =
-            first_track == nullptr
-                ? second_track.bone_rows[index]
-                : first_track->bone_rows[index] +
-                      (second_track.bone_rows[index] -
-                       first_track->bone_rows[index]) *
-                          amount;
-        const std::size_t row_component = index % 12;
-        if (row_component == 3 || row_component == 7 ||
-            row_component == 11) {
-          value += map_origin[(row_component - 3) / 4];
+      if (first_track == nullptr) {
+        output.bone_rows = second_track.bone_rows;
+      } else {
+        if (previous_track == nullptr) {
+          previous_track = first_track;
         }
-        output.bone_rows[index] = value;
+        if (next_track == nullptr) {
+          next_track = &second_track;
+        }
+        const std::size_t bone_count =
+            output.bone_rows.size() / 12;
+        for (std::size_t bone = 0; bone < bone_count; ++bone) {
+          const float* first_bone =
+              first_track->bone_rows.data() + bone * 12;
+          const float* second_bone =
+              second_track.bone_rows.data() + bone * 12;
+          float* output_bone =
+              output.bone_rows.data() + bone * 12;
+          if (second_track.mesh_key ==
+              kCanonicalSkeletonTrackKey) {
+            InterpolateAffine(
+                first_bone, second_bone, amount, output_bone);
+          } else {
+            InterpolateAttachmentAffine(
+                first_bone, second_bone, amount, output_bone);
+          }
+        }
+      }
+      for (std::size_t bone = 0;
+           bone < output.bone_rows.size() / 12; ++bone) {
+        output.bone_rows[bone * 12 + 3] += map_origin[0];
+        output.bone_rows[bone * 12 + 7] += map_origin[1];
+        output.bone_rows[bone * 12 + 11] += map_origin[2];
       }
       out.tracks.push_back(std::move(output));
     }
@@ -1754,6 +3403,8 @@ class Runtime {
     session_id_ = 0;
     send_sequence_ = 0;
     animation_send_sequence_ = 0;
+    outbound_animation_keyframes_.clear();
+    outbound_appearance_.clear();
     remote_peers_.clear();
 #if defined(_WIN32)
     host_peers_.clear();
@@ -1763,7 +3414,10 @@ class Runtime {
     std::fill_n(local_position_, 3, 0.0f);
     local_position_valid_ = false;
     last_send_ = {};
+    last_pose_sample_time_us_ = 0;
     last_animation_send_ = {};
+    last_animation_sample_time_us_ = 0;
+    last_appearance_send_ = {};
     last_rate_log_ = {};
     last_rate_snapshot_ = {};
     telemetry_.socket_ready = false;
@@ -1788,8 +3442,15 @@ class Runtime {
   std::uint32_t session_id_ = 0;
   std::uint32_t send_sequence_ = 0;
   std::uint32_t animation_send_sequence_ = 0;
+  std::unordered_map<std::uint32_t, QuantizedAnimationFrame>
+      outbound_animation_keyframes_;
+  std::unordered_map<std::uint32_t, OutboundAppearanceState>
+      outbound_appearance_;
   Clock::time_point last_send_{};
+  std::uint64_t last_pose_sample_time_us_ = 0;
   Clock::time_point last_animation_send_{};
+  std::uint64_t last_animation_sample_time_us_ = 0;
+  Clock::time_point last_appearance_send_{};
   Clock::time_point last_rate_log_{};
   std::unordered_map<std::uint32_t, RemotePeerState> remote_peers_;
 #if defined(_WIN32)
@@ -1800,6 +3461,7 @@ class Runtime {
   std::unordered_map<std::uint64_t, bool> relevance_cache_;
   float local_position_[3] = {};
   bool local_position_valid_ = false;
+  NetworkTuning network_tuning_;
   TelemetrySnapshot telemetry_;
   TelemetrySnapshot last_rate_snapshot_;
 };
@@ -1814,9 +3476,11 @@ Runtime& ActiveRuntime() {
 bool TickLocalVisuals(const char* map_name,
                       const float map_render_origin[3],
                       const AnimationPose* local_animation,
+                      const AppearanceBlob* local_appearance,
                       std::vector<RemotePlayer>& out_remotes) {
   return ActiveRuntime().Tick(
-      map_name, map_render_origin, local_animation, out_remotes);
+      map_name, map_render_origin, local_animation,
+      local_appearance, out_remotes);
 }
 
 void AppendTelemetry(std::ostream& out) {

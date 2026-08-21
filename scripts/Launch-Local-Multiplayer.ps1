@@ -4,6 +4,7 @@ param(
     [string]$BuildDirectory = '..\build\skate3-custom-engine-layer-release',
     [ValidateRange(2, 100)]
     [int]$Clients = 2,
+    [string]$CacAssetRoot = '',
     [switch]$NoDirectBoot
 )
 
@@ -114,6 +115,15 @@ foreach ($role in 1..$Clients) {
     )
     if (-not $NoDirectBoot) {
         $arguments += '--skate3_direct_boot=true'
+    }
+    if (-not [string]::IsNullOrWhiteSpace($CacAssetRoot)) {
+        $resolvedCacAssetRoot = [System.IO.Path]::GetFullPath(
+            $CacAssetRoot
+        )
+        $arguments += (
+            '--skate3_multiplayer_cac_asset_root={0}' -f
+            $resolvedCacAssetRoot
+        )
     }
     $stagedClients += [pscustomobject]@{
         Role = $role

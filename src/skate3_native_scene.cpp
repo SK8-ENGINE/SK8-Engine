@@ -3912,6 +3912,32 @@ bool CaptureSkinnedState(uint8_t* base, uint32_t bank, uint32_t palette_base,
     const bool main_pass = palette_base >= 7;
     const uint32_t flag_reg = main_pass ? 7u : 4u;
     const float flag_x = LoadGuestF32(base, bank + (flag_reg * 4) * 4);
+    // The post-shadow bank can make BankPaletteBase return c7 even though
+    // c7 is then a mid-palette/world-affine row, not this ROPA draw's flag.
+    // Its x component changes sign with the skater's rotation; using
+    // `flag_x > 0` directly therefore flips a live CPU-deformed garment to
+    // the skinned path while the VB still contains root-local cloth
+    // vertices. The resulting double deformation is the local-only
+    // shirt/hair-on-the-ground failure. The owning skater's garment table
+    // plus the completed DoubleBuffer stamp is the existing authoritative
+    // proof that this exact VB is CPU-deformed this tick. Consult it before
+    // trusting an ambiguous bank row.
+    float authoritative_ropa_rows[12];
+    const bool authoritative_rigid =
+        skate3::native_entity::ServeRopaWorld(
+            base, item.ctx, item.vb_obj, authoritative_ropa_rows);
+    if (authoritative_rigid && flag_x > 0.0f) {
+      static std::atomic<uint32_t> s_mode_override{0};
+      const uint32_t n =
+          s_mode_override.fetch_add(1, std::memory_order_relaxed);
+      if (n < 4 || (n & 65535u) == 0) {
+        REXLOG_INFO(
+            "native-scene: ropa mode authority kept CPU-rigid "
+            "mesh={:08X} ctx={:08X} vb={:08X} bank_base={} "
+            "nonflag_x={:.3f} (n={})",
+            item.mesh, item.ctx, item.vb_obj, palette_base, flag_x, n + 1);
+      }
+    }
     // Diagnosis logging (rate-limited): the flag/matrix registers were
     // verified against an emulated-mode F10 capture; this confirms what the
     // live native-mode banks actually hold at OUR capture moments.
@@ -3941,7 +3967,7 @@ bool CaptureSkinnedState(uint8_t* base, uint32_t bank, uint32_t palette_base,
           LoadGuestF32(base, bank + ((m + 2) * 4 + 2) * 4),
           LoadGuestF32(base, bank + ((m + 2) * 4 + 3) * 4));
     }
-    if (flag_x > 0.0f) {
+    if (flag_x > 0.0f && !authoritative_rigid) {
       // Sim inactive: the palette sits one register late (c5/c8). The LAYOUT
       // is exact, but the BANK can still be foreign, the same stale-bank
       // hazard the rigid branch below scores against (the flag itself was
@@ -3969,7 +3995,8 @@ bool CaptureSkinnedState(uint8_t* base, uint32_t bank, uint32_t palette_base,
       // 0, VB objects freed) must never publish rigid; whatever this bank
       // holds is foreign (the game draws the ctx skinned now), and a rigid
       // publish would pair a live world with our retained stale drape.
-      if (skate3::native_entity::RopaGarmentDropped(base, item.ctx,
+      if (!authoritative_rigid &&
+          skate3::native_entity::RopaGarmentDropped(base, item.ctx,
                                                     item.vb_obj)) {
         g_ropa_stale.fetch_add(1, std::memory_order_relaxed);
         return false;
@@ -4044,7 +4071,12 @@ bool CaptureSkinnedState(uint8_t* base, uint32_t bank, uint32_t palette_base,
         // the acceptance can't see. Bank rows remain the fallback.
         const float* src_rows = rows;
         float ent_rows[12];
-        if (REXCVAR_GET(skate3_native_render_scene_entity_ropa_world_primary) &&
+        if (authoritative_rigid) {
+          skate3::native_entity::NoteAcceptedWorldCompare(
+              rows, authoritative_ropa_rows);
+          src_rows = authoritative_ropa_rows;
+        } else if (
+            REXCVAR_GET(skate3_native_render_scene_entity_ropa_world_primary) &&
             skate3::native_entity::ServeRopaWorld(base, item.ctx, item.vb_obj,
                                                   ent_rows)) {
           skate3::native_entity::NoteAcceptedWorldCompare(rows, ent_rows);
@@ -4083,14 +4115,20 @@ bool CaptureSkinnedState(uint8_t* base, uint32_t bank, uint32_t palette_base,
       // foreign bank, torn state). Geometry only; the PS lighting rows
       // stay on their caches, since the bank is not proven ours here.
       float ent_rows[12];
-      if (skate3::native_entity::ServeRopaWorld(base, item.ctx, item.vb_obj,
-                                                ent_rows)) {
+      const float* served_rows = nullptr;
+      if (authoritative_rigid) {
+        served_rows = authoritative_ropa_rows;
+      } else if (skate3::native_entity::ServeRopaWorld(
+                     base, item.ctx, item.vb_obj, ent_rows)) {
+        served_rows = ent_rows;
+      }
+      if (served_rows != nullptr) {
         for (int i = 0; i < 3; ++i) {
           for (int j = 0; j < 3; ++j) {
-            item.world[i * 4 + j] = ent_rows[j * 4 + i];
+            item.world[i * 4 + j] = served_rows[j * 4 + i];
           }
           item.world[i * 4 + 3] = 0.0f;
-          item.world[12 + i] = ent_rows[i * 4 + 3];
+          item.world[12 + i] = served_rows[i * 4 + 3];
         }
         item.world[15] = 1.0f;
         item.skinned = false;
@@ -8480,6 +8518,10 @@ void BuildFrameScene(uint8_t* base, const SubmitRecord* records, size_t count) {
   }
 
   FrameScene scene;
+  // The dynamic palettes may be re-timed below to the native presentation
+  // clock. Keep that effective pose time separate from the later publication
+  // time so multiplayer does not label an older skeleton as a fresh sample.
+  double dynamic_pose_sample_time_s = 0.0;
   scene.items.reserve(count);
   std::unordered_set<uint32_t> seen;
   // Pre-size the per-frame bookkeeping: these fill with thousands of
@@ -9795,6 +9837,7 @@ void BuildFrameScene(uint8_t* base, const SubmitRecord* records, size_t count) {
       // Keep the skater/NPCs/props in phase with the smoothed camera:
       // interpolate their palettes/worlds at the same playback time.
       InterpolateDynamicItems(base, scene, now_s);
+      dynamic_pose_sample_time_s = g_smooth_play;
     }
   }
 
@@ -10462,10 +10505,15 @@ void BuildFrameScene(uint8_t* base, const SubmitRecord* records, size_t count) {
       }
     }
   }
-  g_last_publish_ns.store(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                              std::chrono::steady_clock::now().time_since_epoch())
-                              .count(),
-                          std::memory_order_relaxed);
+  const int64_t publish_ns =
+      std::chrono::duration_cast<std::chrono::nanoseconds>(
+          std::chrono::steady_clock::now().time_since_epoch())
+          .count();
+  scene.sample_time_us =
+      dynamic_pose_sample_time_s > 0.0
+          ? static_cast<uint64_t>(dynamic_pose_sample_time_s * 1000000.0)
+          : static_cast<uint64_t>(publish_ns / 1000);
+  g_last_publish_ns.store(publish_ns, std::memory_order_relaxed);
   std::lock_guard<std::mutex> lock(g_scene_mutex);
   scene.generation = ++g_generation;
   g_scene = std::make_shared<const FrameScene>(std::move(scene));
