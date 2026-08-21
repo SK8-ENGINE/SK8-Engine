@@ -10785,6 +10785,7 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
       owned_flags |= draw.normal_texture != 0 ? 8u : 0u;
       owned_flags |= draw.orm_texture != 0 ? 16u : 0u;
       owned_flags |= draw.emissive_texture != 0 ? 32u : 0u;
+      owned_flags |= draw.indirect_lightmap != 0 ? 64u : 0u;
       constants[48] =
           imported ? -static_cast<float>(owned_flags) : draw.material[0];
       constants[49] =
@@ -11109,6 +11110,7 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
       owned_flags |= draw.normal_texture != 0 ? 8u : 0u;
       owned_flags |= draw.orm_texture != 0 ? 16u : 0u;
       owned_flags |= draw.emissive_texture != 0 ? 32u : 0u;
+      owned_flags |= draw.indirect_lightmap != 0 ? 64u : 0u;
       constants[48] =
           imported ? -static_cast<float>(owned_flags)
                    : draw.material[0];

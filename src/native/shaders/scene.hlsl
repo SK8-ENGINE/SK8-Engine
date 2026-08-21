@@ -374,6 +374,7 @@ float4 ShadePixel(VSOut i) {
     bool has_normal_map = (owned_flags & 8) != 0;
     bool has_orm_map = (owned_flags & 16) != 0;
     bool has_emissive_map = (owned_flags & 32) != 0;
+    bool has_indirect_lightmap = (owned_flags & 64) != 0;
     int pattern = (int)(misc.x + 0.5);
     float emissive_intensity =
         imported_material ? max(misc.w, 0.0) : max(-misc.z, 0.0);
@@ -436,7 +437,7 @@ float4 ShadePixel(VSOut i) {
                            float3(0.35, 0.47, 0.64), sky_amount);
     float3 ambient_light =
         sky_fill * (mat_tint.w * lerp(0.72, 1.12, sky_amount));
-    if (imported_material) {
+    if (imported_material && has_indirect_lightmap) {
       // UV1 holds static indirect illumination baked in Blender. It remains
       // stable as the sun/moon move, while a restrained exposure response
       // lets the same bounce lighting settle naturally at night.
