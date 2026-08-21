@@ -25,6 +25,25 @@ $buildRoot = [System.IO.Path]::GetFullPath(
 $clientRoot = [System.IO.Path]::GetFullPath(
     (Join-Path $repoRoot 'out\local-multiplayer')
 )
+if ([string]::IsNullOrWhiteSpace($CacAssetRoot)) {
+    $documentsRoot = Split-Path (
+        Split-Path $repoRoot -Parent
+    ) -Parent
+    $candidate = Join-Path $documentsRoot (
+        'Skate3Research\publish\skate3recomp\work\gesture_pipeline\' +
+        'createacharacter-extracted-v2\data\content\' +
+        'createacharacter\model\cas_db'
+    )
+    if (Test-Path -LiteralPath $candidate -PathType Container) {
+        $CacAssetRoot = $candidate
+    }
+}
+if (-not [string]::IsNullOrWhiteSpace($CacAssetRoot)) {
+    $CacAssetRoot = [System.IO.Path]::GetFullPath($CacAssetRoot)
+    if (-not (Test-Path -LiteralPath $CacAssetRoot -PathType Container)) {
+        throw "Create-a-Skater asset root is missing: $CacAssetRoot"
+    }
+}
 
 $builtExecutable = Join-Path $buildRoot 'skate3.exe'
 $builtRuntime = Join-Path $buildRoot 'rexruntime.dll'
@@ -117,12 +136,9 @@ foreach ($role in 1..$Clients) {
         $arguments += '--skate3_direct_boot=true'
     }
     if (-not [string]::IsNullOrWhiteSpace($CacAssetRoot)) {
-        $resolvedCacAssetRoot = [System.IO.Path]::GetFullPath(
-            $CacAssetRoot
-        )
         $arguments += (
             '--skate3_multiplayer_cac_asset_root={0}' -f
-            $resolvedCacAssetRoot
+            $CacAssetRoot
         )
     }
     $stagedClients += [pscustomobject]@{
@@ -148,4 +164,7 @@ Write-Host "$Clients clients use the same game and maps read-only through juncti
 Write-Host 'Their settings, caches, logs, and saves are isolated under:'
 Write-Host "  $clientRoot"
 Write-Host 'Client 1 is the logical host; nearby peers use the real animated skater and board.'
+if (-not [string]::IsNullOrWhiteSpace($CacAssetRoot)) {
+    Write-Host "CAC bind assets: $CacAssetRoot"
+}
 Write-Host 'Remote collision is disabled.'

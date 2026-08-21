@@ -3357,14 +3357,15 @@ class Runtime {
               second_track.bone_rows.data() + bone * 12;
           float* output_bone =
               output.bone_rows.data() + bone * 12;
-          if (second_track.mesh_key ==
-              kCanonicalSkeletonTrackKey) {
-            InterpolateAffine(
-                first_bone, second_bone, amount, output_bone);
-          } else {
-            InterpolateAttachmentAffine(
-                first_bone, second_bone, amount, output_bone);
-          }
+          // Every transmitted row is a model-to-world skinning affine, not
+          // an independently positioned joint. Its translation includes the
+          // inverse-bind pivot compensation (p - R*p), so interpolating
+          // rotation and translation independently lets rigidly weighted
+          // shoes, hats and hair orbit away from the body between samples.
+          // Use the same pivot-preserving SE(3) interpolation for the
+          // canonical skeleton and the post-skeleton exception tracks.
+          InterpolateAttachmentAffine(
+              first_bone, second_bone, amount, output_bone);
         }
       }
       for (std::size_t bone = 0;

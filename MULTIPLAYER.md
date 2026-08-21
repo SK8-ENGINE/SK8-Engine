@@ -156,6 +156,13 @@ default. Pass another clean install when required:
   -SourceInstallRoot 'D:\Games\Skate3CustomEngineLayer'
 ```
 
+For the current development bridge, the launcher automatically uses the
+extracted Create-a-Skater database under the sibling `Skate3Research`
+workspace when it is present. Pass another legal local extraction explicitly
+with `-CacAssetRoot`. Without this database, ROPA shirts and hair fall back to
+an already-deformed rigid snapshot and cannot remain attached to a remote
+animation.
+
 It stages two ignored portable roots under `out\local-multiplayer`, gives each
 client independent writable user data, and junctions the legally supplied
 `game` directory and user `maps` directory rather than duplicating them.

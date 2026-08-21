@@ -516,6 +516,28 @@ bool DecodeBindMesh(
       std::size_t(parsed.vertex_count) * 14, 0.0f);
   constexpr float kPositionScale = 2.0f / 32767.0f;
   constexpr float kUvScale = 1.0f / 32767.0f;
+  const auto decode_uv =
+      [&](const VertexElement& element, std::size_t source,
+          float& u, float& v) {
+        if (element.format == 0x002C2159) {
+          // Xenos k_16_16 signed-normalized.
+          u = ReadBeS16(
+                  parsed.bytes, source + element.offset) *
+              kUvScale;
+          v = ReadBeS16(
+                  parsed.bytes, source + element.offset + 2) *
+              kUvScale;
+          return;
+        }
+        // Xenos k_32_32_FLOAT. ROPA expands this format unchanged into its
+        // live float vertex buffer; treating the first four bytes as two
+        // signed shorts corrupts hair strand-coverage UVs and exposes the
+        // normally transparent cards across the forehead.
+        u = ReadBeFloat(
+            parsed.bytes, source + element.offset);
+        v = ReadBeFloat(
+            parsed.bytes, source + element.offset + 4);
+      };
   for (std::uint32_t vertex = 0;
        vertex < parsed.vertex_count; ++vertex) {
     const std::size_t source =
@@ -535,22 +557,13 @@ bool DecodeBindMesh(
         ReadBeS16(
             parsed.bytes, source + position->offset + 4) *
         kPositionScale;
-    destination[3] =
-        ReadBeS16(parsed.bytes, source + uv0->offset) *
-        kUvScale;
-    destination[4] =
-        ReadBeS16(parsed.bytes, source + uv0->offset + 2) *
-        kUvScale;
+    decode_uv(
+        *uv0, source, destination[3], destination[4]);
     if (uv1 != nullptr &&
         (uv1->format == 0x002C2159 ||
          uv1->format == 0x002C23A5)) {
-      destination[5] =
-          ReadBeS16(parsed.bytes, source + uv1->offset) *
-          kUvScale;
-      destination[6] =
-          ReadBeS16(
-              parsed.bytes, source + uv1->offset + 2) *
-          kUvScale;
+      decode_uv(
+          *uv1, source, destination[5], destination[6]);
     }
     const std::uint32_t packed_weights =
         ReadBe32(parsed.bytes, source + weights->offset);

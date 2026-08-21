@@ -9860,6 +9860,10 @@ multiplayer::AppearanceBlob BuildLocalAppearanceBlob(
     double world_delta[3] = {};
     double transpose_raw_delta[3] = {};
     double transpose_world_delta[3] = {};
+    double uv0_error = 0.0;
+    double uv1_error = 0.0;
+    double uv0_max = 0.0;
+    double uv1_max = 0.0;
     std::size_t compared = 0;
     std::size_t invalid = 0;
     for (std::size_t vertex = 0;
@@ -9867,6 +9871,23 @@ multiplayer::AppearanceBlob BuildLocalAppearanceBlob(
          vertex += 14) {
       const float* bind =
           piece.bind_mesh.vertices.data() + vertex;
+      const float* live =
+          piece.mesh->raytracing_verts.data() + vertex;
+      for (std::size_t component = 0; component < 2;
+           ++component) {
+        const double uv0_delta =
+            double(bind[3 + component]) -
+            live[3 + component];
+        const double uv1_delta =
+            double(bind[5 + component]) -
+            live[5 + component];
+        uv0_error += uv0_delta * uv0_delta;
+        uv1_error += uv1_delta * uv1_delta;
+        uv0_max = std::max(
+            uv0_max, std::abs(uv0_delta));
+        uv1_max = std::max(
+            uv1_max, std::abs(uv1_delta));
+      }
       std::uint32_t packed_weights = 0;
       std::uint32_t packed_indices = 0;
       std::memcpy(
@@ -9933,8 +9954,6 @@ multiplayer::AppearanceBlob BuildLocalAppearanceBlob(
         predicted[component] /= weight_sum;
         predicted_transpose[component] /= weight_sum;
       }
-      const float* live =
-          piece.mesh->raytracing_verts.data() + vertex;
       float live_world[3] = {};
       for (std::size_t component = 0; component < 3;
            ++component) {
@@ -10003,7 +10022,8 @@ multiplayer::AppearanceBlob BuildLocalAppearanceBlob(
         "verts={} invalid={} "
         "row_raw={:.5f}/{:.5f} row_world={:.5f}/{:.5f} "
         "transpose_raw={:.5f}/{:.5f} "
-        "transpose_world={:.5f}/{:.5f}",
+        "transpose_world={:.5f}/{:.5f} "
+        "uv0={:.6f}/{:.6f} uv1={:.6f}/{:.6f}",
         piece.item->mesh, piece.bind_mesh.asset_id,
         compared, invalid,
         rms(raw_error),
@@ -10016,7 +10036,19 @@ multiplayer::AppearanceBlob BuildLocalAppearanceBlob(
         rms(transpose_world_error),
         centered_rms(
             transpose_world_error,
-            transpose_world_delta));
+            transpose_world_delta),
+        compared == 0
+            ? -1.0
+            : std::sqrt(
+                  uv0_error /
+                  (double(compared) * 2.0)),
+        uv0_max,
+        compared == 0
+            ? -1.0
+            : std::sqrt(
+                  uv1_error /
+                  (double(compared) * 2.0)),
+        uv1_max);
   }
   NetworkAppearanceHeader header;
   std::copy_n(
@@ -11629,11 +11661,22 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
       }
       weighted_rows = std::min(
           weighted_rows, item->bones.size() / 12);
-      // Small rigidly weighted pieces are cheap and sensitive to
-      // post-canonical procedural transforms. A missing remap is always an
-      // exception regardless of size.
-      if (have_rig &&
-          rig.palette_to_canonical.size() > 8) {
+      // A verified body remap must use the same canonical rows as the body.
+      // Giving rigidly weighted shoes/headwear their own independently
+      // sampled track makes them visibly detach during motion even though
+      // they line up at rest. The skateboard hierarchy is intentionally
+      // finalized after the canonical source palette (wheel spin and truck
+      // transforms), so rows 25..31 remain exact-track exceptions.
+      const bool post_canonical_skateboard =
+          have_rig &&
+          std::any_of(
+              rig.palette_to_canonical.begin(),
+              rig.palette_to_canonical.end(),
+              [](std::size_t canonical_bone) {
+                return canonical_bone >= 25 &&
+                       canonical_bone <= 31;
+              });
+      if (have_rig && !post_canonical_skateboard) {
         continue;
       }
       multiplayer::AnimationTrack exact_track;
