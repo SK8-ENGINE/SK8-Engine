@@ -1116,38 +1116,44 @@ bool LookupCanonicalRig(uint32_t ctx, uint32_t mesh,
     return false;
   }
   std::lock_guard<std::mutex> lock(g_mu);
-  for (auto rig = g_canonical_rigs_prev.rbegin();
-       rig != g_canonical_rigs_prev.rend(); ++rig) {
-    for (const CanonicalRigPiece& piece : rig->pieces) {
-      if (piece.ctx == ctx && piece.mesh == mesh &&
-          !piece.palette_to_canonical.empty() &&
-          !rig->canonical_rows.empty()) {
-        out.canonical_rows = rig->canonical_rows;
-        out.canonical_rows_column_vector =
-            rig->canonical_rows_column_vector;
-        out.palette_to_canonical = piece.palette_to_canonical;
-        return true;
-      }
-    }
+  const auto lookup =
+      [&out, ctx, mesh](
+          const std::vector<CanonicalRigSnap>& rigs,
+          bool require_ctx) {
+        for (auto rig = rigs.rbegin();
+             rig != rigs.rend(); ++rig) {
+          for (const CanonicalRigPiece& piece : rig->pieces) {
+            if (piece.mesh != mesh ||
+                (require_ctx && piece.ctx != ctx) ||
+                piece.palette_to_canonical.empty() ||
+                rig->canonical_rows.empty()) {
+              continue;
+            }
+            out.canonical_rows = rig->canonical_rows;
+            out.canonical_rows_column_vector =
+                rig->canonical_rows_column_vector;
+            out.palette_to_canonical =
+                piece.palette_to_canonical;
+            return true;
+          }
+        }
+        return false;
+      };
+
+  // ServeAuthoritativePalettes prefers this frame's settled UBT packs and
+  // falls back to the previous frame only when the current instance did not
+  // pack. Resolve the canonical source in that same order. Looking only in
+  // the previous ring made bind-skinned ROPA clothing animate one simulation
+  // sample behind the exact body pieces.
+  if (lookup(g_canonical_rigs, true) ||
+      lookup(g_canonical_rigs_prev, true)) {
+    return true;
   }
   // The mesh's remap is immutable asset data. UBT's per-frame part arena can
   // recycle its one ctx before the render thread consumes the snapshot, so
   // fall back to the exact mesh object when containment identity has moved.
-  for (auto rig = g_canonical_rigs_prev.rbegin();
-       rig != g_canonical_rigs_prev.rend(); ++rig) {
-    for (const CanonicalRigPiece& piece : rig->pieces) {
-      if (piece.mesh == mesh &&
-          !piece.palette_to_canonical.empty() &&
-          !rig->canonical_rows.empty()) {
-        out.canonical_rows = rig->canonical_rows;
-        out.canonical_rows_column_vector =
-            rig->canonical_rows_column_vector;
-        out.palette_to_canonical = piece.palette_to_canonical;
-        return true;
-      }
-    }
-  }
-  return false;
+  return lookup(g_canonical_rigs, false) ||
+         lookup(g_canonical_rigs_prev, false);
 }
 
 void OnLwPack(uint8_t* base, uint32_t entity) {

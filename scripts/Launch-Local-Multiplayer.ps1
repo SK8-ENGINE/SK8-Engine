@@ -25,23 +25,78 @@ $buildRoot = [System.IO.Path]::GetFullPath(
 $clientRoot = [System.IO.Path]::GetFullPath(
     (Join-Path $repoRoot 'out\local-multiplayer')
 )
+
+function Test-CompleteCacAssetRoot {
+    param([Parameter(Mandatory)][string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Container)) {
+        return $false
+    }
+    $createACaracterRoot = Split-Path (
+        Split-Path $Path -Parent
+    ) -Parent
+    $textureRoot = Join-Path $createACaracterRoot 'texture'
+    if (-not (Test-Path -LiteralPath $textureRoot -PathType Container)) {
+        return $false
+    }
+
+    # The old memory-snapshot catalogue padded every file to 128 KiB and
+    # omitted the lower half of 512x512 clothing atlases. A complete archive
+    # extraction contains many larger RX2 files.
+    $largeTexture = Get-ChildItem -LiteralPath $textureRoot `
+        -File -Filter '*.rx2' |
+        Where-Object Length -GT 131072 |
+        Select-Object -First 1
+    return $null -ne $largeTexture
+}
+
 if ([string]::IsNullOrWhiteSpace($CacAssetRoot)) {
     $documentsRoot = Split-Path (
         Split-Path $repoRoot -Parent
     ) -Parent
-    $candidate = Join-Path $documentsRoot (
-        'Skate3Research\publish\skate3recomp\work\gesture_pipeline\' +
-        'createacharacter-extracted-v2\data\content\' +
+    $cacheRoot = Join-Path $repoRoot 'out\createacharacter-full'
+    $candidate = Join-Path $cacheRoot (
+        'data\content\' +
         'createacharacter\model\cas_db'
     )
-    if (Test-Path -LiteralPath $candidate -PathType Container) {
+    if (-not (Test-CompleteCacAssetRoot $candidate)) {
+        $archive = Join-Path $SourceInstallRoot (
+            'game\data\content\createacharacter.big'
+        )
+        $extractor = Join-Path $documentsRoot (
+            'Skate3Research\UTT-1.1.7\assets\bigfile.exe'
+        )
+        if ((Test-Path -LiteralPath $archive -PathType Leaf) -and
+            (Test-Path -LiteralPath $extractor -PathType Leaf)) {
+            Write-Host (
+                'Extracting the complete Create-a-Skater catalogue once...'
+            )
+            New-Item -ItemType Directory -Path $cacheRoot -Force |
+                Out-Null
+            Push-Location $cacheRoot
+            try {
+                & $extractor $archive -x 2>&1 | Out-Null
+                if ($LASTEXITCODE -ne 0) {
+                    throw (
+                        "bigfile.exe failed with exit code $LASTEXITCODE"
+                    )
+                }
+            } finally {
+                Pop-Location
+            }
+        }
+    }
+    if (Test-CompleteCacAssetRoot $candidate) {
         $CacAssetRoot = $candidate
     }
 }
 if (-not [string]::IsNullOrWhiteSpace($CacAssetRoot)) {
     $CacAssetRoot = [System.IO.Path]::GetFullPath($CacAssetRoot)
-    if (-not (Test-Path -LiteralPath $CacAssetRoot -PathType Container)) {
-        throw "Create-a-Skater asset root is missing: $CacAssetRoot"
+    if (-not (Test-CompleteCacAssetRoot $CacAssetRoot)) {
+        throw (
+            'Create-a-Skater asset root is missing complete RX2 texture ' +
+            "payloads: $CacAssetRoot"
+        )
     }
 }
 

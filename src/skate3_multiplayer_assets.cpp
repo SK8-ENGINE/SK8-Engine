@@ -6,9 +6,11 @@
 #include <cmath>
 #include <cstring>
 #include <fstream>
+#include <iomanip>
 #include <limits>
 #include <mutex>
 #include <optional>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -19,9 +21,9 @@
 
 REXCVAR_DEFINE_STRING(
     skate3_multiplayer_cac_asset_root, "", "Skate 3/Multiplayer",
-    "Path to a locally extracted createacharacter/model/cas_db directory. "
-    "This development bridge is ignored when empty; the retail BIG reader "
-    "will replace it without changing the renderer-facing asset interface.");
+    "Path to a complete, locally extracted "
+    "createacharacter/model/cas_db directory. Incomplete fixed-size memory "
+    "snapshots are rejected because they omit clothing texture data.");
 
 namespace skate3::multiplayer_assets {
 namespace {
@@ -97,6 +99,8 @@ std::filesystem::path g_indexed_root;
 CategoryIndex g_outer_torso;
 CategoryIndex g_hair;
 std::unordered_map<Signature, BindMesh, SignatureHash> g_loaded;
+std::unordered_map<std::uint64_t, BindMesh> g_recipe_meshes;
+std::unordered_map<std::uint64_t, RecipeTexture> g_recipe_textures;
 
 bool RangeValid(
     const std::vector<std::uint8_t>& bytes, std::size_t offset,
@@ -224,6 +228,14 @@ bool ParseLayout(
     if (!RangeValid(
             output.bytes, section.file_offset,
             section.size)) {
+      // Some extracted CAC assets retain descriptors for lower-detail LODs
+      // whose raw GPU buffers were not included in the fixed-size extraction.
+      // The primary/high-detail mesh is still complete, so ignore only those
+      // unavailable raw buffers and let descriptor matching select a complete
+      // buffer pair below.
+      if (section.type == kTypeRawBuffer) {
+        continue;
+      }
       return false;
     }
     output.sections.push_back(section);
@@ -624,6 +636,392 @@ bool DecodeBindMesh(
   return true;
 }
 
+struct ParsedRecipePiece {
+  std::string category;
+  std::uint64_t asset_id = 0;
+  std::uint64_t model_id = 0;
+  std::uint64_t material_id = 0;
+  std::unordered_map<std::string, std::uint64_t> textures;
+};
+
+std::uint64_t ReadBe64(
+    const std::vector<std::uint8_t>& bytes, std::size_t offset) {
+  if (!RangeValid(bytes, offset, 8)) {
+    return 0;
+  }
+  return (std::uint64_t(ReadBe32(bytes, offset)) << 32) |
+         ReadBe32(bytes, offset + 4);
+}
+
+bool ReadRecipeString(
+    const std::vector<std::uint8_t>& bytes, std::size_t& cursor,
+    std::size_t maximum_length, std::string& output) {
+  if (!RangeValid(bytes, cursor, 4)) {
+    return false;
+  }
+  const std::uint32_t length = ReadBe32(bytes, cursor);
+  cursor += 4;
+  if (length == 0 || length > maximum_length ||
+      !RangeValid(bytes, cursor, length)) {
+    return false;
+  }
+  output.assign(
+      reinterpret_cast<const char*>(bytes.data() + cursor),
+      length);
+  cursor += length;
+  return std::all_of(
+      output.begin(), output.end(),
+      [](unsigned char character) {
+        return character >= 0x20 && character <= 0x7E;
+      });
+}
+
+bool ParseRecipe(
+    const std::vector<std::uint8_t>& bytes,
+    std::vector<ParsedRecipePiece>& pieces,
+    std::size_t& structural_bytes,
+    std::uint8_t& gender) {
+  static constexpr std::array<std::uint8_t, 26> kHeader = {
+      0x00, 0x00, 0x00, 0x07, 0x00, 0x00, 0x00, 0x06,
+      'c',  'a',  's',  '_',  'd',  'b',  0x00, 0x00,
+      0x00, 0x03, 0x00, 0x00, 0x00, 0x19, 0x00, 0x00,
+      0x00, 0x02};
+  if (bytes.size() < kHeader.size() ||
+      !std::equal(kHeader.begin(), kHeader.end(), bytes.begin())) {
+    return false;
+  }
+  const std::uint32_t recipe_name_length = ReadBe32(bytes, 4);
+  if (recipe_name_length != 6 ||
+      !RangeValid(bytes, 8, recipe_name_length + 16)) {
+    return false;
+  }
+  std::size_t cursor = 24 + recipe_name_length;
+  const std::uint32_t list_count = ReadBe32(bytes, cursor - 4);
+  if (list_count == 0 || list_count > 32) {
+    return false;
+  }
+  pieces.clear();
+  for (std::uint32_t list_index = 0;
+       list_index < list_count; ++list_index) {
+    std::string category;
+    if (!ReadRecipeString(bytes, cursor, 48, category) ||
+        !RangeValid(bytes, cursor, 4)) {
+      return false;
+    }
+    const std::uint32_t asset_count = ReadBe32(bytes, cursor);
+    cursor += 4;
+    if (asset_count == 0 || asset_count > 16) {
+      return false;
+    }
+    for (std::uint32_t asset_index = 0;
+         asset_index < asset_count; ++asset_index) {
+      if (!RangeValid(bytes, cursor, 12)) {
+        return false;
+      }
+      const std::uint64_t asset_id = ReadBe64(bytes, cursor);
+      const std::uint32_t model_count =
+          ReadBe32(bytes, cursor + 8);
+      cursor += 12;
+      if (model_count == 0 || model_count > 8) {
+        return false;
+      }
+      for (std::uint32_t model_index = 0;
+           model_index < model_count; ++model_index) {
+        if (!RangeValid(bytes, cursor, 37)) {
+          return false;
+        }
+        const std::uint8_t lod = bytes[cursor];
+        const std::uint64_t model_id =
+            ReadBe64(bytes, cursor + 9);
+        const std::uint32_t texture_loops =
+            ReadBe32(bytes, cursor + 17);
+        const std::uint64_t material_id =
+            ReadBe64(bytes, cursor + 25);
+        std::uint32_t texture_count =
+            ReadBe32(bytes, cursor + 33);
+        cursor += 37;
+        if (texture_loops == 0 || texture_loops > 8 ||
+            texture_count > 32) {
+          return false;
+        }
+        ParsedRecipePiece parsed;
+        parsed.category = category;
+        parsed.asset_id = asset_id;
+        parsed.model_id = model_id;
+        parsed.material_id = material_id;
+        for (std::uint32_t texture_index = 0;
+             texture_index < texture_count; ++texture_index) {
+          std::string channel;
+          if (!ReadRecipeString(bytes, cursor, 48, channel) ||
+              !RangeValid(bytes, cursor, 8)) {
+            return false;
+          }
+          parsed.textures.emplace(
+              std::move(channel), ReadBe64(bytes, cursor));
+          cursor += 8;
+        }
+        for (std::uint32_t loop = 1;
+             loop < texture_loops; ++loop) {
+          if (!RangeValid(bytes, cursor, 16)) {
+            return false;
+          }
+          cursor += 16;
+          texture_count = ReadBe32(bytes, cursor - 4);
+          if (texture_count > 32) {
+            return false;
+          }
+          for (std::uint32_t texture_index = 0;
+               texture_index < texture_count; ++texture_index) {
+            std::string ignored_channel;
+            if (!ReadRecipeString(
+                    bytes, cursor, 48, ignored_channel) ||
+                !RangeValid(bytes, cursor, 8)) {
+              return false;
+            }
+            cursor += 8;
+          }
+        }
+        // LOD 0 is the normal high-detail presentation model. LOD 2 is
+        // intentionally omitted; it carries the same material bindings and
+        // would otherwise duplicate every recipe piece.
+        if (lod == 0 && model_id != 0) {
+          pieces.push_back(std::move(parsed));
+        }
+      }
+    }
+  }
+  structural_bytes = cursor;
+  if (pieces.empty() || pieces.size() > 64) {
+    return false;
+  }
+
+  // Full CAC recipes append 01 00000006, gender, mirrored RGB-block counts,
+  // then 44-byte tint records. This metadata is not required to locate
+  // assets, but validating it prevents a truncated network payload from
+  // being accepted as a complete recipe.
+  gender = 0;
+  if (!RangeValid(bytes, cursor, 14) ||
+      bytes[cursor] != 1 ||
+      ReadBe32(bytes, cursor + 1) != 6) {
+    return false;
+  }
+  gender = bytes[cursor + 5];
+  if (gender > 1) {
+    return false;
+  }
+  const std::uint32_t rgb_count_a =
+      ReadBe32(bytes, cursor + 6);
+  const std::uint32_t rgb_count_b =
+      ReadBe32(bytes, cursor + 10);
+  if (rgb_count_a != rgb_count_b || rgb_count_a > 64) {
+    return false;
+  }
+  cursor += 14;
+  const std::size_t rgb_bytes =
+      std::size_t(rgb_count_a) * 44;
+  if (!RangeValid(bytes, cursor, rgb_bytes)) {
+    return false;
+  }
+  cursor += rgb_bytes;
+  structural_bytes = cursor;
+  return true;
+}
+
+std::string AssetFileName(std::uint64_t id) {
+  std::ostringstream stream;
+  stream << "0x" << std::hex << std::nouppercase
+         << std::setw(16) << std::setfill('0') << id << ".rx2";
+  return stream.str();
+}
+
+std::uint32_t X360TiledX(
+    std::uint32_t offset, std::uint32_t width_units,
+    std::uint32_t texel_pitch) {
+  const std::uint32_t aligned_width =
+      (width_units + 31u) & ~31u;
+  const std::uint32_t log_bpp =
+      (texel_pitch >> 2) +
+      ((texel_pitch >> 1) >> (texel_pitch >> 2));
+  const std::uint32_t offset_b = offset << log_bpp;
+  const std::uint32_t offset_t =
+      ((offset_b & ~4095u) >> 3) +
+      ((offset_b & 1792u) >> 2) +
+      (offset_b & 63u);
+  const std::uint32_t offset_m =
+      offset_t >> (7 + log_bpp);
+  const std::uint32_t macro_x =
+      (offset_m % (aligned_width >> 5)) << 2;
+  const std::uint32_t tile =
+      (((offset_t >> (5 + log_bpp)) & 2u) +
+       (offset_b >> 6)) &
+      3u;
+  const std::uint32_t macro = (macro_x + tile) << 3;
+  const std::uint32_t micro =
+      ((((offset_t >> 1) & ~15u) + (offset_t & 15u)) &
+       ((texel_pitch << 3) - 1u)) >>
+      log_bpp;
+  return macro + micro;
+}
+
+std::uint32_t X360TiledY(
+    std::uint32_t offset, std::uint32_t width_units,
+    std::uint32_t texel_pitch) {
+  const std::uint32_t aligned_width =
+      (width_units + 31u) & ~31u;
+  const std::uint32_t log_bpp =
+      (texel_pitch >> 2) +
+      ((texel_pitch >> 1) >> (texel_pitch >> 2));
+  const std::uint32_t offset_b = offset << log_bpp;
+  const std::uint32_t offset_t =
+      ((offset_b & ~4095u) >> 3) +
+      ((offset_b & 1792u) >> 2) +
+      (offset_b & 63u);
+  const std::uint32_t offset_m =
+      offset_t >> (7 + log_bpp);
+  const std::uint32_t macro_y =
+      (offset_m / (aligned_width >> 5)) << 2;
+  const std::uint32_t tile =
+      ((offset_t >> (6 + log_bpp)) & 1u) +
+      ((offset_b & 2048u) >> 10);
+  const std::uint32_t macro = (macro_y + tile) << 3;
+  const std::uint32_t micro =
+      ((((offset_t &
+          (((texel_pitch << 6) - 1u) & ~31u)) +
+         ((offset_t & 15u) << 1)) >>
+        (3 + log_bpp)) &
+       ~1u);
+  return macro + micro + ((offset_t & 16u) >> 4);
+}
+
+bool DecodeRecipeTexture(
+    const std::filesystem::path& path,
+    std::uint64_t texture_id,
+    RecipeTexture& output) {
+  std::vector<std::uint8_t> bytes;
+  if (!ReadFile(path, bytes) || bytes.size() < 0x5C ||
+      !std::equal(
+          kRx2Magic.begin(), kRx2Magic.end(), bytes.begin())) {
+    return false;
+  }
+  const std::uint32_t section_count = ReadBe32(bytes, 0x20);
+  const std::uint32_t section_table = ReadBe32(bytes, 0x30);
+  const std::uint32_t data_base = ReadBe32(bytes, 0x44);
+  if (section_count < 2 || section_count > 128 ||
+      !RangeValid(
+          bytes, section_table,
+          std::size_t(section_count) * 24)) {
+    return false;
+  }
+  constexpr std::uint32_t kTextureInfo = 0x000200E8;
+  std::uint32_t data_offset = 0;
+  std::uint32_t data_bytes = 0;
+  std::uint32_t info_offset = 0;
+  bool found = false;
+  for (std::uint32_t index = 1;
+       index < section_count; ++index) {
+    const std::size_t record =
+        std::size_t(section_table) + std::size_t(index) * 24;
+    if (ReadBe32(bytes, record + 20) != kTextureInfo) {
+      continue;
+    }
+    const std::size_t previous = record - 24;
+    data_offset = ReadBe32(bytes, previous);
+    data_bytes = ReadBe32(bytes, previous + 8);
+    info_offset = ReadBe32(bytes, record);
+    found = true;
+    break;
+  }
+  if (!found || !RangeValid(bytes, info_offset, 40)) {
+    return false;
+  }
+  const std::uint8_t file_format = bytes[info_offset + 35];
+  const std::uint32_t height =
+      (std::uint32_t(bytes[info_offset + 37]) + 1u) * 8u;
+  const std::uint32_t width =
+      (std::uint32_t(ReadBe16(bytes, info_offset + 38)) + 1u) &
+      0x1FFFu;
+  std::uint32_t block_bytes = 0;
+  TextureFormat format;
+  if (file_format == 0x52) {
+    block_bytes = 8;
+    format = TextureFormat::kBc1;
+  } else if (file_format == 0x54) {
+    block_bytes = 16;
+    format = TextureFormat::kBc3;
+  } else {
+    REXLOG_WARN(
+        "multiplayer-assets: unsupported CAC texture format "
+        "id={:016X} format={:02X}",
+        texture_id, file_format);
+    return false;
+  }
+  if (width == 0 || height == 0 ||
+      width > 4096 || height > 4096) {
+    return false;
+  }
+  const std::uint32_t width_blocks = (width + 3u) >> 2;
+  const std::uint32_t height_blocks = (height + 3u) >> 2;
+  const std::size_t expected_bytes =
+      std::size_t(width_blocks) * height_blocks * block_bytes;
+  if (expected_bytes == 0 ||
+      expected_bytes > 64u * 1024u * 1024u ||
+      std::size_t(data_base) + data_offset >= bytes.size()) {
+    return false;
+  }
+  std::vector<std::uint8_t> tiled(expected_bytes);
+  const std::size_t source_offset =
+      std::size_t(data_base) + data_offset;
+  const std::size_t available =
+      bytes.size() - source_offset;
+  if (data_bytes < expected_bytes ||
+      available < expected_bytes) {
+    REXLOG_WARN(
+        "multiplayer-assets: incomplete CAC texture "
+        "id={:016X} dimensions={}x{} expected={} declared={} "
+        "available={} path={}",
+        texture_id, width, height, expected_bytes, data_bytes,
+        available, path.string());
+    return false;
+  }
+  std::copy_n(
+      bytes.begin() + source_offset, expected_bytes,
+      tiled.begin());
+  std::vector<std::uint8_t> linear(expected_bytes);
+  for (std::uint32_t y = 0; y < height_blocks; ++y) {
+    for (std::uint32_t x = 0; x < width_blocks; ++x) {
+      const std::uint32_t logical =
+          y * width_blocks + x;
+      const std::uint32_t tiled_x =
+          X360TiledX(logical, width_blocks, block_bytes);
+      const std::uint32_t tiled_y =
+          X360TiledY(logical, width_blocks, block_bytes);
+      const std::size_t destination =
+          (std::size_t(tiled_y) * width_blocks + tiled_x) *
+          block_bytes;
+      const std::size_t source =
+          std::size_t(logical) * block_bytes;
+      if (destination + block_bytes <= linear.size() &&
+          source + block_bytes <= tiled.size()) {
+        std::copy_n(
+            tiled.begin() + source, block_bytes,
+            linear.begin() + destination);
+      }
+    }
+  }
+  for (std::size_t index = 0;
+       index + 1 < linear.size(); index += 2) {
+    std::swap(linear[index], linear[index + 1]);
+  }
+  output = {};
+  output.texture_id = texture_id;
+  output.format = format;
+  output.width = width;
+  output.height = height;
+  output.row_pitch = width_blocks * block_bytes;
+  output.bytes = std::move(linear);
+  return true;
+}
+
 std::filesystem::path ConfiguredRoot() {
   const std::string configured =
       REXCVAR_GET(skate3_multiplayer_cac_asset_root);
@@ -648,6 +1046,8 @@ void ResetForRoot(const std::filesystem::path& root) {
   g_outer_torso = {};
   g_hair = {};
   g_loaded.clear();
+  g_recipe_meshes.clear();
+  g_recipe_textures.clear();
 }
 
 void ScanCategory(
@@ -702,6 +1102,126 @@ void ScanCategory(
 }
 
 }  // namespace
+
+bool ResolveRecipeAppearance(
+    const std::vector<std::uint8_t>& recipe,
+    bool load_textures,
+    RecipeAppearance& output) {
+  std::vector<ParsedRecipePiece> parsed_pieces;
+  std::size_t structural_bytes = 0;
+  std::uint8_t gender = 0;
+  if (!ParseRecipe(
+          recipe, parsed_pieces, structural_bytes, gender)) {
+    REXLOG_WARN(
+        "multiplayer-assets: rejected invalid or incomplete cas_db recipe "
+        "bytes={}",
+        recipe.size());
+    return false;
+  }
+  const std::filesystem::path root = ConfiguredRoot();
+  if (root.empty()) {
+    REXLOG_WARN(
+        "multiplayer-assets: cannot resolve cas_db recipe because the local "
+        "CAC asset root is not configured");
+    return false;
+  }
+  std::lock_guard lock(g_mutex);
+  ResetForRoot(root);
+
+  RecipeAppearance resolved;
+  resolved.gender = gender;
+  resolved.structural_bytes = structural_bytes;
+  resolved.pieces.reserve(parsed_pieces.size());
+  const std::filesystem::path texture_root =
+      root.parent_path().parent_path() / "texture";
+  const auto texture_for =
+      [&resolved, &texture_root, load_textures](
+          std::uint64_t texture_id) -> bool {
+        if (!load_textures || texture_id == 0 ||
+            resolved.textures.contains(texture_id)) {
+          return true;
+        }
+        auto cached = g_recipe_textures.find(texture_id);
+        if (cached == g_recipe_textures.end()) {
+          RecipeTexture decoded;
+          const std::filesystem::path path =
+              texture_root / AssetFileName(texture_id);
+          if (!DecodeRecipeTexture(path, texture_id, decoded)) {
+            REXLOG_WARN(
+                "multiplayer-assets: failed to decode recipe texture "
+                "id={:016X} path={}",
+                texture_id, path.string());
+            return false;
+          }
+          cached = g_recipe_textures.emplace(
+              texture_id, std::move(decoded)).first;
+        }
+        resolved.textures.emplace(texture_id, cached->second);
+        return true;
+      };
+  const auto channel =
+      [](const ParsedRecipePiece& piece,
+         std::string_view name) {
+        const auto found =
+            piece.textures.find(std::string(name));
+        return found == piece.textures.end()
+                   ? std::uint64_t{0}
+                   : found->second;
+      };
+  for (const ParsedRecipePiece& parsed : parsed_pieces) {
+    RecipePiece piece;
+    piece.category = parsed.category;
+    piece.asset_id = parsed.asset_id;
+    piece.model_id = parsed.model_id;
+    piece.material_id = parsed.material_id;
+    piece.diffuse_texture = channel(parsed, "diffuse");
+    piece.normal_texture = channel(parsed, "normal");
+    piece.alpha_texture = channel(parsed, "alpha");
+    piece.specular_texture = channel(parsed, "specular");
+
+    auto cached_mesh = g_recipe_meshes.find(parsed.model_id);
+    if (cached_mesh == g_recipe_meshes.end()) {
+      const std::filesystem::path path =
+          root / parsed.category /
+          AssetFileName(parsed.model_id);
+      ParsedLayout layout;
+      BindMesh mesh;
+      if (!ParseLayout(path, layout) ||
+          !DecodeBindMesh(path, layout, mesh)) {
+        REXLOG_WARN(
+            "multiplayer-assets: failed to decode recipe model "
+            "category={} id={:016X} path={}",
+            parsed.category, parsed.model_id, path.string());
+        continue;
+      }
+      cached_mesh = g_recipe_meshes.emplace(
+          parsed.model_id, std::move(mesh)).first;
+    }
+    piece.mesh = cached_mesh->second;
+    if (!texture_for(piece.diffuse_texture) ||
+        !texture_for(piece.normal_texture) ||
+        !texture_for(piece.alpha_texture) ||
+        !texture_for(piece.specular_texture)) {
+      REXLOG_WARN(
+          "multiplayer-assets: recipe piece has an incomplete required "
+          "texture category={} model={:016X}",
+          piece.category, piece.model_id);
+      return false;
+    }
+    resolved.pieces.push_back(std::move(piece));
+  }
+  if (resolved.pieces.empty()) {
+    return false;
+  }
+  REXLOG_INFO(
+      "multiplayer-assets: resolved cas_db recipe pieces={}/{} "
+      "textures={} structural_bytes={} gender={}",
+      resolved.pieces.size(), parsed_pieces.size(),
+      resolved.textures.size(), resolved.structural_bytes,
+      resolved.gender);
+  output = std::move(resolved);
+  return true;
+}
 
 bool ResolveRopaBindMesh(
     std::uint8_t character_family,

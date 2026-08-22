@@ -16,6 +16,7 @@
 #include <ostream>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include <rex/cvar.h>
@@ -79,6 +80,13 @@ REXCVAR_DEFINE_INT32(
     "retains at least two animation frames plus measured network jitter; "
     "larger values trade responsiveness for additional stability.")
     .range(0, 250)
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+REXCVAR_DEFINE_INT32(
+    skate3_multiplayer_animation_interpolation_mode, 2, "Skate 3",
+    "Remote skeletal interpolation diagnostic: 0 holds the latest complete "
+    "animation frame, 1 interpolates affine rotation/scale with linear "
+    "translation, and 2 uses pivot-preserving rigid interpolation.")
+    .range(0, 2)
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 REXCVAR_DEFINE_DOUBLE(
     skate3_multiplayer_relevance_radius, 80.0, "Skate 3",
@@ -242,9 +250,8 @@ constexpr std::uint16_t kMaximumAnimationFragments =
     kAnimationFragmentWords;
 constexpr std::uint32_t kAnimationKeyframeInterval = 20;
 constexpr std::uint16_t kAppearanceChunkBytes = 1024;
-// Transitional engine-owned appearance bundles can contain the sender's
-// already-decoded vanilla meshes and textures. This cap will shrink again
-// when the local vanilla asset catalogue replaces bundle transfer.
+// Recipe appearances are only a few KiB. Keep the larger compatibility cap
+// while older peers can still send assembled vanilla mesh/texture bundles.
 constexpr std::uint32_t kMaximumAppearanceBytes = 16 * 1024 * 1024;
 // Animation matrices stay inside a compact character-relative range. Fixed
 // point gives substantially more stable per-frame values than half floats at
@@ -256,6 +263,8 @@ constexpr float kAnimationQuaternionScale = 32767.0f;
 enum class AnimationTrackEncoding : std::uint16_t {
   kAffineRows = 0,
   kRigidQuaternion = 1,
+  kAffineRowsWideTranslation = 2,
+  kRigidQuaternionWideTranslation = 3,
 };
 
 #pragma pack(push, 1)
@@ -369,6 +378,7 @@ struct RemotePeerState {
   std::int64_t minimum_clock_offset_us =
       std::numeric_limits<std::int64_t>::max();
   bool clock_offset_valid = false;
+  std::uint32_t clock_rebase_count = 0;
   bool announced = false;
   std::int64_t animation_period_us = 50000;
   std::int64_t animation_jitter_us = 0;
@@ -673,7 +683,58 @@ float DequantizeSigned(std::uint16_t value, float scale) {
 }
 
 std::size_t TrackWordStride(AnimationTrackEncoding encoding) {
-  return encoding == AnimationTrackEncoding::kRigidQuaternion ? 7u : 12u;
+  switch (encoding) {
+    case AnimationTrackEncoding::kRigidQuaternion:
+      return 7u;
+    case AnimationTrackEncoding::kAffineRowsWideTranslation:
+      return 15u;
+    case AnimationTrackEncoding::kRigidQuaternionWideTranslation:
+      return 10u;
+    case AnimationTrackEncoding::kAffineRows:
+    default:
+      return 12u;
+  }
+}
+
+bool RigidTrackEncoding(AnimationTrackEncoding encoding) {
+  return encoding == AnimationTrackEncoding::kRigidQuaternion ||
+         encoding ==
+             AnimationTrackEncoding::kRigidQuaternionWideTranslation;
+}
+
+bool WideTranslationTrackEncoding(AnimationTrackEncoding encoding) {
+  return encoding ==
+             AnimationTrackEncoding::kAffineRowsWideTranslation ||
+         encoding ==
+             AnimationTrackEncoding::kRigidQuaternionWideTranslation;
+}
+
+void AppendI32(std::vector<std::uint16_t>& words,
+               std::int32_t value) {
+  const std::uint32_t bits =
+      static_cast<std::uint32_t>(value);
+  words.push_back(static_cast<std::uint16_t>(bits));
+  words.push_back(static_cast<std::uint16_t>(bits >> 16));
+}
+
+std::int32_t QuantizeSignedWide(float value, float scale) {
+  const double scaled =
+      static_cast<double>(value) * static_cast<double>(scale);
+  return static_cast<std::int32_t>(std::clamp(
+      std::llround(scaled),
+      static_cast<long long>(
+          std::numeric_limits<std::int32_t>::min()),
+      static_cast<long long>(
+          std::numeric_limits<std::int32_t>::max())));
+}
+
+float DequantizeSignedWide(const std::uint16_t* words, float scale) {
+  const std::uint32_t bits =
+      static_cast<std::uint32_t>(words[0]) |
+      (static_cast<std::uint32_t>(words[1]) << 16);
+  return static_cast<float>(
+             static_cast<std::int32_t>(bits)) /
+         scale;
 }
 
 bool QuantizeAnimationTrack(
@@ -691,12 +752,31 @@ bool QuantizeAnimationTrack(
           source.bone_rows.size() / 12,
           kMaximumAnimationBones));
   bool rigid = true;
+  bool wide_translation = false;
+  float maximum_relative_translation = 0.0f;
   std::vector<Quaternion> rotations(output.bone_count);
   for (std::size_t bone = 0; bone < output.bone_count; ++bone) {
+    const float* rows =
+        source.bone_rows.data() + bone * 12;
+    for (std::size_t axis = 0; axis < 3; ++axis) {
+      const float relative_translation =
+          rows[axis * 4 + 3] - root_position[axis];
+      if (!std::isfinite(relative_translation)) {
+        return false;
+      }
+      maximum_relative_translation = std::max(
+          maximum_relative_translation,
+          std::fabs(relative_translation));
+      wide_translation =
+          wide_translation ||
+          std::fabs(relative_translation) *
+                  kAnimationTranslationScale >
+              static_cast<float>(
+                  std::numeric_limits<std::int16_t>::max());
+    }
     float scale[3];
     if (!DecomposeAffineRotationScale(
-            source.bone_rows.data() + bone * 12,
-            rotations[bone], scale) ||
+            rows, rotations[bone], scale) ||
         std::fabs(scale[0] - 1.0f) > 0.01f ||
         std::fabs(scale[1] - 1.0f) > 0.01f ||
         std::fabs(scale[2] - 1.0f) > 0.01f) {
@@ -705,8 +785,29 @@ bool QuantizeAnimationTrack(
     }
   }
   output.encoding =
-      rigid ? AnimationTrackEncoding::kRigidQuaternion
-            : AnimationTrackEncoding::kAffineRows;
+      rigid
+          ? (wide_translation
+                 ? AnimationTrackEncoding::
+                       kRigidQuaternionWideTranslation
+                 : AnimationTrackEncoding::kRigidQuaternion)
+          : (wide_translation
+                 ? AnimationTrackEncoding::
+                       kAffineRowsWideTranslation
+                 : AnimationTrackEncoding::kAffineRows);
+  if (wide_translation) {
+    static std::mutex s_wide_track_log_mutex;
+    static std::unordered_set<std::uint32_t>
+        s_wide_track_logs;
+    std::lock_guard<std::mutex> lock(
+        s_wide_track_log_mutex);
+    if (s_wide_track_logs.insert(source.mesh_key).second) {
+      REXLOG_INFO(
+          "multiplayer-animation-wide-track: key={:08X} "
+          "bones={} max_relative_translation={:.3f}",
+          source.mesh_key, output.bone_count,
+          maximum_relative_translation);
+    }
+  }
   output.words.reserve(
       std::size_t(output.bone_count) *
       TrackWordStride(output.encoding));
@@ -722,15 +823,21 @@ bool QuantizeAnimationTrack(
           QuantizeSigned(rotation.z, kAnimationQuaternionScale));
       output.words.push_back(
           QuantizeSigned(rotation.w, kAnimationQuaternionScale));
-      output.words.push_back(QuantizeSigned(
-          rows[3] - root_position[0],
-          kAnimationTranslationScale));
-      output.words.push_back(QuantizeSigned(
-          rows[7] - root_position[1],
-          kAnimationTranslationScale));
-      output.words.push_back(QuantizeSigned(
-          rows[11] - root_position[2],
-          kAnimationTranslationScale));
+      for (std::size_t axis = 0; axis < 3; ++axis) {
+        const float relative_translation =
+            rows[axis * 4 + 3] - root_position[axis];
+        if (wide_translation) {
+          AppendI32(
+              output.words,
+              QuantizeSignedWide(
+                  relative_translation,
+                  kAnimationTranslationScale));
+        } else {
+          output.words.push_back(QuantizeSigned(
+              relative_translation,
+              kAnimationTranslationScale));
+        }
+      }
       continue;
     }
     for (std::size_t component = 0; component < 12; ++component) {
@@ -738,10 +845,20 @@ bool QuantizeAnimationTrack(
         return false;
       }
       if (component == 3 || component == 7 || component == 11) {
-        output.words.push_back(QuantizeSigned(
+        const float relative_translation =
             rows[component] -
-                root_position[(component - 3) / 4],
-            kAnimationTranslationScale));
+            root_position[(component - 3) / 4];
+        if (wide_translation) {
+          AppendI32(
+              output.words,
+              QuantizeSignedWide(
+                  relative_translation,
+                  kAnimationTranslationScale));
+        } else {
+          output.words.push_back(QuantizeSigned(
+              relative_translation,
+              kAnimationTranslationScale));
+        }
       } else {
         output.words.push_back(
             QuantizeSigned(rows[component], kAnimationBasisScale));
@@ -914,7 +1031,12 @@ bool DecodeAnimationFrameWords(
         track.bone_count > kMaximumAnimationBones ||
         (track.encoding != AnimationTrackEncoding::kAffineRows &&
          track.encoding !=
-             AnimationTrackEncoding::kRigidQuaternion)) {
+             AnimationTrackEncoding::kRigidQuaternion &&
+         track.encoding !=
+             AnimationTrackEncoding::kAffineRowsWideTranslation &&
+         track.encoding !=
+             AnimationTrackEncoding::
+                 kRigidQuaternionWideTranslation)) {
       return false;
     }
     const std::size_t stride =
@@ -986,8 +1108,7 @@ bool DecodeAnimationFrameWords(
           track.words.data() + bone * stride;
       float* rows =
           decoded.bone_rows.data() + bone * 12;
-      if (track.encoding ==
-          AnimationTrackEncoding::kRigidQuaternion) {
+      if (RigidTrackEncoding(track.encoding)) {
         Quaternion rotation{
             DequantizeSigned(
                 source[0], kAnimationQuaternionScale),
@@ -1008,27 +1129,43 @@ bool DecodeAnimationFrameWords(
             rows[row * 4 + column] =
                 rotation_matrix[row * 3 + column];
           }
+          const std::size_t translation_offset =
+              WideTranslationTrackEncoding(track.encoding)
+                  ? 4 + row * 2
+                  : 4 + row;
           rows[row * 4 + 3] =
               root_position[row] +
-              DequantizeSigned(
-                  source[4 + row],
-                  kAnimationTranslationScale);
+              (WideTranslationTrackEncoding(track.encoding)
+                   ? DequantizeSignedWide(
+                         source + translation_offset,
+                         kAnimationTranslationScale)
+                   : DequantizeSigned(
+                         source[translation_offset],
+                         kAnimationTranslationScale));
         }
       } else {
+        std::size_t source_component = 0;
         for (std::size_t component = 0;
              component < 12; ++component) {
           if (component == 3 || component == 7 ||
               component == 11) {
             rows[component] =
                 root_position[(component - 3) / 4] +
-                DequantizeSigned(
-                    source[component],
-                    kAnimationTranslationScale);
+                (WideTranslationTrackEncoding(track.encoding)
+                     ? DequantizeSignedWide(
+                           source + source_component,
+                           kAnimationTranslationScale)
+                     : DequantizeSigned(
+                           source[source_component],
+                           kAnimationTranslationScale));
+            source_component +=
+                WideTranslationTrackEncoding(track.encoding) ? 2 : 1;
           } else {
             rows[component] =
                 DequantizeSigned(
-                    source[component],
+                    source[source_component],
                     kAnimationBasisScale);
+            ++source_component;
           }
         }
       }
@@ -1811,7 +1948,7 @@ class Runtime {
       RemotePeerState& peer = remote_peers_.at(remote_role);
       RemotePlayer remote;
       remote.role = remote_role;
-      if (!SmoothRemote(peer, now, remote.pose)) {
+      if (!SmoothRemote(remote_role, peer, now, remote.pose)) {
         continue;
       }
       SmoothRemoteAnimation(
@@ -1952,7 +2089,7 @@ class Runtime {
         telemetry_.animation_present_held_oldest,
         last_rate_snapshot_.animation_present_held_oldest);
     REXLOG_INFO(
-        "multiplayer-net: role={} peers={} visible={} quality={} "
+        "multiplayer-net: role={} peers={} visible={} quality={} interp={} "
         "rates={}/{}Hz tx={:.1f}KiB/s "
         "rx={:.1f}KiB/s tx={:.1f}pps rx={:.1f}pps anim={:.1f}/{:.1f}fps "
         "bones={} relay={:.1f}pps relevance_drop={:.1f}pps rejected={} "
@@ -1960,6 +2097,7 @@ class Runtime {
         "timing={:.1f}ms jitter={:.1f}ms buffered={}",
         bound_role_, telemetry_.known_peers,
         telemetry_.visible_players, NetworkQualityName(network_tuning_),
+        REXCVAR_GET(skate3_multiplayer_animation_interpolation_mode),
         network_tuning_.pose_rate, network_tuning_.animation_rate,
         tx_kib, rx_kib, tx_pps, rx_pps,
         animation_tx_fps, animation_rx_fps,
@@ -3134,11 +3272,13 @@ class Runtime {
 #endif
   }
 
-  bool SmoothRemote(RemotePeerState& peer, Clock::time_point now,
-                    RemotePose& out) {
-    const auto interpolation_delay = std::chrono::microseconds(
+  bool SmoothRemote(std::uint32_t remote_role, RemotePeerState& peer,
+                    Clock::time_point now, RemotePose& out) {
+    const std::int64_t interpolation_delay_us =
         PresentationDelayMicroseconds(
-            peer, network_tuning_.interpolation_ms));
+            peer, network_tuning_.interpolation_ms);
+    const auto interpolation_delay =
+        std::chrono::microseconds(interpolation_delay_us);
     while (!peer.samples.empty() &&
            now - peer.samples.front().received_at >
                kRemoteTimeout + interpolation_delay) {
@@ -3151,11 +3291,59 @@ class Runtime {
     }
     const std::int64_t local_now_us =
         static_cast<std::int64_t>(NowMicroseconds());
+    if (peer.clock_offset_valid &&
+        peer.animation_samples.size() >= 2 &&
+        peer.minimum_clock_offset_us !=
+            std::numeric_limits<std::int64_t>::max() &&
+        peer.minimum_clock_offset_us < peer.clock_offset_us) {
+      constexpr std::int64_t kClockRebaseThresholdUs = 2000;
+      const std::int64_t oldest_animation_time_us =
+          static_cast<std::int64_t>(
+              peer.animation_samples.front().pose.sender_time_us);
+      const std::int64_t newest_animation_time_us =
+          static_cast<std::int64_t>(
+              peer.animation_samples.back().pose.sender_time_us);
+      const std::int64_t current_target_time_us =
+          local_now_us - peer.clock_offset_us -
+          interpolation_delay_us;
+      const std::int64_t rebased_target_time_us =
+          local_now_us - peer.minimum_clock_offset_us -
+          interpolation_delay_us;
+      // A delayed first pose can seed the clock offset far above the clean
+      // session minimum. The normal 0.25 ms-per-packet slew then leaves both
+      // root and skeleton playback pinned to the oldest buffered frame for
+      // minutes. Rebase only when the current cursor is demonstrably behind
+      // the retained animation timeline and the best observed offset would
+      // place it inside that same timeline.
+      if (current_target_time_us + kClockRebaseThresholdUs <
+              oldest_animation_time_us &&
+          rebased_target_time_us + kClockRebaseThresholdUs >=
+              oldest_animation_time_us &&
+          rebased_target_time_us <=
+              newest_animation_time_us +
+                  kClockRebaseThresholdUs) {
+        const std::int64_t previous_offset_us =
+            peer.clock_offset_us;
+        peer.clock_offset_us =
+            peer.minimum_clock_offset_us;
+        if (peer.clock_rebase_count < 4) {
+          REXLOG_INFO(
+              "multiplayer-clock: receiver={} remote={} rebased "
+              "offset={:.1f}->{:.1f}ms stale={:.1f}ms",
+              bound_role_, remote_role,
+              static_cast<double>(previous_offset_us) / 1000.0,
+              static_cast<double>(peer.clock_offset_us) / 1000.0,
+              static_cast<double>(
+                  oldest_animation_time_us -
+                  current_target_time_us) /
+                  1000.0);
+        }
+        ++peer.clock_rebase_count;
+      }
+    }
     const std::int64_t target_sender_time_us =
         local_now_us - peer.clock_offset_us -
-        std::chrono::duration_cast<std::chrono::microseconds>(
-            interpolation_delay)
-            .count();
+        interpolation_delay_us;
     if (target_sender_time_us <=
         static_cast<std::int64_t>(
             peer.samples.front().sender_time_us)) {
@@ -3357,15 +3545,23 @@ class Runtime {
               second_track.bone_rows.data() + bone * 12;
           float* output_bone =
               output.bone_rows.data() + bone * 12;
-          // Every transmitted row is a model-to-world skinning affine, not
-          // an independently positioned joint. Its translation includes the
-          // inverse-bind pivot compensation (p - R*p), so interpolating
-          // rotation and translation independently lets rigidly weighted
-          // shoes, hats and hair orbit away from the body between samples.
-          // Use the same pivot-preserving SE(3) interpolation for the
-          // canonical skeleton and the post-skeleton exception tracks.
-          InterpolateAttachmentAffine(
-              first_bone, second_bone, amount, output_bone);
+          const std::int32_t interpolation_mode = std::clamp(
+              REXCVAR_GET(
+                  skate3_multiplayer_animation_interpolation_mode),
+              0, 2);
+          if (interpolation_mode == 0) {
+            std::copy_n(second_bone, 12, output_bone);
+          } else if (interpolation_mode == 1) {
+            InterpolateAffine(
+                first_bone, second_bone, amount, output_bone);
+          } else {
+            // Every transmitted row is a model-to-world skinning affine,
+            // not an independently positioned joint. Its translation
+            // includes inverse-bind pivot compensation (p - R*p), so this
+            // path interpolates the complete rigid transform on SE(3).
+            InterpolateAttachmentAffine(
+                first_bone, second_bone, amount, output_bone);
+          }
         }
       }
       for (std::size_t bone = 0;

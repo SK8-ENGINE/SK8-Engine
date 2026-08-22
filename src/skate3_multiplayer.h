@@ -45,11 +45,11 @@ struct AnimationPose {
   std::vector<AnimationTrack> tracks;
 };
 
-// Versioned engine-owned appearance payload. The current bootstrap format is
-// a one-time bundle of the sender's assembled vanilla meshes and textures.
-// Runtime animation remains a separate compact stream. A local vanilla asset
-// catalogue will replace this bundle with asset IDs without changing remote
-// renderer ownership.
+// Versioned engine-owned appearance payload. The primary format carries the
+// sender's compact CAC recipe plus animation-binding metadata; the receiver
+// resolves meshes and textures from its local vanilla asset catalogue.
+// Runtime animation remains a separate compact stream. The older assembled
+// mesh/texture bundle remains readable as a compatibility fallback.
 struct AppearanceBlob {
   std::uint64_t identity = 0;
   std::shared_ptr<const std::vector<std::uint8_t>> bytes;
