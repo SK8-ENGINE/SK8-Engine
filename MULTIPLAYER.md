@@ -96,7 +96,9 @@ AppID and follow Valve's setup and redistributable requirements.
   tracks for small or post-processed attachments such as the hat and wheels.
   Affine components use signed 16-bit fixed point with root-relative
   translations, are fragmented into bounded datagrams, reassembled, buffered,
-  and interpolated at 20 frames per second on Balanced.
+  and interpolated at 60 frames per second on Balanced. The higher sampling
+  rate preserves fast rotations such as a freely rolling skateboard wheel;
+  20 Hz can cross the 180-degree ambiguity between orientation samples.
 - The sender publishes a versioned engine-owned appearance recipe. The
   receiver resolves exact vanilla CAC bind meshes from its local asset
   catalogue and installs the sender's body, clothing, hair, accessories,
@@ -119,8 +121,8 @@ Open **Escape → Multiplayer → Network Quality**:
 | Preset | Root pose | Animation | Interpolation | Detail radius | Nearby players |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | Bandwidth Saver | 30 Hz | 10 Hz | 100 ms | 50 m | 6 |
-| Balanced | 60 Hz | 20 Hz | 50 ms | 80 m | 12 |
-| High Fidelity | 90 Hz | 30 Hz | 35 ms | 120 m | 16 |
+| Balanced | 60 Hz | 60 Hz | 50 ms | 80 m | 12 |
+| High Fidelity | 90 Hz | 60 Hz | 35 ms | 120 m | 16 |
 
 **Auto** chooses High Fidelity for up to 4 participants, Balanced for 5-12,
 and Bandwidth Saver above 12. **Custom** exposes the individual rates,
@@ -188,16 +190,16 @@ relay, not 100 simultaneous full animation streams or internet conditions.
 
 ## Measured skeletal-stream cost
 
-A two-real-client protocol-v11 Balanced run on 2026-08-21 delivered about
-19.2 complete animation frames per second and settled around 69-75 KiB/s and
-123-133 packets/s in each direction for one nearby detailed skater. Both
-processes reported zero socket failures. Appearance transfer is a separate
-one-time burst when a player first joins or changes outfit.
+A two-real-client protocol-v11 Balanced-equivalent 60 Hz run on 2026-08-22
+delivered about 54-56 complete animation frames per second and settled around
+274-280 KiB/s and 326-335 packets/s in each direction for one nearby detailed
+skater. Both processes reported zero socket failures. Appearance transfer is
+a separate one-time burst when a player first joins or changes outfit.
 
 Steam sessions now use direct peer fan-out. With ten players all mutually
 nearby, each player uploads one detailed stream to nine peers and receives
 nine streams: using the measured Balanced localhost payload as a planning
-estimate, about 650 KiB/s (roughly 5.3 Mbit/s) in each direction before Steam
+estimate, about 2.5 MiB/s (roughly 20 Mbit/s) in each direction before Steam
 transport overhead and appearance bootstrap traffic. No lobby owner carries
 the other players' streams. This is a far healthier ten-player topology, but
 it still grows approximately with the square of the nearby player count

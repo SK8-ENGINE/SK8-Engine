@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.1.0-preview.11 - 2026-08-22
+
+- Replaced multi-megabyte remote appearance transfers with compact
+  recipe-driven custom skaters resolved from each player's local vanilla
+  Create-a-Skater catalogue.
+- Fixed remote clothing, hair, hats, shoes, and boards so their final animated
+  palettes remain coupled to the correct remote skater.
+- Preserved the real detached-board animation tracks after a skater throws or
+  drops the board instead of making the board follow the walking skater.
+- Raised normal multiplayer skeletal sampling to 60 Hz, removing the
+  orientation aliasing that made freely rolling skateboard wheels glitch
+  between network frames.
+- Fixed custom maps without baked-indirect textures being rendered with
+  excessive brightness.
+
 ## 0.1.0-preview.10 - 2026-08-21
 
 - Restored the Blender-owned map generators, included Feature Park artifacts,

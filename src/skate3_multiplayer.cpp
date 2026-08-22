@@ -69,7 +69,7 @@ REXCVAR_DEFINE_INT32(
     .range(10, 120)
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 REXCVAR_DEFINE_INT32(
-    skate3_multiplayer_local_animation_rate, 20, "Skate 3",
+    skate3_multiplayer_local_animation_rate, 60, "Skate 3",
     "Custom-preset completed skeletal-pose frames sent per second by the "
     "multiplayer transport.")
     .range(10, 60)
@@ -129,7 +129,7 @@ enum class NetworkQualityPreset : std::int32_t {
 
 struct NetworkTuning {
   std::int32_t pose_rate = 60;
-  std::int32_t animation_rate = 20;
+  std::int32_t animation_rate = 60;
   std::int32_t interpolation_ms = 50;
   float relevance_radius = 80.0f;
   float attachment_radius = 35.0f;
@@ -171,7 +171,7 @@ NetworkTuning ResolveNetworkTuning(std::size_t participant_count) {
       break;
     case NetworkQualityPreset::kHighFidelity:
       tuning.pose_rate = 90;
-      tuning.animation_rate = 30;
+      tuning.animation_rate = 60;
       tuning.interpolation_ms = 35;
       tuning.relevance_radius = 120.0f;
       tuning.attachment_radius = 50.0f;
