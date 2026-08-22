@@ -9553,6 +9553,17 @@ multiplayer::AppearanceBlob BuildLocalRecipeAppearanceBlob(
     NetworkRecipeAppearanceBinding wire;
     std::vector<uint16_t> remap;
   };
+  // Dynamic character pieces are not guaranteed to submit on every rendered
+  // frame. Retain the most recently matched animation binding for each recipe
+  // model so a transiently absent deck, truck, wheel, or garment does not
+  // replace its real sender track key with zero and churn the appearance.
+  static uint64_t cached_binding_recipe_identity = 0;
+  static std::unordered_map<uint64_t, BindingBuild>
+      cached_bindings;
+  if (cached_binding_recipe_identity != recipe_identity) {
+    cached_binding_recipe_identity = recipe_identity;
+    cached_bindings.clear();
+  }
   std::vector<BindingBuild> bindings;
   bindings.reserve(cached_recipe.pieces.size());
   std::unordered_set<uint32_t> used_meshes;
@@ -9612,6 +9623,12 @@ multiplayer::AppearanceBlob BuildLocalRecipeAppearanceBlob(
             rig.palette_to_canonical.begin(),
             rig.palette_to_canonical.end());
       }
+    } else {
+      const auto cached_binding =
+          cached_bindings.find(recipe_piece.model_id);
+      if (cached_binding != cached_bindings.end()) {
+        binding = cached_binding->second;
+      }
     }
     if (binding.remap.empty()) {
       binding.remap =
@@ -9622,6 +9639,9 @@ multiplayer::AppearanceBlob BuildLocalRecipeAppearanceBlob(
     }
     binding.wire.remap_count =
         static_cast<uint16_t>(binding.remap.size());
+    if (match != nullptr) {
+      cached_bindings[recipe_piece.model_id] = binding;
+    }
     bindings.push_back(std::move(binding));
   }
   if (bindings.empty()) {
@@ -11779,6 +11799,14 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
   bool local_animation_root_anchored = false;
   std::vector<const DrawItem*> local_player_items;
   float local_board_position[3] = {};
+  trick_pipeline::LiveSpatialSnapshot local_spatial;
+  const bool have_local_spatial =
+      trick_pipeline::CurrentLiveSpatialSnapshot(
+          local_spatial);
+  const bool local_skater_offboard =
+      have_local_spatial &&
+      local_spatial.board_state_flags != 0xFFFFFFFFu &&
+      (local_spatial.board_state_flags & 0x7u) != 0;
   if (trick_pipeline::CurrentLocalBoardPosition(local_board_position)) {
     std::memcpy(
         local_animation.root_position, local_board_position,
@@ -11820,9 +11848,43 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
       const float dx = anchor[0] - local_board_position[0];
       const float dy = anchor[1] - local_board_position[1];
       const float dz = anchor[2] - local_board_position[2];
-      if (!std::isfinite(dx) || !std::isfinite(dy) ||
-          !std::isfinite(dz) || dx * dx + dy * dy + dz * dz > 16.0f) {
+      const bool finite_distance =
+          std::isfinite(dx) && std::isfinite(dy) &&
+          std::isfinite(dz);
+      const float distance_squared =
+          finite_distance
+              ? dx * dx + dy * dy + dz * dz
+              : std::numeric_limits<float>::infinity();
+      bool detached_board_piece = false;
+      if (local_skater_offboard && finite_distance &&
+          distance_squared > 16.0f && item.skinned) {
+        native_palette::CanonicalRigSample board_rig;
+        detached_board_piece =
+            native_palette::LookupCanonicalRig(
+                item.ctx, item.mesh, board_rig) &&
+            std::any_of(
+                board_rig.palette_to_canonical.begin(),
+                board_rig.palette_to_canonical.end(),
+                [](std::size_t canonical_bone) {
+                  return canonical_bone >= 25 &&
+                         canonical_bone <= 31;
+                });
+      }
+      if (!finite_distance ||
+          (distance_squared > 16.0f &&
+           !detached_board_piece)) {
         continue;
+      }
+      if (detached_board_piece) {
+        static bool s_logged_detached_board_bypass = false;
+        if (!s_logged_detached_board_bypass) {
+          s_logged_detached_board_bypass = true;
+          REXLOG_INFO(
+              "multiplayer-detached-board-capture: "
+              "mesh={:08X} distance={:.3f} "
+              "ownership_filter=bypassed",
+              item.mesh, std::sqrt(distance_squared));
+        }
       }
       local_player_items.push_back(&item);
       if (!item.skinned || item.bones.empty() ||
@@ -12270,229 +12332,6 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
     }
   }
 
-  // The player-board palette exposed by the retained scene can lag or select
-  // a different board submission while skating. Anchor its complete hierarchy
-  // to the authoritative local board body before transmission. This correction
-  // is board-only: character and clothing tracks keep their captured matrices.
-  float board_palette_to_spatial[12] = {};
-  bool board_palette_to_spatial_valid = false;
-  {
-    static auto s_last_board_capture_log =
-        std::chrono::steady_clock::time_point{};
-    const auto now = std::chrono::steady_clock::now();
-    trick_pipeline::LiveSpatialSnapshot board_spatial;
-    if (trick_pipeline::CurrentLiveSpatialSnapshot(
-            board_spatial)) {
-      for (const DrawItem* item : local_player_items) {
-        if (item == nullptr || !item->skinned ||
-            item->bones.empty() ||
-            item->bones.size() % 12 != 0) {
-          continue;
-        }
-        native_palette::CanonicalRigSample rig;
-        if (!native_palette::LookupCanonicalRig(
-                item->ctx, item->mesh, rig)) {
-          continue;
-        }
-        const auto skateboard_root = std::find(
-            rig.palette_to_canonical.begin(),
-            rig.palette_to_canonical.end(),
-            std::uint16_t{25});
-        if (skateboard_root ==
-            rig.palette_to_canonical.end()) {
-          continue;
-        }
-        const std::size_t palette_bone =
-            static_cast<std::size_t>(
-                skateboard_root -
-                rig.palette_to_canonical.begin());
-        if ((palette_bone + 1) * 12 >
-            item->bones.size()) {
-          continue;
-        }
-        const float* root =
-            item->bones.data() + palette_bone * 12;
-        float target_x[3] = {
-            std::bit_cast<float>(
-                board_spatial.x_axis_bits[0]),
-            std::bit_cast<float>(
-                board_spatial.x_axis_bits[1]),
-            std::bit_cast<float>(
-                board_spatial.x_axis_bits[2])};
-        float target_z[3] = {
-            std::bit_cast<float>(
-                board_spatial.z_axis_bits[0]),
-            std::bit_cast<float>(
-                board_spatial.z_axis_bits[1]),
-            std::bit_cast<float>(
-                board_spatial.z_axis_bits[2])};
-        const auto normalize_axis = [](float axis[3]) {
-          const float length_squared =
-              axis[0] * axis[0] +
-              axis[1] * axis[1] +
-              axis[2] * axis[2];
-          if (!std::isfinite(length_squared) ||
-              length_squared < 1.0e-8f) {
-            return false;
-          }
-          const float inverse_length =
-              1.0f / std::sqrt(length_squared);
-          axis[0] *= inverse_length;
-          axis[1] *= inverse_length;
-          axis[2] *= inverse_length;
-          return true;
-        };
-        if (!normalize_axis(target_x)) {
-          continue;
-        }
-        const float projection =
-            target_z[0] * target_x[0] +
-            target_z[1] * target_x[1] +
-            target_z[2] * target_x[2];
-        for (std::size_t component = 0;
-             component < 3; ++component) {
-          target_z[component] -=
-              target_x[component] * projection;
-        }
-        if (!normalize_axis(target_z)) {
-          continue;
-        }
-        const float target_y[3] = {
-            target_z[1] * target_x[2] -
-                target_z[2] * target_x[1],
-            target_z[2] * target_x[0] -
-                target_z[0] * target_x[2],
-            target_z[0] * target_x[1] -
-                target_z[1] * target_x[0]};
-        const float determinant =
-            root[0] *
-                    (root[5] * root[10] -
-                     root[6] * root[9]) -
-            root[1] *
-                    (root[4] * root[10] -
-                     root[6] * root[8]) +
-            root[2] *
-                    (root[4] * root[9] -
-                     root[5] * root[8]);
-        if (!std::isfinite(determinant) ||
-            std::fabs(determinant) < 1.0e-8f) {
-          continue;
-        }
-        const float inverse_determinant =
-            1.0f / determinant;
-        const float inverse_source[9] = {
-            (root[5] * root[10] -
-             root[6] * root[9]) * inverse_determinant,
-            (root[2] * root[9] -
-             root[1] * root[10]) * inverse_determinant,
-            (root[1] * root[6] -
-             root[2] * root[5]) * inverse_determinant,
-            (root[6] * root[8] -
-             root[4] * root[10]) * inverse_determinant,
-            (root[0] * root[10] -
-             root[2] * root[8]) * inverse_determinant,
-            (root[2] * root[4] -
-             root[0] * root[6]) * inverse_determinant,
-            (root[4] * root[9] -
-             root[5] * root[8]) * inverse_determinant,
-            (root[1] * root[8] -
-             root[0] * root[9]) * inverse_determinant,
-            (root[0] * root[5] -
-             root[1] * root[4]) * inverse_determinant};
-        const float* target_axes[3] = {
-            target_x, target_y, target_z};
-        for (std::size_t row = 0; row < 3; ++row) {
-          for (std::size_t column = 0;
-               column < 3; ++column) {
-            board_palette_to_spatial[
-                row * 4 + column] = 0.0f;
-            for (std::size_t inner = 0;
-                 inner < 3; ++inner) {
-              board_palette_to_spatial[
-                  row * 4 + column] +=
-                  target_axes[inner][row] *
-                  inverse_source[
-                      inner * 3 + column];
-            }
-          }
-          board_palette_to_spatial[row * 4 + 3] =
-              std::bit_cast<float>(
-                  board_spatial.position_bits[row]);
-          for (std::size_t column = 0;
-               column < 3; ++column) {
-            board_palette_to_spatial[row * 4 + 3] -=
-                board_palette_to_spatial[
-                    row * 4 + column] *
-                root[column * 4 + 3];
-          }
-        }
-        board_palette_to_spatial_valid = true;
-        if (now - s_last_board_capture_log >=
-            std::chrono::seconds(1)) {
-          REXLOG_INFO(
-              "multiplayer-board-capture: mesh={:08X} "
-              "palette_root=({:.4f},{:.4f},{:.4f}) "
-              "physics_root=({:.4f},{:.4f},{:.4f}) "
-              "palette_x=({:.3f},{:.3f},{:.3f}) "
-              "physics_x=({:.3f},{:.3f},{:.3f}) "
-              "corrected=1",
-              item->mesh,
-              root[3], root[7], root[11],
-              std::bit_cast<float>(
-                  board_spatial.position_bits[0]),
-              std::bit_cast<float>(
-                  board_spatial.position_bits[1]),
-              std::bit_cast<float>(
-                  board_spatial.position_bits[2]),
-              root[0], root[4], root[8],
-              target_x[0], target_x[1], target_x[2]);
-          s_last_board_capture_log = now;
-        }
-        break;
-      }
-    }
-  }
-
-  const auto correct_board_palette =
-      [&board_palette_to_spatial,
-       board_palette_to_spatial_valid](
-          std::vector<float>& rows) {
-        if (!board_palette_to_spatial_valid ||
-            rows.empty() || rows.size() % 12 != 0) {
-          return;
-        }
-        for (std::size_t bone = 0;
-             bone < rows.size() / 12; ++bone) {
-          const float* source =
-              rows.data() + bone * 12;
-          float corrected[12] = {};
-          for (std::size_t row = 0; row < 3; ++row) {
-            for (std::size_t column = 0;
-                 column < 3; ++column) {
-              for (std::size_t inner = 0;
-                   inner < 3; ++inner) {
-                corrected[row * 4 + column] +=
-                    board_palette_to_spatial[
-                        row * 4 + inner] *
-                    source[inner * 4 + column];
-              }
-            }
-            corrected[row * 4 + 3] =
-                board_palette_to_spatial[row * 4 + 3];
-            for (std::size_t inner = 0;
-                 inner < 3; ++inner) {
-              corrected[row * 4 + 3] +=
-                  board_palette_to_spatial[
-                      row * 4 + inner] *
-                  source[inner * 4 + 3];
-            }
-          }
-          std::copy_n(
-              corrected, 12,
-              rows.begin() + bone * 12);
-        }
-      };
-
   // Send the final rendered palette for each ordinary skinned piece alongside
   // the coherent canonical fallback. Exact sender-owned appearance tracks
   // take precedence on the receiver.
@@ -12537,32 +12376,19 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
       }
       weighted_rows = std::min(
           weighted_rows, item->bones.size() / 12);
-      native_palette::CanonicalRigSample rig;
-      const bool skateboard_piece =
-          native_palette::LookupCanonicalRig(
-              item->ctx, item->mesh, rig) &&
-          std::any_of(
-              rig.palette_to_canonical.begin(),
-              rig.palette_to_canonical.end(),
-              [](std::size_t canonical_bone) {
-                return canonical_bone >= 25 &&
-                       canonical_bone <= 31;
-              });
       // Capture every live final palette as an exact track. The canonical
       // hierarchy remains in the packet for bind-skinned ROPA and fallback,
       // but a sender-owned appearance piece should consume the exact matrix
-      // rows that produced the sender's displayed frame. This also gives us
-      // a clean diagnostic boundary: no canonical world reconstruction is
-      // involved in the body, head, shoes, or skateboard presentation.
+      // rows that produced the sender's displayed frame. This includes a
+      // detached board: its final palette follows the real throw trajectory,
+      // while the separately sampled board-controller body remains beside the
+      // walking skater.
       multiplayer::AnimationTrack exact_track;
       exact_track.mesh_key = item->mesh;
       exact_track.bone_rows.assign(
           item->bones.begin(),
           item->bones.begin() +
               weighted_rows * 12);
-      if (skateboard_piece) {
-        correct_board_palette(exact_track.bone_rows);
-      }
       local_animation.tracks.push_back(
           std::move(exact_track));
     }

@@ -1750,6 +1750,8 @@ bool SampleLocalPose(const float map_origin[3], std::int32_t role,
                      const AnimationPose* presentation,
                      PosePacket& packet) {
   trick_pipeline::LiveSpatialSnapshot snapshot;
+  const bool have_spatial_snapshot =
+      trick_pipeline::CurrentLiveSpatialSnapshot(snapshot);
   if (map_origin == nullptr) {
     return false;
   }
@@ -1766,7 +1768,7 @@ bool SampleLocalPose(const float map_origin[3], std::int32_t role,
     }
     packet.sender_time_us = presentation->sender_time_us;
   } else {
-    if (!trick_pipeline::CurrentLiveSpatialSnapshot(snapshot)) {
+    if (!have_spatial_snapshot) {
       return false;
     }
     for (std::size_t component = 0; component < 3; ++component) {
@@ -1795,7 +1797,10 @@ bool SampleLocalPose(const float map_origin[3], std::int32_t role,
     packet.position[component] +=
         packet.x_axis[component] * lane_offset;
   }
-  packet.board_state_flags = snapshot.board_state_flags;
+  packet.board_state_flags =
+      have_spatial_snapshot
+          ? snapshot.board_state_flags
+          : 0xFFFFFFFFu;
   return true;
 }
 
