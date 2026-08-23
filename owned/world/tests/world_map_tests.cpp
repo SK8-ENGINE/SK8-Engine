@@ -824,6 +824,29 @@ int main() {
           adopted_retail_mesh.mesh.cluster_count ==
               retail_edge_mesh.mesh.cluster_count,
       "serialized retail collision mesh adoption changed the resource");
+  std::vector<std::uint8_t> branchless_retail =
+      adopted_retail_mesh.mesh.bytes;
+  const std::uint32_t branchless_kd =
+      ReadBeU32(branchless_retail, 48);
+  Require(ReadBeU32(branchless_retail, branchless_kd + 4) == 0,
+          "single-triangle retail test mesh unexpectedly has KD branches");
+  constexpr std::uint32_t kUnusedRetailBranchPointer = 0xfe720db0u;
+  branchless_retail.at(branchless_kd) =
+      static_cast<std::uint8_t>(kUnusedRetailBranchPointer >> 24u);
+  branchless_retail.at(branchless_kd + 1) =
+      static_cast<std::uint8_t>(kUnusedRetailBranchPointer >> 16u);
+  branchless_retail.at(branchless_kd + 2) =
+      static_cast<std::uint8_t>(kUnusedRetailBranchPointer >> 8u);
+  branchless_retail.at(branchless_kd + 3) =
+      static_cast<std::uint8_t>(kUnusedRetailBranchPointer);
+  Require(FixupRwCollisionMeshForGuest(branchless_retail, 0x51000000u),
+          "retail branchless KD tree guest fixup failed");
+  Require(ReadBeU32(branchless_retail, branchless_kd) ==
+              kUnusedRetailBranchPointer,
+          "unused retail branchless pointer was modified");
+  Require(ReadBeU32(branchless_retail, 48) ==
+              0x51000000u + branchless_kd,
+          "retail branchless KD header pointer was not fixed up");
 
   std::uint32_t kd_leaf_triangles = 0;
   for (std::uint32_t branch = 0; branch < kd_branch_count; ++branch) {

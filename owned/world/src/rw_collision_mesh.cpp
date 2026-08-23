@@ -905,14 +905,15 @@ bool FixupRwCollisionMeshForGuest(std::span<std::uint8_t> bytes,
 
   const std::uint32_t branch_offset = ReadBeU32(bytes, kd_offset);
   const std::uint32_t branch_count = ReadBeU32(bytes, kd_offset + 4);
-  if (branch_count == 0) {
-    if (branch_offset != 0) {
-      return false;
-    }
-  } else if ((branch_offset & 0x0fu) != 0 ||
-             branch_offset > bytes.size() ||
-             branch_count >
-                 (bytes.size() - branch_offset) / 32u) {
+  // Retail branchless trees retain an unused serialized pointer value in
+  // the branch-record field. Native traversal never dereferences that field
+  // when branch_count is zero, so preserve it exactly instead of requiring
+  // a value that only our rebuilt meshes initialize to zero.
+  if (branch_count != 0 &&
+      ((branch_offset & 0x0fu) != 0 ||
+       branch_offset > bytes.size() ||
+       branch_count >
+           (bytes.size() - branch_offset) / 32u)) {
     return false;
   }
 

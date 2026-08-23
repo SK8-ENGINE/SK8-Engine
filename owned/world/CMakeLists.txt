@@ -59,5 +59,16 @@ if(SKATE_OWNED_WORLD_BUILD_TESTS)
   target_link_libraries(skate_owned_map_validate PRIVATE skate_owned_world)
   target_compile_features(skate_owned_map_validate PRIVATE cxx_std_20)
 
+  add_executable(skate_rw_collision_archive_validate
+    tests/rw_collision_archive_validate.cpp
+  )
+
+  target_link_libraries(
+    skate_rw_collision_archive_validate PRIVATE skate_owned_world
+  )
+  target_compile_features(
+    skate_rw_collision_archive_validate PRIVATE cxx_std_20
+  )
+
   add_test(NAME skate_owned_world_tests COMMAND skate_owned_world_tests)
 endif()

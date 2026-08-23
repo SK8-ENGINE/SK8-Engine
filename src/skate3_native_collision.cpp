@@ -900,6 +900,10 @@ OwnedCollisionBuildSet LoadRetailCollisionArchive(const char* path) {
     return result;
   }
   result.chunks.reserve(*count);
+  std::uint64_t total_triangles = 0;
+  std::uint64_t total_vertices = 0;
+  std::uint64_t total_clusters = 0;
+  std::uint64_t total_mesh_bytes = 0;
   for (std::uint32_t index = 0; index < *count; ++index) {
     const std::optional<std::uint32_t> name_size = read_u32();
     if (!name_size || *name_size > 4096u ||
@@ -928,16 +932,21 @@ OwnedCollisionBuildSet LoadRetailCollisionArchive(const char* path) {
       result.chunks.clear();
       return result;
     }
-    REXLOG_INFO(
-        "native-collision: adopted exact retail mesh '{}' triangles={} "
-        "vertices={} clusters={} bytes={}",
-        name, mesh.mesh.triangle_count, mesh.mesh.vertex_count,
-        mesh.mesh.cluster_count, mesh.mesh.bytes.size());
+    total_triangles += mesh.mesh.triangle_count;
+    total_vertices += mesh.mesh.vertex_count;
+    total_clusters += mesh.mesh.cluster_count;
+    total_mesh_bytes += mesh.mesh.bytes.size();
     result.chunks.push_back(std::move(mesh));
   }
   if (cursor != bytes.size()) {
     result.error = "retail collision archive has trailing bytes";
     result.chunks.clear();
+  } else {
+    REXLOG_INFO(
+        "native-collision: adopted {} exact retail meshes "
+        "(triangles={} vertices={} clusters={} mesh_bytes={})",
+        result.chunks.size(), total_triangles, total_vertices,
+        total_clusters, total_mesh_bytes);
   }
   return result;
 }

@@ -208,6 +208,9 @@ the skater and the active set is refreshed after 24 metres of movement. This
 preserves the exact-resource behavior confirmed in Super Ultra Mega Park
 while extending collision coverage across the complete extracted district
 without flattening unrelated retail resources into one broadphase mesh.
+Offline preparation also runs the production guest-pointer fixup over every
+archive record, including the 23 retail branchless KD trees whose unused
+serialized branch-pointer fields must be preserved rather than relocated.
 
 Every invocation uses
 `out/university-visual-check/runs/<yyyyMMdd_HHmmss>/`. Its `logs/` directory

@@ -519,8 +519,9 @@ try {
         '--build',
         $validatorBuildRoot,
         '--target',
-        'skate_owned_map_validate'
-    ) -Description 'Build offline University package validator'
+        'skate_owned_map_validate',
+        'skate_rw_collision_archive_validate'
+    ) -Description 'Build offline University package and archive validators'
 
     $validator = Join-Path $validatorBuildRoot 'skate_owned_map_validate.exe'
     if (-not (Test-Path -LiteralPath $validator -PathType Leaf)) {
@@ -574,6 +575,48 @@ try {
         }
     }
     Write-Host 'Engine loader/render/collision validation: PASS'
+
+    $archiveValidator = Join-Path (
+        $validatorBuildRoot
+    ) 'skate_rw_collision_archive_validate.exe'
+    if (-not (
+            Test-Path -LiteralPath $archiveValidator -PathType Leaf
+        )) {
+        throw (
+            'Offline retail collision archive validator was not built: ' +
+            $archiveValidator
+        )
+    }
+    Write-Host ''
+    Write-Host '== Validate every exact-retail collision guest fixup =='
+    $archiveValidationOutput = @(
+        & $archiveValidator $collisionProbe
+    )
+    if ($LASTEXITCODE -ne 0) {
+        throw (
+            'University retail collision archive validation failed: ' +
+            $LASTEXITCODE
+        )
+    }
+    $archiveValidationOutput | Tee-Object -FilePath (
+        Join-Path $logRoot 'University.collision-archive-validation.txt'
+    )
+    $archiveValidationText = $archiveValidationOutput -join "`n"
+    foreach ($archivePattern in @(
+            'RW_COLLISION_ARCHIVE_OK',
+            'meshes=301',
+            'triangles=1133649',
+            'archive_bytes=24967908',
+            'branchless=23'
+        )) {
+        if (-not $archiveValidationText.Contains($archivePattern)) {
+            throw (
+                'Retail collision archive integrity field is missing: ' +
+                $archivePattern
+            )
+        }
+    }
+    Write-Host 'Exact-retail guest fixup validation: PASS'
 
     $stagedExecutable = Join-Path $runRoot 'skate3.exe'
     $stagedRuntime = Join-Path $runRoot 'rexruntime.dll'
