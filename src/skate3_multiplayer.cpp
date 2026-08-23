@@ -256,7 +256,9 @@ const char *NetworkQualityName(const NetworkTuning &) {
 }
 
 constexpr auto kRemoteTimeout = std::chrono::milliseconds(1500);
-constexpr std::size_t kMaximumBufferedSamples = 16;
+// Keep enough 60 Hz root history for the maximum 250 ms diagnostic
+// interpolation delay plus ordinary worker and receive scheduling variation.
+constexpr std::size_t kMaximumBufferedSamples = 32;
 constexpr std::size_t kMaximumBufferedAnimationSamples = 16;
 constexpr std::uint16_t kV12AnimationStreamId = 2;
 constexpr std::uint8_t kV12AnimationGroupId = 0;

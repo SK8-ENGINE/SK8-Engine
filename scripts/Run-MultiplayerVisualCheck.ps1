@@ -10,7 +10,8 @@ param(
     [switch]$PrepareOnly,
     [switch]$AppearanceRecoveryCheck,
     [switch]$RealtimePriorityCheck,
-    [switch]$SmoothnessCheck
+    [switch]$SmoothnessCheck,
+    [switch]$HighInterpolationCheck
 )
 
 Set-StrictMode -Version Latest
@@ -48,11 +49,15 @@ if ($RealtimePriorityCheck -and $Clients -ne 5) {
 if ($SmoothnessCheck -and $Clients -ne 5) {
     throw 'The smoothness check requires exactly five clients.'
 }
+if ($HighInterpolationCheck -and $Clients -ne 5) {
+    throw 'The high-interpolation check requires exactly five clients.'
+}
 $specializedChecks = @(
     @(
         [bool]$AppearanceRecoveryCheck,
         [bool]$RealtimePriorityCheck,
-        [bool]$SmoothnessCheck
+        [bool]$SmoothnessCheck,
+        [bool]$HighInterpolationCheck
     ) | Where-Object { $_ }
 )
 if ($specializedChecks.Count -gt 1) {
@@ -539,6 +544,7 @@ try {
     # otherwise healthy network streams inherit 100-250 ms capture
     # holes. This cap affects only the local visual-check processes.
     $guestFpsCap = if ($Clients -ge 5) { 90 } else { 120 }
+    $interpolationMs = if ($HighInterpolationCheck) { 250 } else { 100 }
     $manifest = [ordered]@{
         schema = 1
         created_local = (Get-Date).ToString('o')
@@ -567,7 +573,7 @@ try {
         appearance_protocol = 'v11'
         root_rate_hz = 60
         animation_rate_hz = 20
-        interpolation_ms = 100
+        interpolation_ms = $interpolationMs
         per_peer_application_budget_kib_s = 112
         ten_player_direct_mesh_budget_mibit_s = 8.3
         animation_interpolation_mode = 3
@@ -579,6 +585,7 @@ try {
         appearance_recovery_check = [bool]$AppearanceRecoveryCheck
         realtime_priority_check = [bool]$RealtimePriorityCheck
         smoothness_check = [bool]$SmoothnessCheck
+        high_interpolation_check = [bool]$HighInterpolationCheck
         appearance_recovery_receiver = if ($AppearanceRecoveryCheck) {
             3
         } else {
@@ -653,6 +660,56 @@ Failure:
 
 Do not treat logs as proof of visual correctness. Report the visual result
 separately, then ask the agent to analyze this run directory.
+"@
+    } elseif ($HighInterpolationCheck) {
+        @"
+MULTIPLAYER HIGH-INTERPOLATION CHECK
+
+Run directory:
+$runRoot
+
+Clients: 5
+Transport: localhost UDP
+Quality: Complete pose, 60 Hz root, 20 Hz animation
+Interpolation: 250 ms minimum (maximum diagnostic preset)
+Change under test: remote presentation now stays at least a quarter-second
+behind the sender instead of the previous 100 ms minimum. This provides a
+much deeper completed-snapshot buffer while preserving the same pose data,
+rates, four-sample interpolation, outfits, boards, and transport behavior.
+
+Visual scenario:
+1. Wait until all five clients have loaded the same map and every client sees
+   four complete remote skaters.
+2. Play normally for 60-90 seconds. Keep the skaters reasonably nearby and
+   use ordinary skating, turns, ollies, and tricks.
+3. Pay most attention to close remote skaters during curved movement and
+   direction changes. No role-by-role choreography is required.
+4. Close all clients when finished.
+
+Visual success:
+- The repeated small jolts or pull-back/forward corrections are materially
+  smoother or disappear.
+- Continuous skating and tricks remain fluid rather than looking low-Hz.
+- The added remote delay is acceptable, and local input remains immediate.
+- Outfits, boards, attachments, and visibility remain correct.
+
+Visual failure:
+- Jitter is unchanged despite the much deeper buffer.
+- Movement becomes visibly delayed, rubbery, frozen, or low-Hz.
+- Any pose, board, appearance, visibility, input, or frame-stall regression
+  appears.
+
+Telemetry acceptance checked by the agent afterward:
+- Effective peer delay stays near or above 250 ms with the cursor inside a
+  completed animation interval.
+- Held-latest playback, sequence gaps, socket failures, delivery-policy
+  errors, and multiplayer errors remain zero.
+- Root remains 60 Hz, complete pose remains 20 Hz, and the established
+  112 KiB/s per-peer application bandwidth ceiling remains satisfied.
+
+Logs can establish timing and packet behavior, but not visual smoothness.
+Report whether this is clearly smoother, unchanged, or worse, then ask the
+agent to analyze the run.
 "@
     } elseif ($SmoothnessCheck) {
         @"
@@ -941,7 +998,7 @@ separately, then ask the agent to analyze this run directory.
             "--skate3_multiplayer_local_peer_count=$Clients",
             '--skate3_multiplayer_local_send_rate=60',
             '--skate3_multiplayer_local_animation_rate=20',
-            '--skate3_multiplayer_local_interpolation_ms=100',
+            "--skate3_multiplayer_local_interpolation_ms=$interpolationMs",
             '--skate3_multiplayer_animation_interpolation_mode=3',
             (
                 '--skate3_multiplayer_replication_worker={0}' -f
@@ -1032,6 +1089,8 @@ separately, then ask the agent to analyze this run directory.
     Write-Host ''
     if ($AppearanceRecoveryCheck) {
         Write-Host 'MULTIPLAYER APPEARANCE RECOVERY CHECK READY'
+    } elseif ($HighInterpolationCheck) {
+        Write-Host 'MULTIPLAYER HIGH-INTERPOLATION CHECK READY'
     } elseif ($SmoothnessCheck) {
         Write-Host 'MULTIPLAYER SMOOTHNESS CHECK READY'
     } elseif ($RealtimePriorityCheck) {
@@ -1044,7 +1103,8 @@ separately, then ask the agent to analyze this run directory.
     Write-Host ''
     if (-not $AppearanceRecoveryCheck -and
         -not $RealtimePriorityCheck -and
-        -not $SmoothnessCheck) {
+        -not $SmoothnessCheck -and
+        -not $HighInterpolationCheck) {
         Write-Host (
             'After closing client 3, wait 7 seconds and run ' +
             'RELAUNCH_MULTIPLAYER_VISUAL_CLIENT_3.bat.'
