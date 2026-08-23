@@ -186,6 +186,24 @@ foreach ($client in $clientDirectories) {
         ))
     )
     $summary.Add(
+        'local_capture_ready_events=' +
+        (Match-Count $lines (
+            'multiplayer-local-capture: state=ready'
+        ))
+    )
+    $summary.Add(
+        'local_capture_missing_events=' +
+        (Match-Count $lines (
+            'multiplayer-local-capture: state=missing'
+        ))
+    )
+    $summary.Add(
+        'local_capture_far_exact_events=' +
+        (Match-Count $lines (
+            'multiplayer-local-capture: exact entity accepted beyond'
+        ))
+    )
+    $summary.Add(
         'local_profile_recipe_updates=' +
         (Match-Count $lines (
             'multiplayer-assets: adopted local profile recipe'

@@ -104,6 +104,11 @@ AppID and follow Valve's setup and redistributable requirements.
 - A stale remote player disappears after 1.5 seconds.
 - The sender captures Skate 3's final rendered bone palettes after its
   animation graph, IK, tricks, and bails have evaluated.
+- Once the sender has identified its exact local presentation entity, that
+  entity remains the capture owner through bails and board separation.
+  Board-distance proximity is used only during the startup fallback before
+  an exact entity is known, so a separated skater is not replaced by the
+  teal proxy merely for moving more than four map units from the board.
 - The sender transmits one canonical skeleton plus compact exact-palette
   tracks for small or post-processed attachments such as the hat and wheels.
   Affine components use signed 16-bit fixed point with root-relative

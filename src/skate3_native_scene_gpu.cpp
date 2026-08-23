@@ -64,6 +64,7 @@
 #include "skate3_mechanics_sandbox_map.h"
 #include "skate3_multiplayer.h"
 #include "skate3_multiplayer_assets.h"
+#include "skate3_multiplayer_capture.h"
 #include "skate3_multiplayer_lifecycle.h"
 #include "skate3_native_collision.h"
 #include "skate3_native_raytraced_mirror.h"
@@ -11955,6 +11956,13 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
   bool local_animation_root_anchored = false;
   std::vector<const DrawItem*> local_player_items;
   float local_board_position[3] = {};
+  const uint32_t local_presentation =
+      mechanics_sandbox::LocalPresentationCandidate();
+  std::size_t local_capture_skater_items = 0;
+  std::size_t local_capture_exact_items = 0;
+  std::size_t local_capture_rejected_items = 0;
+  std::size_t local_capture_far_exact_items = 0;
+  float local_capture_maximum_exact_distance = 0.0f;
   trick_pipeline::LiveSpatialSnapshot local_spatial;
   const bool have_local_spatial =
       trick_pipeline::CurrentLiveSpatialSnapshot(
@@ -11963,7 +11971,10 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
       have_local_spatial &&
       local_spatial.board_state_flags != 0xFFFFFFFFu &&
       (local_spatial.board_state_flags & 0x7u) != 0;
-  if (trick_pipeline::CurrentLocalBoardPosition(local_board_position)) {
+  const bool have_local_board_position =
+      trick_pipeline::CurrentLocalBoardPosition(
+          local_board_position);
+  if (have_local_board_position) {
     std::memcpy(
         local_animation.root_position, local_board_position,
         sizeof(local_animation.root_position));
@@ -11984,16 +11995,12 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
       if (!skater_family) {
         continue;
       }
-      const uint32_t local_presentation =
-          mechanics_sandbox::LocalPresentationCandidate();
-      if (local_presentation != 0 &&
-          identity.entity != local_presentation) {
-        // Proximity alone is not ownership. Other online skaters and the
-        // wardrobe preview can stand within four metres of player 0; folding
-        // their contexts into this snapshot swaps hair/shirts between
-        // clients and publishes duplicate detached body pieces.
-        continue;
-      }
+      ++local_capture_skater_items;
+      const bool exact_local_presentation =
+          local_presentation != 0 &&
+          identity.entity == local_presentation;
+      local_capture_exact_items +=
+          exact_local_presentation ? 1u : 0u;
       float anchor[3] = {
           item.world[12], item.world[13], item.world[14]};
       if (item.bones.size() >= 12) {
@@ -12013,7 +12020,10 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
               : std::numeric_limits<float>::infinity();
       bool detached_board_piece = false;
       if (local_skater_offboard && finite_distance &&
-          distance_squared > 16.0f && item.skinned) {
+          distance_squared >
+              multiplayer::capture::
+                  kFallbackBoardRadiusSquared &&
+          item.skinned) {
         native_palette::CanonicalRigSample board_rig;
         detached_board_piece =
             native_palette::LookupCanonicalRig(
@@ -12026,12 +12036,24 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
                          canonical_bone <= 31;
                 });
       }
-      if (!finite_distance ||
-          (distance_squared > 16.0f &&
-           !detached_board_piece)) {
+      if (exact_local_presentation && finite_distance &&
+          distance_squared >
+              multiplayer::capture::
+                  kFallbackBoardRadiusSquared) {
+        ++local_capture_far_exact_items;
+        local_capture_maximum_exact_distance =
+            std::max(
+                local_capture_maximum_exact_distance,
+                std::sqrt(distance_squared));
+      }
+      if (!multiplayer::capture::LocalPresentationPieceOwned(
+              local_presentation, identity.entity,
+              finite_distance, distance_squared,
+              detached_board_piece)) {
+        ++local_capture_rejected_items;
         continue;
       }
-      if (detached_board_piece) {
+      if (detached_board_piece && local_presentation == 0) {
         static bool s_logged_detached_board_bypass = false;
         if (!s_logged_detached_board_bypass) {
           s_logged_detached_board_bypass = true;
@@ -12426,6 +12448,42 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
             rig_has_canonical_root;
       }
     }
+  }
+
+  {
+    const bool have_local_animation =
+        !local_animation.tracks.empty();
+    static int s_previous_capture_state = -1;
+    static bool s_far_exact_episode = false;
+    const int capture_state = have_local_animation ? 1 : 0;
+    if (capture_state != s_previous_capture_state) {
+      REXLOG_INFO(
+          "multiplayer-local-capture: state={} candidate={:08X} "
+          "board={} scene_items={} skater_items={} exact_items={} "
+          "accepted_items={} rejected_items={} far_exact_items={} "
+          "max_exact_distance={:.3f} tracks={}",
+          have_local_animation ? "ready" : "missing",
+          local_presentation,
+          have_local_board_position ? 1 : 0,
+          scene.items.size(), local_capture_skater_items,
+          local_capture_exact_items, local_player_items.size(),
+          local_capture_rejected_items,
+          local_capture_far_exact_items,
+          local_capture_maximum_exact_distance,
+          local_animation.tracks.size());
+      s_previous_capture_state = capture_state;
+    }
+    const bool far_exact_episode =
+        local_capture_far_exact_items != 0;
+    if (far_exact_episode && !s_far_exact_episode) {
+      REXLOG_INFO(
+          "multiplayer-local-capture: exact entity accepted beyond "
+          "fallback board radius candidate={:08X} items={} "
+          "max_distance={:.3f}",
+          local_presentation, local_capture_far_exact_items,
+          local_capture_maximum_exact_distance);
+    }
+    s_far_exact_episode = far_exact_episode;
   }
 
   // Bind-skinned ROPA garments do not expose a live palette of their own.

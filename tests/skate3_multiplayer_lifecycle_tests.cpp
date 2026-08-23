@@ -1,3 +1,4 @@
+#include "skate3_multiplayer_capture.h"
 #include "skate3_multiplayer_lifecycle.h"
 
 #include <chrono>
@@ -16,6 +17,7 @@ using skate3::multiplayer::lifecycle::PeerGenerationTracker;
 using skate3::multiplayer::lifecycle::RemoteAppearanceRetirementMatches;
 using skate3::multiplayer::lifecycle::RemoteAppearanceSessionChanged;
 using skate3::multiplayer::lifecycle::RemoteAppearanceTextureStoreKey;
+using skate3::multiplayer::capture::LocalPresentationPieceOwned;
 using skate3::multiplayer::protocol::AppearanceDeliveryState;
 using skate3::multiplayer::protocol::kMaximumAppearanceBytes;
 
@@ -136,6 +138,30 @@ void TestRemoteAppearanceGenerationRetirement() {
          "invalid retirement must not release renderer resources");
 }
 
+void TestLocalPresentationCaptureOwnership() {
+  Expect(LocalPresentationPieceOwned(
+             0x1000, 0x1000, true, 400.0f, false),
+         "verified local presentation was rejected after board separation");
+  Expect(!LocalPresentationPieceOwned(
+             0x1000, 0x2000, true, 1.0f, false),
+         "nearby foreign presentation bypassed exact ownership");
+  Expect(LocalPresentationPieceOwned(
+             0, 0x2000, true, 16.0f, false),
+         "near fallback presentation was rejected without an exact owner");
+  Expect(!LocalPresentationPieceOwned(
+             0, 0x2000, true, 16.01f, false),
+         "far fallback presentation was accepted without board ownership");
+  Expect(LocalPresentationPieceOwned(
+             0, 0x2000, true, 400.0f, true),
+         "verified detached board was rejected by fallback proximity");
+  Expect(!LocalPresentationPieceOwned(
+             0x1000, 0, true, 1.0f, false),
+         "invalid presentation entity was accepted");
+  Expect(!LocalPresentationPieceOwned(
+             0x1000, 0x1000, false, 1.0f, false),
+         "non-finite local presentation transform was accepted");
+}
+
 void TestAppearanceAssemblyBudget() {
   Expect(!CanBeginAppearanceAssembly(0, 0),
          "empty appearance assemblies must be rejected");
@@ -231,6 +257,7 @@ int main() {
   TestInvalidIdentityDoesNotCreateState();
   TestRemoteAppearanceTextureOwnership();
   TestRemoteAppearanceGenerationRetirement();
+  TestLocalPresentationCaptureOwnership();
   TestAppearanceAssemblyBudget();
   TestAppearanceAssemblyTimeout();
   TestCompleteAppearancePieceCount();
