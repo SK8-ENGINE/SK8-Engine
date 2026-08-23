@@ -164,6 +164,23 @@ Launch more real local clients with:
 .\scripts\Launch-Local-Multiplayer.ps1 -Clients 3
 ```
 
+For implementation acceptance checks, automated agents do not launch the
+game. The user runs the fail-closed visual-check wrapper from the dedicated
+multiplayer worktree:
+
+```text
+RUN_MULTIPLAYER_VISUAL_CHECK.bat
+```
+
+It incrementally builds that worktree, stages fresh portable clients under a
+timestamped `out\visual-checks` directory, enables multiplayer and renderer
+telemetry, records the exact commit/diff and binary hashes, and writes
+`out\visual-checks\LATEST.txt`. It never falls back to a binary from another
+checkout. `RELAUNCH_MULTIPLAYER_VISUAL_CLIENT_3.bat` restarts role 3 in the
+same evidence directory after the user closes that client for a role-reuse
+check. Visual correctness is the user's decision; the generated logs support
+a separate telemetry review.
+
 The script uses the sibling `Skate3CustomEngineLayer-Player` install by
 default. Pass another clean install when required:
 

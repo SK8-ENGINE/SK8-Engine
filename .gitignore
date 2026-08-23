@@ -68,3 +68,6 @@ steam_api64.dll
 !/scripts/Package-Windows-Release.ps1
 !/scripts/Launch-Local-Multiplayer.ps1
 !/scripts/Test-LocalMultiplayerLoad.ps1
+!/scripts/Run-MultiplayerVisualCheck.ps1
+!/scripts/Relaunch-MultiplayerVisualClient.ps1
+!/scripts/Analyze-MultiplayerVisualCheck.ps1

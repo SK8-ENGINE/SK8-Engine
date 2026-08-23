@@ -78,3 +78,26 @@ exists, follow the local runbook above.
 The user performs visual multiplayer testing. Process startup, logs, packet
 telemetry, or two running clients are not proof of a visual fix. Ask for a
 visual pass only when a justified build actually needs one.
+
+For all multiplayer implementation work:
+
+- Work only in the dedicated multiplayer Git worktree selected by the user.
+  Keep multiplayer source changes, builds, staged clients, test artifacts,
+  scripts, and telemetry output there. Do not modify the main checkout or
+  another agent's worktree.
+- Automated agents must never boot or launch Skate 3 or any real game client.
+  They may compile and run non-game unit, protocol, synthetic, and offline
+  telemetry tests.
+- When in-game validation is justified, provide a convenient user-run Windows
+  `.bat` launcher in the multiplayer worktree. It must build the exact
+  worktree source without falling back to an older binary, stage isolated
+  clients, enable the required diagnostics, and write every run to a named
+  timestamped directory.
+- Before the user runs a visual check, state the exact launcher, client count,
+  scenario, duration, visual success criteria, and visual failure criteria.
+  Never execute the visual-check `.bat` as an agent.
+- After the user reports that the run is complete, analyze the generated
+  telemetry independently. Report the user's visual verdict separately from
+  telemetry-backed findings. If the logs cannot answer a relevant failure,
+  improve the instrumentation and prepare another user-run check rather than
+  launching the game.
