@@ -2,6 +2,9 @@
 
 #include "skate3_multiplayer_protocol_v12.h"
 
+#include <algorithm>
+#include <array>
+#include <cstddef>
 #include <cstdint>
 
 namespace skate3::multiplayer::protocol_v12 {
@@ -395,11 +398,16 @@ class PoseReceiverState {
 
 class SenderBaselineState {
  public:
+  static constexpr std::size_t kMaximumRetainedOffers = 32;
+
   void ActivateGeneration(std::uint32_t sender_session) {
     sender_session_ = sender_session;
     offered_baseline_id_ = 0;
     offered_baseline_sequence_ = 0;
     confirmed_baseline_id_ = 0;
+    offers_ = {};
+    next_offer_ = 0;
+    retained_offers_ = 0;
   }
 
   [[nodiscard]] bool OfferBaseline(
@@ -420,6 +428,15 @@ class SenderBaselineState {
     }
     offered_baseline_id_ = baseline_id;
     offered_baseline_sequence_ = packet_sequence;
+    offers_[next_offer_] = {
+        .baseline_id = baseline_id,
+        .packet_sequence = packet_sequence,
+    };
+    next_offer_ =
+        (next_offer_ + 1) % kMaximumRetainedOffers;
+    retained_offers_ =
+        std::min(
+            retained_offers_ + 1, kMaximumRetainedOffers);
     return true;
   }
 
@@ -435,8 +452,24 @@ class SenderBaselineState {
     if (decoded_baseline_id == confirmed_baseline_id_) {
       return true;
     }
-    if (decoded_baseline_id != offered_baseline_id_) {
+    bool offered = false;
+    for (std::size_t index = 0;
+         index < retained_offers_; ++index) {
+      if (offers_[index].baseline_id == decoded_baseline_id) {
+        offered = true;
+        break;
+      }
+    }
+    if (!offered) {
       return false;
+    }
+    // A reliable report may arrive after a newer offered baseline has
+    // already been decoded and confirmed. It is still authentic, but it
+    // must never roll the sender's usable baseline backward.
+    if (confirmed_baseline_id_ != 0 &&
+        !SequenceNewer(
+            decoded_baseline_id, confirmed_baseline_id_)) {
+      return true;
     }
     confirmed_baseline_id_ = decoded_baseline_id;
     return true;
@@ -453,10 +486,18 @@ class SenderBaselineState {
   }
 
  private:
+  struct Offer {
+    std::uint32_t baseline_id = 0;
+    std::uint32_t packet_sequence = 0;
+  };
+
   std::uint32_t sender_session_ = 0;
   std::uint32_t offered_baseline_id_ = 0;
   std::uint32_t offered_baseline_sequence_ = 0;
   std::uint32_t confirmed_baseline_id_ = 0;
+  std::array<Offer, kMaximumRetainedOffers> offers_{};
+  std::size_t next_offer_ = 0;
+  std::size_t retained_offers_ = 0;
 };
 
 }  // namespace skate3::multiplayer::protocol_v12

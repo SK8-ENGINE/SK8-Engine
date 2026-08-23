@@ -293,28 +293,49 @@ void TestSenderUsesOnlyDecodedBaselineReports() {
          "packet acknowledgement implicitly confirmed decode");
   Expect(!sender.ConfirmDecodedBaseline(500, 19),
          "unknown decoded baseline report was accepted");
+  Expect(sender.OfferBaseline(500, 21, 1010),
+         "newer baseline offer was rejected");
   Expect(sender.ConfirmDecodedBaseline(500, 20),
-         "matching decoded baseline report was rejected");
+         "delayed retained baseline report was rejected");
   Expect(sender.confirmed_baseline_id() == 20,
          "sender did not expose receiver-confirmed baseline");
 
-  Expect(sender.OfferBaseline(500, 21, 1010),
-         "newer baseline offer was rejected");
+  Expect(sender.OfferBaseline(500, 22, 1020),
+         "second newer baseline offer was rejected");
   Expect(sender.confirmed_baseline_id() == 20,
          "new offer discarded still-usable confirmed baseline");
-  Expect(!sender.ConfirmDecodedBaseline(499, 21),
+  Expect(!sender.ConfirmDecodedBaseline(499, 22),
          "stale generation confirmed a baseline");
   Expect(sender.confirmed_baseline_id() == 20,
          "stale generation changed confirmed baseline");
-  Expect(sender.ConfirmDecodedBaseline(500, 21),
+  Expect(sender.ConfirmDecodedBaseline(500, 22),
          "new decoded baseline report was rejected");
+  Expect(sender.ConfirmDecodedBaseline(500, 21),
+         "valid reordered baseline report was rejected");
+  Expect(sender.confirmed_baseline_id() == 22,
+         "reordered report rolled the confirmed baseline backward");
 
   sender.ActivateGeneration(600);
   Expect(sender.confirmed_baseline_id() == 0 &&
              sender.offered_baseline_id() == 0,
          "sender generation reset retained old baselines");
-  Expect(!sender.ConfirmDecodedBaseline(500, 21),
+  Expect(!sender.ConfirmDecodedBaseline(500, 22),
          "old sender generation survived reset");
+
+  SenderBaselineState bounded;
+  bounded.ActivateGeneration(700);
+  for (std::uint32_t baseline = 1;
+       baseline <=
+       SenderBaselineState::kMaximumRetainedOffers + 1;
+       ++baseline) {
+    Expect(bounded.OfferBaseline(
+               700, baseline, 2000 + baseline),
+           "bounded baseline history rejected monotonic offer");
+  }
+  Expect(!bounded.ConfirmDecodedBaseline(700, 1),
+         "evicted baseline remained confirmable");
+  Expect(bounded.ConfirmDecodedBaseline(700, 2),
+         "oldest retained baseline was not confirmable");
 }
 
 }  // namespace

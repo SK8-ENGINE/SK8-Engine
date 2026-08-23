@@ -568,6 +568,13 @@ Current checkpoint:
   of offered baselines so a valid delayed report cannot be mistaken for an
   unknown baseline. This telemetry does not establish the user's visual
   result.
+- The sender baseline state now retains the 32 most recent offered baselines.
+  A delayed authenticated decode report can confirm any retained offer, while
+  a reordered older report cannot roll an already confirmed baseline
+  backward. Unknown, evicted, and old-generation reports still fail closed.
+  Offline tests cover delayed reports, reorder, bounded eviction, and
+  generation reset before the live encoder begins selecting its delta base
+  from this state.
 
 Completion:
 
