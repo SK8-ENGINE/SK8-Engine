@@ -1976,7 +1976,7 @@ class Runtime {
   bool Tick(const char* map_name, const float map_origin[3],
             const AnimationPose* local_animation,
             const AppearanceBlob* local_appearance,
-            std::uint64_t local_presentation_time_us,
+            std::uint64_t local_capture_time_us,
             std::vector<RemotePlayer>& out_remotes,
             std::vector<RemotePeerRetirement>& out_retirements) {
     out_retirements.clear();
@@ -2024,48 +2024,18 @@ class Runtime {
     }
 
     const auto now = Clock::now();
-    std::uint64_t ideal_presentation_time_us = 0;
-    if (local_presentation_time_us != 0) {
-      ideal_presentation_time_us =
-          local_presentation_time_us;
-      last_presentation_sample_time_us_ =
-          local_presentation_time_us;
-      last_presentation_sample_at_ = now;
-      presentation_clock_valid_ = true;
-    } else if (
-        presentation_clock_valid_ &&
-        last_presentation_sample_at_ != Clock::time_point{}) {
-      ideal_presentation_time_us =
-          playback::ExtrapolateSceneTime(
-              last_presentation_sample_time_us_,
-              std::chrono::duration_cast<
-                  std::chrono::microseconds>(
-                  now - last_presentation_sample_at_)
-                  .count());
-    }
-    if (presentation_clock_valid_ &&
-        ideal_presentation_time_us != 0) {
-      // Native scene samples can repeat for several worker ticks and then
-      // jump forward together. Treat them as phase anchors instead of
-      // directly driving every remote cursor: advance continuously from the
-      // worker's monotonic clock and slew toward the latest scene estimate.
-      const auto wall_time_us = static_cast<std::int64_t>(
-          std::min<std::uint64_t>(
-              NowMicroseconds(),
-              static_cast<std::uint64_t>(
-                  std::numeric_limits<std::int64_t>::max())));
-      const auto ideal_time_us = static_cast<std::int64_t>(
-          std::min<std::uint64_t>(
-              ideal_presentation_time_us,
-              static_cast<std::uint64_t>(
-                  std::numeric_limits<std::int64_t>::max())));
-      current_presentation_time_us_ =
-          static_cast<std::uint64_t>(
-              scene_presentation_clock_.Advance(
-                  wall_time_us, ideal_time_us));
-    } else {
-      current_presentation_time_us_ = NowMicroseconds();
-    }
+    // Packet interpolation uses a transport-neutral monotonic capture
+    // timeline. Native scene timestamps are useful for rejecting duplicate
+    // captures, but they can repeat and jump as the local camera/dynamic
+    // scene is retimed. Putting those irregular timestamps on the wire makes
+    // every receiver reproduce the sender's timestamp pulses as animation
+    // speed changes.
+    current_presentation_time_us_ = NowMicroseconds();
+    presentation_clock_valid_ = true;
+    const std::uint64_t outbound_capture_time_us =
+        local_capture_time_us != 0
+            ? local_capture_time_us
+            : current_presentation_time_us_;
     const std::uint32_t map_hash = HashMapName(map_name);
     std::size_t participant_count = remote_peers_.size() + 1;
 #if defined(_WIN32)
@@ -2103,15 +2073,15 @@ class Runtime {
           (packet.sender_time_us == 0 ||
            packet.sender_time_us !=
                last_pose_sample_time_us_)) {
+        const std::uint64_t source_sample_time_us =
+            packet.sender_time_us;
         packet.sender_role = static_cast<std::uint32_t>(role);
         packet.sender_session = session_id_;
         packet.sequence = ++send_sequence_;
         packet.map_hash = map_hash;
-        if (packet.sender_time_us == 0) {
-          packet.sender_time_us = NowMicroseconds();
-        }
+        packet.sender_time_us = outbound_capture_time_us;
         SendPacket(packet, role, base_port);
-        last_pose_sample_time_us_ = packet.sender_time_us;
+        last_pose_sample_time_us_ = source_sample_time_us;
         pose_send_deadline_.Commit(now, send_interval);
       }
     }
@@ -2126,7 +2096,8 @@ class Runtime {
              last_animation_sample_time_us_) &&
         animation_send_deadline_.Due(now)) {
       SendAnimation(
-          *local_animation, map_origin, map_hash, role, base_port);
+          *local_animation, outbound_capture_time_us,
+          map_origin, map_hash, role, base_port);
       last_animation_sample_time_us_ =
           local_animation->sender_time_us;
       animation_send_deadline_.Commit(
@@ -2458,7 +2429,7 @@ class Runtime {
         last_rate_snapshot_.animation_present_held_oldest);
     REXLOG_INFO(
         "multiplayer-net: role={} peers={} visible={} quality={} interp={} "
-        "clock=scene-slewed "
+        "clock=network-capture "
         "rates={}/{}Hz tx={:.1f}KiB/s "
         "rx={:.1f}KiB/s tx={:.1f}pps rx={:.1f}pps anim={:.1f}/{:.1f}fps "
         "classes=tx({:.1f}r/{:.1f}a/{:.1f}p/{:.1f}c)KiB/s "
@@ -3372,10 +3343,10 @@ class Runtime {
       return false;
     }
     peer.last_packet_at = now;
-    // Sender animation timestamps represent its final native-scene playback
-    // time, not raw wall time. Measure clock offset in the receiver's same
-    // scene-time domain so remote motion remains phase-aligned with the
-    // retimed camera and local dynamic world.
+    // Sender timestamps are monotonic capture times. Measure their offset
+    // from this receiver's monotonic clock; the per-peer presentation clock
+    // then removes transport jitter without inheriting native scene-time
+    // pauses or jumps.
     const std::uint64_t receive_time_us =
         current_presentation_time_us_;
     if (presentation_clock_valid_) {
@@ -4282,7 +4253,9 @@ class Runtime {
 #endif
   }
 
-  void SendAnimation(const AnimationPose& pose, const float map_origin[3],
+  void SendAnimation(const AnimationPose& pose,
+                     std::uint64_t sender_time_us,
+                     const float map_origin[3],
                      std::uint32_t map_hash, std::int32_t role,
                      std::int32_t base_port) {
 #if defined(_WIN32)
@@ -4307,10 +4280,9 @@ class Runtime {
       return;
     }
     const std::uint32_t sequence = ++animation_send_sequence_;
-    const std::uint64_t sender_time_us =
-        pose.sender_time_us != 0
-            ? pose.sender_time_us
-            : NowMicroseconds();
+    if (sender_time_us == 0) {
+      sender_time_us = NowMicroseconds();
+    }
     (void)base_port;
     const auto targets = LocalPacketTargets(
         static_cast<std::uint32_t>(role), true, Clock::now());
@@ -4408,6 +4380,7 @@ class Runtime {
     }
 #else
     (void)pose;
+    (void)sender_time_us;
     (void)map_origin;
     (void)map_hash;
     (void)role;
@@ -4907,9 +4880,6 @@ class Runtime {
     local_appearance_identity_ = 0;
     current_presentation_time_us_ = 0;
     presentation_clock_valid_ = false;
-    scene_presentation_clock_.Reset();
-    last_presentation_sample_time_us_ = 0;
-    last_presentation_sample_at_ = {};
     pose_send_deadline_.Reset();
     last_pose_sample_time_us_ = 0;
     animation_send_deadline_.Reset();
@@ -4971,9 +4941,6 @@ class Runtime {
   NetworkTuning network_tuning_;
   std::uint64_t current_presentation_time_us_ = 0;
   bool presentation_clock_valid_ = false;
-  playback::PresentationClock scene_presentation_clock_;
-  std::uint64_t last_presentation_sample_time_us_ = 0;
-  Clock::time_point last_presentation_sample_at_{};
   TelemetrySnapshot telemetry_;
   TelemetrySnapshot last_rate_snapshot_;
 };
@@ -5150,21 +5117,11 @@ class ReplicationWorker {
                   current_input->local_appearance.bytes != nullptr
               ? &current_input->local_appearance
               : nullptr,
-          [&current_input] {
-            if (!current_input->local_animation.has_value() ||
-                current_input->local_animation->sender_time_us == 0) {
-              return std::uint64_t{0};
-            }
-            const auto elapsed_us =
-                std::chrono::duration_cast<
-                    std::chrono::microseconds>(
-                    Clock::now() -
-                    current_input->published_at)
-                    .count();
-            return playback::ExtrapolateSceneTime(
-                current_input->local_animation->sender_time_us,
-                elapsed_us);
-          }(),
+          static_cast<std::uint64_t>(
+              std::chrono::duration_cast<
+                  std::chrono::microseconds>(
+                  current_input->published_at.time_since_epoch())
+                  .count()),
           remote_players, retirements);
       const std::uint64_t elapsed_ns =
           static_cast<std::uint64_t>(
@@ -5261,9 +5218,7 @@ bool TickLocalVisuals(const char* map_name,
   const bool have_remote_players = ActiveRuntime().Tick(
       map_name, map_render_origin, local_animation,
       local_appearance,
-      local_animation != nullptr
-          ? local_animation->sender_time_us
-          : std::uint64_t{0},
+      NowMicroseconds(),
       remote_players, retirements);
   static std::uint64_t synchronous_sequence = 0;
   out_presentation.sequence = ++synchronous_sequence;

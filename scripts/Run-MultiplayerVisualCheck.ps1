@@ -641,8 +641,8 @@ $runRoot
 Clients: 5
 Transport: localhost UDP
 Quality: Balanced, 60 Hz root, 60 Hz animation, 50 ms minimum interpolation
-Change under test: continuous remote playback aligned to the scene/camera clock
-Diagnostics: slewed scene-clock marker, source cadence, smoothed motion, renderer
+Change under test: stable monotonic capture timestamps for remote playback
+Diagnostics: network-capture clock marker, source cadence, smoothed motion, renderer
 handoff cadence, timing, cursor error, and cursor slew are reported
 
 Visual scenario:
@@ -667,6 +667,8 @@ Visual failure:
   regression appears.
 
 Telemetry acceptance checked by the agent afterward:
+- Every client reports clock=network-capture, and source snapshot timestamps
+  follow the scheduled capture cadence rather than native scene-time pulses.
 - Per-sender complete animation rates approach the configured 60 Hz whenever
   that sender supplies fresh captures.
 - Each receiver/sender pair reports interpolation delay, cursor margin,
