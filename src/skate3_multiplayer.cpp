@@ -125,9 +125,11 @@ using protocol::AnimationFragmentShapeValid;
 using protocol::AnimationFragmentPacket;
 using protocol::AnimationTrackEncoding;
 using protocol::AppearanceChunkByteOffset;
+using protocol::AppearanceDeliveryState;
 using protocol::AppearanceFragmentByteCount;
 using protocol::AppearanceFragmentShapeValid;
 using protocol::AppearanceFragmentPacket;
+using protocol::AppearanceTransferReceived;
 using protocol::ControlMessageType;
 using protocol::ControlPacket;
 using protocol::ControlPacketShapeValid;
@@ -139,6 +141,7 @@ using protocol::kAnimationKeyframeInterval;
 using protocol::kAnimationPacketMagic;
 using protocol::kAppearanceChunkBytes;
 using protocol::kAppearancePacketMagic;
+using protocol::kCapabilityAppearanceState;
 using protocol::kCapabilityControlV1;
 using protocol::kControlPacketMagic;
 using protocol::kMaximumAnimationBones;
@@ -263,6 +266,8 @@ const char* NetworkQualityName(const NetworkTuning& tuning) {
 constexpr auto kRemoteTimeout = std::chrono::milliseconds(1500);
 constexpr std::size_t kMaximumBufferedSamples = 16;
 constexpr std::size_t kMaximumBufferedAnimationSamples = 8;
+constexpr std::uint32_t kLocalControlCapabilities =
+    kCapabilityControlV1 | kCapabilityAppearanceState;
 // Animation matrices stay inside a compact character-relative range. Fixed
 // point gives substantially more stable per-frame values than half floats at
 // the same 16-bit wire size, avoiding pose-dependent mantissa precision.
@@ -346,12 +351,17 @@ struct OutboundAppearanceState {
   std::uint16_t next_chunk = 0;
   std::uint8_t completed_passes = 0;
   Clock::time_point retry_after{};
+  AppearanceDeliveryState acknowledged_state =
+      AppearanceDeliveryState::kUnknown;
 };
 
 struct PeerControlState {
   std::uint32_t capabilities = 0;
   Clock::time_point last_advertisement_sent{};
   Clock::time_point last_advertisement_received{};
+  std::uint64_t pending_received_appearance = 0;
+  std::uint8_t appearance_state_send_attempts = 0;
+  Clock::time_point last_appearance_state_sent{};
 };
 
 std::int64_t PresentationDelayMicroseconds(
@@ -437,6 +447,9 @@ struct TelemetrySnapshot {
   std::uint64_t appearance_budget_rejections = 0;
   std::uint64_t incomplete_appearance_bytes = 0;
   std::uint32_t capability_peers = 0;
+  std::uint64_t appearance_receipts_sent = 0;
+  std::uint64_t appearance_receipts_received = 0;
+  std::uint64_t duplicate_appearance_chunks = 0;
   std::uint64_t animation_present_interpolated = 0;
   std::uint64_t animation_present_held_latest = 0;
   std::uint64_t animation_present_held_oldest = 0;
@@ -1845,6 +1858,8 @@ class Runtime {
     PrunePeers(now);
     SendCapabilityAdvertisements(
         now, map_hash, static_cast<std::uint32_t>(role));
+    SendPendingAppearanceStates(
+        now, map_hash, static_cast<std::uint32_t>(role));
     const std::int32_t send_rate = network_tuning_.pose_rate;
     const auto send_interval = std::chrono::microseconds(
         1000000 / std::max(send_rate, 1));
@@ -2046,6 +2061,12 @@ class Runtime {
         << telemetry_.incomplete_appearance_bytes
         << " multiplayer_capability_peers="
         << telemetry_.capability_peers
+        << " multiplayer_appearance_receipts_sent="
+        << telemetry_.appearance_receipts_sent
+        << " multiplayer_appearance_receipts_received="
+        << telemetry_.appearance_receipts_received
+        << " multiplayer_duplicate_appearance_chunks="
+        << telemetry_.duplicate_appearance_chunks
         << " multiplayer_animation_present_interpolated="
         << telemetry_.animation_present_interpolated
         << " multiplayer_animation_present_held_latest="
@@ -2242,6 +2263,20 @@ class Runtime {
       total += peer.appearance_assembly.bytes.size();
     }
     return total;
+  }
+
+  void QueueAppearanceReceipt(
+      std::uint32_t role, std::uint64_t appearance_id) {
+    if (appearance_id == 0) {
+      return;
+    }
+    PeerControlState& control = peer_control_[role];
+    if (control.pending_received_appearance == appearance_id) {
+      return;
+    }
+    control.pending_received_appearance = appearance_id;
+    control.appearance_state_send_attempts = 0;
+    control.last_appearance_state_sent = {};
   }
 
   void PrunePeers(Clock::time_point now) {
@@ -2633,13 +2668,6 @@ class Runtime {
       // target peer's capability state as its own.
       return true;
     }
-    if (packet.message_type !=
-        ControlMessageType::kCapabilities) {
-      // The envelope reserves appearance state/request messages, but those
-      // transitions are enabled only after their state machine lands.
-      ++telemetry_.rejected_packets;
-      return false;
-    }
     RemotePeerState& peer =
         remote_peers_[packet.sender_role];
     BeginRemoteSession(
@@ -2656,7 +2684,41 @@ class Runtime {
           "multiplayer: peer role={} capabilities=0x{:08X}",
           packet.sender_role, packet.capabilities);
     }
-    return true;
+    switch (packet.message_type) {
+      case ControlMessageType::kCapabilities:
+        return true;
+      case ControlMessageType::kAppearanceState: {
+        const auto outbound =
+            outbound_appearance_.find(packet.sender_role);
+        if (outbound == outbound_appearance_.end() ||
+            outbound->second.identity != packet.appearance_id) {
+          return true;
+        }
+        OutboundAppearanceState& state = outbound->second;
+        if (state.acknowledged_state !=
+            packet.appearance_state) {
+          state.acknowledged_state =
+              packet.appearance_state;
+          if (AppearanceTransferReceived(
+                  packet.appearance_state)) {
+            ++telemetry_.appearance_receipts_received;
+          }
+          REXLOG_INFO(
+              "multiplayer: peer role={} appearance id={:016X} "
+              "state={}",
+              packet.sender_role, packet.appearance_id,
+              static_cast<std::uint16_t>(
+                  packet.appearance_state));
+        }
+        return true;
+      }
+      case ControlMessageType::kAppearanceRequest:
+        // Explicit requests are enabled in a later state-machine slice.
+        ++telemetry_.rejected_packets;
+        return false;
+    }
+    ++telemetry_.rejected_packets;
+    return false;
   }
 
   bool CommonPacketValid(std::uint16_t version,
@@ -2954,6 +3016,14 @@ class Runtime {
     RecordReceivedPacketClass(
         kAppearancePacketMagic, expected_bytes);
     peer.last_packet_at = now;
+    if (peer.appearance.identity == packet.appearance_id &&
+        peer.appearance.bytes != nullptr &&
+        peer.appearance.bytes->size() == packet.total_bytes) {
+      ++telemetry_.duplicate_appearance_chunks;
+      QueueAppearanceReceipt(
+          packet.sender_role, packet.appearance_id);
+      return true;
+    }
     AppearanceAssembly& assembly =
         peer.appearance_assembly;
     if (assembly.identity != packet.appearance_id ||
@@ -2988,6 +3058,8 @@ class Runtime {
       peer.appearance.bytes =
           std::make_shared<const std::vector<std::uint8_t>>(
               std::move(assembly.bytes));
+      QueueAppearanceReceipt(
+          packet.sender_role, packet.appearance_id);
       REXLOG_INFO(
           "multiplayer: received appearance role={} id={:016X} "
           "bytes={} chunks={}",
@@ -3381,9 +3453,55 @@ class Runtime {
       packet.sender_session = session_id_;
       packet.target_role = target_role;
       packet.map_hash = map_hash;
-      packet.capabilities = kCapabilityControlV1;
+      packet.capabilities = kLocalControlCapabilities;
       (void)SendControlPacketToRole(
           packet, target_role, /*relayed=*/false);
+    }
+#else
+    (void)now;
+    (void)map_hash;
+    (void)source_role;
+#endif
+  }
+
+  void SendPendingAppearanceStates(
+      Clock::time_point now, std::uint32_t map_hash,
+      std::uint32_t source_role) {
+#if defined(_WIN32)
+    constexpr auto kRetryInterval =
+        std::chrono::milliseconds(250);
+    const std::uint8_t maximum_attempts =
+        using_steam_ ? 1u : 3u;
+    for (auto& [target_role, control] : peer_control_) {
+      if (control.pending_received_appearance == 0 ||
+          (control.capabilities &
+           kCapabilityAppearanceState) == 0 ||
+          control.appearance_state_send_attempts >=
+              maximum_attempts ||
+          (control.last_appearance_state_sent !=
+               Clock::time_point{} &&
+           now - control.last_appearance_state_sent <
+               kRetryInterval)) {
+        continue;
+      }
+      control.last_appearance_state_sent = now;
+      ControlPacket packet;
+      packet.sender_role = source_role;
+      packet.sender_session = session_id_;
+      packet.target_role = target_role;
+      packet.map_hash = map_hash;
+      packet.message_type =
+          ControlMessageType::kAppearanceState;
+      packet.appearance_state =
+          AppearanceDeliveryState::kReceived;
+      packet.capabilities = kLocalControlCapabilities;
+      packet.appearance_id =
+          control.pending_received_appearance;
+      if (SendControlPacketToRole(
+              packet, target_role, /*relayed=*/false)) {
+        ++control.appearance_state_send_attempts;
+        ++telemetry_.appearance_receipts_sent;
+      }
     }
 #else
     (void)now;
@@ -3607,6 +3725,16 @@ class Runtime {
       if (state.identity != appearance.identity) {
         state = {};
         state.identity = appearance.identity;
+      }
+      // Steam sends one independent reliable appearance stream to each
+      // final recipient, so that recipient's receipt completes its stream.
+      // A localhost non-host sends one stream to role 1 for fan-out; the
+      // host's receipt does not prove every downstream UDP recipient has
+      // every chunk, so preserve the existing three complete passes there.
+      if (using_steam_ &&
+          AppearanceTransferReceived(
+              state.acknowledged_state)) {
+        continue;
       }
       if (state.next_chunk >= chunk_count) {
         // Steam's reliable channel needs one pass. Localhost UDP is allowed

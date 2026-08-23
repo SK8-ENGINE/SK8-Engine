@@ -17,6 +17,7 @@ using skate3::multiplayer::protocol::AppearanceFragmentByteCount;
 using skate3::multiplayer::protocol::AppearanceFragmentPacket;
 using skate3::multiplayer::protocol::AppearanceFragmentShapeValid;
 using skate3::multiplayer::protocol::AppearanceDeliveryState;
+using skate3::multiplayer::protocol::AppearanceTransferReceived;
 using skate3::multiplayer::protocol::ControlMessageType;
 using skate3::multiplayer::protocol::ControlPacket;
 using skate3::multiplayer::protocol::ControlPacketShapeValid;
@@ -361,6 +362,19 @@ void TestControlPacketShapes() {
   packet.appearance_id = 0;
   Expect(!ControlPacketShapeValid(packet),
          "appearance request without an identity was accepted");
+
+  Expect(
+      AppearanceTransferReceived(
+          AppearanceDeliveryState::kReceived),
+      "received appearance state did not complete the transfer");
+  Expect(
+      AppearanceTransferReceived(
+          AppearanceDeliveryState::kInstalled),
+      "installed appearance state did not complete the transfer");
+  Expect(
+      !AppearanceTransferReceived(
+          AppearanceDeliveryState::kFailed),
+      "failed appearance state completed the transfer");
 }
 
 void TestSequenceOrderingAcrossWrap() {

@@ -250,6 +250,12 @@ struct ControlPacket {
   return false;
 }
 
+[[nodiscard]] constexpr bool AppearanceTransferReceived(
+    AppearanceDeliveryState state) {
+  return state == AppearanceDeliveryState::kReceived ||
+         state == AppearanceDeliveryState::kInstalled;
+}
+
 // Sequence numbers use the standard half-range rule. Subtraction is
 // intentionally unsigned so rollover from UINT32_MAX to zero remains a
 // forward step; the signed interpretation is only used after that defined
