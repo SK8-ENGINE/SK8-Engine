@@ -558,7 +558,7 @@ try {
         guest_fps_cap = 120
         replication_quality = 'full-fidelity'
         root_protocol = 'v12-after-negotiation'
-        animation_protocol = 'v12-lossless-packed-confirmed-deltas'
+        animation_protocol = 'v12-semantic-exact-confirmed-deltas'
         appearance_protocol = 'v11'
         root_rate_hz = 60
         animation_rate_hz = 60
@@ -663,10 +663,13 @@ exact keyframe that the receiving peer confirmed decoding; it sends
 self-contained keyframes while confirmation is pending. Outfits remain on
 protocol v11. Full-fidelity direct peer fan-out and the 120 fps per-client test
 budget remain unchanged.
-Animation payloads now use a bounded lossless byte-run encoding only when it
-is smaller than the exact existing word stream; incompressible frames retain
-the raw encoding. Decoding reconstructs the original bytes before the
-unchanged animation decoder runs.
+Protocol v12 keeps a receiver-confirmed baseline until layout changes or an
+explicit recovery request. Exact deltas may encode each changed 16-bit
+transform word as a variable-length signed difference from that confirmed
+baseline when doing so materially reduces bytes or packet count. The receiver
+reconstructs the byte-identical word stream before the unchanged animation
+decoder runs. Keyframes, raw fallback, protocol v11, pose precision, and the
+60 Hz full-fidelity schedule remain unchanged.
 Diagnostics: representative visible body vertices are sampled before send and
 after remote reconstruction, alongside skeleton, network, and GPU timing
 
@@ -707,6 +710,9 @@ Telemetry acceptance checked by the agent afterward:
 - Every client installs receiver-confirmed outbound baselines. Animation
   deltas must flow afterward and never depend on an offered-but-unconfirmed
   keyframe; the runtime fail-closed invariant must report no policy error.
+- Semantic exact deltas should be selected after baseline confirmation, reduce
+  wire bytes and fragment counts, and remain free of animation rejection.
+  Their measured encoding cost must not coincide with client-FPS stalls.
 - Every active sender/receiver pair reports the full-fidelity contract,
   continuous pose/animation traffic, and zero relevance drops.
 - Playback cursor margins remain inside the animation buffer, with no

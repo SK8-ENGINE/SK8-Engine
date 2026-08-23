@@ -36,6 +36,7 @@ enum class PoseGroupEncoding : std::uint8_t {
   // encodings can be negotiated later without changing fragmentation.
   kV11WordStream = 1,
   kBitPackedV1 = 2,
+  kSemanticDeltaV1 = 3,
 };
 
 struct PoseGroupHeader {
@@ -83,7 +84,7 @@ struct PoseGroupHeader {
 [[nodiscard]] constexpr bool PoseGroupEncodingValid(
     PoseGroupEncoding encoding) {
   return encoding >= PoseGroupEncoding::kV11WordStream &&
-         encoding <= PoseGroupEncoding::kBitPackedV1;
+         encoding <= PoseGroupEncoding::kSemanticDeltaV1;
 }
 
 [[nodiscard]] constexpr std::size_t PoseGroupFragmentCount(
@@ -136,7 +137,9 @@ struct PoseGroupHeader {
     return false;
   }
   if (kind == MessageKind::kPoseBaseline) {
-    return header.baseline_id == 0;
+    return header.baseline_id == 0 &&
+           header.encoding !=
+               PoseGroupEncoding::kSemanticDeltaV1;
   }
   return header.baseline_id != 0 &&
          SequenceNewer(header.pose_id, header.baseline_id);

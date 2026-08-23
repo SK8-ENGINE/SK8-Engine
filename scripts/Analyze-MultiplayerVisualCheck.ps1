@@ -651,6 +651,110 @@ foreach ($client in $clientDirectories) {
         'max_v12_delta_logical_bytes=' +
         (Maximum-IntegerField $rateLines 'v12_delta_bytes')
     )
+    $semanticGroups = Maximum-IntegerField `
+        $rateLines 'v12_semantic_groups'
+    $semanticRaw = Maximum-IntegerField `
+        $rateLines 'v12_semantic_raw'
+    $semanticWire = Maximum-IntegerField `
+        $rateLines 'v12_semantic_wire'
+    $keyframeFragments = Maximum-IntegerField `
+        $rateLines 'v12_keyframe_fragments'
+    $deltaFragments = Maximum-IntegerField `
+        $rateLines 'v12_delta_fragments'
+    $semanticAttempts = Maximum-IntegerField `
+        $rateLines 'v12_semantic_attempts'
+    $semanticEncodeNs = Maximum-IntegerField `
+        $rateLines 'v12_semantic_encode_ns'
+    $semanticEncodeMaxNs = Maximum-IntegerField `
+        $rateLines 'v12_semantic_encode_max_ns'
+    $summary.Add(
+        'max_v12_semantic_delta_groups_sent=' + $semanticGroups
+    )
+    $summary.Add(
+        'max_v12_semantic_delta_raw_bytes=' + $semanticRaw
+    )
+    $summary.Add(
+        'max_v12_semantic_delta_wire_bytes=' + $semanticWire
+    )
+    $summary.Add(
+        'max_v12_keyframe_fragments=' + $keyframeFragments
+    )
+    $summary.Add(
+        'max_v12_delta_fragments=' + $deltaFragments
+    )
+    $summary.Add(
+        'max_v12_semantic_delta_attempts=' + $semanticAttempts
+    )
+    $summary.Add(
+        'max_v12_semantic_delta_total_encode_ns=' + $semanticEncodeNs
+    )
+    $summary.Add(
+        'max_v12_semantic_delta_single_encode_ns=' +
+        $semanticEncodeMaxNs
+    )
+    if ($semanticGroups -ne 'n/a' -and
+        $semanticRaw -ne 'n/a' -and
+        $semanticWire -ne 'n/a' -and
+        [double]$semanticGroups -gt 0 -and
+        [double]$semanticRaw -gt 0) {
+        $savedPercent = 100.0 * (
+            1.0 - [double]$semanticWire / [double]$semanticRaw
+        )
+        $rawPerGroup = (
+            [double]$semanticRaw / [double]$semanticGroups
+        )
+        $wirePerGroup = (
+            [double]$semanticWire / [double]$semanticGroups
+        )
+        $summary.Add((
+            'derived_v12_semantic_savings_percent={0:0.00}' -f
+            $savedPercent
+        ))
+        $summary.Add((
+            'derived_v12_semantic_bytes_per_group={0:0.0}/{1:0.0}' -f
+            $rawPerGroup, $wirePerGroup
+        ))
+    }
+    if ($semanticAttempts -ne 'n/a' -and
+        $semanticEncodeNs -ne 'n/a' -and
+        [double]$semanticAttempts -gt 0) {
+        $summary.Add((
+            'derived_v12_semantic_average_encode_us={0:0.000}' -f (
+                [double]$semanticEncodeNs /
+                [double]$semanticAttempts / 1000.0
+            )
+        ))
+    }
+    if ($semanticEncodeMaxNs -ne 'n/a') {
+        $summary.Add((
+            'derived_v12_semantic_max_encode_us={0:0.000}' -f (
+                [double]$semanticEncodeMaxNs / 1000.0
+            )
+        ))
+    }
+    $keyframeGroups = Maximum-IntegerField `
+        $rateLines 'v12_keyframe_groups'
+    $deltaGroups = Maximum-IntegerField `
+        $rateLines 'v12_delta_groups'
+    if ($keyframeFragments -ne 'n/a' -and
+        $keyframeGroups -ne 'n/a' -and
+        [double]$keyframeGroups -gt 0) {
+        $summary.Add((
+            'derived_v12_keyframe_fragments_per_group={0:0.000}' -f (
+                [double]$keyframeFragments /
+                [double]$keyframeGroups
+            )
+        ))
+    }
+    if ($deltaFragments -ne 'n/a' -and
+        $deltaGroups -ne 'n/a' -and
+        [double]$deltaGroups -gt 0) {
+        $summary.Add((
+            'derived_v12_delta_fragments_per_group={0:0.000}' -f (
+                [double]$deltaFragments / [double]$deltaGroups
+            )
+        ))
+    }
     $summary.Add(
         'appearance_byte_receipts=' +
         (Match-Count $lines 'multiplayer: peer role=.*appearance .*state=1')

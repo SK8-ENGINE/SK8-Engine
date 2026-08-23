@@ -670,6 +670,22 @@ Current checkpoint:
   deterministic randomized exact round trips. Small-difference synthetic
   frames must save at least 35 percent. This candidate is not yet selected by
   the live sender in this commit.
+- The live v12 sender now selects semantic exact deltas only after the
+  recipient has confirmed the matching baseline and only when the existing
+  material-savings rule is met. The receiver requires that same installed
+  baseline and reconstructs the original word stream before the unchanged
+  animation decoder. Keyframes cannot carry the semantic-delta encoding;
+  malformed, noncanonical, truncated, stale-baseline, and layout-mismatched
+  inputs fail closed or request explicit baseline recovery.
+- Semantic preflight runs before allocating the raw v12 word stream, so a
+  selected delta allocates only its final wire buffer. Protocol-v11 targets
+  no longer pay for unused v12 serialization or packing. Prepared frames
+  remain shared between recipients with identical confirmed baselines.
+- Dedicated telemetry records semantic attempts, selected groups, exact
+  logical and wire bytes, cumulative and maximum encode time, and keyframe
+  versus delta fragment counts. These measurements will establish actual
+  bandwidth, packet-count, and sender-CPU effects at the next five-client
+  visual gate; they do not establish visual correctness.
 
 Completion:
 

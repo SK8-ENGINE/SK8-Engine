@@ -9,6 +9,7 @@
 #include "skate3_multiplayer_pose_curve.h"
 #include "skate3_multiplayer_protocol.h"
 #include "skate3_multiplayer_protocol_v12_animation.h"
+#include "skate3_multiplayer_protocol_v12_delta.h"
 #include "skate3_multiplayer_protocol_v12_live.h"
 #include "skate3_multiplayer_protocol_v12_lossless.h"
 #include "skate3_multiplayer_protocol_v12_root.h"
@@ -544,6 +545,14 @@ struct TelemetrySnapshot {
   std::uint64_t sent_v12_delta_groups = 0;
   std::uint64_t v12_keyframe_logical_bytes = 0;
   std::uint64_t v12_delta_logical_bytes = 0;
+  std::uint64_t sent_v12_semantic_delta_groups = 0;
+  std::uint64_t v12_semantic_delta_raw_bytes = 0;
+  std::uint64_t v12_semantic_delta_wire_bytes = 0;
+  std::uint64_t v12_keyframe_fragments = 0;
+  std::uint64_t v12_delta_fragments = 0;
+  std::uint64_t v12_semantic_delta_attempts = 0;
+  std::uint64_t v12_semantic_delta_encode_ns = 0;
+  std::uint64_t v12_semantic_delta_encode_max_ns = 0;
   std::uint64_t animation_present_interpolated = 0;
   std::uint64_t animation_present_held_latest = 0;
   std::uint64_t animation_present_held_oldest = 0;
@@ -1014,6 +1023,29 @@ bool SameQuantizedAnimationFrame(
     }
   }
   return true;
+}
+
+std::span<const protocol_v12::AnimationDeltaBaselineTrack>
+BuildAnimationBaselineViews(
+    const QuantizedAnimationFrame& frame,
+    std::array<protocol_v12::AnimationDeltaBaselineTrack,
+               kMaximumAnimationTracks>& storage) {
+  if (frame.tracks.empty() ||
+      frame.tracks.size() > storage.size()) {
+    return {};
+  }
+  for (std::size_t index = 0;
+       index < frame.tracks.size(); ++index) {
+    const QuantizedAnimationTrack& track = frame.tracks[index];
+    storage[index] = {
+        .mesh_key = track.mesh_key,
+        .bone_count = track.bone_count,
+        .encoding = static_cast<std::uint16_t>(track.encoding),
+        .words = track.words,
+    };
+  }
+  return std::span<const protocol_v12::AnimationDeltaBaselineTrack>(
+      storage.data(), frame.tracks.size());
 }
 
 bool BuildAnimationFrameWords(
@@ -2283,6 +2315,22 @@ class Runtime {
         << telemetry_.v12_keyframe_logical_bytes
         << " multiplayer_v12_delta_logical_bytes="
         << telemetry_.v12_delta_logical_bytes
+        << " multiplayer_tx_v12_semantic_delta_groups="
+        << telemetry_.sent_v12_semantic_delta_groups
+        << " multiplayer_v12_semantic_delta_raw_bytes="
+        << telemetry_.v12_semantic_delta_raw_bytes
+        << " multiplayer_v12_semantic_delta_wire_bytes="
+        << telemetry_.v12_semantic_delta_wire_bytes
+        << " multiplayer_v12_keyframe_fragments="
+        << telemetry_.v12_keyframe_fragments
+        << " multiplayer_v12_delta_fragments="
+        << telemetry_.v12_delta_fragments
+        << " multiplayer_v12_semantic_delta_attempts="
+        << telemetry_.v12_semantic_delta_attempts
+        << " multiplayer_v12_semantic_delta_encode_ns="
+        << telemetry_.v12_semantic_delta_encode_ns
+        << " multiplayer_v12_semantic_delta_encode_max_ns="
+        << telemetry_.v12_semantic_delta_encode_max_ns
         << " multiplayer_animation_present_interpolated="
         << telemetry_.animation_present_interpolated
         << " multiplayer_animation_present_held_latest="
@@ -2433,6 +2481,11 @@ class Runtime {
         "v12_lossless_wire={} "
         "v12_keyframe_groups={} v12_keyframe_bytes={} "
         "v12_delta_groups={} v12_delta_bytes={} "
+        "v12_semantic_groups={} v12_semantic_raw={} "
+        "v12_semantic_wire={} "
+        "v12_keyframe_fragments={} v12_delta_fragments={} "
+        "v12_semantic_attempts={} v12_semantic_encode_ns={} "
+        "v12_semantic_encode_max_ns={} "
         "bones={} relay={:.1f}pps relevance_drop={:.1f}pps rejected={} "
         "failures={} peer_resets={} "
         "appearance={:.2f}MiB timeout={} budget_reject={} "
@@ -2484,6 +2537,14 @@ class Runtime {
         telemetry_.v12_keyframe_logical_bytes,
         telemetry_.sent_v12_delta_groups,
         telemetry_.v12_delta_logical_bytes,
+        telemetry_.sent_v12_semantic_delta_groups,
+        telemetry_.v12_semantic_delta_raw_bytes,
+        telemetry_.v12_semantic_delta_wire_bytes,
+        telemetry_.v12_keyframe_fragments,
+        telemetry_.v12_delta_fragments,
+        telemetry_.v12_semantic_delta_attempts,
+        telemetry_.v12_semantic_delta_encode_ns,
+        telemetry_.v12_semantic_delta_encode_max_ns,
         telemetry_.remote_animation_bones, relay_pps, drop_pps,
         telemetry_.rejected_packets, telemetry_.socket_failures,
         telemetry_.outbound_peer_resets,
@@ -3314,7 +3375,9 @@ class Runtime {
         (header.encoding !=
              protocol_v12::PoseGroupEncoding::kV11WordStream &&
          header.encoding !=
-             protocol_v12::PoseGroupEncoding::kBitPackedV1) ||
+             protocol_v12::PoseGroupEncoding::kBitPackedV1 &&
+         header.encoding !=
+             protocol_v12::PoseGroupEncoding::kSemanticDeltaV1) ||
         !SteamSenderValid(envelope.sender_role, sender) ||
         envelope.sender_role ==
             static_cast<std::uint32_t>(bound_role_) ||
@@ -3390,17 +3453,47 @@ class Runtime {
     std::uint16_t root_bone = 0;
     std::vector<std::uint16_t> words;
     std::vector<std::uint8_t> unpacked;
-    const std::span<const std::uint8_t> animation_bytes =
-        completed.encoding ==
-                protocol_v12::PoseGroupEncoding::kBitPackedV1
-            ? (protocol_v12::DecodeLosslessBytes(
-                   completed.bytes, unpacked)
-                   ? std::span<const std::uint8_t>(unpacked)
-                   : std::span<const std::uint8_t>())
-            : std::span<const std::uint8_t>(completed.bytes);
-    if (animation_bytes.empty() ||
-        !protocol_v12::DecodeAnimationWordStream(
-            animation_bytes, root_position, root_bone, words) ||
+    bool animation_decoded = false;
+    if (completed.encoding ==
+        protocol_v12::PoseGroupEncoding::kSemanticDeltaV1) {
+      if (completed.kind !=
+              protocol_v12::MessageKind::kPoseDelta ||
+          peer.animation_keyframe.sequence !=
+              completed.baseline_id) {
+        peer.v12_pose_receiver.NotifyBaselineUnavailable();
+        if (peer.v12_pose_receiver.ConsumeBaselineRequest()) {
+          (void)SendV12PoseControl(
+              envelope.sender_role, sender,
+              protocol_v12::PoseControlType::kRequestBaseline,
+              0, 1u << completed.group_id);
+        }
+        return true;
+      }
+      std::array<protocol_v12::AnimationDeltaBaselineTrack,
+                 kMaximumAnimationTracks>
+          baseline_storage{};
+      const auto baselines = BuildAnimationBaselineViews(
+          peer.animation_keyframe, baseline_storage);
+      animation_decoded =
+          !baselines.empty() &&
+          protocol_v12::DecodeSemanticAnimationDelta(
+              completed.bytes, baselines, root_position,
+              root_bone, words);
+    } else {
+      const std::span<const std::uint8_t> animation_bytes =
+          completed.encoding ==
+                  protocol_v12::PoseGroupEncoding::kBitPackedV1
+              ? (protocol_v12::DecodeLosslessBytes(
+                     completed.bytes, unpacked)
+                     ? std::span<const std::uint8_t>(unpacked)
+                     : std::span<const std::uint8_t>())
+              : std::span<const std::uint8_t>(completed.bytes);
+      animation_decoded =
+          !animation_bytes.empty() &&
+          protocol_v12::DecodeAnimationWordStream(
+              animation_bytes, root_position, root_bone, words);
+    }
+    if (!animation_decoded ||
         !protocol_v12::AnimationWordStreamMatchesPoseGroup(
             completed.kind, header, words)) {
       return reject();
@@ -4768,9 +4861,11 @@ class Runtime {
       if (keyframe) {
         ++telemetry_.sent_v12_keyframe_groups;
         telemetry_.v12_keyframe_logical_bytes += logical_bytes;
+        telemetry_.v12_keyframe_fragments += fragment_count;
       } else {
         ++telemetry_.sent_v12_delta_groups;
         telemetry_.v12_delta_logical_bytes += logical_bytes;
+        telemetry_.v12_delta_fragments += fragment_count;
       }
     }
     if (complete &&
@@ -4780,6 +4875,14 @@ class Runtime {
       telemetry_.v12_lossless_raw_bytes +=
           protocol_v12::AnimationWordStreamByteCount(words.size());
       telemetry_.v12_lossless_wire_bytes += group_bytes.size();
+    }
+    if (complete &&
+        encoding ==
+            protocol_v12::PoseGroupEncoding::kSemanticDeltaV1) {
+      ++telemetry_.sent_v12_semantic_delta_groups;
+      telemetry_.v12_semantic_delta_raw_bytes +=
+          protocol_v12::AnimationWordStreamByteCount(words.size());
+      telemetry_.v12_semantic_delta_wire_bytes += group_bytes.size();
     }
     return complete;
   }
@@ -5283,7 +5386,7 @@ class Runtime {
         frame.valid = BuildAnimationFrameWords(
             pose, target_tracks, sequence, frame.proposed_keyframe,
             frame.words, frame.periodic_keyframes);
-        if (frame.valid) {
+        if (frame.valid && !frame.periodic_keyframes) {
           float relative_root[3] = {};
           for (std::size_t component = 0; component < 3;
                ++component) {
@@ -5291,26 +5394,72 @@ class Runtime {
                 pose.root_position[component] -
                 map_origin[component];
           }
-          frame.v12_group_bytes.resize(
+          const std::size_t raw_bytes =
               protocol_v12::AnimationWordStreamByteCount(
-                  frame.words.size()));
-          frame.valid =
-              protocol_v12::EncodeAnimationWordStream(
-                  relative_root, pose.root_bone,
-                  frame.words, frame.v12_group_bytes);
-          if (frame.valid) {
-            const std::size_t packed_bytes =
-                protocol_v12::LosslessEncodedByteCount(
-                    frame.v12_group_bytes);
-            if (protocol_v12::LosslessPackingWorthwhile(
-                    frame.v12_group_bytes.size(), packed_bytes,
+                  frame.words.size());
+          bool semantic_delta_selected = false;
+          if ((frame.words[0] & 1u) == 0) {
+            const auto semantic_started = Clock::now();
+            ++telemetry_.v12_semantic_delta_attempts;
+            std::array<
+                protocol_v12::AnimationDeltaBaselineTrack,
+                kMaximumAnimationTracks>
+                baseline_storage{};
+            const auto baselines = BuildAnimationBaselineViews(
+                frame.base_keyframe, baseline_storage);
+            const std::size_t semantic_bytes =
+                protocol_v12::SemanticAnimationDeltaByteCount(
+                    frame.words, baselines);
+            if (semantic_bytes != 0 &&
+                protocol_v12::LosslessPackingWorthwhile(
+                    raw_bytes, semantic_bytes,
                     protocol_v12::kMaximumPoseFragmentBytes)) {
-              std::vector<std::uint8_t> packed;
-              if (protocol_v12::EncodeLosslessBytes(
-                      frame.v12_group_bytes, packed)) {
-                frame.v12_group_bytes = std::move(packed);
+              std::vector<std::uint8_t> semantic(
+                  semantic_bytes);
+              if (protocol_v12::EncodeSemanticAnimationDelta(
+                      relative_root, pose.root_bone,
+                      frame.words, baselines, semantic)) {
+                frame.v12_group_bytes = std::move(semantic);
                 frame.v12_encoding =
-                    protocol_v12::PoseGroupEncoding::kBitPackedV1;
+                    protocol_v12::PoseGroupEncoding::
+                        kSemanticDeltaV1;
+                semantic_delta_selected = true;
+              }
+            }
+            const std::uint64_t semantic_ns =
+                static_cast<std::uint64_t>(
+                    std::chrono::duration_cast<
+                        std::chrono::nanoseconds>(
+                        Clock::now() - semantic_started)
+                        .count());
+            telemetry_.v12_semantic_delta_encode_ns +=
+                semantic_ns;
+            auto& maximum_semantic_ns =
+                telemetry_.v12_semantic_delta_encode_max_ns;
+            maximum_semantic_ns =
+                std::max(maximum_semantic_ns, semantic_ns);
+          }
+          if (!semantic_delta_selected) {
+            frame.v12_group_bytes.resize(raw_bytes);
+            frame.valid =
+                protocol_v12::EncodeAnimationWordStream(
+                    relative_root, pose.root_bone,
+                    frame.words, frame.v12_group_bytes);
+            if (frame.valid) {
+              const std::size_t packed_bytes =
+                  protocol_v12::LosslessEncodedByteCount(
+                      frame.v12_group_bytes);
+              if (protocol_v12::LosslessPackingWorthwhile(
+                      frame.v12_group_bytes.size(), packed_bytes,
+                      protocol_v12::kMaximumPoseFragmentBytes)) {
+                std::vector<std::uint8_t> packed;
+                if (protocol_v12::EncodeLosslessBytes(
+                        frame.v12_group_bytes, packed)) {
+                  frame.v12_group_bytes = std::move(packed);
+                  frame.v12_encoding =
+                      protocol_v12::PoseGroupEncoding::
+                          kBitPackedV1;
+                }
               }
             }
           }

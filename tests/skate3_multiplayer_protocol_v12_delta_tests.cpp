@@ -1,4 +1,5 @@
 #include "skate3_multiplayer_protocol_v12_delta.h"
+#include "skate3_multiplayer_protocol_v12_transport.h"
 
 #include <algorithm>
 #include <array>
@@ -250,6 +251,32 @@ void TestInputValidation() {
          "semantic delta encoder accepted truncated words");
 }
 
+void TestVarintCanonicalValidation() {
+  const std::array<std::uint8_t, 2> noncanonical = {
+      0x80u, 0x00u,
+  };
+  detail::LittleEndianReader noncanonical_reader(noncanonical);
+  std::uint32_t value = 0;
+  Expect(!delta_detail::ReadVarint(
+             noncanonical_reader, value),
+         "noncanonical semantic varint was accepted");
+
+  const std::array<std::uint8_t, 3> oversized = {
+      0xFFu, 0xFFu, 0x07u,
+  };
+  detail::LittleEndianReader oversized_reader(oversized);
+  Expect(!delta_detail::ReadVarint(oversized_reader, value),
+         "semantic varint above exact delta range was accepted");
+
+  const std::array<std::uint8_t, 3> unterminated = {
+      0x80u, 0x80u, 0x80u,
+  };
+  detail::LittleEndianReader unterminated_reader(unterminated);
+  Expect(!delta_detail::ReadVarint(
+             unterminated_reader, value),
+         "unterminated semantic varint was accepted");
+}
+
 void TestDeterministicPropertyRoundTrips() {
   const Fixture fixture;
   for (std::uint32_t seed = 0; seed < 2000; ++seed) {
@@ -262,6 +289,102 @@ void TestDeterministicPropertyRoundTrips() {
   }
 }
 
+void TestReverseFragmentReassembly() {
+  constexpr std::uint16_t bone_count = 131;
+  constexpr std::uint16_t encoding = 0;
+  constexpr std::size_t stride = 12;
+  std::vector<std::uint16_t> baseline_words(
+      std::size_t(bone_count) * stride, 0);
+  const std::array<AnimationDeltaBaselineTrack, 1> baselines = {{
+      {
+          .mesh_key = 0x12345678u,
+          .bone_count = bone_count,
+          .encoding = encoding,
+          .words = baseline_words,
+      },
+  }};
+  std::vector<std::uint16_t> words = {
+      0, 1, 0x0009u, 0,
+  };
+  AppendU32(words, baselines[0].mesh_key);
+  words.push_back(bone_count);
+  words.push_back(encoding);
+  constexpr std::size_t mask_count = (bone_count + 15) / 16;
+  words.push_back(mask_count);
+  words.insert(words.end(), mask_count, UINT16_MAX);
+  words[4 + 5 + mask_count - 1] = 0x0007u;
+  std::uint32_t random = 0xC001D00Du;
+  for (std::size_t index = 0;
+       index < std::size_t(bone_count) * stride; ++index) {
+    random = random * 1664525u + 1013904223u;
+    words.push_back(static_cast<std::uint16_t>(random));
+  }
+  const float root[3] = {5.0f, 6.0f, 7.0f};
+  const std::size_t byte_count =
+      SemanticAnimationDeltaByteCount(words, baselines);
+  std::vector<std::uint8_t> encoded(byte_count);
+  Expect(EncodeSemanticAnimationDelta(
+             root, 9, words, baselines, encoded),
+         "large semantic delta did not encode");
+  Expect(encoded.size() > kMaximumPoseFragmentBytes,
+         "semantic packet test did not span fragments");
+
+  PoseGroupPacketizeRequest request;
+  request.envelope.kind = MessageKind::kPoseDelta;
+  request.envelope.sender_role = 2;
+  request.envelope.stream_id = 2;
+  request.envelope.sender_session = 100;
+  request.envelope.sequence = 500;
+  request.envelope.sender_time_us = 1000000;
+  request.pose_id = 10;
+  request.baseline_id = 9;
+  request.element_count = 1;
+  request.group_id = 0;
+  request.encoding = PoseGroupEncoding::kSemanticDeltaV1;
+  request.group_bytes = encoded;
+  std::array<PoseGroupDatagram, 58> descriptors{};
+  const std::size_t count =
+      BuildPoseGroupDatagrams(request, descriptors);
+  Expect(count > 1, "semantic delta did not packetize");
+
+  PoseGroupReassembler reassembler;
+  std::vector<std::uint8_t> reconstructed;
+  for (std::size_t reverse = count; reverse-- > 0;) {
+    const PoseGroupDatagram& descriptor = descriptors[reverse];
+    std::vector<std::uint8_t> datagram(
+        kEnvelopeBytes + descriptor.envelope.payload_bytes);
+    Expect(EncodePoseGroupDatagram(
+               descriptor, encoded, datagram),
+           "semantic fragment did not encode");
+    Envelope envelope;
+    PoseGroupHeader header;
+    std::span<const std::uint8_t> fragment;
+    Expect(DecodePoseGroupDatagram(
+               datagram, envelope, header, fragment),
+           "semantic fragment did not decode");
+    const ReassemblyPushResult result =
+        reassembler.Push(envelope, header, fragment, 2000 + reverse);
+    if (result.completed.has_value()) {
+      Expect(result.completed->encoding ==
+                 PoseGroupEncoding::kSemanticDeltaV1,
+             "reassembly changed semantic encoding");
+      reconstructed = result.completed->bytes;
+    }
+  }
+  float decoded_root[3] = {};
+  std::uint16_t root_bone = 0;
+  std::vector<std::uint16_t> decoded_words;
+  Expect(DecodeSemanticAnimationDelta(
+             reconstructed, baselines, decoded_root,
+             root_bone, decoded_words),
+         "reassembled semantic delta did not decode");
+  Expect(decoded_words == words && root_bone == 9 &&
+             decoded_root[0] == root[0] &&
+             decoded_root[1] == root[1] &&
+             decoded_root[2] == root[2],
+         "reverse fragment reassembly changed semantic delta");
+}
+
 }  // namespace
 
 int main() {
@@ -269,7 +392,9 @@ int main() {
   TestMaximumDifferences();
   TestMalformedAndTransactionalDecode();
   TestInputValidation();
+  TestVarintCanonicalValidation();
   TestDeterministicPropertyRoundTrips();
+  TestReverseFragmentReassembly();
 
   if (g_failures != 0) {
     std::cerr << g_failures

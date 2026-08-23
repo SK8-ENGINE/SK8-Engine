@@ -294,6 +294,15 @@ void TestPoseGroupFragmentBoundaries() {
   Expect(!PoseGroupHeaderShapeValid(
              malformed, MessageKind::kPoseBaseline),
          "baseline carrying a delta reference was accepted");
+  malformed = header;
+  malformed.encoding = PoseGroupEncoding::kSemanticDeltaV1;
+  Expect(!PoseGroupHeaderShapeValid(
+             malformed, MessageKind::kPoseBaseline),
+         "baseline carrying semantic-delta encoding was accepted");
+  malformed.baseline_id = 1;
+  Expect(PoseGroupHeaderShapeValid(
+             malformed, MessageKind::kPoseDelta),
+         "semantic delta encoding was rejected for a delta");
 }
 
 void TestPoseGroupMalformedDecode() {
@@ -317,7 +326,7 @@ void TestPoseGroupMalformedDecode() {
              payload, MessageKind::kPoseBaseline, output),
          "pose fragment with trailing bytes was accepted");
   payload.pop_back();
-  payload[23] = 3;
+  payload[23] = 4;
   Expect(!DecodePoseGroupHeader(
              payload, MessageKind::kPoseBaseline, output),
          "unknown pose group encoding was accepted");
