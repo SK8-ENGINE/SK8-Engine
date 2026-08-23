@@ -1021,7 +1021,8 @@ bool BuildAnimationFrameWords(
     const std::vector<const AnimationTrack*>& tracks,
     std::uint32_t sequence,
     QuantizedAnimationFrame& keyframe,
-    std::vector<std::uint16_t>& words) {
+    std::vector<std::uint16_t>& words,
+    bool periodic_keyframes) {
   QuantizedAnimationFrame current;
   current.sequence = sequence;
   current.tracks.reserve(tracks.size());
@@ -1039,7 +1040,13 @@ bool BuildAnimationFrameWords(
   }
   bool keyframe_required =
       keyframe.tracks.size() != current.tracks.size() ||
-      sequence - keyframe.sequence >= kAnimationKeyframeInterval;
+      // Protocol v11 has no receiver acknowledgement or explicit recovery,
+      // so it retains periodic self-contained keyframes. Protocol v12 only
+      // disables this timer after selecting the exact baseline confirmed by
+      // this recipient; layout changes and recovery requests still force a
+      // fresh keyframe.
+      (periodic_keyframes &&
+       sequence - keyframe.sequence >= kAnimationKeyframeInterval);
   if (!keyframe_required) {
     for (std::size_t index = 0;
          index < current.tracks.size(); ++index) {
@@ -5235,6 +5242,7 @@ class Runtime {
       std::vector<std::uint8_t> v12_group_bytes;
       protocol_v12::PoseGroupEncoding v12_encoding =
           protocol_v12::PoseGroupEncoding::kV11WordStream;
+      bool periodic_keyframes = true;
       bool valid = false;
     };
     std::vector<PreparedAnimationFrame> prepared_frames;
@@ -5261,17 +5269,20 @@ class Runtime {
           prepared_frames.begin(), prepared_frames.end(),
           [&](const PreparedAnimationFrame& candidate) {
             return candidate.tracks == target_tracks &&
+                   candidate.periodic_keyframes ==
+                       !use_v12_animation &&
                    SameQuantizedAnimationFrame(
                        candidate.base_keyframe, target_keyframe);
           });
       if (prepared == prepared_frames.end()) {
         PreparedAnimationFrame frame;
         frame.tracks = target_tracks;
+        frame.periodic_keyframes = !use_v12_animation;
         frame.base_keyframe = target_keyframe;
         frame.proposed_keyframe = target_keyframe;
         frame.valid = BuildAnimationFrameWords(
             pose, target_tracks, sequence, frame.proposed_keyframe,
-            frame.words);
+            frame.words, frame.periodic_keyframes);
         if (frame.valid) {
           float relative_root[3] = {};
           for (std::size_t component = 0; component < 3;

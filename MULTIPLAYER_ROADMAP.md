@@ -637,6 +637,27 @@ Current checkpoint:
   inputs, and 100,000 deterministic random orientations under a 0.02-degree
   angular-error contract. It is not yet a live wire encoding; final skinned-
   vertex and user visual gates are still required before activation.
+- In corrected-codec run `20260823-210052-19a82bb9`, the user reported that
+  five-client visuals looked good. Telemetry independently showed four known
+  and four visible peers on every client, zero v12 animation-fragment,
+  pose-control, delivery-policy, socket, appearance-resource, or unsafe
+  GPU-reuse faults, and one successful explicit baseline recovery. The fixed
+  byte-run codec correctly selected no groups under its stricter material-
+  savings rule.
+- That run measured roughly 1.29-1.45 MiB/s upload per client. Exact
+  keyframes averaged approximately 5.2-5.6 KiB and exact deltas approximately
+  5.1-5.5 KiB, confirming that most finely quantized bones change every
+  frame. Periodic keyframes accounted for approximately 20-25% of pose
+  groups because several self-contained frames could be sent while each
+  20-frame offer awaited acknowledgement.
+- Protocol v12 therefore keeps an acknowledged baseline until track layout
+  changes or the receiver explicitly requests recovery. It no longer forces
+  a periodic 20-frame keyframe. The protocol-v11 fallback retains that
+  periodic safety behavior because it has neither receiver-confirmed
+  baselines nor explicit recovery. This changes baseline frequency only;
+  quantization, pose data, 60 Hz scheduling, interpolation, attachments,
+  boards, appearance, and rendering remain unchanged. Telemetry does not
+  establish the user's visual result.
 
 Completion:
 

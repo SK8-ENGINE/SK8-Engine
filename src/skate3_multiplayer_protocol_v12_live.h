@@ -30,7 +30,8 @@ struct CompatibilityIdentity {
 // commit. They change only when a build or content-schema difference makes
 // realtime replication unsafe between peers.
 inline constexpr std::uint64_t kBuildCompatibilityHash =
-    Fnv1a64("skate3-multiplayer-live-v12-lossless-packing-2");
+    Fnv1a64(
+        "skate3-multiplayer-live-v12-persistent-confirmed-baseline-1");
 inline constexpr std::uint64_t kContentCompatibilityHash =
     Fnv1a64("skate3-cac-recipe-final-pose-contract-1");
 inline constexpr std::uint64_t kAdvertisedFeatureBits =
