@@ -372,6 +372,66 @@ struct AppearanceAssembly {
   std::vector<bool> received;
 };
 
+struct PeerTimingTelemetry {
+  std::uint64_t completed_animation_frames = 0;
+  std::uint64_t animation_sequence_gaps = 0;
+  std::uint64_t superseded_animation_assemblies = 0;
+  std::uint64_t present_interpolated = 0;
+  std::uint64_t present_held_latest = 0;
+  std::uint64_t present_held_oldest = 0;
+  std::uint64_t cursor_margin_samples = 0;
+  std::int64_t cursor_margin_sum_us = 0;
+  std::int64_t cursor_margin_min_us =
+      std::numeric_limits<std::int64_t>::max();
+  std::int64_t cursor_margin_max_us =
+      std::numeric_limits<std::int64_t>::min();
+  std::uint32_t current_held_latest_run = 0;
+  std::uint32_t maximum_held_latest_run = 0;
+
+  void RecordCursorMargin(std::int64_t margin_us) {
+    ++cursor_margin_samples;
+    cursor_margin_sum_us += margin_us;
+    cursor_margin_min_us =
+        std::min(cursor_margin_min_us, margin_us);
+    cursor_margin_max_us =
+        std::max(cursor_margin_max_us, margin_us);
+  }
+
+  void RecordInterpolated() {
+    ++present_interpolated;
+    current_held_latest_run = 0;
+  }
+
+  void RecordHeldLatest() {
+    ++present_held_latest;
+    ++current_held_latest_run;
+    maximum_held_latest_run =
+        std::max(maximum_held_latest_run,
+                 current_held_latest_run);
+  }
+
+  void RecordHeldOldest() {
+    ++present_held_oldest;
+    current_held_latest_run = 0;
+  }
+
+  void ResetInterval() {
+    completed_animation_frames = 0;
+    animation_sequence_gaps = 0;
+    superseded_animation_assemblies = 0;
+    present_interpolated = 0;
+    present_held_latest = 0;
+    present_held_oldest = 0;
+    cursor_margin_samples = 0;
+    cursor_margin_sum_us = 0;
+    cursor_margin_min_us =
+        std::numeric_limits<std::int64_t>::max();
+    cursor_margin_max_us =
+        std::numeric_limits<std::int64_t>::min();
+    maximum_held_latest_run = current_held_latest_run;
+  }
+};
+
 struct RemotePeerState {
   std::uint32_t session = 0;
   Clock::time_point last_packet_at{};
@@ -390,6 +450,7 @@ struct RemotePeerState {
   std::deque<ReceivedAnimationSample> animation_samples;
   AnimationAssembly animation_assembly;
   QuantizedAnimationFrame animation_keyframe;
+  PeerTimingTelemetry timing;
   AppearanceAssembly appearance_assembly;
   AppearanceBlob appearance;
 };
@@ -2343,6 +2404,77 @@ class Runtime {
         static_cast<double>(telemetry_.animation_period_us) / 1000.0,
         static_cast<double>(telemetry_.animation_jitter_us) / 1000.0,
         telemetry_.animation_buffered_samples);
+
+    std::vector<std::uint32_t> timing_roles;
+    timing_roles.reserve(remote_peers_.size());
+    for (const auto& [remote_role, peer] : remote_peers_) {
+      (void)peer;
+      timing_roles.push_back(remote_role);
+    }
+    std::sort(timing_roles.begin(), timing_roles.end());
+    for (const std::uint32_t remote_role : timing_roles) {
+      RemotePeerState& peer = remote_peers_.at(remote_role);
+      PeerTimingTelemetry& timing = peer.timing;
+      const std::uint64_t presentation_count =
+          timing.present_interpolated +
+          timing.present_held_latest +
+          timing.present_held_oldest;
+      const double held_latest_percent =
+          presentation_count == 0
+              ? 0.0
+              : static_cast<double>(
+                    timing.present_held_latest) *
+                    100.0 /
+                    static_cast<double>(presentation_count);
+      const double margin_average_ms =
+          timing.cursor_margin_samples == 0
+              ? 0.0
+              : static_cast<double>(
+                    timing.cursor_margin_sum_us) /
+                    static_cast<double>(
+                        timing.cursor_margin_samples) /
+                    1000.0;
+      const double margin_minimum_ms =
+          timing.cursor_margin_samples == 0
+              ? 0.0
+              : static_cast<double>(
+                    timing.cursor_margin_min_us) /
+                    1000.0;
+      const double margin_maximum_ms =
+          timing.cursor_margin_samples == 0
+              ? 0.0
+              : static_cast<double>(
+                    timing.cursor_margin_max_us) /
+                    1000.0;
+      REXLOG_INFO(
+          "multiplayer-peer-timing: receiver={} sender={} "
+          "rx={:.1f}fps period={:.1f}ms jitter={:.1f}ms "
+          "delay={:.1f}ms margin={:.1f}/{:.1f}/{:.1f}ms "
+          "buffered={} present={}/{}/{} latest={:.1f}% "
+          "latest_run={} gaps={} superseded={}",
+          bound_role_, remote_role,
+          static_cast<double>(
+              timing.completed_animation_frames) /
+              seconds,
+          static_cast<double>(peer.animation_period_us) /
+              1000.0,
+          static_cast<double>(peer.animation_jitter_us) /
+              1000.0,
+          static_cast<double>(
+              PresentationDelayMicroseconds(
+                  peer, network_tuning_.interpolation_ms)) /
+              1000.0,
+          margin_average_ms, margin_minimum_ms,
+          margin_maximum_ms, peer.animation_samples.size(),
+          timing.present_interpolated,
+          timing.present_held_latest,
+          timing.present_held_oldest,
+          held_latest_percent,
+          timing.maximum_held_latest_run,
+          timing.animation_sequence_gaps,
+          timing.superseded_animation_assemblies);
+      timing.ResetInterval();
+    }
     last_rate_log_ = now;
     last_rate_snapshot_ = telemetry_;
   }
@@ -3197,6 +3329,12 @@ class Runtime {
       // stale fragment replace the newer in-progress assembly.
       return false;
     }
+    if (peer.animation_assembly.active &&
+        peer.animation_assembly.session == packet.sender_session &&
+        peer.animation_assembly.sequence != packet.sequence &&
+        peer.animation_assembly.received_fragments != 0) {
+      ++peer.timing.superseded_animation_assemblies;
+    }
     if (peer.animation_assembly.session != packet.sender_session ||
         peer.animation_assembly.sequence != packet.sequence) {
       peer.animation_assembly = {};
@@ -3286,6 +3424,10 @@ class Runtime {
       const std::uint32_t sequence_delta =
           complete.pose.sequence -
           peer.last_animation_sequence;
+      if (sequence_delta > 1) {
+        peer.timing.animation_sequence_gaps +=
+            static_cast<std::uint64_t>(sequence_delta - 1);
+      }
       const std::int64_t period_sample =
           static_cast<std::int64_t>(
               sender_delta / sequence_delta);
@@ -3318,6 +3460,7 @@ class Runtime {
            kMaximumBufferedAnimationSamples) {
       peer.animation_samples.pop_front();
     }
+    ++peer.timing.completed_animation_frames;
     ++telemetry_.received_animation_frames;
     telemetry_.remote_animation_bones = total_bones;
     peer.animation_assembly = {};
@@ -4390,6 +4533,11 @@ class Runtime {
         std::chrono::duration_cast<std::chrono::microseconds>(
             interpolation_delay)
             .count();
+    const std::int64_t cursor_margin_us =
+        static_cast<std::int64_t>(
+            peer.animation_samples.back().pose.sender_time_us) -
+        target_sender_time_us;
+    peer.timing.RecordCursorMargin(cursor_margin_us);
     const AnimationPose* first =
         &peer.animation_samples.front().pose;
     const AnimationPose* second = first;
@@ -4404,12 +4552,14 @@ class Runtime {
         static_cast<std::int64_t>(
             peer.animation_samples.front().pose.sender_time_us)) {
       ++telemetry_.animation_present_held_oldest;
+      peer.timing.RecordHeldOldest();
     } else if (target_sender_time_us >=
         static_cast<std::int64_t>(
             peer.animation_samples.back().pose.sender_time_us)) {
       first = second = &peer.animation_samples.back().pose;
       previous = next = second;
       ++telemetry_.animation_present_held_latest;
+      peer.timing.RecordHeldLatest();
     } else {
       for (std::size_t index = 1;
            index < peer.animation_samples.size(); ++index) {
@@ -4439,6 +4589,7 @@ class Runtime {
                                  static_cast<float>(span),
                              0.0f, 1.0f);
           ++telemetry_.animation_present_interpolated;
+          peer.timing.RecordInterpolated();
           break;
         }
       }

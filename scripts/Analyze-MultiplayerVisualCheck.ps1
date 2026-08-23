@@ -127,6 +127,10 @@ foreach ($client in $clientDirectories) {
         $lines | Select-String -Pattern 'multiplayer-net:' |
             ForEach-Object { $_.Line }
     )
+    $peerTimingLines = @(
+        $lines | Select-String -Pattern 'multiplayer-peer-timing:' |
+            ForEach-Object { $_.Line }
+    )
     $perfLines = @(
         $lines | Select-String -Pattern 'multiplayer-perf:' |
             ForEach-Object { $_.Line }
@@ -236,6 +240,22 @@ foreach ($client in $clientDirectories) {
     $summary.Add("logs=$($logs.Count)")
     $summary.Add("latest_log=$($logs[-1].FullName)")
     $summary.Add("rate_samples=$($rateLines.Count)")
+    $summary.Add("peer_timing_samples=$($peerTimingLines.Count)")
+    foreach ($sender in 1..5) {
+        $senderTimingLines = @(
+            $peerTimingLines |
+                Select-String -Pattern (
+                    " sender=$sender(?:\s|$)"
+                ) |
+                ForEach-Object { $_.Line }
+        )
+        if ($senderTimingLines.Count -gt 0) {
+            $summary.Add(
+                "last_peer_timing_sender_$sender=" +
+                $senderTimingLines[-1]
+            )
+        }
+    }
     $summary.Add("multiplayer_perf_samples=$($perfLines.Count)")
     $summary.Add("multiplayer_worker_samples=$($workerLines.Count)")
     $summary.Add(
