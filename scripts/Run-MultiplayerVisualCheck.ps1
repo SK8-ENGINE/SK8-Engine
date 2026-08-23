@@ -557,6 +557,9 @@ try {
         fidelity_contract = 'full-for-1-to-100-players'
         guest_fps_cap = 120
         replication_quality = 'full-fidelity'
+        root_protocol = 'v12-after-negotiation'
+        animation_protocol = 'v11'
+        appearance_protocol = 'v11'
         root_rate_hz = 60
         animation_rate_hz = 60
         interpolation_ms = 50
@@ -646,12 +649,11 @@ $runRoot
 Clients: 5
 Transport: localhost UDP
 Quality: Full fidelity, 60 Hz root, 60 Hz animation, 50 ms minimum interpolation
-Change under test: buffered playback cannot advance beyond an interpolatable
-skeletal frame after a scheduler stall; all five localhost clients exchange
-realtime packets directly instead of routing every stream through client 1;
-all five peers receive full root, skeletal, board, clothing, and attachment
-streams regardless of distance; the five-instance test has an explicit
-120 fps per-client resource budget
+Change under test: directly negotiated peers now exchange their 60 Hz
+root-position, board-orientation, and board-state snapshot through the
+explicit-endian protocol-v12 envelope. Skeletal animation, outfits, and
+attachments remain on protocol v11. Full-fidelity direct peer fan-out and the
+120 fps per-client test budget remain unchanged.
 Diagnostics: representative visible body vertices are sampled before send and
 after remote reconstruction, alongside skeleton, network, and GPU timing
 
@@ -683,6 +685,9 @@ Telemetry acceptance checked by the agent afterward:
   final remote reconstruction, using the same skinning equation as rendering.
 - GPU upload-ring pressure remains healthy with zero unsafe region reuse.
 - Client 1 reports direct-mesh topology and zero relayed realtime packets.
+- Every client negotiates v12 with all four peers, sends and receives v12
+  root snapshots continuously, and reports zero v12 compatibility or root
+  rejection.
 - Every active sender/receiver pair reports the full-fidelity contract,
   continuous pose/animation traffic, and zero relevance drops.
 - Playback cursor margins remain inside the animation buffer, with no
@@ -707,7 +712,7 @@ $runRoot
 Clients: 5
 Transport: localhost UDP
 Quality: Full fidelity, 60 Hz root, 60 Hz animation, 50 ms interpolation
-Wire format: unchanged protocol v11
+Wire format: v12 root snapshots after negotiation; v11 animation and outfits
 Delivery policy: root/animation unreliable and latest-wins; control/outfits
 reliable
 

@@ -1,4 +1,5 @@
 #include "skate3_multiplayer_protocol_v12_pose.h"
+#include "skate3_multiplayer_protocol_v12_root.h"
 
 #include <algorithm>
 #include <array>
@@ -325,6 +326,56 @@ void TestPoseGroupMalformedDecode() {
          "pose group decoded for unrelated message kind");
 }
 
+void TestRootSnapshotRoundTripAndPolicy() {
+  RootSnapshot snapshot;
+  snapshot.position[0] = 1.0f;
+  snapshot.position[1] = -2.5f;
+  snapshot.position[2] = 3.25f;
+  snapshot.x_axis[0] = 1.0f;
+  snapshot.z_axis[2] = -1.0f;
+  snapshot.board_state_flags = 0xA1B2C3D4u;
+
+  std::array<std::uint8_t, kRootSnapshotPayloadBytes> bytes{};
+  Expect(EncodeRootSnapshot(snapshot, bytes),
+         "v12 root snapshot did not encode");
+  Expect(
+      bytes[0] == 0x00 && bytes[1] == 0x00 &&
+          bytes[2] == 0x80 && bytes[3] == 0x3F &&
+          bytes[36] == 0xD4 && bytes[37] == 0xC3 &&
+          bytes[38] == 0xB2 && bytes[39] == 0xA1,
+      "v12 root snapshot explicit-endian bytes changed");
+
+  RootSnapshot decoded;
+  Expect(DecodeRootSnapshot(bytes, decoded),
+         "v12 root snapshot did not decode");
+  Expect(decoded.position[0] == snapshot.position[0] &&
+             decoded.position[1] == snapshot.position[1] &&
+             decoded.position[2] == snapshot.position[2] &&
+             decoded.x_axis[0] == snapshot.x_axis[0] &&
+             decoded.z_axis[2] == snapshot.z_axis[2] &&
+             decoded.board_state_flags ==
+                 snapshot.board_state_flags,
+         "v12 root snapshot round trip changed fields");
+  Expect(!DecodeRootSnapshot(
+             std::span<const std::uint8_t>(
+                 bytes.data(), bytes.size() - 1),
+             decoded),
+         "truncated v12 root snapshot was accepted");
+
+  Envelope envelope;
+  envelope.kind = MessageKind::kRootSnapshot;
+  envelope.flags = kFlagExpires;
+  envelope.payload_bytes = kRootSnapshotPayloadBytes;
+  envelope.sender_role = 1;
+  envelope.sender_session = 2;
+  envelope.stream_id = kRootSnapshotStreamId;
+  Expect(RootSnapshotEnvelopeShapeValid(envelope),
+         "valid v12 root envelope was rejected");
+  envelope.flags = kFlagReliable;
+  Expect(!RootSnapshotEnvelopeShapeValid(envelope),
+         "reliable v12 root envelope was accepted");
+}
+
 }  // namespace
 
 int main() {
@@ -334,6 +385,7 @@ int main() {
   TestPoseGroupGoldenBytesAndRoundTrip();
   TestPoseGroupFragmentBoundaries();
   TestPoseGroupMalformedDecode();
+  TestRootSnapshotRoundTripAndPolicy();
 
   if (g_failures != 0) {
     std::cerr << g_failures

@@ -552,6 +552,18 @@ foreach ($client in $clientDirectories) {
         (Maximum-IntegerField $rateLines 'v12_incompatible')
     )
     $summary.Add(
+        'max_v12_root_snapshots_sent=' +
+        (Maximum-IntegerField $rateLines 'v12_root_tx')
+    )
+    $summary.Add(
+        'max_v12_root_snapshots_received=' +
+        (Maximum-IntegerField $rateLines 'v12_root_rx')
+    )
+    $summary.Add(
+        'max_v12_root_snapshot_rejections=' +
+        (Maximum-IntegerField $rateLines 'v12_root_rejected')
+    )
+    $summary.Add(
         'appearance_byte_receipts=' +
         (Match-Count $lines 'multiplayer: peer role=.*appearance .*state=1')
     )
