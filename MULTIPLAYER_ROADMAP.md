@@ -256,6 +256,26 @@ Work:
 - Keep critical control reliable and appearance bulk reliable but
   rate-limited.
 
+Current checkpoint:
+
+- Commit `6a5285c` adds an offline-only protocol-v12 foundation alongside the
+  live protocol-v11 structs. It does not participate in runtime send or
+  receive dispatch.
+- The v12 wire layer uses a fixed 40-byte transport-independent envelope,
+  explicit little-endian encoding, a 1,200-byte datagram ceiling, sender
+  session and stream identities, sequence acknowledgement plus a 32-packet
+  receive bitmap, and expirable/keyframe/reliable flags.
+- A one-time capabilities payload carries feature bits and 64-bit map, build,
+  and content hashes instead of repeating those hashes on every realtime
+  packet. Unknown feature bits remain forward-compatible and negotiation
+  intersects only locally understood features.
+- Golden-byte, round-trip, malformed-packet, payload-boundary, feature
+  negotiation, acknowledgement-window, and sequence-rollover tests pass.
+  Protocol-v11 golden tests remain unchanged.
+- The next isolated slice is a tested receive-history/baseline state machine.
+  Runtime capability advertisements remain v11-only until that state can
+  safely reject stale generations and request a fresh baseline.
+
 Completion:
 
 - Losing one realtime group does not discard the entire pose.
