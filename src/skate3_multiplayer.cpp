@@ -3028,10 +3028,9 @@ private:
                                                fragment) ||
         envelope.stream_id != kV12AnimationStreamId ||
         header.group_id != kV12AnimationGroupId ||
-        (header.encoding != protocol_v12::PoseGroupEncoding::kV11WordStream &&
-         header.encoding != protocol_v12::PoseGroupEncoding::kBitPackedV1 &&
-         header.encoding != protocol_v12::PoseGroupEncoding::kSemanticDeltaV1 &&
-         header.encoding != protocol_v12::PoseGroupEncoding::kBlockDeltaV1) ||
+        !protocol_v12::AnimationPoseGroupEncodingAllowed(
+            header.encoding,
+            envelope.kind == protocol_v12::MessageKind::kPoseBaseline) ||
         !SteamSenderValid(envelope.sender_role, sender) ||
         envelope.sender_role == static_cast<std::uint32_t>(bound_role_) ||
         envelope.sender_session == session_id_) {
