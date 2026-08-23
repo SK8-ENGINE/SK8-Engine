@@ -63,15 +63,24 @@ struct RemotePlayer {
   AppearanceBlob appearance;
 };
 
+// One renderer-owned peer generation that the replication core has
+// definitively replaced or forgotten. The session prevents a delayed
+// retirement from releasing a newer occupant of the same reusable role.
+struct RemotePeerRetirement {
+  std::uint32_t role = 0;
+  std::uint32_t session = 0;
+};
+
 // Samples the verified local board, services the current transport, and
 // returns independently smoothed remote players alive on the same map. The
 // first transport is localhost UDP; the packet and pose seam is deliberately
 // independent from it so another transport can replace only networking.
 bool TickLocalVisuals(const char* map_name,
-                      const float map_render_origin[3],
-                      const AnimationPose* local_animation,
-                      const AppearanceBlob* local_appearance,
-                      std::vector<RemotePlayer>& out_remotes);
+                       const float map_render_origin[3],
+                       const AnimationPose* local_animation,
+                       const AppearanceBlob* local_appearance,
+                       std::vector<RemotePlayer>& out_remotes,
+                       std::vector<RemotePeerRetirement>& out_retirements);
 
 void AppendTelemetry(std::ostream& out);
 

@@ -10476,7 +10476,6 @@ struct RemoteAppearanceRenderState {
   uint32_t session = 0;
   bool installation_reported = false;
   uint32_t installation_reported_session = 0;
-  std::chrono::steady_clock::time_point last_visible{};
   float root_position[3] = {};
   float root_x_axis[3] = {1.0f, 0.0f, 0.0f};
   float root_z_axis[3] = {0.0f, 0.0f, 1.0f};
@@ -10491,7 +10490,6 @@ struct RemoteVisualTelemetryState {
   uint32_t session = 0;
   bool real_skater = false;
   bool initialized = false;
-  std::chrono::steady_clock::time_point last_visible{};
 };
 
 std::unordered_map<uint32_t, RemoteVisualTelemetryState>
@@ -10548,8 +10546,7 @@ void ReleaseRemoteAppearanceResources(
 
 void ObserveRemoteAppearanceSession(
     const NativeGuestOutputRenderContext& context,
-    uint32_t role, uint32_t session,
-    std::chrono::steady_clock::time_point now) {
+    uint32_t role, uint32_t session) {
   const auto installed = g_remote_appearances.find(role);
   if (installed == g_remote_appearances.end()) {
     return;
@@ -10560,45 +10557,30 @@ void ObserveRemoteAppearanceSession(
         context, role, installed->second, "session changed");
     g_remote_appearances.erase(installed);
     g_remote_visual_telemetry.erase(role);
-    return;
   }
-  installed->second.last_visible = now;
 }
 
-void PruneRemoteAppearanceResources(
+void ReleaseRetiredRemoteAppearance(
     const NativeGuestOutputRenderContext& context,
-    std::chrono::steady_clock::time_point now) {
-  for (auto installed = g_remote_appearances.begin();
-       installed != g_remote_appearances.end();) {
-    if (!multiplayer::lifecycle::RemoteAppearanceResidencyExpired<
-            std::chrono::steady_clock>(
-            now, installed->second.last_visible)) {
-      ++installed;
-      continue;
-    }
-    const uint32_t role = installed->first;
-    ReleaseRemoteAppearanceResources(
-        context, role, installed->second, "not visible");
-    installed = g_remote_appearances.erase(installed);
-    g_remote_visual_telemetry.erase(role);
+    const multiplayer::RemotePeerRetirement& retirement) {
+  const auto installed =
+      g_remote_appearances.find(retirement.role);
+  if (installed == g_remote_appearances.end() ||
+      !multiplayer::lifecycle::RemoteAppearanceRetirementMatches(
+          installed->second.session, retirement.session)) {
+    return;
   }
-  for (auto visual = g_remote_visual_telemetry.begin();
-       visual != g_remote_visual_telemetry.end();) {
-    if (multiplayer::lifecycle::RemoteAppearanceResidencyExpired<
-            std::chrono::steady_clock>(
-            now, visual->second.last_visible)) {
-      visual = g_remote_visual_telemetry.erase(visual);
-    } else {
-      ++visual;
-    }
-  }
+  ReleaseRemoteAppearanceResources(
+      context, retirement.role, installed->second,
+      "peer retired");
+  g_remote_appearances.erase(installed);
+  g_remote_visual_telemetry.erase(retirement.role);
 }
 
 bool InstallRemoteRecipeAppearance(
     const NativeGuestOutputRenderContext& context,
     uint32_t role,
     uint32_t session,
-    std::chrono::steady_clock::time_point observed_at,
     const multiplayer::AppearanceBlob& appearance) {
   if (appearance.bytes == nullptr) {
     return false;
@@ -10692,7 +10674,6 @@ bool InstallRemoteRecipeAppearance(
   RemoteAppearanceRenderState installed;
   installed.identity = appearance.identity;
   installed.session = session;
-  installed.last_visible = observed_at;
   std::copy_n(
       header.root_position, 3, installed.root_position);
   std::copy_n(
@@ -10995,7 +10976,6 @@ bool InstallRemoteAppearance(
     const NativeGuestOutputRenderContext& context,
     uint32_t role,
     uint32_t session,
-    std::chrono::steady_clock::time_point observed_at,
     const multiplayer::AppearanceBlob& appearance) {
   if (appearance.identity == 0 ||
       appearance.bytes == nullptr ||
@@ -11023,7 +11003,7 @@ bool InstallRemoteAppearance(
     std::memcpy(&magic, bytes.data(), sizeof(magic));
     if (magic == 0x31504352u) {
       return InstallRemoteRecipeAppearance(
-          context, role, session, observed_at, appearance);
+          context, role, session, appearance);
     }
   }
   size_t cursor = 0;
@@ -11039,7 +11019,6 @@ bool InstallRemoteAppearance(
   RemoteAppearanceRenderState installed;
   installed.identity = appearance.identity;
   installed.session = session;
-  installed.last_visible = observed_at;
   std::copy_n(
       header.root_position, 3,
       installed.root_position);
@@ -12676,6 +12655,8 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
       BuildLocalAppearanceBlob(
           context, local_player_items, local_animation);
   std::vector<multiplayer::RemotePlayer> remote_players;
+  std::vector<multiplayer::RemotePeerRetirement>
+      remote_retirements;
   const bool have_remote_players =
       multiplayer::TickLocalVisuals(
           mechanics_sandbox::map::ActiveMapName(), origin,
@@ -12687,9 +12668,11 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
                   local_appearance.bytes != nullptr
               ? &local_appearance
               : nullptr,
-          remote_players);
-  const auto remote_appearance_now =
-      std::chrono::steady_clock::now();
+          remote_players, remote_retirements);
+  for (const multiplayer::RemotePeerRetirement& retirement :
+       remote_retirements) {
+    ReleaseRetiredRemoteAppearance(context, retirement);
+  }
   if (have_remote_players) {
   for (const multiplayer::RemotePlayer& remote_player : remote_players) {
     const multiplayer::RemotePose& remote_pose = remote_player.pose;
@@ -12708,12 +12691,11 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
     const RemoteAppearanceRenderState*
         remote_appearance_state = nullptr;
     ObserveRemoteAppearanceSession(
-        context, remote_player.role, remote_player.session,
-        remote_appearance_now);
+        context, remote_player.role, remote_player.session);
     const bool appearance_installed =
         InstallRemoteAppearance(
             context, remote_player.role,
-            remote_player.session, remote_appearance_now,
+            remote_player.session,
             remote_player.appearance);
     if (appearance_installed) {
       const auto installed =
@@ -13324,7 +13306,6 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
 
     RemoteVisualTelemetryState& visual_state =
         g_remote_visual_telemetry[remote_player.role];
-    visual_state.last_visible = remote_appearance_now;
     if (!visual_state.initialized ||
         visual_state.session != remote_player.session ||
         visual_state.real_skater != replicated_real_skater) {
@@ -13394,8 +13375,6 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
     }
   }
   }
-  PruneRemoteAppearanceResources(
-      context, remote_appearance_now);
 
   // The same cached authored poses are consumed later by the DXR dynamic
   // scene. Rendering the emissive source meshes here makes their motion and

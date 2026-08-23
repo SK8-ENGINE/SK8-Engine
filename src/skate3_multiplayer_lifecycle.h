@@ -14,7 +14,6 @@ inline constexpr std::size_t kMaximumIncompleteAppearanceBytes =
 inline constexpr auto kAppearanceAssemblyIdleTimeout = std::chrono::seconds(10);
 inline constexpr auto kAppearanceResendRequestMinimumInterval =
     std::chrono::seconds(2);
-inline constexpr auto kRemoteAppearanceIdleTimeout = std::chrono::seconds(5);
 
 // Renderer texture entries are mutable GPU resources. Scope their content
 // identity by role so two players wearing the same recipe cannot replace or
@@ -41,12 +40,10 @@ inline constexpr auto kRemoteAppearanceIdleTimeout = std::chrono::seconds(5);
          installed_session != observed_session;
 }
 
-template <typename Clock>
-[[nodiscard]] bool RemoteAppearanceResidencyExpired(
-    typename Clock::time_point now,
-    typename Clock::time_point last_visible) {
-  return last_visible != typename Clock::time_point{} &&
-         now - last_visible > kRemoteAppearanceIdleTimeout;
+[[nodiscard]] constexpr bool RemoteAppearanceRetirementMatches(
+    std::uint32_t installed_session, std::uint32_t retired_session) {
+  return installed_session != 0 &&
+         installed_session == retired_session;
 }
 
 [[nodiscard]] constexpr bool

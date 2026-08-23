@@ -1813,7 +1813,9 @@ class Runtime {
   bool Tick(const char* map_name, const float map_origin[3],
             const AnimationPose* local_animation,
             const AppearanceBlob* local_appearance,
-            std::vector<RemotePlayer>& out_remotes) {
+            std::vector<RemotePlayer>& out_remotes,
+            std::vector<RemotePeerRetirement>& out_retirements) {
+    out_retirements.clear();
     // The explicit local-visuals mode is the isolated multi-process test
     // transport. Steam can still be active in both portable clients under
     // the same account, which would otherwise make them choose the same
@@ -1841,6 +1843,7 @@ class Runtime {
     telemetry_.role = role;
     if (!enabled || role == 0) {
       ShutdownLocked();
+      DrainRemotePeerRetirements(out_retirements);
       telemetry_.remote_visible = false;
       out_remotes.clear();
       return false;
@@ -1850,6 +1853,7 @@ class Runtime {
         REXCVAR_GET(skate3_multiplayer_local_base_port);
     if (!(steam_active ? EnsureSteam(role)
                        : EnsureSocket(role, base_port))) {
+      DrainRemotePeerRetirements(out_retirements);
       telemetry_.remote_visible = false;
       out_remotes.clear();
       return false;
@@ -1878,6 +1882,7 @@ class Runtime {
             : 0;
     ReceivePackets(now, map_hash);
     PrunePeers(now);
+    DrainRemotePeerRetirements(out_retirements);
     SendCapabilityAdvertisements(
         now, map_hash, static_cast<std::uint32_t>(role));
     SendPendingAppearanceControls(
@@ -2412,6 +2417,38 @@ class Runtime {
         role, appearance_id);
   }
 
+  void QueueRemotePeerRetirement(std::uint32_t role,
+                                 std::uint32_t session) {
+    if (role < 1 || role > 100 || session == 0) {
+      return;
+    }
+    const auto duplicate = std::find_if(
+        pending_remote_retirements_.begin(),
+        pending_remote_retirements_.end(),
+        [role, session](const RemotePeerRetirement& retirement) {
+          return retirement.role == role &&
+                 retirement.session == session;
+        });
+    if (duplicate == pending_remote_retirements_.end()) {
+      pending_remote_retirements_.push_back({role, session});
+    }
+  }
+
+  void QueueAllRemotePeerRetirements() {
+    for (const auto& [role, peer] : remote_peers_) {
+      QueueRemotePeerRetirement(role, peer.session);
+    }
+  }
+
+  void DrainRemotePeerRetirements(
+      std::vector<RemotePeerRetirement>& out_retirements) {
+    out_retirements.insert(
+        out_retirements.end(),
+        pending_remote_retirements_.begin(),
+        pending_remote_retirements_.end());
+    pending_remote_retirements_.clear();
+  }
+
   void PrunePeers(Clock::time_point now) {
     constexpr auto kForgetPeerAfter = std::chrono::seconds(5);
     for (auto iterator = remote_peers_.begin();
@@ -2443,6 +2480,8 @@ class Runtime {
       }
       if (newest != Clock::time_point{} &&
           now - newest > kForgetPeerAfter) {
+        QueueRemotePeerRetirement(
+            iterator->first, peer.session);
         ForgetPeerGeneration(
             iterator->first, "remote timeout");
         iterator = remote_peers_.erase(iterator);
@@ -2927,6 +2966,7 @@ class Runtime {
     if (peer.session == sender_session) {
       return;
     }
+    QueueRemotePeerRetirement(role, peer.session);
     if (peer_generations_.ObserveProcessSession(
             role, sender_session)) {
       ResetOutboundPeerState(
@@ -4354,6 +4394,7 @@ class Runtime {
   }
 
   void ShutdownLocked() {
+    QueueAllRemotePeerRetirements();
 #if defined(_WIN32)
     if (socket_ != INVALID_SOCKET) {
       closesocket(socket_);
@@ -4433,6 +4474,7 @@ class Runtime {
   Clock::time_point last_appearance_send_{};
   Clock::time_point last_rate_log_{};
   std::unordered_map<std::uint32_t, RemotePeerState> remote_peers_;
+  std::vector<RemotePeerRetirement> pending_remote_retirements_;
 #if defined(_WIN32)
   std::unordered_map<std::uint32_t, HostPeer> host_peers_;
 #endif
@@ -4460,10 +4502,11 @@ bool TickLocalVisuals(const char* map_name,
                       const float map_render_origin[3],
                       const AnimationPose* local_animation,
                       const AppearanceBlob* local_appearance,
-                      std::vector<RemotePlayer>& out_remotes) {
+                      std::vector<RemotePlayer>& out_remotes,
+                      std::vector<RemotePeerRetirement>& out_retirements) {
   return ActiveRuntime().Tick(
       map_name, map_render_origin, local_animation,
-      local_appearance, out_remotes);
+      local_appearance, out_remotes, out_retirements);
 }
 
 void AppendTelemetry(std::ostream& out) {
