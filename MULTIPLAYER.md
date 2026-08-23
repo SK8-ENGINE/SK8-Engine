@@ -176,10 +176,15 @@ It incrementally builds that worktree, stages fresh portable clients under a
 timestamped `out\visual-checks` directory, enables multiplayer and renderer
 telemetry, records the exact commit/diff and binary hashes, and writes
 `out\visual-checks\LATEST.txt`. It never falls back to a binary from another
-checkout. `RELAUNCH_MULTIPLAYER_VISUAL_CLIENT_3.bat` restarts role 3 in the
-same evidence directory after the user closes that client for a role-reuse
-check. Visual correctness is the user's decision; the generated logs support
-a separate telemetry review.
+checkout. Each numbered role has separate persistent profile storage under
+`out\visual-check-profiles/clientN`; a role's saved outfit therefore survives
+later launcher runs while logs and binaries remain isolated by timestamp.
+The first persistent profiles are seeded from the latest visual run when one
+exists, preserving outfits already edited there.
+`RELAUNCH_MULTIPLAYER_VISUAL_CLIENT_3.bat` restarts role 3 in the same evidence
+directory after the user closes that client for a role-reuse check. Visual
+correctness is the user's decision; the generated logs support a separate
+telemetry review.
 
 The script uses the sibling `Skate3CustomEngineLayer-Player` install by
 default. Pass another clean install when required:

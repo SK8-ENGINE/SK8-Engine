@@ -215,6 +215,72 @@ function New-Junction {
         Out-Null
 }
 
+function Get-ProfileDirectories {
+    param([Parameter(Mandatory)][string]$Root)
+
+    if (-not (Test-Path -LiteralPath $Root -PathType Container)) {
+        return @()
+    }
+    return @(
+        Get-ChildItem -LiteralPath $Root -Directory -Force |
+            Where-Object Name -Match '^[0-9A-Fa-f]{16}$'
+    )
+}
+
+function Initialize-RoleProfileStore {
+    param(
+        [Parameter(Mandatory)][int]$Role,
+        [Parameter(Mandatory)][string]$Store,
+        [Parameter(Mandatory)][string]$AppDataSeed
+    )
+
+    New-Item -ItemType Directory -Path $Store -Force |
+        Out-Null
+    if (@(Get-ProfileDirectories $Store).Count -gt 0) {
+        Write-Setup (
+            "Using persistent profile storage for role ${Role}: $Store"
+        )
+        return
+    }
+
+    $sources = New-Object System.Collections.Generic.List[string]
+    $latestPointer = Join-Path (
+        Join-Path $repoRoot 'out\visual-checks'
+    ) 'LATEST.txt'
+    if (Test-Path -LiteralPath $latestPointer -PathType Leaf) {
+        $latestRun = (
+            Get-Content -LiteralPath $latestPointer -Raw
+        ).Trim()
+        if (-not [string]::IsNullOrWhiteSpace($latestRun)) {
+            $sources.Add(
+                (Join-Path $latestRun "clients\client$Role")
+            )
+        }
+    }
+    $sources.Add($AppDataSeed)
+
+    foreach ($source in $sources) {
+        $profiles = @(Get-ProfileDirectories $source)
+        if ($profiles.Count -eq 0) {
+            continue
+        }
+        foreach ($profile in $profiles) {
+            Copy-Item -LiteralPath $profile.FullName -Destination (
+                Join-Path $Store $profile.Name
+            ) -Recurse
+        }
+        Write-Setup (
+            "Seeded persistent role ${Role} profile from $source"
+        )
+        return
+    }
+    throw (
+        "No portable profile seed was found for role $Role. " +
+        "Expected a 16-hex profile under the latest visual run or " +
+        "$AppDataSeed."
+    )
+}
+
 function ConvertTo-BatchArgument {
     param([Parameter(Mandatory)][string]$Value)
 
@@ -372,6 +438,9 @@ try {
         runtime_sha256 = $runtimeHash
         player_data_root = $playerRoot
         cac_asset_root = $resolvedCacRoot
+        persistent_profile_root = (
+            Join-Path $repoRoot 'out\visual-check-profiles'
+        )
         clients = $Clients
         transport = 'localhost-udp'
         quality_preset = 2
@@ -397,22 +466,34 @@ $runRoot
 Clients: $Clients
 Transport: localhost UDP
 Quality: Balanced, 60 Hz root, 60 Hz animation, 50 ms interpolation
+Profiles: persistent per role across visual-check runs
 
 Visual scenario:
 1. Wait until every client has loaded the same map and all remote skaters appear.
 2. On each client, inspect every other player: body, top, trousers, shoes,
    hair/hat, accessories, board deck, trucks, and wheels.
-3. Skate on each client. Perform pushes, carving, ollies, flip tricks, grabs,
+3. On client 2, enter the wardrobe, change at least one obvious body item
+   (top, trousers, shoes, or hat/hair) and one board item, save/apply the
+   outfit, and return to skating. On clients 1 and 3, confirm role 2 changes
+   to that exact outfit without becoming the teal proxy. Repeat on client 3
+   while watching it from clients 1 and 2.
+4. Skate on each client. Perform pushes, carving, ollies, flip tricks, grabs,
    spins, grinds, a bail, and a board-detached/board-return sequence.
-4. Watch nearby remote players for pose fidelity, smooth motion, snapping,
+5. Watch nearby remote players for pose fidelity, smooth motion, snapping,
    freezing, attachment drift, duplicated pieces, stale pieces, or flicker.
-5. Confirm the focused local client keeps normal input response and has no
+6. Confirm the focused local client keeps normal input response and has no
    obvious new frame stalls.
-6. Close client 3 only. Wait at least 3 seconds for it to disappear from
+7. Close client 3 only. Wait at least 3 seconds for it to disappear from
    clients 1 and 2. Then run RELAUNCH_MULTIPLAYER_VISUAL_CLIENT_3.bat from
    the repository root. Confirm role 3 returns with its correct current
    appearance and animation, without the old remote state being reused.
-7. Continue for at least 2 minutes after the reconnect, then close all clients.
+8. Continue for at least 2 minutes after the reconnect, then close all clients.
+
+Outfit/profile behavior:
+- Each numbered client keeps its own writable profile under
+  out\visual-check-profiles\clientN.
+- Wardrobe changes made and saved on a role survive the next visual-check
+  launcher run. Timestamped run folders and logs remain isolated.
 
 Do not treat logs as proof of visual correctness. Report the visual result
 separately, then ask the agent to analyze this run directory.
@@ -422,6 +503,9 @@ separately, then ask the agent to analyze this run directory.
     ) -Encoding UTF8
 
     $seedRoot = Join-Path $env:APPDATA 'skate3'
+    $persistentProfileRoot = Join-Path (
+        Join-Path $repoRoot 'out'
+    ) 'visual-check-profiles'
     $stagedClients = @()
     foreach ($role in 1..$Clients) {
         $clientRoot = Join-Path $runRoot "clients\client$role"
@@ -441,14 +525,28 @@ separately, then ask the agent to analyze this run directory.
         New-Junction -Path (Join-Path $clientRoot 'maps') `
             -Target $mapsRoot
 
-        if (Test-Path -LiteralPath $seedRoot -PathType Container) {
-            Get-ChildItem -LiteralPath $seedRoot -Directory |
-                Where-Object Name -Match '^[0-9A-Fa-f]{16}$' |
-                ForEach-Object {
-                    Copy-Item -LiteralPath $_.FullName -Destination (
-                        Join-Path $clientRoot $_.Name
-                    ) -Recurse
-                }
+        $roleProfileStore = Join-Path (
+            $persistentProfileRoot
+        ) "client$role"
+        Initialize-RoleProfileStore -Role $role `
+            -Store $roleProfileStore -AppDataSeed $seedRoot
+        foreach ($profile in @(
+                Get-ProfileDirectories $roleProfileStore
+            )) {
+            New-Junction -Path (
+                Join-Path $clientRoot $profile.Name
+            ) -Target $profile.FullName
+        }
+        $profileRecipe = Get-ChildItem `
+            -LiteralPath $roleProfileStore -Recurse -File `
+            -Filter 'SKATER.P' |
+            Sort-Object LastWriteTime -Descending |
+            Select-Object -First 1
+        if ($null -eq $profileRecipe) {
+            throw (
+                "Persistent role $role profile has no SKATER.P recipe: " +
+                $roleProfileStore
+            )
         }
 
         $arguments = @(
@@ -466,7 +564,11 @@ separately, then ask the agent to analyze this run directory.
             '--skate3_multiplayer_local_animation_rate=60',
             '--skate3_multiplayer_local_interpolation_ms=50',
             '--skate3_native_render_scene_perf_log=true',
-            '--skate3_native_render_scene_perf_interval=300'
+            '--skate3_native_render_scene_perf_interval=300',
+            (
+                '--skate3_multiplayer_local_profile_recipe={0}' -f
+                $profileRecipe.FullName
+            )
         )
         if (-not $NoDirectBoot) {
             $arguments += '--skate3_direct_boot=true'

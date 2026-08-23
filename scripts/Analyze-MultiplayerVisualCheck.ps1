@@ -142,6 +142,48 @@ foreach ($client in $clientDirectories) {
         ))
     )
     $summary.Add(
+        'local_profile_recipe_updates=' +
+        (Match-Count $lines (
+            'multiplayer-assets: adopted local profile recipe'
+        ))
+    )
+    $summary.Add(
+        'local_recipe_builds=' +
+        (Match-Count $lines (
+            'multiplayer: built recipe appearance'
+        ))
+    )
+    $summary.Add(
+        'presentation_candidate_removals=' +
+        (Match-Count $lines (
+            'local presentation candidate removed'
+        ))
+    )
+    $summary.Add(
+        'presentation_candidate_selections=' +
+        (Match-Count $lines (
+            'provisional local presentation candidate='
+        ))
+    )
+    $summary.Add(
+        'remote_proxy_transitions=' +
+        (Match-Count $lines (
+            'multiplayer-visual-state: .*mode=proxy'
+        ))
+    )
+    $summary.Add(
+        'remote_appearance_transitions=' +
+        (Match-Count $lines (
+            'multiplayer-visual-state: .*mode=appearance'
+        ))
+    )
+    $summary.Add(
+        'incomplete_recipe_events=' +
+        (Match-Count $lines (
+            'multiplayer: recipe appearance incomplete'
+        ))
+    )
+    $summary.Add(
         'peer_reset_events=' +
         (Match-Count $lines (
             'multiplayer: reset outbound state for role'
