@@ -15,6 +15,7 @@
 #include "skate3_multiplayer_protocol_v12_lossless.h"
 #include "skate3_multiplayer_protocol_v12_predictive_delta.h"
 #include "skate3_multiplayer_protocol_v12_root.h"
+#include "skate3_multiplayer_protocol_v12_snappy.h"
 #include "skate3_multiplayer_protocol_v12_state.h"
 #include "skate3_multiplayer_protocol_v12_transport.h"
 #include "skate3_multiplayer_send_schedule.h"
@@ -558,6 +559,14 @@ struct TelemetrySnapshot {
   std::uint64_t v12_predictive_delta_attempts = 0;
   std::uint64_t v12_predictive_delta_encode_ns = 0;
   std::uint64_t v12_predictive_delta_encode_max_ns = 0;
+  std::uint64_t sent_v12_snappy_groups = 0;
+  std::uint64_t received_v12_snappy_groups = 0;
+  std::uint64_t rejected_v12_snappy_groups = 0;
+  std::uint64_t v12_snappy_raw_bytes = 0;
+  std::uint64_t v12_snappy_wire_bytes = 0;
+  std::uint64_t v12_snappy_attempts = 0;
+  std::uint64_t v12_snappy_encode_ns = 0;
+  std::uint64_t v12_snappy_encode_max_ns = 0;
   std::uint64_t animation_prepare_passes = 0;
   std::uint64_t animation_shared_reuses = 0;
   std::uint64_t animation_fanout_targets = 0;
@@ -2106,6 +2115,22 @@ public:
         << telemetry_.v12_predictive_delta_encode_ns
         << " multiplayer_v12_predictive_delta_encode_max_ns="
         << telemetry_.v12_predictive_delta_encode_max_ns
+        << " multiplayer_v12_snappy_groups_sent="
+        << telemetry_.sent_v12_snappy_groups
+        << " multiplayer_v12_snappy_groups_received="
+        << telemetry_.received_v12_snappy_groups
+        << " multiplayer_v12_snappy_groups_rejected="
+        << telemetry_.rejected_v12_snappy_groups
+        << " multiplayer_v12_snappy_raw_bytes="
+        << telemetry_.v12_snappy_raw_bytes
+        << " multiplayer_v12_snappy_wire_bytes="
+        << telemetry_.v12_snappy_wire_bytes
+        << " multiplayer_v12_snappy_attempts="
+        << telemetry_.v12_snappy_attempts
+        << " multiplayer_v12_snappy_encode_ns="
+        << telemetry_.v12_snappy_encode_ns
+        << " multiplayer_v12_snappy_encode_max_ns="
+        << telemetry_.v12_snappy_encode_max_ns
         << " multiplayer_animation_prepare_passes="
         << telemetry_.animation_prepare_passes
         << " multiplayer_animation_shared_reuses="
@@ -2224,6 +2249,18 @@ private:
             : 100.0 *
                   static_cast<double>(telemetry_.animation_shared_reuses) /
                   static_cast<double>(telemetry_.animation_fanout_targets));
+    REXLOG_INFO(
+        "multiplayer-compression: role={} snappy_groups={} "
+        "snappy_received={} snappy_rejected={} raw={} wire={} attempts={} "
+        "encode_ns={} encode_max_ns={}",
+        bound_role_, telemetry_.sent_v12_snappy_groups,
+        telemetry_.received_v12_snappy_groups,
+        telemetry_.rejected_v12_snappy_groups,
+        telemetry_.v12_snappy_raw_bytes,
+        telemetry_.v12_snappy_wire_bytes,
+        telemetry_.v12_snappy_attempts,
+        telemetry_.v12_snappy_encode_ns,
+        telemetry_.v12_snappy_encode_max_ns);
     const double seconds =
         std::chrono::duration<double>(now - last_rate_log_).count();
     const auto per_second = [seconds](std::uint64_t current,
@@ -3184,11 +3221,29 @@ private:
     std::uint16_t root_bone = 0;
     std::vector<std::uint16_t> words;
     std::vector<std::uint8_t> unpacked;
-    bool animation_decoded = false;
+    std::vector<std::uint8_t> snappy_unpacked;
+    protocol_v12::PoseGroupEncoding effective_encoding =
+        completed.encoding;
+    std::span<const std::uint8_t> effective_bytes(completed.bytes);
     if (completed.encoding ==
+        protocol_v12::PoseGroupEncoding::kSnappyV1) {
+      if (!protocol_v12::DecodeSnappyPoseGroup(
+              completed.bytes, effective_encoding, snappy_unpacked) ||
+          !protocol_v12::AnimationPoseGroupEncodingAllowed(
+              effective_encoding,
+              completed.kind ==
+                  protocol_v12::MessageKind::kPoseBaseline)) {
+        ++telemetry_.rejected_v12_snappy_groups;
+        return reject();
+      }
+      effective_bytes = snappy_unpacked;
+      ++telemetry_.received_v12_snappy_groups;
+    }
+    bool animation_decoded = false;
+    if (effective_encoding ==
             protocol_v12::PoseGroupEncoding::kSemanticDeltaV1 ||
-        completed.encoding == protocol_v12::PoseGroupEncoding::kBlockDeltaV1 ||
-        completed.encoding ==
+        effective_encoding == protocol_v12::PoseGroupEncoding::kBlockDeltaV1 ||
+        effective_encoding ==
             protocol_v12::PoseGroupEncoding::kPredictiveDeltaV1) {
       if (completed.kind != protocol_v12::MessageKind::kPoseDelta ||
           peer.animation_keyframe.sequence != completed.baseline_id) {
@@ -3207,34 +3262,38 @@ private:
       const auto baselines = BuildAnimationBaselineViews(
           peer.animation_keyframe, baseline_storage);
       if (!baselines.empty()) {
-        if (completed.encoding ==
+        if (effective_encoding ==
             protocol_v12::PoseGroupEncoding::kPredictiveDeltaV1) {
           animation_decoded = protocol_v12::DecodePredictiveAnimationDelta(
-              completed.bytes, baselines, root_position, root_bone, words);
-        } else if (completed.encoding ==
+              effective_bytes, baselines, root_position, root_bone, words);
+        } else if (effective_encoding ==
                    protocol_v12::PoseGroupEncoding::kBlockDeltaV1) {
           animation_decoded =
               protocol_v12::DecodeBlockPackedAnimationDelta(
-                  completed.bytes, baselines, root_position, root_bone, words);
+                  effective_bytes, baselines, root_position, root_bone, words);
         } else {
           animation_decoded = protocol_v12::DecodeSemanticAnimationDelta(
-              completed.bytes, baselines, root_position, root_bone, words);
+              effective_bytes, baselines, root_position, root_bone, words);
         }
       }
     } else {
       const std::span<const std::uint8_t> animation_bytes =
-          completed.encoding == protocol_v12::PoseGroupEncoding::kBitPackedV1
-              ? (protocol_v12::DecodeLosslessBytes(completed.bytes, unpacked)
+          effective_encoding ==
+                  protocol_v12::PoseGroupEncoding::kBitPackedV1
+              ? (protocol_v12::DecodeLosslessBytes(effective_bytes, unpacked)
                      ? std::span<const std::uint8_t>(unpacked)
                      : std::span<const std::uint8_t>())
-              : std::span<const std::uint8_t>(completed.bytes);
+              : effective_bytes;
       animation_decoded = !animation_bytes.empty() &&
                           protocol_v12::DecodeAnimationWordStream(
                               animation_bytes, root_position, root_bone, words);
     }
+    protocol_v12::PoseGroupHeader decoded_header = header;
+    decoded_header.encoding = effective_encoding;
     if (!animation_decoded ||
         !protocol_v12::AnimationWordStreamMatchesPoseGroup(completed.kind,
-                                                           header, words)) {
+                                                           decoded_header,
+                                                           words)) {
       return reject();
     }
     const std::uint32_t group_mask = 1u << completed.group_id;
@@ -4423,6 +4482,9 @@ private:
           protocol_v12::AnimationWordStreamByteCount(words.size());
       telemetry_.v12_predictive_delta_wire_bytes += group_bytes.size();
     }
+    if (complete && encoding == protocol_v12::PoseGroupEncoding::kSnappyV1) {
+      ++telemetry_.sent_v12_snappy_groups;
+    }
     return complete;
   }
 
@@ -5002,6 +5064,32 @@ private:
                 }
               }
             }
+          }
+          if (frame.valid && !frame.v12_group_bytes.empty()) {
+            const auto snappy_started = Clock::now();
+            ++telemetry_.v12_snappy_attempts;
+            std::vector<std::uint8_t> snappy;
+            const std::size_t uncompressed_bytes =
+                frame.v12_group_bytes.size();
+            if (protocol_v12::EncodeSnappyPoseGroup(
+                    frame.v12_encoding, frame.v12_group_bytes, snappy) &&
+                protocol_v12::LosslessPackingWorthwhile(
+                    uncompressed_bytes, snappy.size(),
+                    protocol_v12::kMaximumPoseFragmentBytes)) {
+              frame.v12_group_bytes = std::move(snappy);
+              frame.v12_encoding =
+                  protocol_v12::PoseGroupEncoding::kSnappyV1;
+              telemetry_.v12_snappy_raw_bytes += uncompressed_bytes;
+              telemetry_.v12_snappy_wire_bytes +=
+                  frame.v12_group_bytes.size();
+            }
+            const std::uint64_t snappy_ns = static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    Clock::now() - snappy_started)
+                    .count());
+            telemetry_.v12_snappy_encode_ns += snappy_ns;
+            telemetry_.v12_snappy_encode_max_ns = std::max(
+                telemetry_.v12_snappy_encode_max_ns, snappy_ns);
           }
         }
         prepared_frames.push_back(std::move(frame));

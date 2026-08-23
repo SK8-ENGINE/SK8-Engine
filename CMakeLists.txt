@@ -433,7 +433,7 @@ else()
     message(STATUS "generated/eawebkit/sources.cmake not found; run the generate-all target before building skate3")
 endif()
 
-target_link_libraries(skate3 PRIVATE rex::runtime skate_owned_world)
+target_link_libraries(skate3 PRIVATE rex::runtime skate_owned_world snappy)
 rexglue_configure_target(skate3)
 
 if(APPLE)

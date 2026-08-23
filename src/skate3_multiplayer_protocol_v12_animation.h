@@ -46,7 +46,8 @@ AnimationWordStreamMatchesPoseGroup(MessageKind kind,
        header.encoding != PoseGroupEncoding::kBitPackedV1 &&
        header.encoding != PoseGroupEncoding::kSemanticDeltaV1 &&
        header.encoding != PoseGroupEncoding::kBlockDeltaV1 &&
-       header.encoding != PoseGroupEncoding::kPredictiveDeltaV1) ||
+       header.encoding != PoseGroupEncoding::kPredictiveDeltaV1 &&
+       header.encoding != PoseGroupEncoding::kSnappyV1) ||
       header.element_count != words[1]) {
     return false;
   }

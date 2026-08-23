@@ -288,7 +288,14 @@ void TestPoseGroupFragmentBoundaries() {
   malformed.baseline_id = 1;
   Expect(PoseGroupHeaderShapeValid(malformed, MessageKind::kPoseDelta),
          "predictive delta encoding was rejected for a delta");
-  malformed.encoding = static_cast<PoseGroupEncoding>(6);
+  malformed.encoding = PoseGroupEncoding::kSnappyV1;
+  Expect(PoseGroupHeaderShapeValid(malformed, MessageKind::kPoseDelta),
+         "Snappy wrapper encoding was rejected for a delta");
+  malformed.baseline_id = 0;
+  Expect(PoseGroupHeaderShapeValid(malformed, MessageKind::kPoseBaseline),
+         "Snappy wrapper encoding was rejected for a baseline");
+  malformed.baseline_id = 1;
+  malformed.encoding = static_cast<PoseGroupEncoding>(7);
   Expect(!PoseGroupHeaderShapeValid(malformed, MessageKind::kPoseDelta),
          "unknown pose encoding was accepted");
 }

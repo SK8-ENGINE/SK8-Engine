@@ -230,6 +230,7 @@ struct Totals {
   std::uint64_t byte_run_bytes = 0;
   std::uint64_t snappy_raw_bytes = 0;
   std::uint64_t snappy_semantic_bytes = 0;
+  std::uint64_t snappy_predictive_bytes = 0;
   std::uint64_t selected_group_bytes = 0;
   std::uint64_t selected_datagram_bytes = 0;
   std::uint64_t selected_fragments = 0;
@@ -241,6 +242,7 @@ struct Totals {
   std::uint64_t translation_bytes = 0;
   std::chrono::nanoseconds snappy_raw_time{};
   std::chrono::nanoseconds snappy_semantic_time{};
+  std::chrono::nanoseconds snappy_predictive_time{};
   std::chrono::nanoseconds block_delta_time{};
   std::chrono::nanoseconds predictive_delta_time{};
 };
@@ -288,10 +290,17 @@ Totals RunScenario(const AvatarCorpus &avatar, const Scenario &scenario) {
     const std::string snappy_semantic = SnappyCompress(semantic);
     totals.snappy_semantic_time +=
         std::chrono::steady_clock::now() - semantic_started;
+    const auto predictive_compress_started =
+        std::chrono::steady_clock::now();
+    const std::string snappy_predictive =
+        SnappyCompress(predictive_delta);
+    totals.snappy_predictive_time +=
+        std::chrono::steady_clock::now() - predictive_compress_started;
 
     if (frame == 0 || frame + 1 == kFrames) {
       ExpectSnappyRoundTrip(raw, snappy_raw);
       ExpectSnappyRoundTrip(semantic, snappy_semantic);
+      ExpectSnappyRoundTrip(predictive_delta, snappy_predictive);
       float decoded_root[3] = {};
       std::uint16_t decoded_root_bone = 0;
       std::vector<std::uint16_t> decoded_words;
@@ -319,12 +328,14 @@ Totals RunScenario(const AvatarCorpus &avatar, const Scenario &scenario) {
     totals.byte_run_bytes += byte_run.size();
     totals.snappy_raw_bytes += snappy_raw.size();
     totals.snappy_semantic_bytes += snappy_semantic.size();
+    totals.snappy_predictive_bytes += snappy_predictive.size();
     const std::size_t selected = std::min({
         raw.size(),
         semantic.size(),
         block_delta.size(),
         predictive_delta.size(),
         snappy_semantic.size(),
+        snappy_predictive.size(),
     });
     const std::size_t fragments =
         PoseGroupFragmentCount(static_cast<std::uint32_t>(selected));
@@ -368,7 +379,12 @@ void PrintScenario(const Scenario &scenario, const Totals &totals) {
             << " snappy_semantic="
             << Average(totals.snappy_semantic_bytes, totals.frames) << " ("
             << Percent(totals.snappy_semantic_bytes, totals.semantic_bytes)
-            << "% semantic)\n";
+            << "% semantic)"
+            << " snappy_predictive="
+            << Average(totals.snappy_predictive_bytes, totals.frames) << " ("
+            << Percent(totals.snappy_predictive_bytes,
+                       totals.predictive_delta_bytes)
+            << "% predictive)\n";
   std::cout << "  varint_words 1_byte="
             << Percent(totals.varint_words[0], totals.component_words)
             << "% 2_byte="
@@ -389,6 +405,11 @@ void PrintScenario(const Scenario &scenario, const Totals &totals) {
              static_cast<double>(totals.frames)
       << " semantic="
       << std::chrono::duration<double, std::micro>(totals.snappy_semantic_time)
+                 .count() /
+             static_cast<double>(totals.frames)
+      << " predictive="
+      << std::chrono::duration<double, std::micro>(
+             totals.snappy_predictive_time)
                  .count() /
              static_cast<double>(totals.frames)
       << " block_delta_preflight+encode="

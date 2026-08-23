@@ -135,6 +135,10 @@ foreach ($client in $clientDirectories) {
         $lines | Select-String -Pattern 'multiplayer-fanout:' |
             ForEach-Object { $_.Line }
     )
+    $compressionLines = @(
+        $lines | Select-String -Pattern 'multiplayer-compression:' |
+            ForEach-Object { $_.Line }
+    )
     $peerTimingLines = @(
         $lines | Select-String -Pattern 'multiplayer-peer-timing:' |
             ForEach-Object { $_.Line }
@@ -909,6 +913,50 @@ foreach ($client in $clientDirectories) {
         'steam_transport_max_jitter_ms=' +
         (Maximum-DecimalField $transportLines 'jitter_ms')
     )
+    $snappyGroups = Maximum-IntegerField `
+        $compressionLines 'snappy_groups'
+    $snappyRaw = Maximum-IntegerField $compressionLines 'raw'
+    $snappyWire = Maximum-IntegerField $compressionLines 'wire'
+    $snappyAttempts = Maximum-IntegerField `
+        $compressionLines 'attempts'
+    $snappyEncodeNs = Maximum-IntegerField `
+        $compressionLines 'encode_ns'
+    $snappyEncodeMaxNs = Maximum-IntegerField `
+        $compressionLines 'encode_max_ns'
+    $summary.Add('max_v12_snappy_groups_sent=' + $snappyGroups)
+    $summary.Add(
+        'max_v12_snappy_groups_received=' +
+        (Maximum-IntegerField $compressionLines 'snappy_received')
+    )
+    $summary.Add(
+        'max_v12_snappy_groups_rejected=' +
+        (Maximum-IntegerField $compressionLines 'snappy_rejected')
+    )
+    $summary.Add('max_v12_snappy_raw_bytes=' + $snappyRaw)
+    $summary.Add('max_v12_snappy_wire_bytes=' + $snappyWire)
+    if ($snappyRaw -ne 'n/a' -and $snappyWire -ne 'n/a' -and
+        [double]$snappyRaw -gt 0) {
+        $summary.Add((
+            'derived_v12_snappy_savings_percent={0:0.00}' -f (
+                100.0 * (1.0 - [double]$snappyWire / [double]$snappyRaw)
+            )
+        ))
+    }
+    if ($snappyAttempts -ne 'n/a' -and $snappyEncodeNs -ne 'n/a' -and
+        [double]$snappyAttempts -gt 0) {
+        $summary.Add((
+            'derived_v12_snappy_average_encode_us={0:0.000}' -f (
+                [double]$snappyEncodeNs / [double]$snappyAttempts / 1000.0
+            )
+        ))
+    }
+    if ($snappyEncodeMaxNs -ne 'n/a') {
+        $summary.Add((
+            'derived_v12_snappy_max_encode_us={0:0.000}' -f (
+                [double]$snappyEncodeMaxNs / 1000.0
+            )
+        ))
+    }
     $keyframeGroups = Maximum-IntegerField `
         $rateLines 'v12_keyframe_groups'
     $deltaGroups = Maximum-IntegerField `

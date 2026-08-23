@@ -563,7 +563,7 @@ try {
         guest_fps_cap = $guestFpsCap
         replication_quality = 'full-fidelity'
         root_protocol = 'v12-after-negotiation'
-        animation_protocol = 'v12-smallest-exact-confirmed-delta'
+        animation_protocol = 'v12-snappy-smallest-exact-confirmed-delta'
         appearance_protocol = 'v11'
         root_rate_hz = 60
         animation_rate_hz = 60
@@ -603,7 +603,8 @@ try {
             'skate3_multiplayer_worker_tests',
             'skate3_multiplayer_render_cache_tests',
             'skate3_multiplayer_routing_tests',
-            'skate3_multiplayer_scale_tests'
+            'skate3_multiplayer_scale_tests',
+            'skate3_multiplayer_protocol_v12_snappy_tests'
         )
     }
     $manifest | ConvertTo-Json -Depth 4 |

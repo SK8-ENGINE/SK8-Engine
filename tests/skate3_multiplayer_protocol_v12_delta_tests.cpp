@@ -293,9 +293,11 @@ void TestInputValidation() {
   Expect(AnimationPoseGroupEncodingAllowed(PoseGroupEncoding::kV11WordStream,
                                            /*keyframe=*/true) &&
              AnimationPoseGroupEncodingAllowed(PoseGroupEncoding::kBitPackedV1,
+                                               /*keyframe=*/true) &&
+             AnimationPoseGroupEncodingAllowed(PoseGroupEncoding::kSnappyV1,
                                                /*keyframe=*/true),
          "sender policy rejected validated keyframe encodings");
-  Expect(!AnimationPoseGroupEncodingAllowed(static_cast<PoseGroupEncoding>(6),
+  Expect(!AnimationPoseGroupEncodingAllowed(static_cast<PoseGroupEncoding>(7),
                                             /*keyframe=*/false),
          "sender policy accepted unknown pose encoding");
 }
