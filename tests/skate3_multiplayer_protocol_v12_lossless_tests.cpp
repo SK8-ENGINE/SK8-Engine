@@ -21,6 +21,8 @@ void RoundTrip(const std::vector<std::uint8_t>& source) {
   std::vector<std::uint8_t> encoded;
   std::vector<std::uint8_t> decoded;
   Expect(EncodeLosslessBytes(source, encoded), "encode failed");
+  Expect(LosslessEncodedByteCount(source) == encoded.size(),
+         "encoded-size preflight disagreed with encoder");
   Expect(DecodeLosslessBytes(encoded, decoded), "decode failed");
   Expect(decoded == source, "round trip changed bytes");
 }

@@ -625,6 +625,18 @@ Current checkpoint:
   separates keyframe and delta group counts and logical bytes so the next
   semantic packing step is based on measured frame composition. This run is
   not accepted as the codec telemetry gate despite the user's visual pass.
+- Rigid-track quaternion signs are now canonicalized before quantization,
+  preventing mathematically identical `q` and `-q` values from producing
+  false changed-bone deltas. The per-track temporary quaternion buffer is now
+  fixed-capacity on the stack rather than heap-allocated every frame.
+- Packing now performs an allocation-free exact encoded-size pass and only
+  allocates output after passing the material-savings policy. Malformed
+  decode is transactional and cannot expose partial output.
+- The smallest-three quaternion candidate remains offline-only. A dedicated
+  eleventh suite validates normalization, omitted-component handling, invalid
+  inputs, and 100,000 deterministic random orientations under a 0.02-degree
+  angular-error contract. It is not yet a live wire encoding; final skinned-
+  vertex and user visual gates are still required before activation.
 
 Completion:
 

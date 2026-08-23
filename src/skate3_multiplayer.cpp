@@ -605,6 +605,24 @@ bool NormalizeQuaternion(Quaternion& value) {
   return true;
 }
 
+bool CanonicalizeQuaternionSign(Quaternion& value) {
+  const bool negate =
+      value.w < 0.0f ||
+      (value.w == 0.0f &&
+       (value.z < 0.0f ||
+        (value.z == 0.0f &&
+         (value.y < 0.0f ||
+          (value.y == 0.0f && value.x < 0.0f)))));
+  if (!negate) {
+    return false;
+  }
+  value.x = -value.x;
+  value.y = -value.y;
+  value.z = -value.z;
+  value.w = -value.w;
+  return true;
+}
+
 bool QuaternionFromRotation(
     const float matrix[9], Quaternion& out) {
   for (std::size_t index = 0; index < 9; ++index) {
@@ -836,7 +854,7 @@ bool QuantizeAnimationTrack(
   bool rigid = true;
   bool wide_translation = false;
   float maximum_relative_translation = 0.0f;
-  std::vector<Quaternion> rotations(output.bone_count);
+  std::array<Quaternion, kMaximumAnimationBones> rotations{};
   for (std::size_t bone = 0; bone < output.bone_count; ++bone) {
     const float* rows =
         source.bone_rows.data() + bone * 12;
@@ -858,8 +876,12 @@ bool QuantizeAnimationTrack(
     }
     float scale[3];
     if (!DecomposeAffineRotationScale(
-            rows, rotations[bone], scale) ||
-        std::fabs(scale[0] - 1.0f) > 0.01f ||
+            rows, rotations[bone], scale)) {
+      rigid = false;
+      break;
+    }
+    (void)CanonicalizeQuaternionSign(rotations[bone]);
+    if (std::fabs(scale[0] - 1.0f) > 0.01f ||
         std::fabs(scale[1] - 1.0f) > 0.01f ||
         std::fabs(scale[2] - 1.0f) > 0.01f) {
       rigid = false;
@@ -5266,15 +5288,19 @@ class Runtime {
                   relative_root, pose.root_bone,
                   frame.words, frame.v12_group_bytes);
           if (frame.valid) {
-            std::vector<std::uint8_t> packed;
-            if (protocol_v12::EncodeLosslessBytes(
-                    frame.v12_group_bytes, packed) &&
-                protocol_v12::LosslessPackingWorthwhile(
-                    frame.v12_group_bytes.size(), packed.size(),
+            const std::size_t packed_bytes =
+                protocol_v12::LosslessEncodedByteCount(
+                    frame.v12_group_bytes);
+            if (protocol_v12::LosslessPackingWorthwhile(
+                    frame.v12_group_bytes.size(), packed_bytes,
                     protocol_v12::kMaximumPoseFragmentBytes)) {
-              frame.v12_group_bytes = std::move(packed);
-              frame.v12_encoding =
-                  protocol_v12::PoseGroupEncoding::kBitPackedV1;
+              std::vector<std::uint8_t> packed;
+              if (protocol_v12::EncodeLosslessBytes(
+                      frame.v12_group_bytes, packed)) {
+                frame.v12_group_bytes = std::move(packed);
+                frame.v12_encoding =
+                    protocol_v12::PoseGroupEncoding::kBitPackedV1;
+              }
             }
           }
         }

@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <span>
+#include <utility>
 #include <vector>
 
 namespace skate3::multiplayer::protocol_v12 {
@@ -25,6 +26,45 @@ inline constexpr std::size_t kMaximumLosslessDecodedBytes = 64u * 1024u;
          packed_bytes * 10 <= raw_bytes * 9;
 }
 
+[[nodiscard]] inline std::size_t LosslessEncodedByteCount(
+    std::span<const std::uint8_t> source) {
+  if (source.empty() ||
+      source.size() > kMaximumLosslessDecodedBytes) {
+    return 0;
+  }
+  std::size_t encoded_bytes = kLosslessPrefixBytes;
+  std::size_t cursor = 0;
+  while (cursor < source.size()) {
+    std::size_t run = 1;
+    while (cursor + run < source.size() &&
+           source[cursor + run] == source[cursor] &&
+           run < 66) {
+      ++run;
+    }
+    if (run >= 3) {
+      encoded_bytes += source[cursor] == 0 ? 1 : 2;
+      cursor += run;
+      continue;
+    }
+    const std::size_t literal_start = cursor;
+    while (cursor < source.size() &&
+           cursor - literal_start < 128) {
+      std::size_t next_run = 1;
+      while (cursor + next_run < source.size() &&
+             source[cursor + next_run] == source[cursor] &&
+             next_run < 3) {
+        ++next_run;
+      }
+      if (next_run >= 3 && cursor != literal_start) {
+        break;
+      }
+      ++cursor;
+    }
+    encoded_bytes += 1 + cursor - literal_start;
+  }
+  return encoded_bytes;
+}
+
 [[nodiscard]] inline bool EncodeLosslessBytes(
     std::span<const std::uint8_t> source,
     std::vector<std::uint8_t>& destination) {
@@ -33,7 +73,7 @@ inline constexpr std::size_t kMaximumLosslessDecodedBytes = 64u * 1024u;
     return false;
   }
   destination.clear();
-  destination.reserve(source.size() + kLosslessPrefixBytes);
+  destination.reserve(LosslessEncodedByteCount(source));
   const auto size = static_cast<std::uint32_t>(source.size());
   for (unsigned shift = 0; shift < 32; shift += 8) {
     destination.push_back(
@@ -101,42 +141,46 @@ inline constexpr std::size_t kMaximumLosslessDecodedBytes = 64u * 1024u;
       decoded_size > kMaximumLosslessDecodedBytes) {
     return false;
   }
-  destination.clear();
-  destination.reserve(decoded_size);
+  std::vector<std::uint8_t> decoded;
+  decoded.reserve(decoded_size);
   std::size_t cursor = kLosslessPrefixBytes;
   while (cursor < source.size() &&
-         destination.size() < decoded_size) {
+         decoded.size() < decoded_size) {
     const std::uint8_t token = source[cursor++];
     if (token < 0x80) {
       const std::size_t count = std::size_t(token) + 1;
       if (cursor + count > source.size() ||
-          destination.size() + count > decoded_size) {
+          decoded.size() + count > decoded_size) {
         return false;
       }
-      destination.insert(
-          destination.end(), source.begin() + cursor,
+      decoded.insert(
+          decoded.end(), source.begin() + cursor,
           source.begin() + cursor + count);
       cursor += count;
     } else if (token < 0xC0) {
       const std::size_t count =
           std::size_t(token - 0x80) + 3;
-      if (destination.size() + count > decoded_size) {
+      if (decoded.size() + count > decoded_size) {
         return false;
       }
-      destination.insert(destination.end(), count, 0);
+      decoded.insert(decoded.end(), count, 0);
     } else {
       const std::size_t count =
           std::size_t(token - 0xC0) + 3;
       if (cursor >= source.size() ||
-          destination.size() + count > decoded_size) {
+          decoded.size() + count > decoded_size) {
         return false;
       }
-      destination.insert(
-          destination.end(), count, source[cursor++]);
+      decoded.insert(
+          decoded.end(), count, source[cursor++]);
     }
   }
-  return cursor == source.size() &&
-         destination.size() == decoded_size;
+  if (cursor != source.size() ||
+      decoded.size() != decoded_size) {
+    return false;
+  }
+  destination = std::move(decoded);
+  return true;
 }
 
 }  // namespace skate3::multiplayer::protocol_v12
