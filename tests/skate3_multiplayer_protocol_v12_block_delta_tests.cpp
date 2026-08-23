@@ -1,4 +1,5 @@
 #include "skate3_multiplayer_protocol_v12_block_delta.h"
+#include "skate3_multiplayer_protocol_v12_transport.h"
 
 #include <algorithm>
 #include <array>
@@ -262,6 +263,55 @@ void TestDeterministicPropertyRoundTrips() {
   }
 }
 
+void TestReverseFragmentReassembly() {
+  const Fixture fixture;
+  const std::vector<std::uint16_t> words =
+      BuildDelta(fixture, 0xC001D00Du, 32767);
+  const std::vector<std::uint8_t> encoded = Encode(fixture, words);
+  Expect(encoded.size() > kMaximumPoseFragmentBytes,
+         "block delta packet test did not span fragments");
+
+  PoseGroupPacketizeRequest request;
+  request.envelope.kind = MessageKind::kPoseDelta;
+  request.envelope.sender_role = 2;
+  request.envelope.stream_id = 2;
+  request.envelope.sender_session = 100;
+  request.envelope.sequence = 500;
+  request.envelope.sender_time_us = 1000000;
+  request.pose_id = 10;
+  request.baseline_id = 9;
+  request.element_count = static_cast<std::uint16_t>(fixture.tracks.size());
+  request.group_id = 0;
+  request.encoding = PoseGroupEncoding::kBlockDeltaV1;
+  request.group_bytes = encoded;
+  std::array<PoseGroupDatagram, 58> descriptors{};
+  const std::size_t count = BuildPoseGroupDatagrams(request, descriptors);
+  Expect(count > 1, "block delta did not packetize");
+
+  PoseGroupReassembler reassembler;
+  std::vector<std::uint8_t> reconstructed;
+  for (std::size_t reverse = count; reverse-- > 0;) {
+    const PoseGroupDatagram &descriptor = descriptors[reverse];
+    std::vector<std::uint8_t> datagram(kEnvelopeBytes +
+                                       descriptor.envelope.payload_bytes);
+    Expect(EncodePoseGroupDatagram(descriptor, encoded, datagram),
+           "block delta fragment did not encode");
+    Envelope envelope;
+    PoseGroupHeader header;
+    std::span<const std::uint8_t> fragment;
+    Expect(DecodePoseGroupDatagram(datagram, envelope, header, fragment),
+           "block delta fragment did not decode");
+    const ReassemblyPushResult result =
+        reassembler.Push(envelope, header, fragment, 2000 + reverse);
+    if (result.completed.has_value()) {
+      Expect(result.completed->encoding == PoseGroupEncoding::kBlockDeltaV1,
+             "reassembly changed block delta encoding");
+      reconstructed = result.completed->bytes;
+    }
+  }
+  ExpectRoundTrip(fixture, words, reconstructed);
+}
+
 } // namespace
 
 int main() {
@@ -270,6 +320,7 @@ int main() {
   TestBlockPrimitiveCanonicalForm();
   TestMalformedTransactionalDecode();
   TestDeterministicPropertyRoundTrips();
+  TestReverseFragmentReassembly();
 
   if (g_failures != 0) {
     std::cerr << g_failures << " block animation delta test(s) failed\n";

@@ -151,11 +151,10 @@ inline bool UnpackBlock(std::span<const std::uint8_t> source,
 [[nodiscard]] inline std::size_t BlockPackedAnimationDeltaByteCount(
     std::span<const std::uint16_t> words,
     std::span<const AnimationDeltaBaselineTrack> baselines) {
-  SemanticAnimationDeltaStatistics statistics;
-  if (!InspectSemanticAnimationDelta(words, baselines, statistics)) {
+  if (SemanticAnimationDeltaByteCount(words, baselines) == 0) {
     return 0;
   }
-  std::size_t encoded_bytes = statistics.fixed_header_bytes;
+  std::size_t encoded_bytes = kAnimationWordStreamHeaderBytes + 8;
   std::size_t cursor = 4;
   std::array<std::uint32_t, kAnimationDeltaBitBlockWords> block{};
   for (std::size_t track_index = 0; track_index < baselines.size();

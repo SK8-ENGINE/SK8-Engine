@@ -748,6 +748,19 @@ Current checkpoint:
   not yet negotiated or sent by the game. It also shows that exact bit packing
   alone will not reach the 90 KB/s target; translation/rotation representation
   work and final skinned-vertex validation remain necessary.
+- The exact block candidate is now available under a new live compatibility
+  identity and a delta-only encoding value. The sender compares raw, semantic,
+  and block sizes per shared prepared frame, selects block packing only when
+  it meets the material-savings policy and beats semantic packing, and retains
+  the existing semantic/raw fallbacks. The receiver requires the matching
+  installed baseline and reconstructs the original word stream before the
+  unchanged pose decoder.
+- Live block telemetry and the visual-check analyzer report attempts, selected
+  groups, logical/wire bytes, average and maximum encode cost, and aggregate
+  fragment effects. Reverse-order multi-fragment reassembly is covered
+  offline. This activation still requires a five-client user visual gate;
+  telemetry can establish protocol integrity, traffic, and timing but not
+  visual correctness.
 
 Completion:
 

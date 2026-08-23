@@ -732,6 +732,75 @@ foreach ($client in $clientDirectories) {
             )
         ))
     }
+    $blockGroups = Maximum-IntegerField `
+        $rateLines 'v12_block_groups'
+    $blockRaw = Maximum-IntegerField `
+        $rateLines 'v12_block_raw'
+    $blockWire = Maximum-IntegerField `
+        $rateLines 'v12_block_wire'
+    $blockAttempts = Maximum-IntegerField `
+        $rateLines 'v12_block_attempts'
+    $blockEncodeNs = Maximum-IntegerField `
+        $rateLines 'v12_block_encode_ns'
+    $blockEncodeMaxNs = Maximum-IntegerField `
+        $rateLines 'v12_block_encode_max_ns'
+    $summary.Add(
+        'max_v12_block_delta_groups_sent=' + $blockGroups
+    )
+    $summary.Add(
+        'max_v12_block_delta_raw_bytes=' + $blockRaw
+    )
+    $summary.Add(
+        'max_v12_block_delta_wire_bytes=' + $blockWire
+    )
+    $summary.Add(
+        'max_v12_block_delta_attempts=' + $blockAttempts
+    )
+    $summary.Add(
+        'max_v12_block_delta_total_encode_ns=' + $blockEncodeNs
+    )
+    $summary.Add(
+        'max_v12_block_delta_single_encode_ns=' +
+        $blockEncodeMaxNs
+    )
+    if ($blockGroups -ne 'n/a' -and
+        $blockRaw -ne 'n/a' -and
+        $blockWire -ne 'n/a' -and
+        [double]$blockGroups -gt 0 -and
+        [double]$blockRaw -gt 0) {
+        $summary.Add((
+            'derived_v12_block_savings_percent={0:0.00}' -f (
+                100.0 * (
+                    1.0 -
+                    [double]$blockWire / [double]$blockRaw
+                )
+            )
+        ))
+        $summary.Add((
+            'derived_v12_block_bytes_per_group={0:0.0}/{1:0.0}' -f (
+                [double]$blockRaw / [double]$blockGroups
+            ), (
+                [double]$blockWire / [double]$blockGroups
+            )
+        ))
+    }
+    if ($blockAttempts -ne 'n/a' -and
+        $blockEncodeNs -ne 'n/a' -and
+        [double]$blockAttempts -gt 0) {
+        $summary.Add((
+            'derived_v12_block_average_encode_us={0:0.000}' -f (
+                [double]$blockEncodeNs /
+                [double]$blockAttempts / 1000.0
+            )
+        ))
+    }
+    if ($blockEncodeMaxNs -ne 'n/a') {
+        $summary.Add((
+            'derived_v12_block_max_encode_us={0:0.000}' -f (
+                [double]$blockEncodeMaxNs / 1000.0
+            )
+        ))
+    }
     $keyframeGroups = Maximum-IntegerField `
         $rateLines 'v12_keyframe_groups'
     $deltaGroups = Maximum-IntegerField `

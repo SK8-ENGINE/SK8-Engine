@@ -21,32 +21,31 @@ inline constexpr std::uint32_t kMaximumAnimationWordStreamBytes =
     kAnimationWordStreamHeaderBytes +
     std::uint32_t(protocol::kMaximumAnimationFrameWords) * 2u;
 
-[[nodiscard]] constexpr std::size_t AnimationWordStreamByteCount(
-    std::size_t word_count) {
+[[nodiscard]] constexpr std::size_t
+AnimationWordStreamByteCount(std::size_t word_count) {
   return kAnimationWordStreamHeaderBytes + word_count * 2u;
 }
 
-[[nodiscard]] inline bool AnimationWordStreamShapeValid(
-    const float root_position[3],
-    std::span<const std::uint16_t> words) {
-  return root_position != nullptr &&
-         std::isfinite(root_position[0]) &&
-         std::isfinite(root_position[1]) &&
-         std::isfinite(root_position[2]) &&
+[[nodiscard]] inline bool
+AnimationWordStreamShapeValid(const float root_position[3],
+                              std::span<const std::uint16_t> words) {
+  return root_position != nullptr && std::isfinite(root_position[0]) &&
+         std::isfinite(root_position[1]) && std::isfinite(root_position[2]) &&
          words.size() >= 4 &&
          words.size() <= protocol::kMaximumAnimationFrameWords &&
-         (words[0] & ~std::uint16_t{1}) == 0 &&
-         words[1] >= 1 &&
+         (words[0] & ~std::uint16_t{1}) == 0 && words[1] >= 1 &&
          words[1] <= protocol::kMaximumAnimationTracks;
 }
 
-[[nodiscard]] inline bool AnimationWordStreamMatchesPoseGroup(
-    MessageKind kind, const PoseGroupHeader& header,
-    std::span<const std::uint16_t> words) {
+[[nodiscard]] inline bool
+AnimationWordStreamMatchesPoseGroup(MessageKind kind,
+                                    const PoseGroupHeader &header,
+                                    std::span<const std::uint16_t> words) {
   if (words.size() < 4 ||
-        (header.encoding != PoseGroupEncoding::kV11WordStream &&
-         header.encoding != PoseGroupEncoding::kBitPackedV1 &&
-         header.encoding != PoseGroupEncoding::kSemanticDeltaV1) ||
+      (header.encoding != PoseGroupEncoding::kV11WordStream &&
+       header.encoding != PoseGroupEncoding::kBitPackedV1 &&
+       header.encoding != PoseGroupEncoding::kSemanticDeltaV1 &&
+       header.encoding != PoseGroupEncoding::kBlockDeltaV1) ||
       header.element_count != words[1]) {
     return false;
   }
@@ -59,24 +58,22 @@ inline constexpr std::uint32_t kMaximumAnimationWordStreamBytes =
            embedded_baseline == header.pose_id;
   }
   return kind == MessageKind::kPoseDelta && !keyframe &&
-         header.baseline_id != 0 &&
-         embedded_baseline == header.baseline_id;
+         header.baseline_id != 0 && embedded_baseline == header.baseline_id;
 }
 
-[[nodiscard]] constexpr bool AnimationPoseGroupEncodingAllowed(
-    PoseGroupEncoding encoding, bool keyframe) {
+[[nodiscard]] constexpr bool
+AnimationPoseGroupEncodingAllowed(PoseGroupEncoding encoding, bool keyframe) {
   return PoseGroupEncodingValid(encoding) &&
-         (!keyframe ||
-          encoding != PoseGroupEncoding::kSemanticDeltaV1);
+         (!keyframe || (encoding != PoseGroupEncoding::kSemanticDeltaV1 &&
+                        encoding != PoseGroupEncoding::kBlockDeltaV1));
 }
 
-[[nodiscard]] inline bool EncodeAnimationWordStream(
-    const float root_position[3], std::uint16_t root_bone,
-    std::span<const std::uint16_t> words,
-    std::span<std::uint8_t> destination) {
+[[nodiscard]] inline bool
+EncodeAnimationWordStream(const float root_position[3], std::uint16_t root_bone,
+                          std::span<const std::uint16_t> words,
+                          std::span<std::uint8_t> destination) {
   if (!AnimationWordStreamShapeValid(root_position, words) ||
-      destination.size() !=
-          AnimationWordStreamByteCount(words.size())) {
+      destination.size() != AnimationWordStreamByteCount(words.size())) {
     return false;
   }
   detail::LittleEndianWriter writer(destination);
@@ -95,10 +92,10 @@ inline constexpr std::uint32_t kMaximumAnimationWordStreamBytes =
   return writer.offset() == destination.size();
 }
 
-[[nodiscard]] inline bool DecodeAnimationWordStream(
-    std::span<const std::uint8_t> source,
-    float root_position[3], std::uint16_t& root_bone,
-    std::vector<std::uint16_t>& words) {
+[[nodiscard]] inline bool
+DecodeAnimationWordStream(std::span<const std::uint8_t> source,
+                          float root_position[3], std::uint16_t &root_bone,
+                          std::vector<std::uint16_t> &words) {
   if (root_position == nullptr ||
       source.size() < kAnimationWordStreamHeaderBytes) {
     return false;
@@ -107,10 +104,8 @@ inline constexpr std::uint32_t kMaximumAnimationWordStreamBytes =
   std::uint32_t root_bits[3] = {};
   std::uint16_t decoded_root_bone = 0;
   std::uint16_t word_count = 0;
-  if (!reader.U32(root_bits[0]) ||
-      !reader.U32(root_bits[1]) ||
-      !reader.U32(root_bits[2]) ||
-      !reader.U16(decoded_root_bone) ||
+  if (!reader.U32(root_bits[0]) || !reader.U32(root_bits[1]) ||
+      !reader.U32(root_bits[2]) || !reader.U16(decoded_root_bone) ||
       !reader.U16(word_count) ||
       source.size() != AnimationWordStreamByteCount(word_count)) {
     return false;
@@ -121,14 +116,13 @@ inline constexpr std::uint32_t kMaximumAnimationWordStreamBytes =
       std::bit_cast<float>(root_bits[2]),
   };
   std::vector<std::uint16_t> decoded_words(word_count);
-  for (std::uint16_t& word : decoded_words) {
+  for (std::uint16_t &word : decoded_words) {
     if (!reader.U16(word)) {
       return false;
     }
   }
   if (reader.offset() != source.size() ||
-      !AnimationWordStreamShapeValid(
-          decoded_root, decoded_words)) {
+      !AnimationWordStreamShapeValid(decoded_root, decoded_words)) {
     return false;
   }
   root_position[0] = decoded_root[0];
@@ -141,7 +135,6 @@ inline constexpr std::uint32_t kMaximumAnimationWordStreamBytes =
 
 static_assert(kAnimationWordStreamHeaderBytes == 16);
 static_assert(kMaximumAnimationWordStreamBytes == 16400);
-static_assert(
-    kMaximumAnimationWordStreamBytes <= kMaximumPoseGroupBytes);
+static_assert(kMaximumAnimationWordStreamBytes <= kMaximumPoseGroupBytes);
 
-}  // namespace skate3::multiplayer::protocol_v12
+} // namespace skate3::multiplayer::protocol_v12
