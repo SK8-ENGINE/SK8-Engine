@@ -117,6 +117,11 @@ AppID and follow Valve's setup and redistributable requirements.
   renderer installation. The renderer reports installation only after the
   complete sender-declared recipe piece count resolves and commits, and the
   report is matched against role, process session, and appearance identity.
+  Renderer texture ownership is isolated per role even when multiple players
+  wear the same recipe. A reused role releases the previous process session's
+  meshes and textures immediately; an appearance outside the active visual
+  set is retired after five seconds and rebuilt from the cached recipe if it
+  becomes relevant again.
   Steam can associate byte receipt with its direct per-recipient stream;
   localhost preserves all three relay passes because a host receipt alone
   does not prove every downstream UDP client is complete.

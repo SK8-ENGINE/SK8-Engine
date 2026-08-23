@@ -13,6 +13,8 @@ using skate3::multiplayer::lifecycle::CompleteAppearancePieceCount;
 using skate3::multiplayer::lifecycle::kMaximumIncompleteAppearanceBytes;
 using skate3::multiplayer::lifecycle::OutboundAppearanceState;
 using skate3::multiplayer::lifecycle::PeerGenerationTracker;
+using skate3::multiplayer::lifecycle::RemoteAppearanceResidencyExpired;
+using skate3::multiplayer::lifecycle::RemoteAppearanceSessionChanged;
 using skate3::multiplayer::lifecycle::RemoteAppearanceTextureStoreKey;
 using skate3::multiplayer::protocol::AppearanceDeliveryState;
 using skate3::multiplayer::protocol::kMaximumAppearanceBytes;
@@ -115,6 +117,29 @@ void TestRemoteAppearanceTextureOwnership() {
          "empty content identity must not own a remote texture");
 }
 
+void TestRemoteAppearanceResidency() {
+  using Clock = std::chrono::steady_clock;
+  const Clock::time_point start = Clock::now();
+
+  Expect(!RemoteAppearanceSessionChanged(111, 111),
+         "stable process session must retain renderer resources");
+  Expect(RemoteAppearanceSessionChanged(111, 222),
+         "role reuse must release the previous session's resources");
+  Expect(!RemoteAppearanceSessionChanged(0, 222),
+         "an uninitialized renderer session must not look replaced");
+  Expect(!RemoteAppearanceSessionChanged(111, 0),
+         "an invalid observed session must not evict live resources");
+  Expect(!RemoteAppearanceResidencyExpired<Clock>(
+             start + std::chrono::seconds(5), start),
+         "remote appearance expired at the retention boundary");
+  Expect(RemoteAppearanceResidencyExpired<Clock>(
+             start + std::chrono::seconds(6), start),
+         "departed remote appearance was retained indefinitely");
+  Expect(!RemoteAppearanceResidencyExpired<Clock>(
+             start + std::chrono::seconds(30), Clock::time_point{}),
+         "uninitialized remote appearance reported expired");
+}
+
 void TestAppearanceAssemblyBudget() {
   Expect(!CanBeginAppearanceAssembly(0, 0),
          "empty appearance assemblies must be rejected");
@@ -209,6 +234,7 @@ int main() {
   TestDepartureAndRoleReuse();
   TestInvalidIdentityDoesNotCreateState();
   TestRemoteAppearanceTextureOwnership();
+  TestRemoteAppearanceResidency();
   TestAppearanceAssemblyBudget();
   TestAppearanceAssemblyTimeout();
   TestCompleteAppearancePieceCount();

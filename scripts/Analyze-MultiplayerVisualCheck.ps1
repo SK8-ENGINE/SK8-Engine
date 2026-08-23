@@ -170,6 +170,12 @@ foreach ($client in $clientDirectories) {
         ))
     )
     $summary.Add(
+        'renderer_release_events=' +
+        (Match-Count $lines (
+            'multiplayer: released renderer appearance role='
+        ))
+    )
+    $summary.Add(
         'local_profile_recipe_updates=' +
         (Match-Count $lines (
             'multiplayer-assets: adopted local profile recipe'

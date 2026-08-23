@@ -626,7 +626,7 @@ Visual scenario:
    freezing, attachment drift, duplicated pieces, stale pieces, or flicker.
 6. Confirm the focused local client keeps normal input response and has no
    obvious new frame stalls.
-7. Close client 3 only. Wait at least 3 seconds for it to disappear from
+7. Close client 3 only. Wait at least 7 seconds for it to disappear from
    clients 1 and 2. Then run RELAUNCH_MULTIPLAYER_VISUAL_CLIENT_3.bat from
    the repository root. Confirm role 3 returns with its correct current
    appearance and animation, without the old remote state being reused.
@@ -794,7 +794,7 @@ separately, then ask the agent to analyze this run directory.
     Write-Host ''
     if (-not $AppearanceRecoveryCheck) {
         Write-Host (
-            'After closing client 3, wait 3 seconds and run ' +
+            'After closing client 3, wait 7 seconds and run ' +
             'RELAUNCH_MULTIPLAYER_VISUAL_CLIENT_3.bat.'
         )
     }

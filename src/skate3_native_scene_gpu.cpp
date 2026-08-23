@@ -10473,8 +10473,10 @@ multiplayer::AppearanceBlob BuildLocalAppearanceBlob(
 
 struct RemoteAppearanceRenderState {
   uint64_t identity = 0;
+  uint32_t session = 0;
   bool installation_reported = false;
   uint32_t installation_reported_session = 0;
+  std::chrono::steady_clock::time_point last_visible{};
   float root_position[3] = {};
   float root_x_axis[3] = {1.0f, 0.0f, 0.0f};
   float root_z_axis[3] = {0.0f, 0.0f, 1.0f};
@@ -10489,14 +10491,114 @@ struct RemoteVisualTelemetryState {
   uint32_t session = 0;
   bool real_skater = false;
   bool initialized = false;
+  std::chrono::steady_clock::time_point last_visible{};
 };
 
 std::unordered_map<uint32_t, RemoteVisualTelemetryState>
     g_remote_visual_telemetry;
 
+void ReleaseRemoteAppearanceResources(
+    const NativeGuestOutputRenderContext& context,
+    uint32_t role,
+    const RemoteAppearanceRenderState& state,
+    const char* reason) {
+  std::size_t released_textures = 0;
+  for (uint64_t store_key : state.texture_store_keys) {
+    const auto texture = g_r.tex_store.find(store_key);
+    if (texture != g_r.tex_store.end()) {
+      RetireGuestTexture(
+          texture->second,
+          context.device->CurrentSubmission());
+      g_r.tex_store.erase(texture);
+      ++released_textures;
+    }
+    for (auto route = g_r.tex_routes.begin();
+         route != g_r.tex_routes.end();) {
+      if (route->second.key == store_key) {
+        route = g_r.tex_routes.erase(route);
+      } else {
+        ++route;
+      }
+    }
+  }
+
+  std::unordered_set<uint32_t> released_mesh_keys;
+  released_mesh_keys.reserve(state.items.size());
+  std::size_t released_meshes = 0;
+  for (const DrawItem& item : state.items) {
+    if (!released_mesh_keys.insert(item.mesh).second) {
+      continue;
+    }
+    const auto mesh = g_r.meshes.find(item.mesh);
+    if (mesh == g_r.meshes.end()) {
+      continue;
+    }
+    PoolMeshBuffer(context.device, mesh->second.vb);
+    PoolMeshBuffer(context.device, mesh->second.ib);
+    g_r.meshes.erase(mesh);
+    ++released_meshes;
+  }
+
+  REXLOG_INFO(
+      "multiplayer: released renderer appearance role={} "
+      "session={} id={:016X} meshes={} textures={} reason={}",
+      role, state.session, state.identity, released_meshes,
+      released_textures, reason);
+}
+
+void ObserveRemoteAppearanceSession(
+    const NativeGuestOutputRenderContext& context,
+    uint32_t role, uint32_t session,
+    std::chrono::steady_clock::time_point now) {
+  const auto installed = g_remote_appearances.find(role);
+  if (installed == g_remote_appearances.end()) {
+    return;
+  }
+  if (multiplayer::lifecycle::RemoteAppearanceSessionChanged(
+          installed->second.session, session)) {
+    ReleaseRemoteAppearanceResources(
+        context, role, installed->second, "session changed");
+    g_remote_appearances.erase(installed);
+    g_remote_visual_telemetry.erase(role);
+    return;
+  }
+  installed->second.last_visible = now;
+}
+
+void PruneRemoteAppearanceResources(
+    const NativeGuestOutputRenderContext& context,
+    std::chrono::steady_clock::time_point now) {
+  for (auto installed = g_remote_appearances.begin();
+       installed != g_remote_appearances.end();) {
+    if (!multiplayer::lifecycle::RemoteAppearanceResidencyExpired<
+            std::chrono::steady_clock>(
+            now, installed->second.last_visible)) {
+      ++installed;
+      continue;
+    }
+    const uint32_t role = installed->first;
+    ReleaseRemoteAppearanceResources(
+        context, role, installed->second, "not visible");
+    installed = g_remote_appearances.erase(installed);
+    g_remote_visual_telemetry.erase(role);
+  }
+  for (auto visual = g_remote_visual_telemetry.begin();
+       visual != g_remote_visual_telemetry.end();) {
+    if (multiplayer::lifecycle::RemoteAppearanceResidencyExpired<
+            std::chrono::steady_clock>(
+            now, visual->second.last_visible)) {
+      visual = g_remote_visual_telemetry.erase(visual);
+    } else {
+      ++visual;
+    }
+  }
+}
+
 bool InstallRemoteRecipeAppearance(
     const NativeGuestOutputRenderContext& context,
     uint32_t role,
+    uint32_t session,
+    std::chrono::steady_clock::time_point observed_at,
     const multiplayer::AppearanceBlob& appearance) {
   if (appearance.bytes == nullptr) {
     return false;
@@ -10504,6 +10606,7 @@ bool InstallRemoteRecipeAppearance(
   RemoteAppearanceRenderState& state =
       g_remote_appearances[role];
   if (state.identity == appearance.identity &&
+      state.session == session &&
       !state.items.empty()) {
     bool meshes_ready = true;
     for (const DrawItem& item : state.items) {
@@ -10588,6 +10691,8 @@ bool InstallRemoteRecipeAppearance(
   }
   RemoteAppearanceRenderState installed;
   installed.identity = appearance.identity;
+  installed.session = session;
+  installed.last_visible = observed_at;
   std::copy_n(
       header.root_position, 3, installed.root_position);
   std::copy_n(
@@ -10889,6 +10994,8 @@ bool InstallRemoteRecipeAppearance(
 bool InstallRemoteAppearance(
     const NativeGuestOutputRenderContext& context,
     uint32_t role,
+    uint32_t session,
+    std::chrono::steady_clock::time_point observed_at,
     const multiplayer::AppearanceBlob& appearance) {
   if (appearance.identity == 0 ||
       appearance.bytes == nullptr ||
@@ -10898,6 +11005,7 @@ bool InstallRemoteAppearance(
   RemoteAppearanceRenderState& state =
       g_remote_appearances[role];
   if (state.identity == appearance.identity &&
+      state.session == session &&
       !state.items.empty()) {
     bool meshes_ready = true;
     for (const DrawItem& item : state.items) {
@@ -10915,7 +11023,7 @@ bool InstallRemoteAppearance(
     std::memcpy(&magic, bytes.data(), sizeof(magic));
     if (magic == 0x31504352u) {
       return InstallRemoteRecipeAppearance(
-          context, role, appearance);
+          context, role, session, observed_at, appearance);
     }
   }
   size_t cursor = 0;
@@ -10930,6 +11038,8 @@ bool InstallRemoteAppearance(
   }
   RemoteAppearanceRenderState installed;
   installed.identity = appearance.identity;
+  installed.session = session;
+  installed.last_visible = observed_at;
   std::copy_n(
       header.root_position, 3,
       installed.root_position);
@@ -12578,6 +12688,8 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
               ? &local_appearance
               : nullptr,
           remote_players);
+  const auto remote_appearance_now =
+      std::chrono::steady_clock::now();
   if (have_remote_players) {
   for (const multiplayer::RemotePlayer& remote_player : remote_players) {
     const multiplayer::RemotePose& remote_pose = remote_player.pose;
@@ -12595,9 +12707,13 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
     std::vector<const DrawItem*> appearance_items;
     const RemoteAppearanceRenderState*
         remote_appearance_state = nullptr;
+    ObserveRemoteAppearanceSession(
+        context, remote_player.role, remote_player.session,
+        remote_appearance_now);
     const bool appearance_installed =
         InstallRemoteAppearance(
             context, remote_player.role,
+            remote_player.session, remote_appearance_now,
             remote_player.appearance);
     if (appearance_installed) {
       const auto installed =
@@ -13208,6 +13324,7 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
 
     RemoteVisualTelemetryState& visual_state =
         g_remote_visual_telemetry[remote_player.role];
+    visual_state.last_visible = remote_appearance_now;
     if (!visual_state.initialized ||
         visual_state.session != remote_player.session ||
         visual_state.real_skater != replicated_real_skater) {
@@ -13277,6 +13394,8 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
     }
   }
   }
+  PruneRemoteAppearanceResources(
+      context, remote_appearance_now);
 
   // The same cached authored poses are consumed later by the DXR dynamic
   // scene. Rendering the emissive source meshes here makes their motion and
