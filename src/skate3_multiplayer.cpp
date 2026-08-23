@@ -130,6 +130,7 @@ using protocol::AppearanceFragmentShapeValid;
 using protocol::AppearanceFragmentPacket;
 using protocol::PosePacket;
 using protocol::SequenceNewer;
+using protocol::SequenceNewerOrEqual;
 using protocol::kAnimationFragmentWords;
 using protocol::kAnimationKeyframeInterval;
 using protocol::kAnimationPacketMagic;
@@ -291,6 +292,7 @@ struct QuantizedAnimationFrame {
 
 struct AnimationAssembly {
   Clock::time_point received_at{};
+  bool active = false;
   std::uint32_t session = 0;
   std::uint32_t sequence = 0;
   std::uint64_t sender_time_us = 0;
@@ -874,7 +876,6 @@ bool BuildAnimationFrameWords(
   }
   bool keyframe_required =
       keyframe.tracks.size() != current.tracks.size() ||
-      keyframe.sequence == 0 ||
       sequence - keyframe.sequence >= kAnimationKeyframeInterval;
   if (!keyframe_required) {
     for (std::size_t index = 0;
@@ -2673,12 +2674,10 @@ class Runtime {
             peer.animation_samples.back().pose.sequence)) {
       return false;
     }
-    if (peer.animation_assembly.session == packet.sender_session &&
-        peer.animation_assembly.sequence != 0 &&
-        packet.sequence != peer.animation_assembly.sequence &&
-        !SequenceNewer(
-            packet.sequence,
-            peer.animation_assembly.sequence)) {
+    if (peer.animation_assembly.active &&
+        peer.animation_assembly.session == packet.sender_session &&
+        !SequenceNewerOrEqual(
+            packet.sequence, peer.animation_assembly.sequence)) {
       // Unreliable internet delivery can put a late fragment from an
       // abandoned frame behind fragments of the next frame. Never let that
       // stale fragment replace the newer in-progress assembly.
@@ -2688,6 +2687,7 @@ class Runtime {
         peer.animation_assembly.sequence != packet.sequence) {
       peer.animation_assembly = {};
       peer.animation_assembly.received_at = now;
+      peer.animation_assembly.active = true;
       peer.animation_assembly.session = packet.sender_session;
       peer.animation_assembly.sequence = packet.sequence;
       peer.animation_assembly.sender_time_us = packet.sender_time_us;

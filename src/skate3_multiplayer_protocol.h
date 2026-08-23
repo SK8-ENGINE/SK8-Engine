@@ -196,6 +196,11 @@ struct AppearanceFragmentPacket {
   return SequenceNewer(reference, candidate);
 }
 
+[[nodiscard]] constexpr bool SequenceNewerOrEqual(
+    std::uint32_t candidate, std::uint32_t reference) {
+  return candidate == reference || SequenceNewer(candidate, reference);
+}
+
 static_assert(sizeof(PosePacket) == 72);
 static_assert(offsetof(AnimationFragmentPacket, words) == 56);
 static_assert(sizeof(AnimationFragmentPacket) == 1096);

@@ -18,6 +18,7 @@ using skate3::multiplayer::protocol::AppearanceFragmentPacket;
 using skate3::multiplayer::protocol::AppearanceFragmentShapeValid;
 using skate3::multiplayer::protocol::PosePacket;
 using skate3::multiplayer::protocol::SequenceNewer;
+using skate3::multiplayer::protocol::SequenceNewerOrEqual;
 using skate3::multiplayer::protocol::SequenceOlder;
 using skate3::multiplayer::protocol::kAnimationFragmentWords;
 using skate3::multiplayer::protocol::kAnimationPacketMagic;
@@ -302,6 +303,12 @@ void TestSequenceOrderingAcrossWrap() {
          "ambiguous half-range sequence must not be newer");
   Expect(!SequenceOlder(0x80000000u, 0),
          "ambiguous half-range sequence must not be older");
+  Expect(SequenceNewerOrEqual(0, 0),
+         "sequence zero must be equal to an active zero reference");
+  Expect(SequenceNewerOrEqual(0, UINT32_MAX),
+         "rolled-over sequence zero must advance a pre-rollover reference");
+  Expect(!SequenceNewerOrEqual(UINT32_MAX, 0),
+         "late pre-rollover sequence must not replace active sequence zero");
 }
 
 }  // namespace
