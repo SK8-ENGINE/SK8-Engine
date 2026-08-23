@@ -194,9 +194,22 @@ Current checkpoint:
 - Background preparation reduced the remaining one-time render-thread
   installation work to 21.6-51.4 ms for 10-11 pieces and 23-25 textures.
   Steady multiplayer render work averaged about 0.20-0.25 ms in that pass.
-  The next acceptance gate is a transactional incremental GPU installer that
-  keeps the complete proxy visible until every resource is ready and bounds
-  each render frame's upload work.
+- A guarded transactional installer at `ce95e96` now stages textures, meshes,
+  and per-piece render caches in an alternate renderer namespace before a
+  final atomic state swap. The synchronous path remains available as a
+  rollback.
+- A three-client user visual pass reported the staged transition working well.
+  Telemetry independently recorded complete 10-11-piece appearances after 37
+  operations, no failed preparation, incomplete recipe, socket failure,
+  weighted-row fallback, or rig retry, and commit operations of 0.03-0.09 ms.
+- Total installation work of 36-43 ms was spread over roughly 160-298 ms
+  instead of one render frame. Every observed resource operation was at or
+  below 2.98 ms except one 6.99 ms texture upload. This is a soft-budget
+  outlier to retain in performance regression checks, not evidence of visual
+  failure.
+- Before protocol v12, the remaining Phase 3 gate is explicit resource
+  accounting plus repeated join, departure, role-reuse, and wardrobe-churn
+  coverage. A five-client visual completion pass also remains outstanding.
 
 Completion:
 
