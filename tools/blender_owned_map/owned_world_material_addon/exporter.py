@@ -526,6 +526,17 @@ def _scene_content_fingerprint(
             material.get("ow_collision_enabled", True)
         ):
             continue
+        _hash_text(
+            digest,
+            int(
+                bool(
+                    obj.get(
+                        "ow_preserve_opposite_wound_collision",
+                        False,
+                    )
+                )
+            ),
+        )
         _hash_mesh(
             digest, obj, visual=False, depsgraph=depsgraph
         )
@@ -1489,18 +1500,42 @@ def audit_collision_geometry(
                 ):
                     object_wrong_facing += 1
                     continue
-                # Position-only, orientation-independent key catches both
-                # exact duplicates and opposite-wound copies. Those surfaces
-                # create contradictory native contacts and broken adjacency.
-                key = tuple(
-                    sorted(
-                        tuple(
-                            round(float(component), 6)
-                            for component in point
-                        )
-                        for point in points
+                rounded_points = tuple(
+                    tuple(
+                        round(float(component), 6)
+                        for component in point
                     )
+                    for point in points
                 )
+                if bool(
+                    source_object.get(
+                        "ow_preserve_opposite_wound_collision",
+                        False,
+                    )
+                ):
+                    # Cyclic rotation does not change triangle orientation,
+                    # but reversing two vertices does. Retail ClusteredMesh
+                    # uses reverse-wound partners to provide intentional
+                    # two-sided collision, so only same-wound copies are
+                    # duplicates for these objects.
+                    key = min(
+                        rounded_points,
+                        (
+                            rounded_points[1],
+                            rounded_points[2],
+                            rounded_points[0],
+                        ),
+                        (
+                            rounded_points[2],
+                            rounded_points[0],
+                            rounded_points[1],
+                        ),
+                    )
+                else:
+                    # Generic authored maps retain the stricter cleanup:
+                    # opposite-wound copies can otherwise create
+                    # contradictory contacts and broken adjacency.
+                    key = tuple(sorted(rounded_points))
                 if key in triangle_owners:
                     object_duplicates += 1
                     skipped_duplicates += 1
@@ -1526,8 +1561,19 @@ def audit_collision_geometry(
             )
         if object_duplicates:
             warnings.append(
-                f"{source_object.name}: skipped {object_duplicates} exact "
-                "or opposite-wound duplicate collision triangle(s)."
+                f"{source_object.name}: skipped {object_duplicates} "
+                + (
+                    "same-wound duplicate collision triangle(s); retained "
+                    "reverse-wound retail partners."
+                    if bool(
+                        source_object.get(
+                            "ow_preserve_opposite_wound_collision",
+                            False,
+                        )
+                    )
+                    else "exact or opposite-wound duplicate collision "
+                    "triangle(s)."
+                )
             )
         if object_non_finite:
             issues.append(

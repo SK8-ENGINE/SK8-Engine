@@ -134,6 +134,11 @@ def analyze_package(
             {
                 "id": index + 1,
                 "name": name,
+                "albedo_texture": struct.unpack_from("<I", fields, 32)[0],
+                "lightmap_texture": struct.unpack_from("<I", fields, 36)[0],
+                "normal_texture": struct.unpack_from("<I", fields, 44)[0],
+                "orm_texture": struct.unpack_from("<I", fields, 48)[0],
+                "emissive_texture": struct.unpack_from("<I", fields, 52)[0],
                 "audio_surface": struct.unpack_from("<I", fields, 64)[0],
                 "physics_surface": struct.unpack_from("<I", fields, 68)[0],
                 "surface_pattern": struct.unpack_from("<I", fields, 72)[0],
@@ -169,6 +174,7 @@ def analyze_package(
         texture_decoded_bytes += len(rgba8)
         texture_dimensions.append(
             {
+                "id": index + 1,
                 "name": name,
                 "width": width,
                 "height": height,

@@ -81,7 +81,22 @@ def _configure_material(material: bpy.types.Material) -> None:
     material["ow_baked_strength"] = 0.0
     material["ow_albedo_image"] = image.name if image is not None else ""
     material["ow_lightmap_image"] = ""
-    material["ow_normal_image"] = ""
+    normal_texture_id = str(
+        material.get("skate3_normal_texture_id", "")
+    )
+    normal_image = (
+        bpy.data.images.get(normal_texture_id)
+        if normal_texture_id
+        else None
+    )
+    if normal_texture_id and normal_image is None:
+        raise RuntimeError(
+            f"{material.name!r} lost retail normal image "
+            f"{normal_texture_id!r}"
+        )
+    material["ow_normal_image"] = (
+        normal_image.name if normal_image is not None else ""
+    )
     material["ow_orm_image"] = ""
     material["ow_emissive_image"] = ""
     material["ow_alpha_mode"] = int(material.get("skate3_alpha_mode", 0))

@@ -101,9 +101,11 @@ def main() -> int:
     expected_xor: dict[int, int] = defaultdict(int)
     expected_sum: dict[int, int] = defaultdict(int)
     expected_counts: dict[int, int] = defaultdict(int)
-    seen: set[tuple[tuple[float, float, float], ...]] = set()
+    seen_positions: set[tuple[tuple[float, float, float], ...]] = set()
+    seen_oriented: set[tuple[tuple[float, float, float], ...]] = set()
     degenerate = 0
-    duplicates = 0
+    same_wound_duplicates = 0
+    retained_reverse_wound = 0
     surfaces = sorted(by_surface)
     for surface in surfaces:
         name = f"MAT_RETAIL_COLLISION_{surface:04X}"
@@ -128,16 +130,27 @@ def main() -> int:
             if _cross_length_squared(*points) <= 1.0e-10:
                 degenerate += 1
                 continue
-            key = tuple(
+            rounded = tuple(
+                tuple(round(component, 6) for component in point)
+                for point in points
+            )
+            position_key = tuple(
                 sorted(
-                    tuple(round(component, 6) for component in point)
-                    for point in points
+                    rounded
                 )
             )
-            if key in seen:
-                duplicates += 1
+            oriented_key = min(
+                rounded,
+                (rounded[1], rounded[2], rounded[0]),
+                (rounded[2], rounded[0], rounded[1]),
+            )
+            if oriented_key in seen_oriented:
+                same_wound_duplicates += 1
                 continue
-            seen.add(key)
+            if position_key in seen_positions:
+                retained_reverse_wound += 1
+            seen_positions.add(position_key)
+            seen_oriented.add(oriented_key)
             record_hash = int.from_bytes(
                 hashlib.sha256(
                     _canonical_oriented_record(points)
@@ -217,7 +230,8 @@ def main() -> int:
         "source_surfaces": len(surfaces),
         "source_triangles": source_triangles,
         "removed_degenerate": degenerate,
-        "removed_duplicates": duplicates,
+        "removed_same_wound_duplicates": same_wound_duplicates,
+        "retained_reverse_wound": retained_reverse_wound,
         "package_triangles": sum(expected_counts.values()),
         "canonical_sha256": canonical_digest.hexdigest(),
     }
@@ -232,7 +246,10 @@ def main() -> int:
             "surfaces": result["source_surfaces"],
             "source_triangles": result["source_triangles"],
             "removed_degenerate": result["removed_degenerate"],
-            "removed_duplicates": result["removed_duplicates"],
+            "removed_same_wound_duplicates": result[
+                "removed_same_wound_duplicates"
+            ],
+            "retained_reverse_wound": result["retained_reverse_wound"],
             "package_triangles": result["package_triangles"],
             "position_tolerance": result["position_tolerance"],
             "canonical_sha256": result["canonical_sha256"],

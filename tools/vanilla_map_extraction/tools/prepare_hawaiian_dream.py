@@ -29,6 +29,19 @@ ALPHA_BLEND_SHADERS = {
     "environment.reflective_trans",
     "environment.transparent",
 }
+RETAIL_TEXTURE_CHANNELS = (
+    "diffuse",
+    "transparent",
+    "normal",
+    "normal2",
+    "specular",
+    "lightmap",
+    "detail",
+    "macrooverlay",
+    "decal",
+    "environment",
+    "noise",
+)
 RX2_TOC_RECORD_SIZE = 24
 RX2_TYPE_MATERIAL = 0x00EB0005
 RX2_TYPE_EXTERNAL_REFERENCES = 0x00EB000B
@@ -257,6 +270,16 @@ def _material_metadata(
         alpha_mode = 1
     else:
         alpha_mode = 0
+    retail_texture_ids = {
+        channel: texture_id
+        for channel in RETAIL_TEXTURE_CHANNELS
+        if (
+            texture_id := _material_texture_id(
+                _first_parameter(group, channel)
+            )
+        )
+        is not None
+    }
     return {
         "material_name": material_name,
         "texture_id": _material_texture_id(material_name),
@@ -270,6 +293,11 @@ def _material_metadata(
         "shader_name": shader_name,
         "alpha_mode": alpha_mode,
         "alpha_cutoff": 0.5,
+        # Preserve every retail texture association in the extraction
+        # manifest even when the current Blender/export policy does not yet
+        # consume that role. This keeps extraction lossless and makes later
+        # fidelity work independent of another RX2 material reparse.
+        "retail_texture_ids": retail_texture_ids,
     }
 
 
@@ -283,6 +311,7 @@ def prepare(
     package_name: str = "DHS by DH13",
     cache_format: str = "skate3-hawaiian-dream-cache-v1",
     texture_stream_names: tuple[str, ...] = (),
+    excluded_normal_texture_ids: tuple[str, ...] = (),
 ) -> Path:
     sys.path.insert(0, str(utt_root))
     import rx2_parser
@@ -318,6 +347,12 @@ def prepare(
         "axis_conversion": {
             "runtime_to_blender": ["x", "-z", "y"],
             "uv_v_flipped": True,
+        },
+        "normal_texture_policy": {
+            "excluded_texture_ids": sorted(
+                texture_id.lower()
+                for texture_id in excluded_normal_texture_ids
+            ),
         },
         "textures": {},
         "models": [],
@@ -579,6 +614,18 @@ def prepare(
         for mesh in model["meshes"]  # type: ignore[index]
         if mesh["texture_id"] is not None
     }
+    used_texture_ids_by_channel = {
+        channel: {
+            texture_id
+            for model in models
+            for mesh in model["meshes"]  # type: ignore[index]
+            if (
+                texture_id := mesh["retail_texture_ids"].get(channel)  # type: ignore[union-attr]
+            )
+            is not None
+        }
+        for channel in RETAIL_TEXTURE_CHANNELS
+    }
     manifest["summary"] = {
         "presentation_assets": len(presentation_assets),
         "model_assets": len(models),
@@ -591,6 +638,18 @@ def prepare(
         ),
         "decoded_textures": len(textures),
         "used_diffuse_textures": len(used_texture_ids),
+        "bound_texture_references_by_channel": {
+            channel: sum(
+                channel in mesh["retail_texture_ids"]  # type: ignore[operator]
+                for model in models
+                for mesh in model["meshes"]  # type: ignore[index]
+            )
+            for channel in RETAIL_TEXTURE_CHANNELS
+        },
+        "used_texture_ids_by_channel": {
+            channel: len(texture_ids)
+            for channel, texture_ids in used_texture_ids_by_channel.items()
+        },
         "material_binding_strategies": {
             strategy: sum(
                 model["material_binding"]["strategy"] == strategy  # type: ignore[index]
@@ -615,6 +674,10 @@ def prepare(
             bool(rail["closed"]) for rail in grind_splines  # type: ignore[index]
         ),
         "unmatched_diffuse_textures": sorted(used_texture_ids - set(textures)),
+        "unmatched_texture_ids_by_channel": {
+            channel: sorted(texture_ids - set(textures))
+            for channel, texture_ids in used_texture_ids_by_channel.items()
+        },
     }
 
     manifest_path = output_root / "manifest.json"

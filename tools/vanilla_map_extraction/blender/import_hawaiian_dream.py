@@ -63,6 +63,8 @@ def _new_material(
     image: bpy.types.Image | None,
     alpha_mode: int,
     *,
+    normal_texture_id: str = "",
+    normal_image: bpy.types.Image | None = None,
     fallback: bool = False,
 ) -> bpy.types.Material:
     alpha_suffix = ("OPAQUE", "MASK", "BLEND")[alpha_mode]
@@ -90,6 +92,21 @@ def _new_material(
             1.0,
             1.0,
         )
+    if normal_texture_id:
+        if normal_image is None:
+            raise ValueError(
+                f"normal texture {normal_texture_id} is missing from the cache"
+            )
+        normal_image.colorspace_settings.name = "Non-Color"
+        normal_texture = nodes.new("ShaderNodeTexImage")
+        normal_texture.name = f"NORMAL_{normal_texture_id}"
+        normal_texture.label = normal_texture_id
+        normal_texture.image = normal_image
+        normal_texture.interpolation = "Linear"
+        normal_map = nodes.new("ShaderNodeNormalMap")
+        normal_map.name = f"NORMAL_MAP_{normal_texture_id}"
+        links.new(normal_texture.outputs["Color"], normal_map.inputs["Color"])
+        links.new(normal_map.outputs["Normal"], principled.inputs["Normal"])
     principled.inputs["Roughness"].default_value = 0.68
     principled.inputs["Metallic"].default_value = 0.0
     if alpha_mode != 0:
@@ -101,8 +118,12 @@ def _new_material(
             except Exception:
                 pass
     material["skate3_texture_id"] = texture_id
+    material["skate3_normal_texture_id"] = normal_texture_id
     material["skate3_alpha_mode"] = alpha_mode
     material["skate3_alpha_cutoff"] = 0.5
+    material["ow_normal_image"] = (
+        normal_image.name if normal_image is not None else ""
+    )
     if fallback:
         material["skate3_fallback_reason"] = (
             "Package references a shared texture that is not embedded."
@@ -306,6 +327,10 @@ def _import_retail_collision(
         obj["skate3_retail_collision"] = True
         obj["skate3_retail_surface_id"] = f"0x{surface:04X}"
         obj["skate3_retail_triangle_count"] = len(faces)
+        # Retail ClusteredMesh commonly stores reverse-wound partner faces.
+        # They make a patch intentionally collidable from both sides and must
+        # not be collapsed by the generic collision cleanup.
+        obj["ow_preserve_opposite_wound_collision"] = True
         obj["ow_material"] = material.name
         imported_triangles += len(faces)
 
@@ -335,11 +360,20 @@ def build_scene(manifest_path: Path) -> dict[str, int]:
     collision.hide_render = True
     metadata = _new_child_collection(root, "Metadata")
     images = _load_images(manifest, cache_root)
-    materials: dict[tuple[str, int], bpy.types.Material] = {}
+    materials: dict[tuple[str, str, int], bpy.types.Material] = {}
+    excluded_normal_texture_ids = {
+        str(texture_id).lower()
+        for texture_id in manifest.get("normal_texture_policy", {}).get(
+            "excluded_texture_ids",
+            [],
+        )
+    }
 
     object_count = 0
     vertex_count = 0
     triangle_count = 0
+    normal_mapped_object_count = 0
+    used_normal_texture_ids: set[str] = set()
     for model_entry in manifest["models"]:
         asset_id = model_entry["asset_id"]
         source_stem = Path(model_entry["stream_file"]).stem
@@ -395,15 +429,40 @@ def build_scene(manifest_path: Path) -> dict[str, int]:
                 asset_collection.objects.link(obj)
                 texture_id = mesh_entry["texture_id"]
                 alpha_mode = int(mesh_entry.get("alpha_mode", 0))
+                retail_texture_ids = mesh_entry.get(
+                    "retail_texture_ids",
+                    {},
+                )
+                source_normal_texture_id = str(
+                    retail_texture_ids.get("normal", "")
+                ).lower()
+                normal_texture_id = (
+                    source_normal_texture_id
+                    if source_normal_texture_id
+                    and source_normal_texture_id
+                    not in excluded_normal_texture_ids
+                    else ""
+                )
                 if texture_id:
-                    material_key = (texture_id, alpha_mode)
+                    material_key = (
+                        texture_id,
+                        normal_texture_id,
+                        alpha_mode,
+                    )
                     material = materials.get(material_key)
                     if material is None:
                         image = images.get(texture_id)
+                        normal_image = (
+                            images.get(normal_texture_id)
+                            if normal_texture_id
+                            else None
+                        )
                         material = _new_material(
                             texture_id,
                             image,
                             alpha_mode,
+                            normal_texture_id=normal_texture_id,
+                            normal_image=normal_image,
                             fallback=image is None,
                         )
                         entry = manifest["textures"].get(texture_id)
@@ -416,6 +475,9 @@ def build_scene(manifest_path: Path) -> dict[str, int]:
                             ]
                         materials[material_key] = material
                     mesh_data.materials.append(material)
+                if normal_texture_id:
+                    normal_mapped_object_count += 1
+                    used_normal_texture_ids.add(normal_texture_id)
                 obj["skate3_asset_id"] = asset_id
                 obj["skate3_stream_file"] = model_entry["stream_file"]
                 obj["skate3_mesh_index"] = mesh_index
@@ -432,6 +494,10 @@ def build_scene(manifest_path: Path) -> dict[str, int]:
                     mesh_entry.get("retail_material_group_index", -1)
                 )
                 obj["skate3_texture_id"] = texture_id or ""
+                obj["skate3_normal_texture_id"] = normal_texture_id
+                obj["skate3_source_normal_texture_id"] = (
+                    source_normal_texture_id
+                )
                 obj["skate3_shader_name"] = mesh_entry.get("shader_name") or ""
                 obj["skate3_texture_channel"] = (
                     mesh_entry.get("texture_channel") or ""
@@ -474,9 +540,10 @@ def build_scene(manifest_path: Path) -> dict[str, int]:
     info.empty_display_type = "PLAIN_AXES"
     info.empty_display_size = 2.0
     info["status"] = (
-        "Presentation geometry, diffuse textures, exact retail collision, "
-        "and retail grind splines imported. Original RX2 assets are preserved "
-        "in the cache."
+        "Presentation geometry, diffuse and conservative retail normal "
+        "textures, exact retail collision, and retail grind splines imported. "
+        "Original RX2 assets and all material channel IDs are preserved in "
+        "the cache."
     )
     info["source_manifest"] = str(manifest_path)
     metadata.objects.link(info)
@@ -493,12 +560,18 @@ def build_scene(manifest_path: Path) -> dict[str, int]:
     scene["skate3_grind_status"] = (
         f"{grind_rail_count} retail native cubic splines imported"
     )
+    scene["skate3_normal_status"] = (
+        f"{normal_mapped_object_count} mesh parts use "
+        f"{len(used_normal_texture_ids)} conventional retail normal maps"
+    )
     return {
         "objects": object_count,
         "vertices": vertex_count,
         "triangles": triangle_count,
         "textures": len(images),
         "materials": len(materials),
+        "normal_mapped_objects": normal_mapped_object_count,
+        "normal_textures": len(used_normal_texture_ids),
         "grind_rails": grind_rail_count,
         "grind_segments": grind_segment_count,
         "collision_meshes": collision_mesh_count,

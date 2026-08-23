@@ -10,6 +10,20 @@ from prepare_hawaiian_dream import prepare
 
 
 DISTRICT_NAME = "DIST_University"
+EXCLUDED_NORMAL_TEXTURE_IDS = (
+    # The retail shaders treat these resources specially. The two defaults
+    # are not neutral after generic RGBA decode, the water pair uses a
+    # shader-specific/PCA path, and the palm textures are not conventional
+    # tangent-space normal maps. Retain all IDs in the manifest, but do not
+    # bind them to the generic owned-world normal slot.
+    "0x0000043d03e3870a",
+    "0x0000475d03e3870a",
+    "0x2c70170a00171210",
+    "0x2c70170a00171211",
+    "0x0000676403e3870a",
+    "0x0000676703e3870a",
+    "0x0000677003e3870a",
+)
 
 
 def _workspace() -> Path:
@@ -53,6 +67,7 @@ def main() -> int:
         package_name="Official Skate 3 base game",
         cache_format="skate3-university-cache-v1",
         texture_stream_names=("Tex",),
+        excluded_normal_texture_ids=EXCLUDED_NORMAL_TEXTURE_IDS,
     )
     print(manifest_path)
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))

@@ -263,13 +263,15 @@ intersecting solid boxes to form stairs or leave bottom faces coplanar with a
 floor. Set `ow_upward_surface=true` on floor/ramp-only proxies.
 
 The exporter safely omits zero-area and exact/opposite-wound duplicate
-collision triangles from the generated `.skate` package and reports every
-affected object together. It does not edit the Blender mesh. Do not dissolve
-or re-UV a visual mesh to satisfy collision cleanup; create a separate,
-simpler collision proxy when imported art is messy. Non-finite coordinates
-and downward/vertical triangles on an object marked **Rideable Top Surface**
-remain blocking errors because they can create invalid contacts, instant
-bails, or inverted ramps.
+collision triangles from ordinary authored maps and reports every affected
+object together. It does not edit the Blender mesh. An imported retail
+collision object may opt into
+`ow_preserve_opposite_wound_collision=true`; in that mode cyclic
+same-wound copies are still removed, but reverse-wound partners are retained
+for intentional two-sided collision. Do not enable this globally to mask
+messy authored proxies. Non-finite coordinates and downward/vertical
+triangles on an object marked **Rideable Top Surface** remain blocking errors
+because they can create invalid contacts, instant bails, or inverted ramps.
 
 At runtime, an ordinary map is compiled into one continuous native
 RenderWare collision mesh with its own KD tree. This preserves shared-edge

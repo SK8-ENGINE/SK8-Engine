@@ -9,15 +9,16 @@ The ignored local output
 
 | Property | Verified value |
 | --- | ---: |
-| Package bytes | 121,962,132 |
-| Materials | 515 |
-| Opaque / mask / blend materials | 460 / 50 / 5 |
-| Embedded textures | 327 |
-| Decoded RGBA8 texture bytes | 222,980,096 |
+| Package bytes | 127,155,624 |
+| Materials | 526 |
+| Opaque / mask / blend materials | 471 / 50 / 5 |
+| Embedded textures | 462 |
+| Decoded RGBA8 texture bytes | 253,257,728 |
+| Retail normal maps / mapped mesh parts | 135 / 2,987 |
 | Indexed visual vertices | 2,081,271 |
 | Visual indices | 4,936,851 |
 | Render triangles | 1,645,617 |
-| Collision triangles | 1,122,951 |
+| Collision triangles | 1,133,642 |
 | Retail grind rails | 4,201 |
 | Native cubic segments | 27,008 |
 | Compiled native grind bytes | 4,023,600 |
@@ -46,6 +47,8 @@ reviewed export:
 - byte-exact retail grind records against the extraction manifest;
 - decoded retail collision geometry, winding, and packed surface channels
   against all 301 source `ClusteredMesh` sections;
+- all 141 source normal IDs, the seven explicit special-map exclusions, and
+  all 135 selected linear normal textures through the package material table;
 - downstream render-world, native grind-world, and collision-world counts.
 
 The C++ validator is the actual engine loader linked against the same
@@ -61,11 +64,16 @@ parameter and the old Blender preparation forced all alpha modes to opaque.
 
 ## Known fidelity limits
 
-- Retail collision exports 1,122,951 triangles after rejecting six
-  degenerate source triangles and 10,692 exact/opposite-wound duplicates from
-  the complete 1,133,649-triangle extraction.
+- Retail collision exports 1,133,642 triangles after rejecting six
+  degenerate source triangles and one same-wound duplicate. It retains 10,691
+  reverse-wound retail partners so intentional two-sided patches do not become
+  one-sided dead spots.
 - The current UTT presentation parser computes averaged geometry normals;
   authoritative packed retail normals are not yet transported.
+- Conventional retail tangent-space normal maps are transported. Seven
+  shader-specific default/water/palm resources remain recorded but unbound;
+  specular, lightmap, detail, decal, macro-overlay, environment, and noise
+  semantics are not reconstructed yet.
 - AI routes, hinged doors, and local lights are not recovered yet.
 - All 183 packed retail collision surfaces are preserved, including the three
   surface IDs that use native physics channel 13.

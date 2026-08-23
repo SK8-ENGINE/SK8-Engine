@@ -108,6 +108,26 @@ def main() -> None:
             material.name,
         )
 
+        retail_two_sided = collision_object(
+            "RetailTwoSidedRegression",
+            [
+                (50.0, 0.0, 0.0),
+                (51.0, 0.0, 0.0),
+                (50.0, 1.0, 0.0),
+            ],
+            [(0, 1, 2), (2, 1, 0)],
+            material.name,
+        )
+        retail_two_sided["ow_preserve_opposite_wound_collision"] = True
+        retail_triangles, retail_audit = (
+            addon.exporter.audit_collision_geometry([retail_two_sided])
+        )
+        require(
+            len(retail_triangles) == 2
+            and retail_audit.skipped_duplicates == 0,
+            "Retail reverse-wound collision partner was discarded",
+        )
+
         downward_a = collision_object(
             "WrongFacingA",
             [(40.0, 0.0, 0.0), (40.0, 1.0, 0.0), (41.0, 0.0, 0.0)],
@@ -242,9 +262,9 @@ def main() -> None:
         local_light_count = counts[-2]
         npc_route_count = counts[-1]
         require(
-            collision_triangle_count == 3,
+            collision_triangle_count == 5,
             "Degenerate or duplicate collision reached the package "
-            f"(got {collision_triangle_count}, expected 3)",
+            f"(got {collision_triangle_count}, expected 5)",
         )
         require(
             local_light_count == 3,

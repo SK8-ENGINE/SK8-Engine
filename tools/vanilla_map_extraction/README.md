@@ -45,7 +45,10 @@ The generated extraction scene is `blender/DIST_University.blend`. The 2,046
 available images are packed into the `.blend`, and models are grouped by
 source stream cell. The current extraction resolves all 328 diffuse texture
 IDs used by the University presentation meshes; there are no fallback
-textures.
+textures. It also preserves the complete bound retail channel table:
+141 normal, 200 specular, 1,271 lightmap, 86 decal, 11 detail, 8 macro
+overlay, 6 environment, 2 secondary-normal, and 1 noise texture IDs. Every
+bound resource resolves to a decoded texture.
 
 To rebuild without making a preview render:
 
@@ -58,12 +61,14 @@ owned-world authoring contract and saves
 `blender/DIST_University_Owned.blend`. It preserves base UVs, material
 textures, transforms, and the full visual mesh. The configured UTT model
 parser currently supplies geometry-derived averaged normals rather than
-authoritative packed retail normals. The current owned package has:
+authoritative packed retail vertex normals. Tangent-space retail normal maps
+are transported independently. The current owned package has:
 
-- 515 materials and 327 embedded textures;
-- 460 opaque, 50 alpha-mask, and 5 alpha-blended material variants;
+- 526 materials and 462 embedded textures;
+- 471 opaque, 50 alpha-mask, and 5 alpha-blended material variants;
+- 2,987 mesh parts using 135 conventional retail normal maps;
 - 2,081,271 indexed visual vertices and 1,645,617 render triangles;
-- 1,122,951 cleaned retail collision triangles;
+- 1,133,642 cleaned retail collision triangles;
 - 4,201 retail grind rails containing 27,008 exact native cubic segments;
 - bounds from `(-727.373, -6.849, -1413.082)` to
   `(807.640, 296.100, 792.678)`;
@@ -73,16 +78,18 @@ authoritative packed retail normals. The current owned package has:
 The 1,013 retail simulation resources remain preserved. All 301 native
 RenderWare `ClusteredMesh` sections are decoded into 1,133,649 source
 triangles across 183 packed retail surfaces. Export rejects six degenerate
-triangles and removes 10,692 exact/opposite-wound duplicates, leaving the
-1,122,951 stable runtime triangles above. An offline verifier checks geometry
-to 1e-6 metres, winding, counts, and packed audio/physics/pattern surface
-channels against the retail RX2 source. AI routes, doors, and local lights are
-not yet recovered.
+triangles and one same-wound duplicate. It now retains all 10,691 intentional
+reverse-wound partners, which provide two-sided retail collision and were
+previously a likely cause of dead patches. An offline verifier checks geometry
+to 1e-6 metres, winding, counts, reverse-wound coverage, and packed
+audio/physics/pattern surface channels against the retail RX2 source. AI
+routes, doors, and local lights are not yet recovered.
 
 The SKATE v10 package is
-`intermediate/university/University.skate`. It is 121,962,132 bytes and
-losslessly decodes to the counts and bounds above. The offline engine validator
-also compiles it into 515 render chunks, a 4,023,600-byte native
+`intermediate/university/University.skate`. It is 127,155,624 bytes after
+adding retail normal maps and restoring two-sided collision, and losslessly
+decodes to the counts and bounds above. The offline engine validator also
+compiles it into 515 render chunks, a 4,023,600-byte native
 `tSplineData` blob, and 44 collision chunks using the verified 256 metre
 collision-cell fallback.
 
@@ -125,12 +132,14 @@ material-group index, texture ID, shader, and alpha mode on every object. The
 offline validator checks those fields and selected non-positional regression
 bindings.
 
-Visual review now happens in versioned packed Blender files under
-`blender/review/`. A candidate is not exported to SKATE or staged for an
-in-game run until the user accepts its Blender appearance. The current
-material implementation reproduces diffuse color and alpha classification;
-additional retail channels and shader behavior still need to be audited
-before claiming 1:1 visual parity.
+The manifest retains all known retail texture roles. The current conservative
+normal pass binds 135 conventional tangent-space maps to 2,987 mesh parts and
+proves that the same 135 IDs reach linear SKATE normal slots. Seven
+shader-specific resources remain recorded but intentionally unbound: two
+non-neutral generic defaults, the primary/secondary Skate 3 water pair, and
+three unusual palm maps. Specular, lightmap, decal, detail, macro-overlay,
+environment, noise, and secondary-normal behavior still needs semantic
+reconstruction before claiming 1:1 visual parity.
 
 ## User-run University visual check
 

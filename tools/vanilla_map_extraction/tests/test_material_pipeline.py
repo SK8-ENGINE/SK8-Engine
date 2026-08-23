@@ -209,6 +209,46 @@ class MaterialPipelineTests(unittest.TestCase):
         self.assertEqual(metadata["texture_channel"], "transparent")
         self.assertEqual(metadata["alpha_mode"], 1)
 
+    def test_all_retail_texture_channels_survive_material_binding(self) -> None:
+        groups = _group_material_parameters(
+            [
+                Parameter("Name", "lit_wall"),
+                Parameter(
+                    "diffuse",
+                    "wall_d_0x1111111111111111",
+                ),
+                Parameter(
+                    "normal",
+                    "wall_n_0x2222222222222222",
+                ),
+                Parameter(
+                    "specular",
+                    "wall_s_0x3333333333333333",
+                ),
+                Parameter(
+                    "lightmap",
+                    "wall_l_0x4444444444444444",
+                ),
+                Parameter(
+                    "macrooverlay",
+                    "wall_m_0x5555555555555555",
+                ),
+            ]
+        )
+
+        metadata = _material_metadata(groups, 0)
+
+        self.assertEqual(
+            metadata["retail_texture_ids"],
+            {
+                "diffuse": "0x1111111111111111",
+                "normal": "0x2222222222222222",
+                "specular": "0x3333333333333333",
+                "lightmap": "0x4444444444444444",
+                "macrooverlay": "0x5555555555555555",
+            },
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

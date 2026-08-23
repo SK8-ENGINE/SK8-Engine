@@ -16,6 +16,8 @@ EXPECTED_GRIND_SEGMENTS = 27008
 EXPECTED_CLOSED_GRIND_RAILS = 372
 EXPECTED_COLLISION_SURFACES = 183
 EXPECTED_COLLISION_TRIANGLES = 1_133_649
+EXPECTED_NORMAL_MAPPED_OBJECTS = 2_987
+EXPECTED_NORMAL_TEXTURES = 135
 REGRESSION_BINDINGS = {
     ("0xF6CC7BFCC2C45F8C", 40): (
         "0x861894DE4209CE82",
@@ -68,6 +70,9 @@ def main() -> int:
 
     modes: Counter[int] = Counter()
     unresolved: Counter[int] = Counter()
+    normal_mapped_objects = 0
+    normal_texture_ids: set[str] = set()
+    normal_materials: set[int] = set()
     lookup: dict[tuple[str, int], bpy.types.Object] = {}
     for obj in objects:
         alpha_mode = int(obj.get("skate3_alpha_mode", 0))
@@ -99,10 +104,67 @@ def main() -> int:
             )
         if "skate3_fallback_reason" in material:
             unresolved[alpha_mode] += 1
+        normal_texture_id = str(
+            obj.get("skate3_normal_texture_id", "")
+        )
+        source_normal_texture_id = str(
+            obj.get("skate3_source_normal_texture_id", "")
+        )
+        if normal_texture_id:
+            if normal_texture_id != source_normal_texture_id:
+                raise RuntimeError(
+                    f"{obj.name!r} substituted retail normal "
+                    f"{source_normal_texture_id!r} with "
+                    f"{normal_texture_id!r}"
+                )
+            if (
+                str(material.get("skate3_normal_texture_id", ""))
+                != normal_texture_id
+            ):
+                raise RuntimeError(
+                    f"{obj.name!r} material lost normal provenance"
+                )
+            normal_image = bpy.data.images.get(normal_texture_id)
+            if normal_image is None:
+                raise RuntimeError(
+                    f"{obj.name!r} is missing normal image "
+                    f"{normal_texture_id!r}"
+                )
+            if normal_image.colorspace_settings.name != "Non-Color":
+                raise RuntimeError(
+                    f"{normal_texture_id!r} is not marked Non-Color"
+                )
+            if (
+                str(material.get("ow_normal_image", ""))
+                != normal_image.name
+            ):
+                raise RuntimeError(
+                    f"{material.name!r} does not export its retail normal"
+                )
+            normal_mapped_objects += 1
+            normal_texture_ids.add(normal_texture_id)
+            normal_materials.add(material.as_pointer())
+        elif (
+            str(material.get("skate3_normal_texture_id", ""))
+            or str(material.get("ow_normal_image", ""))
+        ):
+            raise RuntimeError(
+                f"{obj.name!r} unexpectedly inherited another mesh's normal"
+            )
 
     if dict(modes) != EXPECTED_MODE_COUNTS:
         raise RuntimeError(
             f"University alpha modes changed: {dict(modes)}"
+        )
+    if normal_mapped_objects != EXPECTED_NORMAL_MAPPED_OBJECTS:
+        raise RuntimeError(
+            f"University has {normal_mapped_objects} normal-mapped mesh "
+            f"parts, expected {EXPECTED_NORMAL_MAPPED_OBJECTS}"
+        )
+    if len(normal_texture_ids) != EXPECTED_NORMAL_TEXTURES:
+        raise RuntimeError(
+            f"University has {len(normal_texture_ids)} conventional retail "
+            f"normal textures, expected {EXPECTED_NORMAL_TEXTURES}"
         )
 
     for key, expected in REGRESSION_BINDINGS.items():
@@ -267,6 +329,12 @@ def main() -> int:
                 f"{obj.name!r} does not have one retail collision material"
             )
         surface = int(str(obj["skate3_retail_surface_id"]), 16)
+        if not bool(
+            obj.get("ow_preserve_opposite_wound_collision", False)
+        ):
+            raise RuntimeError(
+                f"{obj.name!r} would discard reverse-wound retail collision"
+            )
         material = obj.data.materials[0]
         encoded = (
             int(material["ow_audio_surface"])
@@ -298,6 +366,9 @@ def main() -> int:
                 "alpha_modes": dict(sorted(modes.items())),
                 "unresolved_by_alpha_mode": dict(sorted(unresolved.items())),
                 "regression_bindings": len(REGRESSION_BINDINGS),
+                "normal_mapped_objects": normal_mapped_objects,
+                "normal_textures": len(normal_texture_ids),
+                "normal_materials": len(normal_materials),
                 "grind_rails": len(grind_objects),
                 "grind_segments": grind_segments,
                 "closed_grind_rails": closed_grinds,

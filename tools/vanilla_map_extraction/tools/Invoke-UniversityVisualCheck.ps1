@@ -263,6 +263,9 @@ try {
     $collisionVerifier = Join-Path (
         $workspace
     ) 'tools\verify_university_collision.py'
+    $materialVerifier = Join-Path (
+        $workspace
+    ) 'tools\verify_university_material_channels.py'
     $extractionManifest = Join-Path (
         $workspace
     ) 'intermediate\university\manifest.json'
@@ -279,8 +282,34 @@ try {
 
     Assert-GeneratedCoverage
 
-    if (-not (Test-Path -LiteralPath $baseBlend -PathType Leaf)) {
-        Write-Host 'Base University blend is missing; rebuilding extraction.'
+    $baseInputs = @(
+        (Get-Item -LiteralPath $buildBase)
+        (Get-Item -LiteralPath (
+            Join-Path $workspace 'tools\prepare_university.py'
+        ))
+        (Get-Item -LiteralPath (
+            Join-Path $workspace 'tools\prepare_hawaiian_dream.py'
+        ))
+        (Get-Item -LiteralPath (
+            Join-Path $workspace 'blender\import_university.py'
+        ))
+        (Get-Item -LiteralPath (
+            Join-Path $workspace 'blender\import_hawaiian_dream.py'
+        ))
+        (Get-Item -LiteralPath (
+            Join-Path $workspace 'tools\retail_collision_mesh.py'
+        ))
+        (Get-Item -LiteralPath (
+            Join-Path $workspace 'tools\retail_grind_splines.py'
+        ))
+    )
+    if ($ForceExport -or (
+            Test-OutputStale -Output $baseBlend -Inputs $baseInputs
+        )) {
+        Write-Host (
+            'Base University blend is missing or stale; rebuilding ' +
+            'the retail extraction.'
+        )
         & $buildBase -BlenderExe $blender
         if ($LASTEXITCODE -ne 0) {
             throw "University base blend rebuild failed: $LASTEXITCODE"
@@ -367,6 +396,13 @@ try {
         '--expected',
         $expectedPath
     ) -Description 'Verify retail collision geometry and packed surfaces'
+    Invoke-Checked -FilePath 'python' -Arguments @(
+        $materialVerifier,
+        $extractionManifest,
+        $package,
+        '--expected',
+        $expectedPath
+    ) -Description 'Verify conservative retail normal-map transport'
 
     Assert-Equal 'format version' $actual.version $expected.format_version
     Assert-Equal 'map name' $actual.map_name $expected.map_name
