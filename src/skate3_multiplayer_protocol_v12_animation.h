@@ -44,7 +44,8 @@ inline constexpr std::uint32_t kMaximumAnimationWordStreamBytes =
     MessageKind kind, const PoseGroupHeader& header,
     std::span<const std::uint16_t> words) {
   if (words.size() < 4 ||
-      header.encoding != PoseGroupEncoding::kV11WordStream ||
+        (header.encoding != PoseGroupEncoding::kV11WordStream &&
+         header.encoding != PoseGroupEncoding::kBitPackedV1) ||
       header.element_count != words[1]) {
     return false;
   }

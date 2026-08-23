@@ -10,6 +10,7 @@
 #include "skate3_multiplayer_protocol.h"
 #include "skate3_multiplayer_protocol_v12_animation.h"
 #include "skate3_multiplayer_protocol_v12_live.h"
+#include "skate3_multiplayer_protocol_v12_lossless.h"
 #include "skate3_multiplayer_protocol_v12_root.h"
 #include "skate3_multiplayer_protocol_v12_state.h"
 #include "skate3_multiplayer_protocol_v12_transport.h"
@@ -536,6 +537,9 @@ struct TelemetrySnapshot {
   std::uint64_t installed_v12_confirmed_baselines = 0;
   std::uint64_t v12_unconfirmed_keyframes = 0;
   std::uint64_t sent_v12_confirmed_deltas = 0;
+  std::uint64_t sent_v12_lossless_groups = 0;
+  std::uint64_t v12_lossless_raw_bytes = 0;
+  std::uint64_t v12_lossless_wire_bytes = 0;
   std::uint64_t animation_present_interpolated = 0;
   std::uint64_t animation_present_held_latest = 0;
   std::uint64_t animation_present_held_oldest = 0;
@@ -2232,6 +2236,12 @@ class Runtime {
         << telemetry_.v12_unconfirmed_keyframes
         << " multiplayer_tx_v12_confirmed_deltas="
         << telemetry_.sent_v12_confirmed_deltas
+        << " multiplayer_tx_v12_lossless_groups="
+        << telemetry_.sent_v12_lossless_groups
+        << " multiplayer_v12_lossless_raw_bytes="
+        << telemetry_.v12_lossless_raw_bytes
+        << " multiplayer_v12_lossless_wire_bytes="
+        << telemetry_.v12_lossless_wire_bytes
         << " multiplayer_animation_present_interpolated="
         << telemetry_.animation_present_interpolated
         << " multiplayer_animation_present_held_latest="
@@ -2378,6 +2388,8 @@ class Runtime {
         "v12_baseline_request_rx={} v12_forced_keyframe={} "
         "v12_confirmed_baseline={} v12_unconfirmed_keyframe={} "
         "v12_confirmed_delta={} "
+        "v12_lossless_groups={} v12_lossless_raw={} "
+        "v12_lossless_wire={} "
         "bones={} relay={:.1f}pps relevance_drop={:.1f}pps rejected={} "
         "failures={} peer_resets={} "
         "appearance={:.2f}MiB timeout={} budget_reject={} "
@@ -2422,6 +2434,9 @@ class Runtime {
         telemetry_.installed_v12_confirmed_baselines,
         telemetry_.v12_unconfirmed_keyframes,
         telemetry_.sent_v12_confirmed_deltas,
+        telemetry_.sent_v12_lossless_groups,
+        telemetry_.v12_lossless_raw_bytes,
+        telemetry_.v12_lossless_wire_bytes,
         telemetry_.remote_animation_bones, relay_pps, drop_pps,
         telemetry_.rejected_packets, telemetry_.socket_failures,
         telemetry_.outbound_peer_resets,
@@ -3249,8 +3264,10 @@ class Runtime {
             packet, envelope, header, fragment) ||
         envelope.stream_id != kV12AnimationStreamId ||
         header.group_id != kV12AnimationGroupId ||
-        header.encoding !=
-            protocol_v12::PoseGroupEncoding::kV11WordStream ||
+        (header.encoding !=
+             protocol_v12::PoseGroupEncoding::kV11WordStream &&
+         header.encoding !=
+             protocol_v12::PoseGroupEncoding::kBitPackedV1) ||
         !SteamSenderValid(envelope.sender_role, sender) ||
         envelope.sender_role ==
             static_cast<std::uint32_t>(bound_role_) ||
@@ -3325,8 +3342,18 @@ class Runtime {
     float root_position[3] = {};
     std::uint16_t root_bone = 0;
     std::vector<std::uint16_t> words;
-    if (!protocol_v12::DecodeAnimationWordStream(
-            completed.bytes, root_position, root_bone, words) ||
+    std::vector<std::uint8_t> unpacked;
+    const std::span<const std::uint8_t> animation_bytes =
+        completed.encoding ==
+                protocol_v12::PoseGroupEncoding::kBitPackedV1
+            ? (protocol_v12::DecodeLosslessBytes(
+                   completed.bytes, unpacked)
+                   ? std::span<const std::uint8_t>(unpacked)
+                   : std::span<const std::uint8_t>())
+            : std::span<const std::uint8_t>(completed.bytes);
+    if (animation_bytes.empty() ||
+        !protocol_v12::DecodeAnimationWordStream(
+            animation_bytes, root_position, root_bone, words) ||
         !protocol_v12::AnimationWordStreamMatchesPoseGroup(
             completed.kind, header, words)) {
       return reject();
@@ -4587,11 +4614,18 @@ class Runtime {
       std::uint32_t target_role, const PacketEndpoint& target,
       std::uint32_t pose_id, std::uint64_t sender_time_us,
       std::span<const std::uint16_t> words,
-      std::span<const std::uint8_t> group_bytes) {
-    if (words.size() < 4 ||
-        group_bytes.size() !=
-            protocol_v12::AnimationWordStreamByteCount(
-                words.size())) {
+      std::span<const std::uint8_t> group_bytes,
+      protocol_v12::PoseGroupEncoding encoding) {
+    if (words.size() < 4 || group_bytes.empty() ||
+        (encoding ==
+             protocol_v12::PoseGroupEncoding::kV11WordStream &&
+         group_bytes.size() !=
+             protocol_v12::AnimationWordStreamByteCount(
+                 words.size())) ||
+        (encoding !=
+             protocol_v12::PoseGroupEncoding::kV11WordStream &&
+         encoding !=
+             protocol_v12::PoseGroupEncoding::kBitPackedV1)) {
       ++telemetry_.delivery_policy_errors;
       return false;
     }
@@ -4632,8 +4666,7 @@ class Runtime {
     request.baseline_id = keyframe ? 0 : embedded_baseline;
     request.element_count = words[1];
     request.group_id = kV12AnimationGroupId;
-    request.encoding =
-        protocol_v12::PoseGroupEncoding::kV11WordStream;
+    request.encoding = encoding;
     request.group_bytes = group_bytes;
     std::array<protocol_v12::PoseGroupDatagram,
                kMaximumV12AnimationFragments>
@@ -4681,6 +4714,14 @@ class Runtime {
     }
     if (complete && !keyframe) {
       ++telemetry_.sent_v12_confirmed_deltas;
+    }
+    if (complete &&
+        encoding ==
+            protocol_v12::PoseGroupEncoding::kBitPackedV1) {
+      ++telemetry_.sent_v12_lossless_groups;
+      telemetry_.v12_lossless_raw_bytes +=
+          protocol_v12::AnimationWordStreamByteCount(words.size());
+      telemetry_.v12_lossless_wire_bytes += group_bytes.size();
     }
     return complete;
   }
@@ -5141,6 +5182,8 @@ class Runtime {
       QuantizedAnimationFrame proposed_keyframe;
       std::vector<std::uint16_t> words;
       std::vector<std::uint8_t> v12_group_bytes;
+      protocol_v12::PoseGroupEncoding v12_encoding =
+          protocol_v12::PoseGroupEncoding::kV11WordStream;
       bool valid = false;
     };
     std::vector<PreparedAnimationFrame> prepared_frames;
@@ -5193,6 +5236,16 @@ class Runtime {
               protocol_v12::EncodeAnimationWordStream(
                   relative_root, pose.root_bone,
                   frame.words, frame.v12_group_bytes);
+          if (frame.valid) {
+            std::vector<std::uint8_t> packed;
+            if (protocol_v12::EncodeLosslessBytes(
+                    frame.v12_group_bytes, packed) &&
+                packed.size() < frame.v12_group_bytes.size()) {
+              frame.v12_group_bytes = std::move(packed);
+              frame.v12_encoding =
+                  protocol_v12::PoseGroupEncoding::kBitPackedV1;
+            }
+          }
         }
         prepared_frames.push_back(std::move(frame));
         prepared = std::prev(prepared_frames.end());
@@ -5205,7 +5258,8 @@ class Runtime {
       if (use_v12_animation) {
         target_complete = SendV12Animation(
             target_role, target, sequence, sender_time_us,
-            prepared->words, prepared->v12_group_bytes);
+            prepared->words, prepared->v12_group_bytes,
+            prepared->v12_encoding);
       } else {
         const std::size_t fragment_count =
             (prepared->words.size() +

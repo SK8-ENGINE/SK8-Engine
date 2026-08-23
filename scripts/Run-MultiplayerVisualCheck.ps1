@@ -558,7 +558,7 @@ try {
         guest_fps_cap = 120
         replication_quality = 'full-fidelity'
         root_protocol = 'v12-after-negotiation'
-        animation_protocol = 'v12-grouped-receiver-confirmed-deltas'
+        animation_protocol = 'v12-lossless-packed-confirmed-deltas'
         appearance_protocol = 'v11'
         root_rate_hz = 60
         animation_rate_hz = 60
@@ -588,6 +588,7 @@ try {
             'skate3_multiplayer_protocol_v12_state_tests',
             'skate3_multiplayer_protocol_v12_pose_tests',
             'skate3_multiplayer_protocol_v12_transport_tests',
+            'skate3_multiplayer_protocol_v12_lossless_tests',
             'skate3_multiplayer_outbound_scheduler_tests',
             'skate3_multiplayer_lifecycle_tests',
             'skate3_multiplayer_worker_tests',
@@ -660,6 +661,10 @@ exact keyframe that the receiving peer confirmed decoding; it sends
 self-contained keyframes while confirmation is pending. Outfits remain on
 protocol v11. Full-fidelity direct peer fan-out and the 120 fps per-client test
 budget remain unchanged.
+Animation payloads now use a bounded lossless byte-run encoding only when it
+is smaller than the exact existing word stream; incompressible frames retain
+the raw encoding. Decoding reconstructs the original bytes before the
+unchanged animation decoder runs.
 Diagnostics: representative visible body vertices are sampled before send and
 after remote reconstruction, alongside skeleton, network, and GPU timing
 

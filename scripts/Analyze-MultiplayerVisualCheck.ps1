@@ -624,6 +624,18 @@ foreach ($client in $clientDirectories) {
         (Maximum-IntegerField $rateLines 'v12_confirmed_delta')
     )
     $summary.Add(
+        'max_v12_lossless_groups_sent=' +
+        (Maximum-IntegerField $rateLines 'v12_lossless_groups')
+    )
+    $summary.Add(
+        'max_v12_lossless_raw_bytes=' +
+        (Maximum-IntegerField $rateLines 'v12_lossless_raw')
+    )
+    $summary.Add(
+        'max_v12_lossless_wire_bytes=' +
+        (Maximum-IntegerField $rateLines 'v12_lossless_wire')
+    )
+    $summary.Add(
         'appearance_byte_receipts=' +
         (Match-Count $lines 'multiplayer: peer role=.*appearance .*state=1')
     )

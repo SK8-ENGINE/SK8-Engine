@@ -587,6 +587,30 @@ Current checkpoint:
   offered/unconfirmed keyframes and installed receiver-confirmed baselines.
   A five-client user visual and telemetry gate is required before beginning
   bandwidth packing.
+- In run `20260823-204450-e7ddcc2f`, the user reported that receiver-
+  confirmed deltas worked visually. Telemetry independently showed every
+  client installing approximately 1,300-1,600 confirmed baselines and then
+  sending approximately 4,900-5,200 deltas against them. All five clients
+  retained four known and four visible peers with zero delivery-policy,
+  animation-fragment, pose-control, socket, appearance-resource, or unsafe
+  GPU-reuse faults. No recovery request was needed in the healthy run. This
+  telemetry does not establish the user's visual result.
+- The same run measured approximately 1.35-1.43 MiB/s upload per five-player
+  client, almost entirely exact animation payloads. Phase 5 therefore begins
+  with lossless packing and measured byte composition; it does not reduce
+  precision, send rate, player fidelity, or attachment coverage.
+- The first Phase 5 codec is a bounded lossless byte-run format with an
+  explicit decoded-size prefix, 64 KiB output limit, exact raw fallback, and
+  fail-closed malformed-input handling. It is selected per animation group
+  only when smaller than the existing explicit-little-endian word stream;
+  otherwise the validated raw encoding remains on wire. The receiver restores
+  byte-identical animation data before the unchanged word decoder,
+  interpolation, attachment, board, and renderer paths.
+- A dedicated tenth offline suite covers 1-byte, maximum-size, repeated-byte,
+  zero-run, mixed-data, truncation, missing-value, and output-overflow cases.
+  Live telemetry records selected groups and logical-versus-packed bytes. The
+  next user visual gate must validate exact poses and measure the real
+  reduction before additional packing work proceeds.
 
 Completion:
 
