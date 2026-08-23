@@ -611,6 +611,20 @@ Current checkpoint:
   Live telemetry records selected groups and logical-versus-packed bytes. The
   next user visual gate must validate exact poses and measure the real
   reduction before additional packing work proceeds.
+- Run `20260823-205245-3c081857` looked good to the user, but telemetry
+  correctly failed the protocol gate: clients rejected 241-443 packed
+  animation fragments. A literal boundary could admit 129 bytes into a
+  128-byte token, causing its length to alias a run token. Raw fallback
+  traffic masked the defect visually. The encoder now advances bounded
+  literals one byte at a time, and deterministic property coverage exercises
+  every 120-260 byte boundary plus 1,000 pseudo-random payloads.
+- The initial byte-run codec selected only 92-1,007 groups per client and
+  saved roughly 0.5-0.7% within those selected groups. Selection now requires
+  either at least a ten-percent byte reduction or one fewer pose fragment,
+  avoiding allocation and decode cost for negligible savings. New telemetry
+  separates keyframe and delta group counts and logical bytes so the next
+  semantic packing step is based on measured frame composition. This run is
+  not accepted as the codec telemetry gate despite the user's visual pass.
 
 Completion:
 

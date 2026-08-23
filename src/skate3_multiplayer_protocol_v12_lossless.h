@@ -10,6 +10,21 @@ namespace skate3::multiplayer::protocol_v12 {
 inline constexpr std::size_t kLosslessPrefixBytes = 4;
 inline constexpr std::size_t kMaximumLosslessDecodedBytes = 64u * 1024u;
 
+[[nodiscard]] constexpr bool LosslessPackingWorthwhile(
+    std::size_t raw_bytes, std::size_t packed_bytes,
+    std::size_t fragment_bytes) {
+  if (raw_bytes == 0 || packed_bytes >= raw_bytes ||
+      fragment_bytes == 0) {
+    return false;
+  }
+  const std::size_t raw_fragments =
+      (raw_bytes + fragment_bytes - 1) / fragment_bytes;
+  const std::size_t packed_fragments =
+      (packed_bytes + fragment_bytes - 1) / fragment_bytes;
+  return packed_fragments < raw_fragments ||
+         packed_bytes * 10 <= raw_bytes * 9;
+}
+
 [[nodiscard]] inline bool EncodeLosslessBytes(
     std::span<const std::uint8_t> source,
     std::vector<std::uint8_t>& destination) {
@@ -46,7 +61,6 @@ inline constexpr std::size_t kMaximumLosslessDecodedBytes = 64u * 1024u;
     }
 
     const std::size_t literal_start = cursor;
-    cursor += run;
     while (cursor < source.size() &&
            cursor - literal_start < 128) {
       std::size_t next_run = 1;
@@ -55,10 +69,12 @@ inline constexpr std::size_t kMaximumLosslessDecodedBytes = 64u * 1024u;
              next_run < 3) {
         ++next_run;
       }
-      if (next_run >= 3) {
+      if (next_run >= 3 && cursor != literal_start) {
         break;
       }
-      cursor += next_run;
+      // Advance one byte at a time so a two-byte repeat cannot take a
+      // 127-byte literal past the token's 128-byte capacity.
+      ++cursor;
     }
     const std::size_t literal_bytes = cursor - literal_start;
     destination.push_back(

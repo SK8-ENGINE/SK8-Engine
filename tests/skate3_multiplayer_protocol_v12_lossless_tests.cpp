@@ -37,6 +37,25 @@ void TestRoundTrips() {
     }
   }
   RoundTrip(mixed);
+  for (std::size_t length = 120; length <= 260; ++length) {
+    std::vector<std::uint8_t> boundary(length);
+    for (std::size_t index = 0; index < length; ++index) {
+      boundary[index] = static_cast<std::uint8_t>(
+          (index * 73 + index / 7) & 0xff);
+    }
+    RoundTrip(boundary);
+  }
+  std::uint32_t random = 0x12345678u;
+  for (std::size_t iteration = 0; iteration < 1000; ++iteration) {
+    random = random * 1664525u + 1013904223u;
+    const std::size_t length = 1 + (random % 20000);
+    std::vector<std::uint8_t> fuzz(length);
+    for (std::uint8_t& byte : fuzz) {
+      random = random * 1664525u + 1013904223u;
+      byte = static_cast<std::uint8_t>(random >> 24);
+    }
+    RoundTrip(fuzz);
+  }
 }
 
 void TestMalformed() {
@@ -60,10 +79,22 @@ void TestMalformed() {
   Expect(!EncodeLosslessBytes({}, decoded), "empty input encoded");
 }
 
+void TestSelectionPolicy() {
+  Expect(!LosslessPackingWorthwhile(1000, 999, 1136),
+         "negligible same-fragment saving was selected");
+  Expect(LosslessPackingWorthwhile(1000, 900, 1136),
+         "ten-percent saving was not selected");
+  Expect(LosslessPackingWorthwhile(1200, 1130, 1136),
+         "one-fragment reduction was not selected");
+  Expect(!LosslessPackingWorthwhile(1000, 1000, 1136),
+         "non-saving encoding was selected");
+}
+
 }  // namespace
 
 int main() {
   TestRoundTrips();
   TestMalformed();
+  TestSelectionPolicy();
   return failures == 0 ? 0 : 1;
 }

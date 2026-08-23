@@ -540,6 +540,10 @@ struct TelemetrySnapshot {
   std::uint64_t sent_v12_lossless_groups = 0;
   std::uint64_t v12_lossless_raw_bytes = 0;
   std::uint64_t v12_lossless_wire_bytes = 0;
+  std::uint64_t sent_v12_keyframe_groups = 0;
+  std::uint64_t sent_v12_delta_groups = 0;
+  std::uint64_t v12_keyframe_logical_bytes = 0;
+  std::uint64_t v12_delta_logical_bytes = 0;
   std::uint64_t animation_present_interpolated = 0;
   std::uint64_t animation_present_held_latest = 0;
   std::uint64_t animation_present_held_oldest = 0;
@@ -2242,6 +2246,14 @@ class Runtime {
         << telemetry_.v12_lossless_raw_bytes
         << " multiplayer_v12_lossless_wire_bytes="
         << telemetry_.v12_lossless_wire_bytes
+        << " multiplayer_tx_v12_keyframe_groups="
+        << telemetry_.sent_v12_keyframe_groups
+        << " multiplayer_tx_v12_delta_groups="
+        << telemetry_.sent_v12_delta_groups
+        << " multiplayer_v12_keyframe_logical_bytes="
+        << telemetry_.v12_keyframe_logical_bytes
+        << " multiplayer_v12_delta_logical_bytes="
+        << telemetry_.v12_delta_logical_bytes
         << " multiplayer_animation_present_interpolated="
         << telemetry_.animation_present_interpolated
         << " multiplayer_animation_present_held_latest="
@@ -2390,6 +2402,8 @@ class Runtime {
         "v12_confirmed_delta={} "
         "v12_lossless_groups={} v12_lossless_raw={} "
         "v12_lossless_wire={} "
+        "v12_keyframe_groups={} v12_keyframe_bytes={} "
+        "v12_delta_groups={} v12_delta_bytes={} "
         "bones={} relay={:.1f}pps relevance_drop={:.1f}pps rejected={} "
         "failures={} peer_resets={} "
         "appearance={:.2f}MiB timeout={} budget_reject={} "
@@ -2437,6 +2451,10 @@ class Runtime {
         telemetry_.sent_v12_lossless_groups,
         telemetry_.v12_lossless_raw_bytes,
         telemetry_.v12_lossless_wire_bytes,
+        telemetry_.sent_v12_keyframe_groups,
+        telemetry_.v12_keyframe_logical_bytes,
+        telemetry_.sent_v12_delta_groups,
+        telemetry_.v12_delta_logical_bytes,
         telemetry_.remote_animation_bones, relay_pps, drop_pps,
         telemetry_.rejected_packets, telemetry_.socket_failures,
         telemetry_.outbound_peer_resets,
@@ -4715,6 +4733,17 @@ class Runtime {
     if (complete && !keyframe) {
       ++telemetry_.sent_v12_confirmed_deltas;
     }
+    if (complete) {
+      const std::uint64_t logical_bytes =
+          protocol_v12::AnimationWordStreamByteCount(words.size());
+      if (keyframe) {
+        ++telemetry_.sent_v12_keyframe_groups;
+        telemetry_.v12_keyframe_logical_bytes += logical_bytes;
+      } else {
+        ++telemetry_.sent_v12_delta_groups;
+        telemetry_.v12_delta_logical_bytes += logical_bytes;
+      }
+    }
     if (complete &&
         encoding ==
             protocol_v12::PoseGroupEncoding::kBitPackedV1) {
@@ -5240,7 +5269,9 @@ class Runtime {
             std::vector<std::uint8_t> packed;
             if (protocol_v12::EncodeLosslessBytes(
                     frame.v12_group_bytes, packed) &&
-                packed.size() < frame.v12_group_bytes.size()) {
+                protocol_v12::LosslessPackingWorthwhile(
+                    frame.v12_group_bytes.size(), packed.size(),
+                    protocol_v12::kMaximumPoseFragmentBytes)) {
               frame.v12_group_bytes = std::move(packed);
               frame.v12_encoding =
                   protocol_v12::PoseGroupEncoding::kBitPackedV1;
