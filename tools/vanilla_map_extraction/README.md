@@ -66,7 +66,8 @@ owned package has:
 - 4,201 retail grind rails containing 27,008 exact native cubic segments;
 - bounds from `(-727.373, -6.849, -1413.082)` to
   `(807.640, 296.100, 792.678)`;
-- a runtime spawn at `(200, 59, -50)`.
+- a runtime spawn at `(-430, 223.583, -880)` on the observatory skatepath,
+  beside the large brass orbital sculpture.
 
 The 1,013 retail simulation resources remain preserved, but their collision
 format is not decoded. Collision is therefore derived from structural
