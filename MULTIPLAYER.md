@@ -74,6 +74,14 @@ AppID and follow Valve's setup and redistributable requirements.
   packet whose claimed role does not match its Steam lobby member.
 - The fallback backend uses non-blocking localhost UDP with the same packets,
   roles, interpolation, and relevance routing.
+- The visual-check launcher enables the first protocol-v11-compatible
+  replication worker. The render thread publishes its newest immutable local
+  capture through a latest-wins mailbox and consumes immutable prepared remote
+  presentations; transport polling, validation, reassembly, send scheduling,
+  interpolation, relevance, and network telemetry run on the worker. One-shot
+  peer retirements accumulate until consumed rather than being overwritten by
+  a newer presentation. The worker remains disabled by default outside this
+  controlled validation path.
 - Localhost development still uses role 1 as a small relay because all test
   processes share one machine. Internet Steam sessions use direct peer fan-out.
 - Every receiver keeps an independent interpolation/reassembly timeline for
@@ -242,6 +250,10 @@ final-pose capture, appearance capture/cache work, the replication tick,
 remote appearance installation, remote reconstruction, and their total
 command-processor-thread cost. Average and maximum times are reported
 separately so one-time appearance spikes do not hide inside steady-state cost.
+When the replication worker is enabled, periodic `multiplayer-worker` lines
+report worker tick average/maximum time, published and superseded local
+captures, render consumptions, output sequence, and local-input age. The
+visual-check analyzer includes the latest line from both timing streams.
 
 Steam sessions now use direct peer fan-out. With ten players all mutually
 nearby, each player uploads one detailed stream to nine peers and receives

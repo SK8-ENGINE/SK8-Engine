@@ -471,7 +471,7 @@ try {
     )
 
     Invoke-LoggedNative -Label (
-        'Running multiplayer protocol and lifecycle tests'
+        'Running multiplayer protocol, lifecycle, and worker tests'
     ) -FilePath 'ctest' -Arguments @(
         '--test-dir', $buildRoot, '--output-on-failure'
     )
@@ -538,6 +538,7 @@ try {
         root_rate_hz = 60
         animation_rate_hz = 60
         interpolation_ms = 50
+        replication_worker = $true
         appearance_recovery_check = [bool]$AppearanceRecoveryCheck
         appearance_recovery_receiver = if ($AppearanceRecoveryCheck) {
             3
@@ -551,7 +552,8 @@ try {
         }
         automated_tests = @(
             'skate3_multiplayer_protocol_tests',
-            'skate3_multiplayer_lifecycle_tests'
+            'skate3_multiplayer_lifecycle_tests',
+            'skate3_multiplayer_worker_tests'
         )
     }
     $manifest | ConvertTo-Json -Depth 4 |
@@ -707,6 +709,7 @@ separately, then ask the agent to analyze this run directory.
             '--skate3_multiplayer_local_send_rate=60',
             '--skate3_multiplayer_local_animation_rate=60',
             '--skate3_multiplayer_local_interpolation_ms=50',
+            '--skate3_multiplayer_replication_worker=true',
             '--skate3_native_render_scene_perf_log=true',
             '--skate3_native_render_scene_perf_interval=300',
             (

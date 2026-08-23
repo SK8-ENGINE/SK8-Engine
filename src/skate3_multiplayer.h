@@ -71,6 +71,15 @@ struct RemotePeerRetirement {
   std::uint32_t session = 0;
 };
 
+// Immutable prepared presentation published by the replication core. A
+// worker can replace the shared player vector without mutating data currently
+// consumed by the renderer; retirement events remain one-shot.
+struct RemotePresentationFrame {
+  std::uint64_t sequence = 0;
+  std::shared_ptr<const std::vector<RemotePlayer>> players;
+  std::vector<RemotePeerRetirement> retirements;
+};
+
 // Samples the verified local board, services the current transport, and
 // returns independently smoothed remote players alive on the same map. The
 // first transport is localhost UDP; the packet and pose seam is deliberately
@@ -79,8 +88,7 @@ bool TickLocalVisuals(const char* map_name,
                        const float map_render_origin[3],
                        const AnimationPose* local_animation,
                        const AppearanceBlob* local_appearance,
-                       std::vector<RemotePlayer>& out_remotes,
-                       std::vector<RemotePeerRetirement>& out_retirements);
+                       RemotePresentationFrame& out_presentation);
 
 void AppendTelemetry(std::ostream& out);
 

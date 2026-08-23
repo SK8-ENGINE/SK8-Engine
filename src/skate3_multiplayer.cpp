@@ -2,23 +2,32 @@
 
 #include "skate3_multiplayer_lifecycle.h"
 #include "skate3_multiplayer_protocol.h"
+#include "skate3_multiplayer_worker.h"
 #include "skate3_steam_backend.h"
 #include "skate3_trick_pipeline.h"
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <bit>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <deque>
+#include <iterator>
+#include <memory>
 #include <mutex>
+#include <optional>
 #include <ostream>
+#include <string>
 #include <string_view>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include <rex/cvar.h>
@@ -40,6 +49,13 @@ REXCVAR_DEFINE_BOOL(
     "Experimental multi-client visual replication over localhost. This sends "
     "only the verified local board pose and does not add remote collision or "
     "gameplay authority.")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+REXCVAR_DEFINE_BOOL(
+    skate3_multiplayer_replication_worker, false, "Skate 3",
+    "Run the existing protocol-v11 transport, packet processing, send "
+    "scheduling, reassembly, interpolation, and relevance work on a "
+    "background replication worker. Local capture and prepared remote "
+    "presentation remain renderer-owned.")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 REXCVAR_DEFINE_INT32(
     skate3_multiplayer_local_client, 0, "Skate 3",
@@ -4496,17 +4512,276 @@ Runtime& ActiveRuntime() {
   return runtime;
 }
 
+struct ReplicationWorkerInput {
+  std::string map_name;
+  std::array<float, 3> map_origin{};
+  std::optional<AnimationPose> local_animation;
+  AppearanceBlob local_appearance;
+  Clock::time_point published_at{};
+};
+
+struct AppearanceInstallReport {
+  std::uint32_t role = 0;
+  std::uint32_t session = 0;
+  std::uint64_t appearance_id = 0;
+};
+
+class ReplicationWorker {
+ public:
+  ~ReplicationWorker() { Stop(); }
+
+  bool Tick(const char* map_name, const float map_origin[3],
+            const AnimationPose* local_animation,
+            const AppearanceBlob* local_appearance,
+            RemotePresentationFrame& out_presentation) {
+    auto input = std::make_shared<ReplicationWorkerInput>();
+    input->map_name = map_name == nullptr ? "" : map_name;
+    if (map_origin != nullptr) {
+      std::copy_n(map_origin, input->map_origin.size(),
+                  input->map_origin.begin());
+    }
+    if (local_animation != nullptr) {
+      input->local_animation = *local_animation;
+    }
+    if (local_appearance != nullptr) {
+      input->local_appearance = *local_appearance;
+    }
+    input->published_at = Clock::now();
+
+    if (mailbox_.PublishInput(std::move(input))) {
+      replaced_inputs_.fetch_add(1, std::memory_order_relaxed);
+    }
+    published_inputs_.fetch_add(1, std::memory_order_relaxed);
+    {
+      std::scoped_lock lock(lifecycle_mutex_);
+      if (!thread_.joinable()) {
+        stop_requested_ = false;
+        running_.store(true, std::memory_order_release);
+        thread_ = std::thread([this] { ThreadMain(); });
+      }
+    }
+    input_ready_.notify_one();
+    return Consume(out_presentation);
+  }
+
+  void QueueAppearanceInstalled(std::uint32_t role,
+                                std::uint32_t session,
+                                std::uint64_t appearance_id) {
+    if (role < 1 || role > 100 || session == 0 ||
+        appearance_id == 0) {
+      return;
+    }
+    std::scoped_lock lock(report_mutex_);
+    pending_install_reports_.push_back(
+        {role, session, appearance_id});
+  }
+
+  [[nodiscard]] bool running() const {
+    return running_.load(std::memory_order_acquire);
+  }
+
+  void Stop() {
+    if (!running()) {
+      return;
+    }
+    std::thread stopping_thread;
+    {
+      std::scoped_lock lock(lifecycle_mutex_);
+      stop_requested_ = true;
+      stopping_thread = std::move(thread_);
+    }
+    input_ready_.notify_all();
+    if (stopping_thread.joinable()) {
+      stopping_thread.join();
+    }
+    running_.store(false, std::memory_order_release);
+
+    std::vector<AppearanceInstallReport> remaining_reports;
+    {
+      std::scoped_lock lock(report_mutex_);
+      remaining_reports.swap(pending_install_reports_);
+    }
+    for (const AppearanceInstallReport& report : remaining_reports) {
+      ActiveRuntime().ReportRemoteAppearanceInstalled(
+          report.role, report.session, report.appearance_id);
+    }
+    mailbox_.Clear();
+    {
+      std::scoped_lock lock(lifecycle_mutex_);
+      stop_requested_ = false;
+    }
+  }
+
+ private:
+  bool Consume(RemotePresentationFrame& out_presentation) {
+    const bool have_remote_players = mailbox_.ConsumePresentation(
+        out_presentation.sequence, out_presentation.players,
+        out_presentation.retirements);
+    consumed_outputs_.fetch_add(1, std::memory_order_relaxed);
+    return have_remote_players;
+  }
+
+  void DrainInstallReports() {
+    std::vector<AppearanceInstallReport> reports;
+    {
+      std::scoped_lock lock(report_mutex_);
+      reports.swap(pending_install_reports_);
+    }
+    for (const AppearanceInstallReport& report : reports) {
+      ActiveRuntime().ReportRemoteAppearanceInstalled(
+          report.role, report.session, report.appearance_id);
+    }
+  }
+
+  void ThreadMain() {
+    std::shared_ptr<const ReplicationWorkerInput> current_input;
+    Clock::time_point last_log = Clock::now();
+    std::uint64_t tick_count = 0;
+    std::uint64_t tick_ns = 0;
+    std::uint64_t maximum_tick_ns = 0;
+    constexpr auto kWorkerInterval = std::chrono::milliseconds(4);
+
+    for (;;) {
+      {
+        std::unique_lock lock(lifecycle_mutex_);
+        if (current_input == nullptr) {
+          input_ready_.wait(lock, [this] {
+            return stop_requested_ || mailbox_.HasPendingInput();
+          });
+        } else {
+          input_ready_.wait_for(lock, kWorkerInterval, [this] {
+            return stop_requested_;
+          });
+        }
+        if (stop_requested_) {
+          break;
+        }
+      }
+      if (auto pending_input = mailbox_.TakeInput();
+          pending_input != nullptr) {
+        current_input = std::move(pending_input);
+      }
+      if (current_input == nullptr) {
+        continue;
+      }
+
+      DrainInstallReports();
+      std::vector<RemotePlayer> remote_players;
+      std::vector<RemotePeerRetirement> retirements;
+      const Clock::time_point tick_started = Clock::now();
+      ActiveRuntime().Tick(
+          current_input->map_name.c_str(),
+          current_input->map_origin.data(),
+          current_input->local_animation.has_value()
+              ? &*current_input->local_animation
+              : nullptr,
+          current_input->local_appearance.identity != 0 &&
+                  current_input->local_appearance.bytes != nullptr
+              ? &current_input->local_appearance
+              : nullptr,
+          remote_players, retirements);
+      const std::uint64_t elapsed_ns =
+          static_cast<std::uint64_t>(
+              std::chrono::duration_cast<std::chrono::nanoseconds>(
+                  Clock::now() - tick_started)
+                  .count());
+      ++tick_count;
+      tick_ns += elapsed_ns;
+      maximum_tick_ns = std::max(maximum_tick_ns, elapsed_ns);
+
+      auto published_players =
+          std::make_shared<const std::vector<RemotePlayer>>(
+              std::move(remote_players));
+      const std::uint64_t published_sequence =
+          mailbox_.PublishPresentation(
+              std::move(published_players), std::move(retirements));
+
+      const Clock::time_point now = Clock::now();
+      if (now - last_log >= std::chrono::seconds(5)) {
+        const double average_ms =
+            tick_count == 0
+                ? 0.0
+                : static_cast<double>(tick_ns) /
+                      static_cast<double>(tick_count) * 1e-6;
+        const auto input_age_ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                now - current_input->published_at)
+                .count();
+        REXLOG_INFO(
+            "multiplayer-worker: ticks={} tick={:.3f}/{:.3f}ms "
+            "published={} replaced={} consumed={} output={} "
+            "input_age={}ms",
+            tick_count, average_ms,
+            static_cast<double>(maximum_tick_ns) * 1e-6,
+            published_inputs_.exchange(
+                0, std::memory_order_relaxed),
+            replaced_inputs_.exchange(
+                0, std::memory_order_relaxed),
+            consumed_outputs_.exchange(
+                0, std::memory_order_relaxed),
+            published_sequence, input_age_ms);
+        tick_count = 0;
+        tick_ns = 0;
+        maximum_tick_ns = 0;
+        last_log = now;
+      }
+    }
+    DrainInstallReports();
+  }
+
+  std::mutex lifecycle_mutex_;
+  std::condition_variable input_ready_;
+  bool stop_requested_ = false;
+  std::thread thread_;
+  std::atomic<bool> running_{false};
+
+  worker::LatestFrameMailbox<
+      ReplicationWorkerInput, RemotePlayer,
+      RemotePeerRetirement>
+      mailbox_;
+
+  std::mutex report_mutex_;
+  std::vector<AppearanceInstallReport> pending_install_reports_;
+
+  std::atomic<std::uint64_t> published_inputs_{0};
+  std::atomic<std::uint64_t> replaced_inputs_{0};
+  std::atomic<std::uint64_t> consumed_outputs_{0};
+};
+
+ReplicationWorker& ActiveReplicationWorker() {
+  static ReplicationWorker worker;
+  return worker;
+}
+
 }  // namespace
 
 bool TickLocalVisuals(const char* map_name,
                       const float map_render_origin[3],
                       const AnimationPose* local_animation,
                       const AppearanceBlob* local_appearance,
-                      std::vector<RemotePlayer>& out_remotes,
-                      std::vector<RemotePeerRetirement>& out_retirements) {
-  return ActiveRuntime().Tick(
+                      RemotePresentationFrame& out_presentation) {
+  // The runtime must always be constructed before the worker so static
+  // destruction stops and joins the worker before destroying runtime state.
+  (void)ActiveRuntime();
+  if (REXCVAR_GET(skate3_multiplayer_replication_worker)) {
+    return ActiveReplicationWorker().Tick(
+        map_name, map_render_origin, local_animation,
+        local_appearance, out_presentation);
+  }
+
+  ActiveReplicationWorker().Stop();
+  std::vector<RemotePlayer> remote_players;
+  std::vector<RemotePeerRetirement> retirements;
+  const bool have_remote_players = ActiveRuntime().Tick(
       map_name, map_render_origin, local_animation,
-      local_appearance, out_remotes, out_retirements);
+      local_appearance, remote_players, retirements);
+  static std::uint64_t synchronous_sequence = 0;
+  out_presentation.sequence = ++synchronous_sequence;
+  out_presentation.players =
+      std::make_shared<const std::vector<RemotePlayer>>(
+          std::move(remote_players));
+  out_presentation.retirements = std::move(retirements);
+  return have_remote_players;
 }
 
 void AppendTelemetry(std::ostream& out) {
@@ -4516,6 +4791,12 @@ void AppendTelemetry(std::ostream& out) {
 void ReportRemoteAppearanceInstalled(
     std::uint32_t role, std::uint32_t session,
     std::uint64_t appearance_id) {
+  (void)ActiveRuntime();
+  if (ActiveReplicationWorker().running()) {
+    ActiveReplicationWorker().QueueAppearanceInstalled(
+        role, session, appearance_id);
+    return;
+  }
   ActiveRuntime().ReportRemoteAppearanceInstalled(
       role, session, appearance_id);
 }

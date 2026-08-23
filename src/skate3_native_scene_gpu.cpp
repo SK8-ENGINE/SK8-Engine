@@ -12682,9 +12682,7 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
           context, local_player_items, local_animation);
   g_pw_mp_local_appearance.Add(
       PerfNsSince(local_appearance_t0));
-  std::vector<multiplayer::RemotePlayer> remote_players;
-  std::vector<multiplayer::RemotePeerRetirement>
-      remote_retirements;
+  multiplayer::RemotePresentationFrame remote_presentation;
   const auto multiplayer_tick_t0 = PerfClock::now();
   const bool have_remote_players =
       multiplayer::TickLocalVisuals(
@@ -12697,16 +12695,18 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
                   local_appearance.bytes != nullptr
               ? &local_appearance
               : nullptr,
-          remote_players, remote_retirements);
+          remote_presentation);
   g_pw_mp_tick.Add(PerfNsSince(multiplayer_tick_t0));
   const auto multiplayer_remote_t0 = PerfClock::now();
   uint64_t multiplayer_install_ns = 0;
   for (const multiplayer::RemotePeerRetirement& retirement :
-       remote_retirements) {
+       remote_presentation.retirements) {
     ReleaseRetiredRemoteAppearance(context, retirement);
   }
-  if (have_remote_players) {
-  for (const multiplayer::RemotePlayer& remote_player : remote_players) {
+  if (have_remote_players &&
+      remote_presentation.players != nullptr) {
+  for (const multiplayer::RemotePlayer& remote_player :
+       *remote_presentation.players) {
     const multiplayer::RemotePose& remote_pose = remote_player.pose;
     const multiplayer::AnimationPose& remote_animation =
         remote_player.animation;
