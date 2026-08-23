@@ -120,11 +120,30 @@ struct SteamNetworkingMessage {
   std::uint16_t padding = 0;
 };
 
+struct SteamNetConnectionRealTimeStatus {
+  int state = 0;
+  int ping = 0;
+  float local_quality = 0.0f;
+  float remote_quality = 0.0f;
+  float outbound_packets_per_second = 0.0f;
+  float outbound_bytes_per_second = 0.0f;
+  float inbound_packets_per_second = 0.0f;
+  float inbound_bytes_per_second = 0.0f;
+  int send_rate_bytes_per_second = 0;
+  int pending_unreliable_bytes = 0;
+  int pending_reliable_bytes = 0;
+  int sent_unacked_reliable_bytes = 0;
+  std::int64_t queue_time_us = 0;
+  std::int32_t maximum_jitter_us = 0;
+  std::uint32_t reserved[15] = {};
+};
+
 static_assert(sizeof(CallbackMessage) == 24);
 static_assert(sizeof(SteamApiCallCompleted) == 16);
 static_assert(sizeof(LobbyCreated) == 16);
 static_assert(sizeof(LobbyEnter) == 24);
 static_assert(sizeof(SteamNetworkingIdentity) == 136);
+static_assert(sizeof(SteamNetConnectionRealTimeStatus) == 120);
 
 #if defined(_WIN32)
 template <typename T>
@@ -173,6 +192,9 @@ struct Api {
   using ReceiveNetworkMessages = int (*)(void*, int, SteamNetworkingMessage**,
                                          int);
   using AcceptNetworkSession = bool (*)(void*, SteamNetworkingIdentity*);
+  using GetSessionConnectionInfo =
+      int (*)(void*, SteamNetworkingIdentity*, void*,
+              SteamNetConnectionRealTimeStatus*);
   using ReleaseNetworkMessage = void (*)(SteamNetworkingMessage*);
 
   InitFlat init_flat = nullptr;
@@ -212,6 +234,7 @@ struct Api {
   SendNetworkMessage send_network_message = nullptr;
   ReceiveNetworkMessages receive_network_messages = nullptr;
   AcceptNetworkSession accept_network_session = nullptr;
+  GetSessionConnectionInfo get_session_connection_info = nullptr;
   ReleaseNetworkMessage release_network_message = nullptr;
 };
 
@@ -976,6 +999,13 @@ bool LoadApi(Runtime& runtime) {
              "SteamAPI_ISteamNetworkingMessages_ReceiveMessagesOnChannel");
   LOAD_STEAM(accept_network_session,
              "SteamAPI_ISteamNetworkingMessages_AcceptSessionWithUser");
+  // Optional on older redistributables. The replication protocol remains
+  // functional without it, but modern Steam runtimes expose queue, quality,
+  // rate, ping, and jitter diagnostics through the Messages session.
+  runtime.api.get_session_connection_info =
+      reinterpret_cast<Api::GetSessionConnectionInfo>(GetProcAddress(
+          runtime.api.module,
+          "SteamAPI_ISteamNetworkingMessages_GetSessionConnectionInfo"));
   LOAD_STEAM(release_network_message,
              "SteamAPI_SteamNetworkingMessage_t_Release");
 #undef LOAD_STEAM
@@ -1332,6 +1362,55 @@ std::vector<Message> ReceiveMessages(std::size_t maximum_messages) {
         g_runtime.api.release_network_message(source);
       }
     }
+  }
+  return result;
+}
+
+std::vector<PeerTransportStatus> PeerTransportStatuses() {
+  std::scoped_lock lock(g_mutex);
+  std::vector<PeerTransportStatus> result;
+  if (!g_runtime.state.initialized || !g_runtime.state.in_lobby ||
+      g_runtime.api.get_session_connection_info == nullptr) {
+    return result;
+  }
+  const auto peers = LobbyPeersLocked(g_runtime);
+  result.reserve(peers.size());
+  for (const Peer& peer : peers) {
+    if (peer.steam_id == 0 ||
+        peer.steam_id == g_runtime.state.local_steam_id) {
+      continue;
+    }
+    SteamNetworkingIdentity identity{};
+    g_runtime.api.identity_set_steam_id(&identity, peer.steam_id);
+    SteamNetConnectionRealTimeStatus status{};
+    const int state = g_runtime.api.get_session_connection_info(
+        g_runtime.networking, &identity, nullptr, &status);
+    PeerTransportStatus output{
+        .steam_id = peer.steam_id,
+        .state = state,
+        .ping_ms = status.ping,
+        .local_quality = status.local_quality,
+        .remote_quality = status.remote_quality,
+        .outbound_packets_per_second =
+            status.outbound_packets_per_second,
+        .outbound_bytes_per_second =
+            status.outbound_bytes_per_second,
+        .inbound_packets_per_second =
+            status.inbound_packets_per_second,
+        .inbound_bytes_per_second =
+            status.inbound_bytes_per_second,
+        .send_rate_bytes_per_second =
+            status.send_rate_bytes_per_second,
+        .pending_unreliable_bytes =
+            status.pending_unreliable_bytes,
+        .pending_reliable_bytes =
+            status.pending_reliable_bytes,
+        .sent_unacked_reliable_bytes =
+            status.sent_unacked_reliable_bytes,
+        .queue_time_us = status.queue_time_us,
+        .maximum_jitter_us = status.maximum_jitter_us,
+    };
+    result.push_back(output);
   }
   return result;
 }

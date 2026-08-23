@@ -127,6 +127,14 @@ foreach ($client in $clientDirectories) {
         $lines | Select-String -Pattern 'multiplayer-net:' |
             ForEach-Object { $_.Line }
     )
+    $transportLines = @(
+        $lines | Select-String -Pattern 'multiplayer-transport:' |
+            ForEach-Object { $_.Line }
+    )
+    $fanoutLines = @(
+        $lines | Select-String -Pattern 'multiplayer-fanout:' |
+            ForEach-Object { $_.Line }
+    )
     $peerTimingLines = @(
         $lines | Select-String -Pattern 'multiplayer-peer-timing:' |
             ForEach-Object { $_.Line }
@@ -870,6 +878,37 @@ foreach ($client in $clientDirectories) {
             )
         ))
     }
+    $summary.Add(
+        'max_animation_prepare_passes=' +
+        (Maximum-IntegerField $fanoutLines 'prepare_passes')
+    )
+    $summary.Add(
+        'max_animation_shared_reuses=' +
+        (Maximum-IntegerField $fanoutLines 'shared_reuses')
+    )
+    $summary.Add(
+        'max_animation_fanout_targets=' +
+        (Maximum-IntegerField $fanoutLines 'targets')
+    )
+    $summary.Add(
+        'max_animation_serialization_reuse_percent=' +
+        (Maximum-DecimalField $fanoutLines 'reuse_percent')
+    )
+    $summary.Add(
+        'steam_transport_status_samples=' + $transportLines.Count
+    )
+    $summary.Add(
+        'steam_transport_max_ping_ms=' +
+        (Maximum-IntegerField $transportLines 'ping_ms')
+    )
+    $summary.Add(
+        'steam_transport_max_queue_ms=' +
+        (Maximum-DecimalField $transportLines 'queue_ms')
+    )
+    $summary.Add(
+        'steam_transport_max_jitter_ms=' +
+        (Maximum-DecimalField $transportLines 'jitter_ms')
+    )
     $keyframeGroups = Maximum-IntegerField `
         $rateLines 'v12_keyframe_groups'
     $deltaGroups = Maximum-IntegerField `

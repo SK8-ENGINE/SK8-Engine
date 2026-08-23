@@ -49,6 +49,24 @@ struct Message {
   std::vector<std::byte> bytes;
 };
 
+struct PeerTransportStatus {
+  std::uint64_t steam_id = 0;
+  std::int32_t state = 0;
+  std::int32_t ping_ms = -1;
+  float local_quality = -1.0f;
+  float remote_quality = -1.0f;
+  float outbound_packets_per_second = 0.0f;
+  float outbound_bytes_per_second = 0.0f;
+  float inbound_packets_per_second = 0.0f;
+  float inbound_bytes_per_second = 0.0f;
+  std::int32_t send_rate_bytes_per_second = 0;
+  std::int32_t pending_unreliable_bytes = 0;
+  std::int32_t pending_reliable_bytes = 0;
+  std::int32_t sent_unacked_reliable_bytes = 0;
+  std::int64_t queue_time_us = 0;
+  std::int32_t maximum_jitter_us = -1;
+};
+
 enum class PacketReliability {
   kUnreliable,
   kReliable,
@@ -78,5 +96,6 @@ bool SendPacketToPeer(std::uint64_t steam_id, const void* bytes,
                       std::size_t byte_count,
                       PacketReliability reliability);
 std::vector<Message> ReceiveMessages(std::size_t maximum_messages);
+std::vector<PeerTransportStatus> PeerTransportStatuses();
 
 }  // namespace skate3::multiplayer::steam

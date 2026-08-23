@@ -3,6 +3,13 @@ cmake_minimum_required(VERSION 3.25)
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   project(skate3_multiplayer_tests LANGUAGES CXX)
   include(CTest)
+  set(SNAPPY_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+  set(SNAPPY_BUILD_BENCHMARKS OFF CACHE BOOL "" FORCE)
+  set(SNAPPY_INSTALL OFF CACHE BOOL "" FORCE)
+  add_subdirectory(
+    ../third_party/rexglue-sdk/thirdparty/snappy
+    ${CMAKE_CURRENT_BINARY_DIR}/snappy
+  )
 endif()
 
 add_executable(skate3_multiplayer_protocol_tests

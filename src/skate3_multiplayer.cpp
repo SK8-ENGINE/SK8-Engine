@@ -18,6 +18,7 @@
 #include "skate3_multiplayer_protocol_v12_state.h"
 #include "skate3_multiplayer_protocol_v12_transport.h"
 #include "skate3_multiplayer_send_schedule.h"
+#include "skate3_multiplayer_transport.h"
 #include "skate3_multiplayer_worker.h"
 #include "skate3_steam_backend.h"
 #include "skate3_trick_pipeline.h"
@@ -431,7 +432,7 @@ std::int64_t PresentationDelayMicroseconds(const RemotePeerState &peer,
 
 #if defined(_WIN32)
 struct PacketEndpoint {
-  bool steam = false;
+  TransportKind kind = TransportKind::kLocalhostUdp;
   sockaddr_in udp{};
   std::uint64_t steam_id = 0;
 };
@@ -557,6 +558,15 @@ struct TelemetrySnapshot {
   std::uint64_t v12_predictive_delta_attempts = 0;
   std::uint64_t v12_predictive_delta_encode_ns = 0;
   std::uint64_t v12_predictive_delta_encode_max_ns = 0;
+  std::uint64_t animation_prepare_passes = 0;
+  std::uint64_t animation_shared_reuses = 0;
+  std::uint64_t animation_fanout_targets = 0;
+  std::uint32_t transport_status_peers = 0;
+  std::int32_t transport_max_ping_ms = -1;
+  std::int32_t transport_max_jitter_us = -1;
+  std::int32_t transport_pending_unreliable_bytes = 0;
+  std::int32_t transport_pending_reliable_bytes = 0;
+  std::int64_t transport_max_queue_time_us = 0;
   std::uint64_t animation_present_interpolated = 0;
   std::uint64_t animation_present_held_latest = 0;
   std::uint64_t animation_present_held_oldest = 0;
@@ -2096,6 +2106,24 @@ public:
         << telemetry_.v12_predictive_delta_encode_ns
         << " multiplayer_v12_predictive_delta_encode_max_ns="
         << telemetry_.v12_predictive_delta_encode_max_ns
+        << " multiplayer_animation_prepare_passes="
+        << telemetry_.animation_prepare_passes
+        << " multiplayer_animation_shared_reuses="
+        << telemetry_.animation_shared_reuses
+        << " multiplayer_animation_fanout_targets="
+        << telemetry_.animation_fanout_targets
+        << " multiplayer_transport_status_peers="
+        << telemetry_.transport_status_peers
+        << " multiplayer_transport_max_ping_ms="
+        << telemetry_.transport_max_ping_ms
+        << " multiplayer_transport_max_jitter_us="
+        << telemetry_.transport_max_jitter_us
+        << " multiplayer_transport_pending_unreliable_bytes="
+        << telemetry_.transport_pending_unreliable_bytes
+        << " multiplayer_transport_pending_reliable_bytes="
+        << telemetry_.transport_pending_reliable_bytes
+        << " multiplayer_transport_max_queue_time_us="
+        << telemetry_.transport_max_queue_time_us
         << " multiplayer_animation_present_interpolated="
         << telemetry_.animation_present_interpolated
         << " multiplayer_animation_present_held_latest="
@@ -2138,6 +2166,64 @@ private:
     if (now - last_rate_log_ < kLogInterval) {
       return;
     }
+    telemetry_.transport_status_peers = 0;
+    telemetry_.transport_max_ping_ms = -1;
+    telemetry_.transport_max_jitter_us = -1;
+    telemetry_.transport_pending_unreliable_bytes = 0;
+    telemetry_.transport_pending_reliable_bytes = 0;
+    telemetry_.transport_max_queue_time_us = 0;
+    if (using_steam_) {
+      const auto statuses = steam::PeerTransportStatuses();
+      telemetry_.transport_status_peers =
+          static_cast<std::uint32_t>(statuses.size());
+      for (const auto& status : statuses) {
+        telemetry_.transport_max_ping_ms =
+            std::max(telemetry_.transport_max_ping_ms, status.ping_ms);
+        telemetry_.transport_max_jitter_us =
+            std::max(telemetry_.transport_max_jitter_us,
+                     status.maximum_jitter_us);
+        telemetry_.transport_pending_unreliable_bytes = std::max(
+            telemetry_.transport_pending_unreliable_bytes,
+            status.pending_unreliable_bytes);
+        telemetry_.transport_pending_reliable_bytes = std::max(
+            telemetry_.transport_pending_reliable_bytes,
+            status.pending_reliable_bytes);
+        telemetry_.transport_max_queue_time_us = std::max(
+            telemetry_.transport_max_queue_time_us, status.queue_time_us);
+        const auto role = steam_role_by_id_.find(status.steam_id);
+        REXLOG_INFO(
+            "multiplayer-transport: role={} peer_role={} backend=steam-messages "
+            "state={} ping_ms={} quality={:.3f}/{:.3f} "
+            "rate={:.1f}/{:.1f}KiB/s packets={:.1f}/{:.1f}pps "
+            "send_capacity={:.1f}KiB/s pending={}/{}B unacked={}B "
+            "queue_ms={:.3f} jitter_ms={:.3f}",
+            bound_role_,
+            role == steam_role_by_id_.end() ? 0u : role->second,
+            status.state, status.ping_ms, status.local_quality,
+            status.remote_quality,
+            status.outbound_bytes_per_second / 1024.0f,
+            status.inbound_bytes_per_second / 1024.0f,
+            status.outbound_packets_per_second,
+            status.inbound_packets_per_second,
+            status.send_rate_bytes_per_second / 1024.0f,
+            status.pending_unreliable_bytes,
+            status.pending_reliable_bytes,
+            status.sent_unacked_reliable_bytes,
+            static_cast<double>(status.queue_time_us) / 1000.0,
+            static_cast<double>(status.maximum_jitter_us) / 1000.0);
+      }
+    }
+    REXLOG_INFO(
+        "multiplayer-fanout: role={} prepare_passes={} shared_reuses={} "
+        "targets={} reuse_percent={:.2f}",
+        bound_role_, telemetry_.animation_prepare_passes,
+        telemetry_.animation_shared_reuses,
+        telemetry_.animation_fanout_targets,
+        telemetry_.animation_fanout_targets == 0
+            ? 0.0
+            : 100.0 *
+                  static_cast<double>(telemetry_.animation_shared_reuses) /
+                  static_cast<double>(telemetry_.animation_fanout_targets));
     const double seconds =
         std::chrono::duration<double>(now - last_rate_log_).count();
     const auto per_second = [seconds](std::uint64_t current,
@@ -2787,7 +2873,7 @@ private:
     if (using_steam_) {
       for (steam::Message &message : steam::ReceiveMessages(4096)) {
         PacketEndpoint sender;
-        sender.steam = true;
+        sender.kind = TransportKind::kSteamMessages;
         sender.steam_id = message.sender_steam_id;
         ProcessReceivedPacket(now, map_hash, v12_compatibility,
                               message.bytes.data(),
@@ -2828,7 +2914,7 @@ private:
 #if defined(_WIN32)
   bool SteamSenderValid(std::uint32_t sender_role,
                         const PacketEndpoint &sender) const {
-    if (!sender.steam) {
+    if (sender.kind != TransportKind::kSteamMessages) {
       return true;
     }
     const auto found = steam_role_by_id_.find(sender.steam_id);
@@ -4015,7 +4101,7 @@ private:
                  OutboundTrafficClass traffic_class, bool relayed) {
     const bool reliable = OutboundTrafficReliable(traffic_class);
     bool success = false;
-    if (target.steam) {
+    if (target.kind == TransportKind::kSteamMessages) {
       success = steam::SendPacketToPeer(
           target.steam_id, bytes, static_cast<std::size_t>(byte_count),
           reliable ? steam::PacketReliability::kReliable
@@ -4076,7 +4162,7 @@ private:
           continue;
         }
         PacketEndpoint target;
-        target.steam = true;
+        target.kind = TransportKind::kSteamMessages;
         target.steam_id = steam_id;
         targets.push_back({target_role, target});
       }
@@ -4126,7 +4212,7 @@ private:
       if (found == steam_id_by_role_.end()) {
         return false;
       }
-      target.steam = true;
+      target.kind = TransportKind::kSteamMessages;
       target.steam_id = found->second;
       return true;
     }
@@ -4452,7 +4538,7 @@ private:
       if (found == steam_id_by_role_.end()) {
         return false;
       }
-      target.steam = true;
+      target.kind = TransportKind::kSteamMessages;
       target.steam_id = found->second;
     } else if (topology::DirectLocalMeshEnabled(ConfiguredLocalPeerCount())) {
       if (!topology::DirectLocalTarget(static_cast<std::uint32_t>(bound_role_),
@@ -4774,6 +4860,7 @@ private:
                                                target_keyframe);
           });
       if (prepared == prepared_frames.end()) {
+        ++telemetry_.animation_prepare_passes;
         PreparedAnimationFrame frame;
         frame.tracks = target_tracks;
         frame.periodic_keyframes = !use_v12_animation;
@@ -4919,7 +5006,10 @@ private:
         }
         prepared_frames.push_back(std::move(frame));
         prepared = std::prev(prepared_frames.end());
+      } else {
+        ++telemetry_.animation_shared_reuses;
       }
+      ++telemetry_.animation_fanout_targets;
       if (!prepared->valid) {
         complete = false;
         continue;

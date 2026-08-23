@@ -596,10 +596,14 @@ try {
             'skate3_multiplayer_protocol_v12_lossless_tests',
             'skate3_multiplayer_protocol_v12_quaternion_tests',
             'skate3_multiplayer_protocol_v12_delta_tests',
+            'skate3_multiplayer_protocol_v12_codec_benchmarks',
+            'skate3_multiplayer_protocol_v12_block_delta_tests',
             'skate3_multiplayer_outbound_scheduler_tests',
             'skate3_multiplayer_lifecycle_tests',
             'skate3_multiplayer_worker_tests',
-            'skate3_multiplayer_render_cache_tests'
+            'skate3_multiplayer_render_cache_tests',
+            'skate3_multiplayer_routing_tests',
+            'skate3_multiplayer_scale_tests'
         )
     }
     $manifest | ConvertTo-Json -Depth 4 |
