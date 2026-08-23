@@ -1,5 +1,6 @@
 #include "skate3_multiplayer.h"
 
+#include "skate3_multiplayer_bandwidth.h"
 #include "skate3_multiplayer_interpolation.h"
 #include "skate3_multiplayer_lifecycle.h"
 #include "skate3_multiplayer_local_topology.h"
@@ -128,19 +129,24 @@ REXCVAR_DEFINE_INT32(
     .range(0, 4)
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 REXCVAR_DEFINE_INT32(
-    skate3_multiplayer_local_send_rate, 60, "Skate 3",
-    "Legacy tuning value retained for settings compatibility. The current "
-    "full-fidelity stream sends root poses at 60 Hz.")
+    skate3_multiplayer_local_send_rate,
+    skate3::multiplayer::bandwidth::kRootSnapshotRateHz, "Skate 3",
+    "Root-pose snapshots per second. Root motion remains independent from "
+    "the larger skeletal stream so board/skater position can stay responsive "
+    "while complete skeletal poses use an internet-safe cadence.")
     .range(10, 120)
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 REXCVAR_DEFINE_INT32(
-    skate3_multiplayer_local_animation_rate, 60, "Skate 3",
-    "Legacy tuning value retained for settings compatibility. The current "
-    "full-fidelity stream sends completed skeletal poses at 60 Hz.")
+    skate3_multiplayer_local_animation_rate,
+    skate3::multiplayer::bandwidth::kAnimationSnapshotRateHz, "Skate 3",
+    "Complete final skeletal-pose snapshots per second. Remote rendering "
+    "continues at the client frame rate using buffered affine interpolation; "
+    "20 Hz is the measured ten-player internet bandwidth baseline.")
     .range(10, 60)
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 REXCVAR_DEFINE_INT32(
-    skate3_multiplayer_local_interpolation_ms, 50, "Skate 3",
+    skate3_multiplayer_local_interpolation_ms,
+    skate3::multiplayer::bandwidth::kMinimumInterpolationDelayMs, "Skate 3",
     "Minimum remote-pose buffer duration. Skeletal animation automatically "
     "retains at least two animation frames plus measured network jitter; "
     "larger values trade responsiveness for additional stability.")
@@ -234,6 +240,10 @@ struct NetworkTuning {
 
 NetworkTuning ResolveNetworkTuning(std::size_t participant_count) {
   NetworkTuning tuning;
+  tuning.pose_rate = std::clamp(
+      REXCVAR_GET(skate3_multiplayer_local_send_rate), 10, 120);
+  tuning.animation_rate = std::clamp(
+      REXCVAR_GET(skate3_multiplayer_local_animation_rate), 10, 60);
   tuning.interpolation_ms = std::clamp(
       REXCVAR_GET(skate3_multiplayer_local_interpolation_ms), 0, 250);
   tuning.full_fidelity = topology::FullFidelitySession(

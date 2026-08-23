@@ -1,3 +1,4 @@
+#include "skate3_multiplayer_bandwidth.h"
 #include "skate3_multiplayer_routing.h"
 #include "skate3_multiplayer_transport.h"
 
@@ -12,6 +13,7 @@
 namespace {
 
 using namespace skate3::multiplayer;
+using namespace skate3::multiplayer::bandwidth;
 using namespace skate3::multiplayer::protocol_v12;
 using namespace skate3::multiplayer::routing;
 
@@ -65,7 +67,7 @@ void TestTopologyPolicyAndBudgets() {
              !RecommendRoute(101, true).supported,
          "invalid player count was accepted");
 
-  constexpr double stream = 114.0 * 1024.0;
+  constexpr double stream = kPerPeerApplicationBudgetBytesPerSecond;
   for (const std::uint32_t players : {2u, 5u, 20u, 50u, 100u}) {
     const auto mesh =
         ProjectBandwidth(players, stream, RouteMode::kDirectPeerMesh);
@@ -82,6 +84,16 @@ void TestTopologyPolicyAndBudgets() {
                stream * static_cast<double>(players) * peers,
            "relay egress projection changed");
   }
+
+  constexpr double ten_player_upload =
+      DirectMeshUploadBytesPerSecond(10);
+  static_assert(kRootSnapshotRateHz == 60);
+  static_assert(kAnimationSnapshotRateHz == 20);
+  static_assert(kMinimumInterpolationDelayMs == 100);
+  Expect(ten_player_upload == 1008.0 * 1024.0,
+         "ten-player direct-mesh byte budget changed");
+  Expect(BitsPerSecond(ten_player_upload) < 8.3 * 1024.0 * 1024.0,
+         "ten-player direct-mesh baseline exceeded 8.3 Mibit/s");
 }
 
 void TestAuthenticatedVisualRelay() {

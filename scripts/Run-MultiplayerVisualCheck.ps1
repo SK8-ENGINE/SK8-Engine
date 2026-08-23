@@ -536,7 +536,7 @@ try {
     $replicationWorker = $true
     # Five native-renderer instances at 120 fps can exceed the shared local
     # CPU/GPU scheduling budget and starve later windows, which makes their
-    # otherwise healthy 60 Hz network streams inherit 100-250 ms capture
+    # otherwise healthy network streams inherit 100-250 ms capture
     # holes. This cap affects only the local visual-check processes.
     $guestFpsCap = if ($Clients -ge 5) { 90 } else { 120 }
     $manifest = [ordered]@{
@@ -559,15 +559,17 @@ try {
         clients = $Clients
         transport = 'localhost-udp'
         localhost_topology = 'direct-mesh'
-        fidelity_contract = 'full-for-1-to-100-players'
+        fidelity_contract = 'complete-pose-common-cadence'
         guest_fps_cap = $guestFpsCap
-        replication_quality = 'full-fidelity'
+        replication_quality = 'complete-pose-internet-baseline'
         root_protocol = 'v12-after-negotiation'
         animation_protocol = 'v12-snappy-smallest-exact-confirmed-delta'
         appearance_protocol = 'v11'
         root_rate_hz = 60
-        animation_rate_hz = 60
-        interpolation_ms = 50
+        animation_rate_hz = 20
+        interpolation_ms = 100
+        per_peer_application_budget_kib_s = 112
+        ten_player_direct_mesh_budget_mibit_s = 8.3
         animation_interpolation_mode = 3
         replication_worker = $replicationWorker
         async_appearance_prepare = $true
@@ -621,7 +623,7 @@ $runRoot
 
 Clients: $Clients
 Transport: localhost UDP
-Quality: Full fidelity, 60 Hz root, 60 Hz animation, 50 ms interpolation
+Quality: Complete pose, 60 Hz root, 20 Hz animation, 100 ms interpolation
 Fault: client 3 intentionally drops role 2's final appearance chunk until
 the bounded assembly timeout requests a resend.
 
@@ -661,30 +663,15 @@ $runRoot
 
 Clients: 5
 Transport: localhost UDP
-Quality: Full fidelity, 60 Hz root, 60 Hz animation, 50 ms minimum interpolation
-Change under test: directly negotiated peers now exchange their 60 Hz
-root/board snapshot and exact skeletal animation words through explicit-endian
-protocol-v12 envelopes. Animation uses one independently reassembled group
-while preserving the current quantization, keyframes/deltas, interpolation,
-attachments, and renderer path. Receivers now acknowledge each completely
-decoded keyframe and can immediately request a fresh keyframe when a delta's
-baseline is unavailable. Each sender now constructs deltas only against the
-exact keyframe that the receiving peer confirmed decoding; it sends
-self-contained keyframes while confirmation is pending. Outfits remain on
-protocol v11. Full-fidelity direct peer fan-out is unchanged. The five local
-test processes are evenly capped at $guestFpsCap fps so shared-machine
-contention cannot starve individual senders; this does not alter the 60 Hz
-replication contract or normal single-client settings.
-Protocol v12 keeps a receiver-confirmed baseline until layout changes or an
-explicit recovery request. Exact deltas may encode each changed 16-bit
-transform word as a variable-length signed difference from that confirmed
-baseline when doing so materially reduces bytes or packet count. The receiver
-reconstructs the byte-identical word stream before the unchanged animation
-decoder runs. Keyframes, raw fallback, protocol v11, pose precision, and the
-60 Hz full-fidelity schedule remain unchanged.
-Small presentation-clock corrections now converge at no more than 2.5%
-playback-speed change instead of 10%, reducing visible pull-back/forward
-pulses without filtering actual pose motion or delaying the local skater.
+Quality: Complete pose, 60 Hz root, 20 Hz animation, 100 ms minimum interpolation
+Change under test: the real root and animation rate settings now drive the
+periodic send deadlines. Root/board snapshots remain at 60 Hz while every
+complete final skeletal pose track is sampled at 20 Hz, then reconstructed at
+the receiver's render cadence with bounded four-sample interpolation. Spatial
+quantization, outfits, attachments, boards, exact deltas, loss recovery, and
+direct peer fan-out are unchanged. The target is no more than 112 KiB/s of
+application traffic per peer, projecting below 8.3 Mibit/s upload for a
+ten-player direct mesh before Steam framing.
 Diagnostics: representative visible body vertices are sampled before send and
 after remote reconstruction, alongside skeleton, network, and GPU timing
 
@@ -730,8 +717,11 @@ Telemetry acceptance checked by the agent afterward:
   confirmation, reduce wire bytes and fragment counts, and remain free of
   animation rejection. Its measured encoding cost must not coincide with
   client-FPS stalls.
-- Every active sender/receiver pair reports the full-fidelity contract,
-  continuous pose/animation traffic, and zero relevance drops.
+- Every active sender/receiver pair reports the 60 Hz root / 20 Hz complete
+  pose contract, continuous traffic, and zero relevance drops.
+- Every client's maximum steady root + animation + control traffic is at most
+  112 KiB/s per peer; the analyzer reports the corresponding ten-player
+  direct-mesh upload projection.
 - Playback cursor margins remain inside the animation buffer, with no
   hundreds-of-milliseconds held-latest runs after a scheduler stall.
 - Normal timing convergence remains bounded to a 2.5% playback-speed
@@ -756,7 +746,7 @@ $runRoot
 
 Clients: 5
 Transport: localhost UDP
-Quality: Full fidelity, 60 Hz root, 60 Hz animation, 50 ms interpolation
+Quality: Complete pose, 60 Hz root, 20 Hz animation, 100 ms interpolation
 Wire format: v12 root and grouped animation after negotiation; v11 outfits
 Delivery policy: root/animation unreliable and latest-wins; control/outfits
 reliable
@@ -817,7 +807,7 @@ $runRoot
 
 Clients: $Clients
 Transport: localhost UDP
-Quality: Full fidelity, 60 Hz root, 60 Hz animation, 50 ms interpolation
+Quality: Complete pose, 60 Hz root, 20 Hz animation, 100 ms interpolation
 Profiles: persistent per role across visual-check runs
 Appearance preparation: background CPU worker enabled
 Appearance installation: staged GPU upload, maximum 4 operations or 4 ms
@@ -950,8 +940,8 @@ separately, then ask the agent to analyze this run directory.
             "--skate3_multiplayer_local_client=$role",
             "--skate3_multiplayer_local_peer_count=$Clients",
             '--skate3_multiplayer_local_send_rate=60',
-            '--skate3_multiplayer_local_animation_rate=60',
-            '--skate3_multiplayer_local_interpolation_ms=50',
+            '--skate3_multiplayer_local_animation_rate=20',
+            '--skate3_multiplayer_local_interpolation_ms=100',
             '--skate3_multiplayer_animation_interpolation_mode=3',
             (
                 '--skate3_multiplayer_replication_worker={0}' -f

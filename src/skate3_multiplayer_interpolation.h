@@ -6,9 +6,10 @@
 namespace skate3::multiplayer::interpolation {
 
 // Complete final-pose frames arrive as multi-datagram groups and are prepared
-// on the replication worker. Retain enough history to absorb both ordinary
-// cadence variation and short worker/relay stalls before the presentation
-// cursor reaches the newest complete frame.
+// on the replication worker. Two source periods place the presentation cursor
+// behind a complete bracketing pair. Additional measured-jitter headroom
+// absorbs scheduling and fragment-assembly variation without multiplying a
+// deliberately lower internet snapshot interval into excessive view lag.
 inline std::int64_t RecommendedDelayMicroseconds(
     std::int32_t configured_delay_ms,
     std::int64_t measured_period_us,
@@ -29,7 +30,7 @@ inline std::int64_t RecommendedDelayMicroseconds(
       std::clamp<std::int64_t>(
           measured_jitter_us, 0, 50000);
   const std::int64_t safety_delay_us =
-      stable_period_us * 5 + stable_jitter_us * 8;
+      stable_period_us * 2 + stable_jitter_us * 4;
   return std::clamp<std::int64_t>(
       std::max(configured_delay_us, safety_delay_us),
       0, 250000);

@@ -70,13 +70,14 @@ void TestSharedSerializationAtScale() {
     std::uint64_t forwarded_bytes = 0;
     for (std::uint32_t frame = 1; frame <= frames; ++frame) {
       for (std::uint32_t role = 1; role <= players; ++role) {
-        // Typical predictive live poses are represented by two MTU-safe
-        // fragments. Each source fragment is serialized once, then the relay
-        // forwards immutable bytes to all recipients.
-        for (std::uint32_t fragment = 0; fragment < 2; ++fragment) {
+        // Current retail telemetry averages roughly four MTU-safe fragments
+        // per complete pose. Each source fragment is serialized once, then
+        // the relay forwards immutable bytes to all recipients.
+        for (std::uint32_t fragment = 0; fragment < 4; ++fragment) {
           const auto bytes = PoseFragment(
               static_cast<std::uint16_t>(role), 20'000 + role,
-              frame * 2 + fragment, fragment == 0 ? 1160 : 658);
+              frame * 4 + fragment,
+              fragment < 3 ? 1160 : 520);
           ++serialization_operations;
           ++ingress_datagrams;
           const auto route = relay.Route(10'000 + role, bytes);
@@ -90,7 +91,7 @@ void TestSharedSerializationAtScale() {
       }
     }
     const std::uint64_t expected_ingress =
-        std::uint64_t(players) * frames * 2;
+        std::uint64_t(players) * frames * 4;
     const std::uint64_t expected_forwarded =
         expected_ingress * (players - 1);
     Expect(serialization_operations == expected_ingress &&
@@ -147,24 +148,31 @@ struct FrameReceipt {
 double SimulatePoseCoverage(ImpairmentConfig config, std::uint64_t seed,
                             std::uint32_t frames = 1800) {
   DatagramNetworkSimulator network(config, seed);
-  const auto first = PoseFragment(1, 101, 1, 1160);
-  const auto second = PoseFragment(1, 101, 2, 658);
+  const std::array fragments = {
+      PoseFragment(1, 101, 1, 1160),
+      PoseFragment(1, 101, 2, 1160),
+      PoseFragment(1, 101, 3, 1160),
+      PoseFragment(1, 101, 4, 520),
+  };
   for (std::uint32_t frame = 0; frame < frames; ++frame) {
-    const std::uint64_t now = std::uint64_t(frame) * 16'667;
-    (void)network.Submit(1, 2, frame * 2 + 1, now, first);
-    (void)network.Submit(1, 2, frame * 2 + 2, now, second);
+    const std::uint64_t now = std::uint64_t(frame) * 50'000;
+    for (std::uint32_t fragment = 0; fragment < fragments.size();
+         ++fragment) {
+      (void)network.Submit(
+          1, 2, frame * 4 + fragment + 1, now, fragments[fragment]);
+    }
   }
   const auto delivered = network.Poll(
-      std::uint64_t(frames) * 16'667 + 10'000'000);
+      std::uint64_t(frames) * 50'000 + 10'000'000);
   std::map<std::uint32_t, FrameReceipt> receipts;
   for (const auto& datagram : delivered) {
-    const std::uint32_t frame = (datagram.sequence - 1) / 2;
+    const std::uint32_t frame = (datagram.sequence - 1) / 4;
     receipts[frame].fragments |=
-        static_cast<std::uint8_t>(1u << ((datagram.sequence - 1) % 2));
+        static_cast<std::uint8_t>(1u << ((datagram.sequence - 1) % 4));
   }
   std::set<std::uint32_t> complete;
   for (const auto& [frame, receipt] : receipts) {
-    if (receipt.fragments == 3) {
+    if (receipt.fragments == 15) {
       complete.insert(frame);
     }
   }
@@ -172,7 +180,7 @@ double SimulatePoseCoverage(ImpairmentConfig config, std::uint64_t seed,
   std::uint64_t considered = 0;
   // A missing source frame remains interpolatable when complete samples
   // bracket it within the 100 ms recovery window.
-  constexpr std::uint32_t maximum_gap_frames = 6;
+  constexpr std::uint32_t maximum_gap_frames = 2;
   for (std::uint32_t frame = maximum_gap_frames;
        frame + maximum_gap_frames < frames; ++frame) {
     ++considered;

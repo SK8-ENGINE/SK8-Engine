@@ -433,6 +433,9 @@ void PrintScenario(const Scenario &scenario, const Totals &totals) {
   std::cout << "  projected_60hz group_payload=" << selected * 60.0 / 1024.0
             << " KiB/s/stream datagrams=" << datagram * 60.0 / 1024.0
             << " KiB/s/stream\n";
+  std::cout << "  projected_20hz group_payload=" << selected * 20.0 / 1024.0
+            << " KiB/s/stream datagrams=" << datagram * 20.0 / 1024.0
+            << " KiB/s/stream\n";
   for (const std::uint32_t players : {2u, 5u, 20u, 50u, 100u}) {
     const double direct_upload =
         datagram * 60.0 * (players - 1) / (1024.0 * 1024.0);

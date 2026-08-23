@@ -23,7 +23,8 @@ The roadmap deliberately preserves the working foundations:
 
 ### Milestone A: visually faithful sessions of five players or fewer
 
-Every player should receive the full final pose at 60 Hz. Outfits,
+Every player should receive complete final-pose samples at the measured
+internet cadence and reconstruct them continuously at render rate. Outfits,
 attachments, boards, detached boards, tricks, bails, lighting, and shadows
 must reconstruct correctly. Remote players may use a small interpolation
 delay, but multiplayer must not add local input latency or create client frame
@@ -31,7 +32,7 @@ stalls.
 
 ### Milestone B: full-fidelity sessions of up to 100 players
 
-Every player receives the same complete 60 Hz final-pose stream, including
+Every player receives the same complete final-pose stream, including
 appearance-specific attachments and board state, regardless of distance,
 visibility, importance, or player count. Compression, batching, shared
 serialization, transport improvements, and server topology should be used
@@ -51,8 +52,9 @@ milestone.
 The client-side architecture work in Phases 0-8 is implemented and covered by
 the automated protocol, lifecycle, renderer-cache, worker, interpolation,
 codec, transport, routing, impairment, and scale suites. The implementation
-keeps every active player at full final-pose fidelity; it does not introduce
-distance, visibility, importance, or player-count throttling.
+keeps every active player at complete final-pose spatial fidelity and a common
+20 Hz internet sampling cadence; it does not introduce distance, visibility,
+importance, or player-count tiers.
 
 Three gates intentionally remain outside this implementation batch:
 
@@ -69,6 +71,24 @@ Three gates intentionally remain outside this implementation batch:
 Future work discovered by those gates should be driven by measurements. It is
 not permission to silently reduce fidelity or to move local input/rendering
 onto the multiplayer path.
+
+Latest internet-baseline checkpoint:
+
+- The first retail five-client v12/Snappy capture measured approximately
+  265-300 KiB/s per peer at 60 complete skeletal samples per second. This
+  disproved the synthetic 42.7 KiB/s projection as a live planning value.
+- The existing root and animation rate controls now govern the actual periodic
+  send deadlines. The default remains 60 Hz for small root/board snapshots and
+  becomes 20 Hz for the complete final skeletal pose.
+- Every player still receives every track with unchanged 16-bit quantization;
+  there are no distance, visibility, importance, or player-count tiers. This
+  is temporal sampling, not reduced spatial precision.
+- The interpolation floor is 100 ms and the adaptive delay keeps two complete
+  source periods plus four measured jitter intervals, capped at 250 ms.
+- Acceptance is at most 112 KiB/s application traffic per peer, projecting to
+  less than 8.3 Mibit/s upload for a ten-player direct mesh before Steam
+  framing. The final five-client run must independently pass both user visual
+  inspection and this analyzer-derived live bandwidth gate.
 
 ## Phase 0: freeze the protocol-v11 baseline
 
@@ -900,8 +920,9 @@ Current checkpoint:
 
 Purpose: increase player count without changing what any receiver sees.
 
-Every active player remains Exact: complete final pose, appearance-specific
-tracks, board state, and attachments at 60 Hz. There are no Near, Mid,
+Every active player remains Exact: complete final-pose samples,
+appearance-specific tracks, board state, and attachments at the common
+configured cadence. There are no Near, Mid,
 Presence, Dormant, distance, visibility, importance, or player-count tiers.
 
 Scale work should focus on:
@@ -998,11 +1019,12 @@ Current checkpoint:
 - Routing policy retains direct P2P for 2-20 players, prefers a dedicated
   relay above 20 when available, and preserves an explicit P2P fallback
   without reducing fidelity.
-- At the code-derived typical 42.7 KiB/s stream, direct-mesh upload is about
-  0.04, 0.17, 0.79, 2.04, and 4.13 MiB/s per sender for 2, 5, 20, 50, and
-  100 players. A dedicated relay keeps each client's upload near 0.04 MiB/s
-  while its egress scales to all recipients. These omit transport framing and
-  appearance bursts and must be replaced with deployment measurements.
+- At the live-derived 112 KiB/s acceptance ceiling, direct-mesh upload is
+  about 0.11, 0.44, 2.08, 5.36, and 10.83 MiB/s per sender for 2, 5, 20, 50,
+  and 100 players. A dedicated relay keeps each client's upload near
+  0.11 MiB/s while its egress scales to all recipients. These omit Steam
+  framing and appearance bursts and must be replaced with deployment
+  measurements.
 
 ## Five-player acceptance contract
 

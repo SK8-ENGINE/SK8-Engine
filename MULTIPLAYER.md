@@ -106,9 +106,10 @@ AppID and follow Valve's setup and redistributable requirements.
 - Positions use custom-map coordinates rather than the hidden retail world's
   absolute coordinates.
 - Received poses use their sender simulation timestamps rather than packet
-  arrival timing. They are buffered 50 ms behind real time by default so a
-  render stall or a batch of arriving packets cannot introduce a catch-up
-  step.
+  arrival timing. The internet baseline has a 100 ms interpolation floor and
+  automatically retains two complete skeletal samples plus measured jitter,
+  so a render stall or batch of arriving fragments cannot introduce a
+  catch-up step.
 - Packets from a different map, protocol version, client slot, process
   session, or unexpected Steam identity are rejected.
 - Peers advertise optional control capabilities with a fixed-size packet.
@@ -143,9 +144,11 @@ AppID and follow Valve's setup and redistributable requirements.
   tracks for small or post-processed attachments such as the hat and wheels.
   Affine components use signed 16-bit fixed point with root-relative
   translations, are fragmented into bounded datagrams, reassembled, buffered,
-  and interpolated at the full-fidelity 60 frames per second. The higher sampling
-  rate preserves fast rotations such as a freely rolling skateboard wheel;
-  20 Hz can cross the 180-degree ambiguity between orientation samples.
+  and interpolated at the render frame rate. The internet baseline samples a
+  complete final skeletal pose at 20 Hz while root/board motion remains 60 Hz.
+  This preserves every captured track and its existing quantization, but it is
+  a temporal sampling change whose wheel, trick, bail, and detached-board
+  behavior requires the user visual gate.
 - The sender publishes a versioned engine-owned appearance recipe. The
   receiver resolves exact vanilla CAC bind meshes from its local asset
   catalogue and installs the sender's body, clothing, hair, accessories,
@@ -169,8 +172,9 @@ AppID and follow Valve's setup and redistributable requirements.
   recipient. Localhost repeats the complete UDP stream three times so a
   single dropped chunk cannot permanently strand the proxy.
 - Every active peer receives the complete root, canonical skeleton, exact
-  appearance tracks, board, wheel, hair, hat, and attachment stream at 60 Hz.
-  Distance, visibility, importance, and player count do not reduce fidelity.
+  appearance tracks, board, wheel, hair, hat, and attachment stream. Root
+  motion is sampled at 60 Hz and complete skeletal poses at 20 Hz. Distance,
+  visibility, importance, and player count do not select a lower tier.
 - Every valid remote peer is reconstructed and rendered. There is no nearest
   player cap, skeletal decode suppression, or far-presence mode.
 - Receivers use larger UDP buffers and drain bursty fragmented traffic
@@ -178,13 +182,14 @@ AppID and follow Valve's setup and redistributable requirements.
 
 ## Full-fidelity policy
 
-The current runtime has one replication quality: full fidelity. Legacy
+The current runtime has one replication quality: complete-pose fidelity. Legacy
 quality, relevance-radius, attachment-radius, nearby-player-budget, and
 far-presence settings remain registered so existing configuration files load,
-but they do not downgrade or suppress another player's stream. Root and final
-skeletal poses are sent at 60 Hz to every recipient. The interpolation floor
-remains configurable because buffering changes presentation latency and
-jitter tolerance, not pose fidelity.
+but they do not downgrade or suppress another player's stream. Root snapshots
+are sent at 60 Hz and complete final skeletal poses at the configured 20 Hz
+internet baseline to every recipient. Remote reconstruction continues at
+render cadence. The interpolation floor remains configurable because buffering
+changes presentation latency and jitter tolerance, not spatial pose precision.
 
 Adaptive tiers are intentionally deferred. They may be reconsidered only if
 measured real-world full-fidelity sessions demonstrate a limit that cannot be
@@ -287,6 +292,14 @@ work per frame on the development machine. Gentle and stress corpora project
 to about 41.5 and 33.2 KiB/s respectively. These are deterministic codec
 benchmarks, not live network measurements or proof of visual correctness; the
 combined five-client visual/telemetry gate remains required.
+The first retail five-client Snappy run was much less compressible than the
+synthetic corpus: it measured about 265-300 KiB/s per peer at 60 skeletal
+samples per second. The internet baseline therefore activates the existing
+animation-rate control at 20 Hz while retaining 60 Hz root snapshots. Its
+acceptance target is at most 112 KiB/s of application traffic per peer, or
+about 8 Mibit/s upload for a ten-player direct mesh. The analyzer calculates
+both values from every user-run visual check. This target is code-derived from
+the observed retail stream and must be confirmed by live telemetry.
 Visual-check builds also emit periodic `multiplayer-perf` windows for local
 final-pose capture, appearance capture/cache work, the replication tick,
 remote appearance installation, remote reconstruction, and their total
@@ -307,11 +320,21 @@ render-thread maxima without changing the installed outfit.
 
 Steam sessions now use direct peer fan-out. With ten players all mutually
 present, each player uploads one exact stream to nine peers and receives nine
-streams. Using the code-derived typical Snappy v12 projection, this is about
-0.38 MiB/s of application datagrams in each direction before Steam framing
-and appearance bootstrap traffic. No lobby owner carries the other players'
-streams. Aggregate direct-mesh traffic still grows approximately with the
-square of player count.
+streams. The 20 Hz internet target caps this at about 0.98 MiB/s
+(approximately 8 Mibit/s) of application datagrams in each direction before
+Steam framing and appearance bootstrap traffic. No lobby owner carries the
+other players' streams. Aggregate direct-mesh traffic still grows
+approximately with the square of player count.
+
+The baseline follows established engine practice rather than treating render
+rate as network rate: Valve documents typical 20-30 packet/s state updates and
+a 100 ms interpolation period, Epic describes smoothing 30 Hz network updates
+at much higher display rates, and Unity documents 30 Hz as its default network
+tick while recommending interpolation when lowering update frequency:
+
+- https://developer.valvesoftware.com/wiki/Source_Multiplayer_Networking
+- https://dev.epicgames.com/documentation/en-us/unreal-engine/understanding-networked-movement-in-the-character-movement-component-for-unreal-engine
+- https://docs-multiplayer.unity3d.com/netcode/2.1.1/components/networktransform/
 
 Higher population work must first pursue compression, packet batching, shared
 serialization, parallel reconstruction, and full-fidelity relays or servers.

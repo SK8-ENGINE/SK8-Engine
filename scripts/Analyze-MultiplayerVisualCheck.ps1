@@ -535,6 +535,62 @@ foreach ($client in $clientDirectories) {
         'max_visible_players=' +
         (Maximum-IntegerField $rateLines 'visible')
     )
+    $bandwidthPerPeerSamples = @()
+    foreach ($rateLine in $rateLines) {
+        $peersMatch = [regex]::Match($rateLine, 'peers=(\d+)')
+        $classesMatch = [regex]::Match(
+            $rateLine,
+            'classes=tx\(([0-9.]+)r/([0-9.]+)a/' +
+                '[0-9.]+p/([0-9.]+)c\)KiB/s'
+        )
+        if (-not $peersMatch.Success -or -not $classesMatch.Success) {
+            continue
+        }
+        $peers = [int]$peersMatch.Groups[1].Value
+        if ($peers -le 0) {
+            continue
+        }
+        $rootKib = [double]::Parse(
+            $classesMatch.Groups[1].Value,
+            [Globalization.CultureInfo]::InvariantCulture
+        )
+        $animationKib = [double]::Parse(
+            $classesMatch.Groups[2].Value,
+            [Globalization.CultureInfo]::InvariantCulture
+        )
+        $controlKib = [double]::Parse(
+            $classesMatch.Groups[3].Value,
+            [Globalization.CultureInfo]::InvariantCulture
+        )
+        $bandwidthPerPeerSamples +=
+            ($rootKib + $animationKib + $controlKib) / [double]$peers
+    }
+    if ($bandwidthPerPeerSamples.Count -gt 0) {
+        $perPeerKib = (
+            $bandwidthPerPeerSamples | Measure-Object -Maximum
+        ).Maximum
+        $tenPlayerMibit = [double]$perPeerKib * 9.0 * 8.0 / 1024.0
+        $summary.Add(
+            'derived_bandwidth_rate_samples=' +
+            $bandwidthPerPeerSamples.Count
+        )
+        $summary.Add((
+            'derived_bandwidth_max_per_peer_kib_s={0:0.0}' -f $perPeerKib
+        ))
+        $summary.Add((
+            'derived_bandwidth_ten_player_upload_mibit_s={0:0.00}' -f
+            $tenPlayerMibit
+        ))
+        $summary.Add(
+            'derived_bandwidth_baseline_112kib_s=' +
+            $(if ($perPeerKib -le 112.0) { 'pass' } else { 'fail' })
+        )
+    } else {
+        $summary.Add('derived_bandwidth_rate_samples=0')
+        $summary.Add('derived_bandwidth_max_per_peer_kib_s=n/a')
+        $summary.Add('derived_bandwidth_ten_player_upload_mibit_s=n/a')
+        $summary.Add('derived_bandwidth_baseline_112kib_s=n/a')
+    }
     $summary.Add(
         'capability_events=' +
         (Match-Count $lines 'multiplayer: peer role=.*capabilities=')

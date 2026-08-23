@@ -352,6 +352,18 @@ void TestPeriodicDeadlineRetainsTargetRate() {
   }
   Expect(sends >= 60 && sends <= 61,
          "4 ms worker ticks collapsed a 60 Hz deadline to 50 Hz");
+
+  deadline.Reset();
+  sends = 0;
+  for (auto elapsed = 0ms; elapsed <= 1000ms; elapsed += 4ms) {
+    const auto now = start + elapsed;
+    if (deadline.Due(now)) {
+      ++sends;
+      deadline.Commit(now, 50000us);
+    }
+  }
+  Expect(sends == 21,
+         "20 Hz internet pose deadline did not retain its target phase");
 }
 
 void TestPeriodicDeadlineDoesNotBurstAfterStall() {
@@ -386,11 +398,15 @@ void TestAdaptiveInterpolationDelayCoversMeasuredStalls() {
 
   Expect(
       RecommendedDelayMicroseconds(
-          50, 20000, 8000, true) == 164000,
+          100, 50000, 5000, true) == 120000,
+      "20 Hz final-pose stream did not retain two frames plus jitter");
+  Expect(
+      RecommendedDelayMicroseconds(
+          100, 20000, 8000, true) == 100000,
       "measured five-client jitter did not receive enough safety delay");
   Expect(
       RecommendedDelayMicroseconds(
-          50, 16300, 3300, true) == 107900,
+          50, 16300, 3300, true) == 50'000,
       "smooth sender was assigned the wrong adaptive delay");
   Expect(
       RecommendedDelayMicroseconds(
@@ -398,11 +414,11 @@ void TestAdaptiveInterpolationDelayCoversMeasuredStalls() {
       "configured interpolation floor was not preserved");
   Expect(
       RecommendedDelayMicroseconds(
-          50, 50000, 50000, true) == 250000,
+          100, 50000, 50000, true) == 250000,
       "adaptive interpolation delay exceeded its safety cap");
   Expect(
       RecommendedDelayMicroseconds(
-          50, 50000, 50000, false) == 50000,
+          100, 50000, 50000, false) == 100000,
       "empty animation history ignored the configured delay");
 }
 
