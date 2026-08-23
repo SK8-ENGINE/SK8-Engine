@@ -801,6 +801,75 @@ foreach ($client in $clientDirectories) {
             )
         ))
     }
+    $predictiveGroups = Maximum-IntegerField `
+        $rateLines 'v12_predictive_groups'
+    $predictiveRaw = Maximum-IntegerField `
+        $rateLines 'v12_predictive_raw'
+    $predictiveWire = Maximum-IntegerField `
+        $rateLines 'v12_predictive_wire'
+    $predictiveAttempts = Maximum-IntegerField `
+        $rateLines 'v12_predictive_attempts'
+    $predictiveEncodeNs = Maximum-IntegerField `
+        $rateLines 'v12_predictive_encode_ns'
+    $predictiveEncodeMaxNs = Maximum-IntegerField `
+        $rateLines 'v12_predictive_encode_max_ns'
+    $summary.Add(
+        'max_v12_predictive_delta_groups_sent=' + $predictiveGroups
+    )
+    $summary.Add(
+        'max_v12_predictive_delta_raw_bytes=' + $predictiveRaw
+    )
+    $summary.Add(
+        'max_v12_predictive_delta_wire_bytes=' + $predictiveWire
+    )
+    $summary.Add(
+        'max_v12_predictive_delta_attempts=' + $predictiveAttempts
+    )
+    $summary.Add(
+        'max_v12_predictive_delta_total_encode_ns=' + $predictiveEncodeNs
+    )
+    $summary.Add(
+        'max_v12_predictive_delta_single_encode_ns=' +
+        $predictiveEncodeMaxNs
+    )
+    if ($predictiveGroups -ne 'n/a' -and
+        $predictiveRaw -ne 'n/a' -and
+        $predictiveWire -ne 'n/a' -and
+        [double]$predictiveGroups -gt 0 -and
+        [double]$predictiveRaw -gt 0) {
+        $summary.Add((
+            'derived_v12_predictive_savings_percent={0:0.00}' -f (
+                100.0 * (
+                    1.0 -
+                    [double]$predictiveWire / [double]$predictiveRaw
+                )
+            )
+        ))
+        $summary.Add((
+            'derived_v12_predictive_bytes_per_group={0:0.0}/{1:0.0}' -f (
+                [double]$predictiveRaw / [double]$predictiveGroups
+            ), (
+                [double]$predictiveWire / [double]$predictiveGroups
+            )
+        ))
+    }
+    if ($predictiveAttempts -ne 'n/a' -and
+        $predictiveEncodeNs -ne 'n/a' -and
+        [double]$predictiveAttempts -gt 0) {
+        $summary.Add((
+            'derived_v12_predictive_average_encode_us={0:0.000}' -f (
+                [double]$predictiveEncodeNs /
+                [double]$predictiveAttempts / 1000.0
+            )
+        ))
+    }
+    if ($predictiveEncodeMaxNs -ne 'n/a') {
+        $summary.Add((
+            'derived_v12_predictive_max_encode_us={0:0.000}' -f (
+                [double]$predictiveEncodeMaxNs / 1000.0
+            )
+        ))
+    }
     $keyframeGroups = Maximum-IntegerField `
         $rateLines 'v12_keyframe_groups'
     $deltaGroups = Maximum-IntegerField `

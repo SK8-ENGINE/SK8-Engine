@@ -13,6 +13,7 @@
 #include "skate3_multiplayer_protocol_v12_delta.h"
 #include "skate3_multiplayer_protocol_v12_live.h"
 #include "skate3_multiplayer_protocol_v12_lossless.h"
+#include "skate3_multiplayer_protocol_v12_predictive_delta.h"
 #include "skate3_multiplayer_protocol_v12_root.h"
 #include "skate3_multiplayer_protocol_v12_state.h"
 #include "skate3_multiplayer_protocol_v12_transport.h"
@@ -550,6 +551,12 @@ struct TelemetrySnapshot {
   std::uint64_t v12_block_delta_attempts = 0;
   std::uint64_t v12_block_delta_encode_ns = 0;
   std::uint64_t v12_block_delta_encode_max_ns = 0;
+  std::uint64_t sent_v12_predictive_delta_groups = 0;
+  std::uint64_t v12_predictive_delta_raw_bytes = 0;
+  std::uint64_t v12_predictive_delta_wire_bytes = 0;
+  std::uint64_t v12_predictive_delta_attempts = 0;
+  std::uint64_t v12_predictive_delta_encode_ns = 0;
+  std::uint64_t v12_predictive_delta_encode_max_ns = 0;
   std::uint64_t animation_present_interpolated = 0;
   std::uint64_t animation_present_held_latest = 0;
   std::uint64_t animation_present_held_oldest = 0;
@@ -2077,6 +2084,18 @@ public:
         << telemetry_.v12_block_delta_encode_ns
         << " multiplayer_v12_block_delta_encode_max_ns="
         << telemetry_.v12_block_delta_encode_max_ns
+        << " multiplayer_tx_v12_predictive_delta_groups="
+        << telemetry_.sent_v12_predictive_delta_groups
+        << " multiplayer_v12_predictive_delta_raw_bytes="
+        << telemetry_.v12_predictive_delta_raw_bytes
+        << " multiplayer_v12_predictive_delta_wire_bytes="
+        << telemetry_.v12_predictive_delta_wire_bytes
+        << " multiplayer_v12_predictive_delta_attempts="
+        << telemetry_.v12_predictive_delta_attempts
+        << " multiplayer_v12_predictive_delta_encode_ns="
+        << telemetry_.v12_predictive_delta_encode_ns
+        << " multiplayer_v12_predictive_delta_encode_max_ns="
+        << telemetry_.v12_predictive_delta_encode_max_ns
         << " multiplayer_animation_present_interpolated="
         << telemetry_.animation_present_interpolated
         << " multiplayer_animation_present_held_latest="
@@ -2225,6 +2244,9 @@ private:
         "v12_block_groups={} v12_block_raw={} v12_block_wire={} "
         "v12_block_attempts={} v12_block_encode_ns={} "
         "v12_block_encode_max_ns={} "
+        "v12_predictive_groups={} v12_predictive_raw={} "
+        "v12_predictive_wire={} v12_predictive_attempts={} "
+        "v12_predictive_encode_ns={} v12_predictive_encode_max_ns={} "
         "bones={} relay={:.1f}pps relevance_drop={:.1f}pps rejected={} "
         "failures={} peer_resets={} "
         "appearance={:.2f}MiB timeout={} budget_reject={} "
@@ -2281,6 +2303,12 @@ private:
         telemetry_.v12_block_delta_attempts,
         telemetry_.v12_block_delta_encode_ns,
         telemetry_.v12_block_delta_encode_max_ns,
+        telemetry_.sent_v12_predictive_delta_groups,
+        telemetry_.v12_predictive_delta_raw_bytes,
+        telemetry_.v12_predictive_delta_wire_bytes,
+        telemetry_.v12_predictive_delta_attempts,
+        telemetry_.v12_predictive_delta_encode_ns,
+        telemetry_.v12_predictive_delta_encode_max_ns,
         telemetry_.remote_animation_bones, relay_pps, drop_pps,
         telemetry_.rejected_packets, telemetry_.socket_failures,
         telemetry_.outbound_peer_resets,
@@ -3074,7 +3102,9 @@ private:
     bool animation_decoded = false;
     if (completed.encoding ==
             protocol_v12::PoseGroupEncoding::kSemanticDeltaV1 ||
-        completed.encoding == protocol_v12::PoseGroupEncoding::kBlockDeltaV1) {
+        completed.encoding == protocol_v12::PoseGroupEncoding::kBlockDeltaV1 ||
+        completed.encoding ==
+            protocol_v12::PoseGroupEncoding::kPredictiveDeltaV1) {
       if (completed.kind != protocol_v12::MessageKind::kPoseDelta ||
           peer.animation_keyframe.sequence != completed.baseline_id) {
         peer.v12_pose_receiver.NotifyBaselineUnavailable();
@@ -3091,15 +3121,21 @@ private:
           baseline_storage{};
       const auto baselines = BuildAnimationBaselineViews(
           peer.animation_keyframe, baseline_storage);
-      animation_decoded =
-          !baselines.empty() &&
-          (completed.encoding == protocol_v12::PoseGroupEncoding::kBlockDeltaV1
-               ? protocol_v12::DecodeBlockPackedAnimationDelta(
-                     completed.bytes, baselines, root_position, root_bone,
-                     words)
-               : protocol_v12::DecodeSemanticAnimationDelta(
-                     completed.bytes, baselines, root_position, root_bone,
-                     words));
+      if (!baselines.empty()) {
+        if (completed.encoding ==
+            protocol_v12::PoseGroupEncoding::kPredictiveDeltaV1) {
+          animation_decoded = protocol_v12::DecodePredictiveAnimationDelta(
+              completed.bytes, baselines, root_position, root_bone, words);
+        } else if (completed.encoding ==
+                   protocol_v12::PoseGroupEncoding::kBlockDeltaV1) {
+          animation_decoded =
+              protocol_v12::DecodeBlockPackedAnimationDelta(
+                  completed.bytes, baselines, root_position, root_bone, words);
+        } else {
+          animation_decoded = protocol_v12::DecodeSemanticAnimationDelta(
+              completed.bytes, baselines, root_position, root_bone, words);
+        }
+      }
     } else {
       const std::span<const std::uint8_t> animation_bytes =
           completed.encoding == protocol_v12::PoseGroupEncoding::kBitPackedV1
@@ -4295,6 +4331,13 @@ private:
           protocol_v12::AnimationWordStreamByteCount(words.size());
       telemetry_.v12_block_delta_wire_bytes += group_bytes.size();
     }
+    if (complete &&
+        encoding == protocol_v12::PoseGroupEncoding::kPredictiveDeltaV1) {
+      ++telemetry_.sent_v12_predictive_delta_groups;
+      telemetry_.v12_predictive_delta_raw_bytes +=
+          protocol_v12::AnimationWordStreamByteCount(words.size());
+      telemetry_.v12_predictive_delta_wire_bytes += group_bytes.size();
+    }
     return complete;
   }
 
@@ -4770,11 +4813,47 @@ private:
             const std::size_t block_bytes =
                 protocol_v12::BlockPackedAnimationDeltaByteCount(frame.words,
                                                                  baselines);
-            if (block_bytes != 0 &&
+            std::uint64_t block_ns = static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    Clock::now() - block_started)
+                    .count());
+
+            const auto predictive_started = Clock::now();
+            ++telemetry_.v12_predictive_delta_attempts;
+            const std::size_t predictive_bytes =
+                protocol_v12::PredictiveAnimationDeltaByteCount(frame.words,
+                                                                baselines);
+            if (predictive_bytes != 0 &&
+                protocol_v12::LosslessPackingWorthwhile(
+                    raw_bytes, predictive_bytes,
+                    protocol_v12::kMaximumPoseFragmentBytes) &&
+                (semantic_bytes == 0 || predictive_bytes < semantic_bytes) &&
+                (block_bytes == 0 || predictive_bytes < block_bytes)) {
+              std::vector<std::uint8_t> predictive(predictive_bytes);
+              if (protocol_v12::EncodePredictiveAnimationDelta(
+                      relative_root, pose.root_bone, frame.words, baselines,
+                      predictive)) {
+                frame.v12_group_bytes = std::move(predictive);
+                frame.v12_encoding =
+                    protocol_v12::PoseGroupEncoding::kPredictiveDeltaV1;
+                exact_delta_selected = true;
+              }
+            }
+            const std::uint64_t predictive_ns = static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    Clock::now() - predictive_started)
+                    .count());
+            telemetry_.v12_predictive_delta_encode_ns += predictive_ns;
+            telemetry_.v12_predictive_delta_encode_max_ns =
+                std::max(telemetry_.v12_predictive_delta_encode_max_ns,
+                         predictive_ns);
+
+            if (!exact_delta_selected && block_bytes != 0 &&
                 protocol_v12::LosslessPackingWorthwhile(
                     raw_bytes, block_bytes,
                     protocol_v12::kMaximumPoseFragmentBytes) &&
                 (semantic_bytes == 0 || block_bytes < semantic_bytes)) {
+              const auto block_encode_started = Clock::now();
               std::vector<std::uint8_t> block(block_bytes);
               if (protocol_v12::EncodeBlockPackedAnimationDelta(
                       relative_root, pose.root_bone, frame.words, baselines,
@@ -4784,11 +4863,11 @@ private:
                     protocol_v12::PoseGroupEncoding::kBlockDeltaV1;
                 exact_delta_selected = true;
               }
+              block_ns += static_cast<std::uint64_t>(
+                  std::chrono::duration_cast<std::chrono::nanoseconds>(
+                      Clock::now() - block_encode_started)
+                      .count());
             }
-            const std::uint64_t block_ns = static_cast<std::uint64_t>(
-                std::chrono::duration_cast<std::chrono::nanoseconds>(
-                    Clock::now() - block_started)
-                    .count());
             telemetry_.v12_block_delta_encode_ns += block_ns;
             telemetry_.v12_block_delta_encode_max_ns =
                 std::max(telemetry_.v12_block_delta_encode_max_ns, block_ns);

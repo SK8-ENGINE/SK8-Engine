@@ -1,4 +1,5 @@
 #include "skate3_multiplayer_protocol_v12_block_delta.h"
+#include "skate3_multiplayer_protocol_v12_predictive_delta.h"
 #include "skate3_multiplayer_protocol_v12_transport.h"
 
 #include <algorithm>
@@ -157,6 +158,83 @@ void ExpectRoundTrip(const Fixture &fixture,
          "block delta changed root metadata");
 }
 
+std::vector<std::uint8_t> EncodePredictive(
+    const Fixture& fixture,
+    std::span<const std::uint16_t> words) {
+  const float root[3] = {12.5f, -87.25f, 0.125f};
+  const std::size_t byte_count =
+      PredictiveAnimationDeltaByteCount(
+          words, fixture.views);
+  std::vector<std::uint8_t> output(byte_count);
+  Expect(byte_count != 0,
+         "valid predictive delta had zero encoded size");
+  Expect(EncodePredictiveAnimationDelta(
+             root, 31, words, fixture.views, output),
+         "valid predictive delta did not encode");
+  return output;
+}
+
+void ExpectPredictiveRoundTrip(
+    const Fixture& fixture,
+    std::span<const std::uint16_t> expected,
+    std::span<const std::uint8_t> encoded) {
+  float root[3] = {};
+  std::uint16_t root_bone = 0;
+  std::vector<std::uint16_t> decoded;
+  Expect(DecodePredictiveAnimationDelta(
+             encoded, fixture.views, root, root_bone, decoded),
+         "valid predictive delta did not decode");
+  Expect(decoded.size() == expected.size() &&
+             std::equal(
+                 decoded.begin(), decoded.end(),
+                 expected.begin(), expected.end()),
+         "predictive delta changed exact animation words");
+  Expect(root[0] == 12.5f && root[1] == -87.25f &&
+             root[2] == 0.125f && root_bone == 31,
+         "predictive delta changed root metadata");
+}
+
+std::vector<std::uint16_t> BuildCoherentDelta(
+    const Fixture& fixture) {
+  std::vector<std::uint16_t> words = {
+      0,
+      static_cast<std::uint16_t>(fixture.tracks.size()),
+      0x5678u,
+      0x1234u,
+  };
+  for (const StoredTrack& track : fixture.tracks) {
+    AppendU32(words, track.mesh_key);
+    words.push_back(track.bone_count);
+    words.push_back(track.encoding);
+    const std::size_t mask_count =
+        (std::size_t(track.bone_count) + 15) / 16;
+    words.push_back(static_cast<std::uint16_t>(mask_count));
+    words.insert(words.end(), mask_count, UINT16_MAX);
+    const std::size_t valid_last_bits =
+        std::size_t(track.bone_count) % 16;
+    if (valid_last_bits != 0) {
+      words[words.size() - 1] = static_cast<std::uint16_t>(
+          (1u << valid_last_bits) - 1u);
+    }
+    const std::size_t stride =
+        AnimationTrackWordStride(track.encoding);
+    for (std::size_t bone = 0; bone < track.bone_count; ++bone) {
+      for (std::size_t component = 0;
+           component < stride; ++component) {
+        const std::int32_t baseline =
+            track.words[bone * stride + component];
+        const std::int32_t difference =
+            1200 + std::int32_t(component) * 31 +
+            std::int32_t(bone) * 3;
+        words.push_back(static_cast<std::uint16_t>(
+            std::clamp(
+                baseline + difference, 0, 65535)));
+      }
+    }
+  }
+  return words;
+}
+
 void TestExactRoundTripAndSavings() {
   const Fixture fixture;
   const std::vector<std::uint16_t> words = BuildDelta(fixture, 1, 4095);
@@ -214,6 +292,95 @@ void TestBlockPrimitiveCanonicalForm() {
   std::span<std::uint8_t> no_bytes;
   Expect(block_delta_detail::PackBlock(zeros, 0, no_bytes),
          "zero-width block did not encode");
+}
+
+void TestPredictivePrimitiveAndSavings() {
+  std::array<std::int32_t, 32> coherent{};
+  for (std::size_t index = 0; index < coherent.size(); ++index) {
+    coherent[index] =
+        12000 + static_cast<std::int32_t>(index) * 3;
+  }
+  std::array<std::uint32_t, 32> encoded{};
+  const auto choice =
+      predictive_delta_detail::ChooseBlock(
+          coherent, encoded);
+  Expect(choice.predictive && choice.width <= 15,
+         "coherent block did not select its exact predictor");
+
+  const Fixture fixture;
+  const std::vector<std::uint16_t> words =
+      BuildCoherentDelta(fixture);
+  const std::vector<std::uint8_t> predictive =
+      EncodePredictive(fixture, words);
+  const std::size_t block =
+      BlockPackedAnimationDeltaByteCount(
+          words, fixture.views);
+  ExpectPredictiveRoundTrip(fixture, words, predictive);
+  Expect(predictive.size() * 100 < block * 70,
+         "lane predictor saved less than thirty percent "
+         "on coherent exact transforms");
+}
+
+void TestPredictiveMalformedTransactionalDecode() {
+  const Fixture fixture;
+  const std::vector<std::uint16_t> words =
+      BuildDelta(fixture, 0x12345678u, 4095);
+  const std::vector<std::uint8_t> encoded =
+      EncodePredictive(fixture, words);
+  for (std::size_t size = 0; size < encoded.size(); ++size) {
+    float root[3] = {9.0f, 8.0f, 7.0f};
+    std::uint16_t root_bone = 123;
+    std::vector<std::uint16_t> output = {4, 5, 6};
+    Expect(!DecodePredictiveAnimationDelta(
+               std::span<const std::uint8_t>(encoded).first(size),
+               fixture.views, root, root_bone, output),
+           "truncated predictive delta was accepted");
+    Expect(root[0] == 9.0f && root[1] == 8.0f &&
+               root[2] == 7.0f && root_bone == 123 &&
+               output == std::vector<std::uint16_t>({4, 5, 6}),
+           "failed predictive decode modified output");
+  }
+  std::vector<std::uint8_t> trailing = encoded;
+  trailing.push_back(0);
+  float root[3] = {};
+  std::uint16_t root_bone = 0;
+  std::vector<std::uint16_t> output;
+  Expect(!DecodePredictiveAnimationDelta(
+             trailing, fixture.views, root, root_bone, output),
+         "predictive delta accepted trailing data");
+
+  Fixture wrong = fixture;
+  wrong.views[0].mesh_key ^= 1u;
+  Expect(!DecodePredictiveAnimationDelta(
+             encoded, wrong.views, root, root_bone, output),
+         "predictive delta accepted a different baseline layout");
+
+  std::vector<std::uint8_t> reserved = encoded;
+  const std::size_t first_mask_words =
+      (std::size_t(fixture.tracks[0].bone_count) + 15) / 16;
+  const std::size_t first_block_header =
+      kAnimationWordStreamHeaderBytes + 8 + 10 + first_mask_words * 2;
+  reserved[first_block_header] |= kPredictiveDeltaReservedMask;
+  Expect(!DecodePredictiveAnimationDelta(
+             reserved, fixture.views, root, root_bone, output),
+         "predictive delta accepted reserved header bits");
+}
+
+void TestPredictivePropertyRoundTrips() {
+  const Fixture fixture;
+  for (std::uint32_t seed = 0; seed < 3000; ++seed) {
+    const std::int32_t maximum =
+        seed % 4 == 0 ? 31
+        : seed % 4 == 1 ? 4095
+        : seed % 4 == 2 ? 16383
+                        : 32767;
+    const std::vector<std::uint16_t> words =
+        BuildDelta(
+            fixture, seed ^ 0xA511E9B3u, maximum);
+    const std::vector<std::uint8_t> encoded =
+        EncodePredictive(fixture, words);
+    ExpectPredictiveRoundTrip(fixture, words, encoded);
+  }
 }
 
 void TestMalformedTransactionalDecode() {
@@ -312,15 +479,76 @@ void TestReverseFragmentReassembly() {
   ExpectRoundTrip(fixture, words, reconstructed);
 }
 
+void TestPredictiveReverseFragmentReassembly() {
+  const Fixture fixture;
+  const std::vector<std::uint16_t> words =
+      BuildDelta(fixture, 0x51A7E123u, 32767);
+  const std::vector<std::uint8_t> encoded =
+      EncodePredictive(fixture, words);
+  Expect(encoded.size() > kMaximumPoseFragmentBytes,
+         "predictive packet test did not span fragments");
+
+  PoseGroupPacketizeRequest request;
+  request.envelope.kind = MessageKind::kPoseDelta;
+  request.envelope.sender_role = 2;
+  request.envelope.stream_id = 2;
+  request.envelope.sender_session = 100;
+  request.envelope.sequence = 500;
+  request.envelope.sender_time_us = 1000000;
+  request.pose_id = 10;
+  request.baseline_id = 9;
+  request.element_count =
+      static_cast<std::uint16_t>(fixture.tracks.size());
+  request.group_id = 0;
+  request.encoding = PoseGroupEncoding::kPredictiveDeltaV1;
+  request.group_bytes = encoded;
+  std::array<PoseGroupDatagram, 58> descriptors{};
+  const std::size_t count =
+      BuildPoseGroupDatagrams(request, descriptors);
+  Expect(count > 1, "predictive delta did not packetize");
+
+  PoseGroupReassembler reassembler;
+  std::vector<std::uint8_t> reconstructed;
+  for (std::size_t reverse = count; reverse-- > 0;) {
+    const PoseGroupDatagram& descriptor = descriptors[reverse];
+    std::vector<std::uint8_t> datagram(
+        kEnvelopeBytes + descriptor.envelope.payload_bytes);
+    Expect(EncodePoseGroupDatagram(
+               descriptor, encoded, datagram),
+           "predictive fragment did not encode");
+    Envelope envelope;
+    PoseGroupHeader header;
+    std::span<const std::uint8_t> fragment;
+    Expect(DecodePoseGroupDatagram(
+               datagram, envelope, header, fragment),
+           "predictive fragment did not decode");
+    const ReassemblyPushResult result =
+        reassembler.Push(
+            envelope, header, fragment, 3000 + reverse);
+    if (result.completed.has_value()) {
+      Expect(result.completed->encoding ==
+                 PoseGroupEncoding::kPredictiveDeltaV1,
+             "reassembly changed predictive delta encoding");
+      reconstructed = result.completed->bytes;
+    }
+  }
+  ExpectPredictiveRoundTrip(
+      fixture, words, reconstructed);
+}
+
 } // namespace
 
 int main() {
   TestExactRoundTripAndSavings();
   TestDifferenceExtremes();
   TestBlockPrimitiveCanonicalForm();
+  TestPredictivePrimitiveAndSavings();
   TestMalformedTransactionalDecode();
+  TestPredictiveMalformedTransactionalDecode();
   TestDeterministicPropertyRoundTrips();
+  TestPredictivePropertyRoundTrips();
   TestReverseFragmentReassembly();
+  TestPredictiveReverseFragmentReassembly();
 
   if (g_failures != 0) {
     std::cerr << g_failures << " block animation delta test(s) failed\n";

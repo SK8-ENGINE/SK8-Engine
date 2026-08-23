@@ -1,5 +1,6 @@
 #include "skate3_multiplayer_protocol_v12_block_delta.h"
 #include "skate3_multiplayer_protocol_v12_lossless.h"
+#include "skate3_multiplayer_protocol_v12_predictive_delta.h"
 
 #include <snappy.h>
 
@@ -190,6 +191,18 @@ EncodeBlockDelta(const AvatarCorpus &avatar,
   return output;
 }
 
+std::vector<std::uint8_t>
+EncodePredictiveDelta(const AvatarCorpus &avatar,
+                      std::span<const std::uint16_t> words) {
+  const float root[3] = {125.25f, -47.5f, 8.0f};
+  std::vector<std::uint8_t> output(
+      PredictiveAnimationDeltaByteCount(words, avatar.baselines));
+  Expect(!output.empty() && EncodePredictiveAnimationDelta(
+                                root, 3, words, avatar.baselines, output),
+         "predictive delta corpus encoding failed");
+  return output;
+}
+
 std::string SnappyCompress(std::span<const std::uint8_t> source) {
   std::string compressed;
   snappy::Compress(reinterpret_cast<const char *>(source.data()), source.size(),
@@ -213,6 +226,7 @@ struct Totals {
   std::uint64_t raw_bytes = 0;
   std::uint64_t semantic_bytes = 0;
   std::uint64_t block_delta_bytes = 0;
+  std::uint64_t predictive_delta_bytes = 0;
   std::uint64_t byte_run_bytes = 0;
   std::uint64_t snappy_raw_bytes = 0;
   std::uint64_t snappy_semantic_bytes = 0;
@@ -228,6 +242,7 @@ struct Totals {
   std::chrono::nanoseconds snappy_raw_time{};
   std::chrono::nanoseconds snappy_semantic_time{};
   std::chrono::nanoseconds block_delta_time{};
+  std::chrono::nanoseconds predictive_delta_time{};
 };
 
 double Average(std::uint64_t total, std::uint64_t count) {
@@ -253,6 +268,11 @@ Totals RunScenario(const AvatarCorpus &avatar, const Scenario &scenario) {
     const std::vector<std::uint8_t> block_delta =
         EncodeBlockDelta(avatar, words);
     totals.block_delta_time += std::chrono::steady_clock::now() - block_started;
+    const auto predictive_started = std::chrono::steady_clock::now();
+    const std::vector<std::uint8_t> predictive_delta =
+        EncodePredictiveDelta(avatar, words);
+    totals.predictive_delta_time +=
+        std::chrono::steady_clock::now() - predictive_started;
     SemanticAnimationDeltaStatistics statistics;
     Expect(InspectSemanticAnimationDelta(words, avatar.baselines, statistics),
            "corpus diagnostics rejected a valid frame");
@@ -282,11 +302,20 @@ Totals RunScenario(const AvatarCorpus &avatar, const Scenario &scenario) {
                  decoded_root[1] == -47.5f && decoded_root[2] == 8.0f &&
                  decoded_root_bone == 3,
              "block delta corpus round trip changed exact data");
+      decoded_words.clear();
+      Expect(DecodePredictiveAnimationDelta(
+                 predictive_delta, avatar.baselines, decoded_root,
+                 decoded_root_bone, decoded_words) &&
+                 decoded_words == words && decoded_root[0] == 125.25f &&
+                 decoded_root[1] == -47.5f && decoded_root[2] == 8.0f &&
+                 decoded_root_bone == 3,
+             "predictive delta corpus round trip changed exact data");
     }
     ++totals.frames;
     totals.raw_bytes += raw.size();
     totals.semantic_bytes += semantic.size();
     totals.block_delta_bytes += block_delta.size();
+    totals.predictive_delta_bytes += predictive_delta.size();
     totals.byte_run_bytes += byte_run.size();
     totals.snappy_raw_bytes += snappy_raw.size();
     totals.snappy_semantic_bytes += snappy_semantic.size();
@@ -294,6 +323,7 @@ Totals RunScenario(const AvatarCorpus &avatar, const Scenario &scenario) {
         raw.size(),
         semantic.size(),
         block_delta.size(),
+        predictive_delta.size(),
         snappy_semantic.size(),
     });
     const std::size_t fragments =
@@ -328,6 +358,10 @@ void PrintScenario(const Scenario &scenario, const Totals &totals) {
             << Average(totals.block_delta_bytes, totals.frames) << " ("
             << Percent(totals.block_delta_bytes, totals.semantic_bytes)
             << "% semantic)"
+            << " predictive_delta="
+            << Average(totals.predictive_delta_bytes, totals.frames) << " ("
+            << Percent(totals.predictive_delta_bytes, totals.block_delta_bytes)
+            << "% block)"
             << " byte_run_semantic="
             << Average(totals.byte_run_bytes, totals.frames)
             << " snappy_raw=" << Average(totals.snappy_raw_bytes, totals.frames)
@@ -359,6 +393,11 @@ void PrintScenario(const Scenario &scenario, const Totals &totals) {
              static_cast<double>(totals.frames)
       << " block_delta_preflight+encode="
       << std::chrono::duration<double, std::micro>(totals.block_delta_time)
+                 .count() /
+             static_cast<double>(totals.frames)
+      << " predictive_delta_preflight+encode="
+      << std::chrono::duration<double, std::micro>(
+             totals.predictive_delta_time)
                  .count() /
              static_cast<double>(totals.frames)
       << '\n';
@@ -430,6 +469,9 @@ int main() {
     if (scenario.name == "typical-confirmed-baseline") {
       Expect(totals.block_delta_bytes * 100 < totals.semantic_bytes * 85,
              "exact block candidate saved less than fifteen percent "
+             "on the typical corpus");
+      Expect(totals.predictive_delta_bytes < totals.block_delta_bytes,
+             "exact predictive candidate did not improve the block codec "
              "on the typical corpus");
     }
     Expect(totals.selected_fragments >= totals.frames &&

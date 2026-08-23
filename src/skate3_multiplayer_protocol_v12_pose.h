@@ -38,6 +38,7 @@ enum class PoseGroupEncoding : std::uint8_t {
   kBitPackedV1 = 2,
   kSemanticDeltaV1 = 3,
   kBlockDeltaV1 = 4,
+  kPredictiveDeltaV1 = 5,
 };
 
 struct PoseGroupHeader {
@@ -84,7 +85,7 @@ PoseControlEnvelopeShapeValid(const Envelope &envelope,
 [[nodiscard]] constexpr bool
 PoseGroupEncodingValid(PoseGroupEncoding encoding) {
   return encoding >= PoseGroupEncoding::kV11WordStream &&
-         encoding <= PoseGroupEncoding::kBlockDeltaV1;
+         encoding <= PoseGroupEncoding::kPredictiveDeltaV1;
 }
 
 [[nodiscard]] constexpr std::size_t
@@ -134,7 +135,8 @@ PoseGroupHeaderShapeValid(const PoseGroupHeader &header, MessageKind kind) {
   if (kind == MessageKind::kPoseBaseline) {
     return header.baseline_id == 0 &&
            header.encoding != PoseGroupEncoding::kSemanticDeltaV1 &&
-           header.encoding != PoseGroupEncoding::kBlockDeltaV1;
+           header.encoding != PoseGroupEncoding::kBlockDeltaV1 &&
+           header.encoding != PoseGroupEncoding::kPredictiveDeltaV1;
   }
   return header.baseline_id != 0 &&
          SequenceNewer(header.pose_id, header.baseline_id);

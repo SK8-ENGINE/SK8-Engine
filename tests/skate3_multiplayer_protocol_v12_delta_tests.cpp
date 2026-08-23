@@ -282,12 +282,20 @@ void TestInputValidation() {
   Expect(!AnimationPoseGroupEncodingAllowed(PoseGroupEncoding::kBlockDeltaV1,
                                             /*keyframe=*/true),
          "sender policy accepted block keyframe encoding");
+  Expect(AnimationPoseGroupEncodingAllowed(
+             PoseGroupEncoding::kPredictiveDeltaV1,
+             /*keyframe=*/false),
+         "sender policy rejected predictive delta encoding");
+  Expect(!AnimationPoseGroupEncodingAllowed(
+             PoseGroupEncoding::kPredictiveDeltaV1,
+             /*keyframe=*/true),
+         "sender policy accepted predictive keyframe encoding");
   Expect(AnimationPoseGroupEncodingAllowed(PoseGroupEncoding::kV11WordStream,
                                            /*keyframe=*/true) &&
              AnimationPoseGroupEncodingAllowed(PoseGroupEncoding::kBitPackedV1,
                                                /*keyframe=*/true),
          "sender policy rejected validated keyframe encodings");
-  Expect(!AnimationPoseGroupEncodingAllowed(static_cast<PoseGroupEncoding>(5),
+  Expect(!AnimationPoseGroupEncodingAllowed(static_cast<PoseGroupEncoding>(6),
                                             /*keyframe=*/false),
          "sender policy accepted unknown pose encoding");
 }

@@ -281,7 +281,14 @@ void TestPoseGroupFragmentBoundaries() {
   malformed.baseline_id = 1;
   Expect(PoseGroupHeaderShapeValid(malformed, MessageKind::kPoseDelta),
          "block delta encoding was rejected for a delta");
-  malformed.encoding = static_cast<PoseGroupEncoding>(5);
+  malformed.baseline_id = 0;
+  malformed.encoding = PoseGroupEncoding::kPredictiveDeltaV1;
+  Expect(!PoseGroupHeaderShapeValid(malformed, MessageKind::kPoseBaseline),
+         "baseline carrying predictive-delta encoding was accepted");
+  malformed.baseline_id = 1;
+  Expect(PoseGroupHeaderShapeValid(malformed, MessageKind::kPoseDelta),
+         "predictive delta encoding was rejected for a delta");
+  malformed.encoding = static_cast<PoseGroupEncoding>(6);
   Expect(!PoseGroupHeaderShapeValid(malformed, MessageKind::kPoseDelta),
          "unknown pose encoding was accepted");
 }

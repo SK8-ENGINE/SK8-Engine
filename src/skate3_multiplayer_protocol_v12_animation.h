@@ -45,7 +45,8 @@ AnimationWordStreamMatchesPoseGroup(MessageKind kind,
       (header.encoding != PoseGroupEncoding::kV11WordStream &&
        header.encoding != PoseGroupEncoding::kBitPackedV1 &&
        header.encoding != PoseGroupEncoding::kSemanticDeltaV1 &&
-       header.encoding != PoseGroupEncoding::kBlockDeltaV1) ||
+       header.encoding != PoseGroupEncoding::kBlockDeltaV1 &&
+       header.encoding != PoseGroupEncoding::kPredictiveDeltaV1) ||
       header.element_count != words[1]) {
     return false;
   }
@@ -65,7 +66,8 @@ AnimationWordStreamMatchesPoseGroup(MessageKind kind,
 AnimationPoseGroupEncodingAllowed(PoseGroupEncoding encoding, bool keyframe) {
   return PoseGroupEncodingValid(encoding) &&
          (!keyframe || (encoding != PoseGroupEncoding::kSemanticDeltaV1 &&
-                        encoding != PoseGroupEncoding::kBlockDeltaV1));
+                        encoding != PoseGroupEncoding::kBlockDeltaV1 &&
+                        encoding != PoseGroupEncoding::kPredictiveDeltaV1));
 }
 
 [[nodiscard]] inline bool
