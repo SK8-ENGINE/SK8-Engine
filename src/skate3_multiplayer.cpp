@@ -2897,6 +2897,24 @@ class Runtime {
       REXLOG_INFO(
           "multiplayer: peer role={} capabilities=0x{:08X}",
           packet.sender_role, packet.capabilities);
+      bool steam_transport = false;
+#if defined(_WIN32)
+      steam_transport = using_steam_;
+#endif
+      const std::uint32_t fanout_target =
+          lifecycle::LocalhostAppearanceFanoutRestartTarget(
+              static_cast<std::uint32_t>(bound_role_),
+              steam_transport, packet.sender_role, changed,
+              local_appearance_identity_);
+      if (fanout_target != 0) {
+        outbound_appearance_[fanout_target].Reset(
+            local_appearance_identity_);
+        REXLOG_INFO(
+            "multiplayer: restarted localhost appearance fanout "
+            "peer={} target={} id={:016X}",
+            packet.sender_role, fanout_target,
+            local_appearance_identity_);
+      }
     }
     switch (packet.message_type) {
       case ControlMessageType::kCapabilities:

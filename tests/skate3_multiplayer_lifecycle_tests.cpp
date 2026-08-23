@@ -14,6 +14,8 @@ using skate3::multiplayer::lifecycle::AppearanceResendTargetRole;
 using skate3::multiplayer::lifecycle::CanBeginAppearanceAssembly;
 using skate3::multiplayer::lifecycle::CompleteAppearancePieceCount;
 using skate3::multiplayer::lifecycle::kMaximumIncompleteAppearanceBytes;
+using skate3::multiplayer::lifecycle::
+    LocalhostAppearanceFanoutRestartTarget;
 using skate3::multiplayer::lifecycle::OutboundAppearanceState;
 using skate3::multiplayer::lifecycle::PeerGenerationTracker;
 using skate3::multiplayer::lifecycle::RemoteAppearanceRetirementMatches;
@@ -315,6 +317,29 @@ void TestAppearanceResendRouting() {
          "invalid requester role must not produce a resend target");
 }
 
+void TestLocalhostAppearanceFanoutRestart() {
+  constexpr std::uint64_t identity = 0x12345678ABCDEF01ull;
+  Expect(LocalhostAppearanceFanoutRestartTarget(
+             2, false, 4, true, identity) == 1,
+         "localhost client did not restart upstream appearance fanout "
+         "for a late peer");
+  Expect(LocalhostAppearanceFanoutRestartTarget(
+             1, false, 4, true, identity) == 0,
+         "localhost host incorrectly restarted an upstream fanout");
+  Expect(LocalhostAppearanceFanoutRestartTarget(
+             2, true, 4, true, identity) == 0,
+         "Steam peer incorrectly used localhost fanout recovery");
+  Expect(LocalhostAppearanceFanoutRestartTarget(
+             2, false, 1, true, identity) == 0,
+         "host capability advertisement restarted downstream fanout");
+  Expect(LocalhostAppearanceFanoutRestartTarget(
+             2, false, 4, false, identity) == 0,
+         "stable peer capabilities repeatedly restarted appearance fanout");
+  Expect(LocalhostAppearanceFanoutRestartTarget(
+             2, false, 4, true, 0) == 0,
+         "empty local appearance started a fanout stream");
+}
+
 void TestAppearanceResendRestart() {
   using Clock = std::chrono::steady_clock;
   constexpr std::uint64_t identity = 0x12345678ABCDEF01ull;
@@ -358,6 +383,7 @@ int main() {
   TestAppearanceAssemblyTimeout();
   TestCompleteAppearancePieceCount();
   TestAppearanceResendRouting();
+  TestLocalhostAppearanceFanoutRestart();
   TestAppearanceResendRestart();
 
   if (g_failures != 0) {

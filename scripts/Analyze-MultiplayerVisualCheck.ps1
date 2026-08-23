@@ -397,6 +397,12 @@ foreach ($client in $clientDirectories) {
         ))
     )
     $summary.Add(
+        'appearance_fanout_restarts=' +
+        (Match-Count $lines (
+            'multiplayer: restarted localhost appearance fanout peer='
+        ))
+    )
+    $summary.Add(
         'stale_appearance_requests=' +
         (Match-Count $lines (
             'multiplayer: ignored stale appearance request role='

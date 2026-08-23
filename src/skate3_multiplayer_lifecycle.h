@@ -119,6 +119,24 @@ AppearanceAssemblyExpired(typename Clock::time_point now,
   return using_steam || local_role == 1 ? requester_role : 1;
 }
 
+// Localhost non-host clients upload one appearance stream to role 1 for live
+// fan-out. A newly observed downstream peer joined after that stream may have
+// completed, so restart the upstream stream once when its capabilities first
+// arrive. Steam and the localhost host already have per-recipient state.
+[[nodiscard]] constexpr std::uint32_t
+LocalhostAppearanceFanoutRestartTarget(
+    std::uint32_t local_role, bool using_steam,
+    std::uint32_t observed_role, bool capabilities_changed,
+    std::uint64_t local_appearance_identity) {
+  if (using_steam || local_role <= 1 || local_role > 100 ||
+      observed_role <= 1 || observed_role > 100 ||
+      observed_role == local_role || !capabilities_changed ||
+      local_appearance_identity == 0) {
+    return 0;
+  }
+  return 1;
+}
+
 struct OutboundAppearanceState {
   std::uint64_t identity = 0;
   std::uint16_t next_chunk = 0;
