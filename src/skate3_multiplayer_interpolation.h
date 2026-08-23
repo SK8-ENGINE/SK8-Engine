@@ -19,6 +19,12 @@ inline std::int64_t RecommendedDelayMicroseconds(
       std::int64_t{
           std::clamp(configured_delay_ms, 0, 250)} *
       1000;
+  // Zero is an explicit diagnostic bypass. Without this escape hatch the
+  // adaptive floor would silently turn a requested zero-delay comparison
+  // back into roughly 100-130 ms at the normal 20 Hz pose cadence.
+  if (configured_delay_ms <= 0) {
+    return 0;
+  }
   if (!have_animation_samples) {
     return configured_delay_us;
   }

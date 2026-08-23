@@ -398,6 +398,10 @@ void TestAdaptiveInterpolationDelayCoversMeasuredStalls() {
 
   Expect(
       RecommendedDelayMicroseconds(
+          0, 50000, 50000, true) == 0,
+      "explicit zero-delay diagnostic was raised by the adaptive floor");
+  Expect(
+      RecommendedDelayMicroseconds(
           100, 50000, 5000, true) == 120000,
       "20 Hz final-pose stream did not retain two frames plus jitter");
   Expect(

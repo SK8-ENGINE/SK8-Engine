@@ -149,7 +149,8 @@ REXCVAR_DEFINE_INT32(
     skate3::multiplayer::bandwidth::kMinimumInterpolationDelayMs, "Skate 3",
     "Minimum remote-pose buffer duration. Skeletal animation automatically "
     "retains at least two animation frames plus measured network jitter; "
-    "larger values trade responsiveness for additional stability.")
+    "larger values trade responsiveness for additional stability. Zero is "
+    "an explicit diagnostic bypass of the adaptive safety delay.")
     .range(0, 250)
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 REXCVAR_DEFINE_INT32(

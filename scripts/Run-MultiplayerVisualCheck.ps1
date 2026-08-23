@@ -11,7 +11,8 @@ param(
     [switch]$AppearanceRecoveryCheck,
     [switch]$RealtimePriorityCheck,
     [switch]$SmoothnessCheck,
-    [switch]$HighInterpolationCheck
+    [switch]$HighInterpolationCheck,
+    [switch]$MinimumInterpolationCheck
 )
 
 Set-StrictMode -Version Latest
@@ -52,12 +53,16 @@ if ($SmoothnessCheck -and $Clients -ne 5) {
 if ($HighInterpolationCheck -and $Clients -ne 5) {
     throw 'The high-interpolation check requires exactly five clients.'
 }
+if ($MinimumInterpolationCheck -and $Clients -ne 5) {
+    throw 'The minimum-interpolation check requires exactly five clients.'
+}
 $specializedChecks = @(
     @(
         [bool]$AppearanceRecoveryCheck,
         [bool]$RealtimePriorityCheck,
         [bool]$SmoothnessCheck,
-        [bool]$HighInterpolationCheck
+        [bool]$HighInterpolationCheck,
+        [bool]$MinimumInterpolationCheck
     ) | Where-Object { $_ }
 )
 if ($specializedChecks.Count -gt 1) {
@@ -544,7 +549,13 @@ try {
     # otherwise healthy network streams inherit 100-250 ms capture
     # holes. This cap affects only the local visual-check processes.
     $guestFpsCap = if ($Clients -ge 5) { 90 } else { 120 }
-    $interpolationMs = if ($HighInterpolationCheck) { 250 } else { 100 }
+    $interpolationMs = if ($HighInterpolationCheck) {
+        250
+    } elseif ($MinimumInterpolationCheck) {
+        0
+    } else {
+        100
+    }
     $manifest = [ordered]@{
         schema = 1
         created_local = (Get-Date).ToString('o')
@@ -586,6 +597,7 @@ try {
         realtime_priority_check = [bool]$RealtimePriorityCheck
         smoothness_check = [bool]$SmoothnessCheck
         high_interpolation_check = [bool]$HighInterpolationCheck
+        minimum_interpolation_check = [bool]$MinimumInterpolationCheck
         appearance_recovery_receiver = if ($AppearanceRecoveryCheck) {
             3
         } else {
@@ -660,6 +672,40 @@ Failure:
 
 Do not treat logs as proof of visual correctness. Report the visual result
 separately, then ask the agent to analyze this run directory.
+"@
+    } elseif ($MinimumInterpolationCheck) {
+        @"
+MULTIPLAYER MINIMUM-INTERPOLATION CHECK
+
+Run directory:
+$runRoot
+
+Clients: 5
+Transport: localhost UDP
+Quality: Complete pose, 60 Hz root, 20 Hz animation
+Interpolation: true 0 ms diagnostic bypass
+Change under test: the presentation buffer and its adaptive safety floor are
+disabled. Remote playback targets the newest available sender time. Rates,
+pose data, four-sample curve implementation, outfits, boards, and transport
+remain unchanged.
+
+Visual scenario:
+1. Wait until all five clients have loaded the same map and every client sees
+   four complete remote skaters.
+2. Play normally for 60-90 seconds. Keep the skaters reasonably nearby and
+   use ordinary skating, turns, ollies, and tricks.
+3. Compare responsiveness and micro-stutter against the previous 250 ms run.
+   No role-by-role choreography is required.
+4. Close all clients when finished.
+
+Expected tradeoff:
+- Remote movement should have the least intentional latency possible.
+- With no future snapshot buffered, animation may hold or look less smooth
+  when a complete 20 Hz pose has not arrived yet. This is intentional for the
+  diagnostic and is not the proposed final shipping value.
+
+Report whether responsiveness improves and whether micro-stutter is better,
+unchanged, or worse. Logs cannot establish visual smoothness.
 "@
     } elseif ($HighInterpolationCheck) {
         @"
@@ -1089,6 +1135,8 @@ separately, then ask the agent to analyze this run directory.
     Write-Host ''
     if ($AppearanceRecoveryCheck) {
         Write-Host 'MULTIPLAYER APPEARANCE RECOVERY CHECK READY'
+    } elseif ($MinimumInterpolationCheck) {
+        Write-Host 'MULTIPLAYER MINIMUM-INTERPOLATION CHECK READY'
     } elseif ($HighInterpolationCheck) {
         Write-Host 'MULTIPLAYER HIGH-INTERPOLATION CHECK READY'
     } elseif ($SmoothnessCheck) {
@@ -1104,7 +1152,8 @@ separately, then ask the agent to analyze this run directory.
     if (-not $AppearanceRecoveryCheck -and
         -not $RealtimePriorityCheck -and
         -not $SmoothnessCheck -and
-        -not $HighInterpolationCheck) {
+        -not $HighInterpolationCheck -and
+        -not $MinimumInterpolationCheck) {
         Write-Host (
             'After closing client 3, wait 7 seconds and run ' +
             'RELAUNCH_MULTIPLAYER_VISUAL_CLIENT_3.bat.'
