@@ -327,6 +327,7 @@ def analyze_package(
     if include_payloads:
         result["_vertex_bytes"] = vertex_bytes
         result["_indices"] = indices
+        result["_collision_bytes"] = collision_bytes
     return result
 
 

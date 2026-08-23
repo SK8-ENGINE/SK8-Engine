@@ -137,6 +137,11 @@ def build_scene(manifest_path: Path) -> dict[str, int]:
                     if f"uvs_{mesh_index}" in arrays
                     else None
                 )
+                normals = (
+                    _runtime_to_blender(arrays[f"normals_{mesh_index}"])
+                    if f"normals_{mesh_index}" in arrays
+                    else None
+                )
 
                 object_name = _safe_name(
                     mesh_entry["material_name"] or mesh_entry["name"],
@@ -157,6 +162,10 @@ def build_scene(manifest_path: Path) -> dict[str, int]:
 
                 for polygon in mesh_data.polygons:
                     polygon.use_smooth = True
+                if normals is not None:
+                    mesh_data.normals_split_custom_set_from_vertices(
+                        normals.tolist()
+                    )
 
                 obj = bpy.data.objects.new(object_name, mesh_data)
                 asset_collection.objects.link(obj)

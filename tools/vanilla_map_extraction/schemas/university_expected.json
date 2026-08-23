@@ -1,0 +1,46 @@
+{
+  "format_version": 9,
+  "map_name": "University District",
+  "file_bytes": 123930019,
+  "texture_decoded_bytes": 222193664,
+  "maximum_visual_index": 2081270,
+  "counts": {
+    "materials": 350,
+    "textures": 325,
+    "vertices": 2081271,
+    "indices": 4936851,
+    "collision_triangles": 1329037,
+    "grind_rails": 0,
+    "hinged_doors": 0,
+    "local_lights": 0,
+    "npc_routes": 0
+  },
+  "bounds_min": [
+    -727.3729858398438,
+    -6.848999977111816,
+    -1413.08203125
+  ],
+  "bounds_max": [
+    807.6400146484375,
+    296.1000061035156,
+    792.677978515625
+  ],
+  "integrity": {
+    "semantic_metadata_sha256": "d9886c7edc5a07ee94552615ffc0cd58b7407017a36f6876ab3615bdcce50011",
+    "materials_sha256": "3128cbe31345832f90f570a5a964e101bca1b32ca049f4229900d76a2603c124",
+    "decoded_textures_sha256": "464c6c03aaafa91126b758149667e4bf3aaf0b178759e59d94c6e0005dbc77b4",
+    "expanded_visual_triangles_sha256": "740f1a2a2b7ef566946549a8fee1710fc01499b7002db2dbab6d93d1b25c29b6",
+    "expanded_visual_triangles_1e6_sha256": "23296307f6486254ae5c5394fcc9382c4c5b706bb2883702cccdb09a4d2b61e2",
+    "collision_sha256": "9b7a29dcd5b2b37ee2681f402602dc2a8619ea6519f50db3a0c03896ede9813a",
+    "authored_features_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "compiled_world": {
+    "render_source_triangles": 1645617,
+    "render_output_triangles": 1777954,
+    "render_chunks": 515,
+    "collision_mode": "spatial",
+    "collision_cell_size": 256,
+    "collision_chunks": 44,
+    "collision_triangles": 1329037
+  }
+}

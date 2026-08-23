@@ -89,7 +89,10 @@ constexpr std::uint32_t kMatrixOffset = 112;
 constexpr std::uint32_t kGroundResultOffset = 176;
 constexpr std::size_t kMaximumOwnedStaticChunks = 96;
 constexpr std::size_t kMaximumHingedDoors = 32;
-constexpr float kOwnedCollisionCellSize = 128.0f;
+// University occupies 140 non-empty cells at 128 m, which exceeds the fixed
+// collection capacity. At 256 m it occupies 44 cells, and its largest cell
+// remains below kMaximumTrianglesPerOwnedChunk without dropping triangles.
+constexpr float kOwnedCollisionCellSize = 256.0f;
 constexpr std::size_t kMaximumTrianglesPerOwnedChunk = 400000;
 
 std::atomic<State> g_state{State::Disabled};

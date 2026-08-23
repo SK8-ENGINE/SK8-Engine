@@ -1,7 +1,9 @@
 # Skate 3 Vanilla Map Extraction
 
-This workspace is intentionally separate from `Source` so retail-map research
-does not overlap multiplayer or engine development.
+This workspace lives only in the dedicated University linked worktree so
+retail-map research does not overlap multiplayer, UI, or the primary checkout.
+The original external extraction directory remains an untouched verified
+backup.
 
 Initial target: `DIST_MegaPark`.
 
@@ -37,11 +39,11 @@ bytes:
 - 1,013 preserved simulation/collision resources;
 - 2,075,425 render vertices and 1,645,617 render triangles.
 
-The generated scene is `blender/DIST_University.blend`. The 2,046 available
-images are packed into the `.blend`, and models are grouped by source stream
-cell. Twenty-three material IDs refer to shared textures that were not found
-as resources in the available base-game archives; these are clearly tagged
-white fallback materials.
+The generated extraction scene is `blender/DIST_University.blend`. The 2,046
+available images are packed into the `.blend`, and models are grouped by
+source stream cell. Twenty-three material IDs refer to shared textures that
+were not found as resources in the available base-game archives; these are
+clearly tagged white fallback materials.
 
 To rebuild without making a preview render:
 
@@ -49,10 +51,65 @@ To rebuild without making a preview render:
 .\tools\Build-UniversityBlend.ps1
 ```
 
-Open the generated scene in Blender and use Home/Frame All in the 3D viewport
-to focus the complete district. Visual validation is intentionally left to the
-user. Simulation resources are preserved under `Collision_RAW`, but collision
-geometry is not decoded yet.
+`blender/prepare_university_owned.py` converts that extraction scene into the
+owned-world authoring contract and saves
+`blender/DIST_University_Owned.blend`. It preserves retail vertex normals,
+base UVs, material textures, transforms, and the full visual mesh. The current
+owned package has:
+
+- 350 materials and 325 embedded textures;
+- 2,081,271 indexed visual vertices and 1,645,617 render triangles;
+- 1,329,037 visual-derived collision triangles;
+- bounds from `(-727.373, -6.849, -1413.082)` to
+  `(807.640, 296.100, 792.678)`;
+- a runtime spawn at `(200, 59, -50)`.
+
+The 1,013 retail simulation resources remain preserved, but their collision
+format is not decoded. Collision is therefore derived from structural
+presentation meshes; water, foliage, decals, reflections, and other obvious
+non-physical presentation objects are excluded. This is an explicit
+approximation, not a claim of retail collision parity. Grind splines, AI
+routes, doors, and local lights are not yet recovered.
+
+The SKATE v9 package is
+`intermediate/university/University.skate`. It is 123,930,019 bytes and
+losslessly decodes to the counts and bounds above. The offline engine validator
+also compiles it into 515 render chunks and 44 collision chunks using the
+verified 256 metre collision-cell fallback.
+
+## User-run University visual check
+
+From the root of the dedicated University worktree, run:
+
+```powershell
+.\Run-University-Visual-Check.bat
+```
+
+The launcher performs stale-only Blender preparation/export, verifies the
+tracked semantic integrity manifest, incrementally builds the dedicated game
+and C++ package validator, validates render and collision compilation, and
+stages an isolated portable run. It then launches the game with University,
+owned collision, map-loader telemetry, and renderer performance telemetry
+enabled.
+
+Every invocation uses
+`out/university-visual-check/runs/<yyyyMMdd_HHmmss>/`. Its `logs/` directory
+contains preparation output, package analysis, engine validation, exact launch
+arguments, hashes/commit metadata, and `skate3_university.log`. The launcher
+prints the exact path before starting the game and reports failures before
+launch.
+
+Agents must never execute this `.bat` file or launch `skate3.exe`. Offline
+preparation can be checked safely with:
+
+```powershell
+.\tools\vanilla_map_extraction\tools\Invoke-UniversityVisualCheck.ps1 `
+  -PrepareOnly
+```
+
+Visual correctness remains a user decision. Passing loader, counts, bounds,
+hash, render-chunk, collision-chunk, and telemetry checks does not prove that
+the map looks or skates correctly.
 
 ## Hawaiian Dream extraction status
 
