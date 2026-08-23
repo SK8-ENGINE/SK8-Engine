@@ -2024,8 +2024,9 @@ class Runtime {
     }
 
     const auto now = Clock::now();
+    std::uint64_t ideal_presentation_time_us = 0;
     if (local_presentation_time_us != 0) {
-      current_presentation_time_us_ =
+      ideal_presentation_time_us =
           local_presentation_time_us;
       last_presentation_sample_time_us_ =
           local_presentation_time_us;
@@ -2034,13 +2035,34 @@ class Runtime {
     } else if (
         presentation_clock_valid_ &&
         last_presentation_sample_at_ != Clock::time_point{}) {
-      current_presentation_time_us_ =
+      ideal_presentation_time_us =
           playback::ExtrapolateSceneTime(
               last_presentation_sample_time_us_,
               std::chrono::duration_cast<
                   std::chrono::microseconds>(
                   now - last_presentation_sample_at_)
                   .count());
+    }
+    if (presentation_clock_valid_ &&
+        ideal_presentation_time_us != 0) {
+      // Native scene samples can repeat for several worker ticks and then
+      // jump forward together. Treat them as phase anchors instead of
+      // directly driving every remote cursor: advance continuously from the
+      // worker's monotonic clock and slew toward the latest scene estimate.
+      const auto wall_time_us = static_cast<std::int64_t>(
+          std::min<std::uint64_t>(
+              NowMicroseconds(),
+              static_cast<std::uint64_t>(
+                  std::numeric_limits<std::int64_t>::max())));
+      const auto ideal_time_us = static_cast<std::int64_t>(
+          std::min<std::uint64_t>(
+              ideal_presentation_time_us,
+              static_cast<std::uint64_t>(
+                  std::numeric_limits<std::int64_t>::max())));
+      current_presentation_time_us_ =
+          static_cast<std::uint64_t>(
+              scene_presentation_clock_.Advance(
+                  wall_time_us, ideal_time_us));
     } else {
       current_presentation_time_us_ = NowMicroseconds();
     }
@@ -2436,7 +2458,7 @@ class Runtime {
         last_rate_snapshot_.animation_present_held_oldest);
     REXLOG_INFO(
         "multiplayer-net: role={} peers={} visible={} quality={} interp={} "
-        "clock=scene "
+        "clock=scene-slewed "
         "rates={}/{}Hz tx={:.1f}KiB/s "
         "rx={:.1f}KiB/s tx={:.1f}pps rx={:.1f}pps anim={:.1f}/{:.1f}fps "
         "classes=tx({:.1f}r/{:.1f}a/{:.1f}p/{:.1f}c)KiB/s "
@@ -4885,6 +4907,7 @@ class Runtime {
     local_appearance_identity_ = 0;
     current_presentation_time_us_ = 0;
     presentation_clock_valid_ = false;
+    scene_presentation_clock_.Reset();
     last_presentation_sample_time_us_ = 0;
     last_presentation_sample_at_ = {};
     pose_send_deadline_.Reset();
@@ -4948,6 +4971,7 @@ class Runtime {
   NetworkTuning network_tuning_;
   std::uint64_t current_presentation_time_us_ = 0;
   bool presentation_clock_valid_ = false;
+  playback::PresentationClock scene_presentation_clock_;
   std::uint64_t last_presentation_sample_time_us_ = 0;
   Clock::time_point last_presentation_sample_at_{};
   TelemetrySnapshot telemetry_;

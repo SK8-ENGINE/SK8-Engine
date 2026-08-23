@@ -496,6 +496,32 @@ void TestPresentationClockConvergesWithoutRewinding() {
          "presentation clock did not converge on reduced delay");
 }
 
+void TestPresentationClockSmoothsSteppedSceneAnchors() {
+  using skate3::multiplayer::playback::PresentationClock;
+
+  PresentationClock clock;
+  std::int64_t wall_time_us = 1000000;
+  std::int64_t scene_anchor_us = 900000;
+  std::int64_t previous_us =
+      clock.Advance(wall_time_us, scene_anchor_us);
+
+  // The native scene timestamp may be published at a lower cadence than the
+  // replication worker. Repeated anchors followed by one larger step must
+  // not stop and then jump every remote presentation cursor.
+  for (int tick = 1; tick <= 120; ++tick) {
+    wall_time_us += 4000;
+    if (tick % 4 == 0) {
+      scene_anchor_us += 16000;
+    }
+    const std::int64_t current_us =
+        clock.Advance(wall_time_us, scene_anchor_us);
+    Expect(current_us - previous_us >= 3600 &&
+               current_us - previous_us <= 4400,
+           "stepped scene anchors leaked into presentation cadence");
+    previous_us = current_us;
+  }
+}
+
 void TestBoundedPoseCurvePreservesSamplesAndLimits() {
   using skate3::multiplayer::pose_curve::
       InterpolateBoundedHermite;
@@ -596,6 +622,7 @@ int main() {
   TestPresentationClockRejectsCursorJumps();
   TestSceneTimeExtrapolationUsesCaptureClock();
   TestPresentationClockConvergesWithoutRewinding();
+  TestPresentationClockSmoothsSteppedSceneAnchors();
   TestBoundedPoseCurvePreservesSamplesAndLimits();
   TestPoseCurveHasContinuousSegmentVelocity();
   TestMotionTraceMeasuresCadenceAndKeepsContinuity();
