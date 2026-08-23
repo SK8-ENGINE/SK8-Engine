@@ -89,6 +89,10 @@ AppID and follow Valve's setup and redistributable requirements.
   step.
 - Packets from a different map, protocol version, client slot, process
   session, or unexpected Steam identity are rejected.
+- Peers advertise optional control capabilities with a fixed-size packet.
+  Steam sends these advertisements directly; localhost clients use a
+  directed host relay. Peers that do not advertise a feature retain the
+  existing protocol-v11 behavior.
 - A stale remote player disappears after 1.5 seconds.
 - The sender captures Skate 3's final rendered bone palettes after its
   animation graph, IK, tricks, and bails have evaluated.

@@ -16,6 +16,10 @@ using skate3::multiplayer::protocol::AnimationFragmentShapeValid;
 using skate3::multiplayer::protocol::AppearanceFragmentByteCount;
 using skate3::multiplayer::protocol::AppearanceFragmentPacket;
 using skate3::multiplayer::protocol::AppearanceFragmentShapeValid;
+using skate3::multiplayer::protocol::AppearanceDeliveryState;
+using skate3::multiplayer::protocol::ControlMessageType;
+using skate3::multiplayer::protocol::ControlPacket;
+using skate3::multiplayer::protocol::ControlPacketShapeValid;
 using skate3::multiplayer::protocol::PosePacket;
 using skate3::multiplayer::protocol::SequenceNewer;
 using skate3::multiplayer::protocol::SequenceNewerOrEqual;
@@ -24,6 +28,10 @@ using skate3::multiplayer::protocol::kAnimationFragmentWords;
 using skate3::multiplayer::protocol::kAnimationPacketMagic;
 using skate3::multiplayer::protocol::kAppearanceChunkBytes;
 using skate3::multiplayer::protocol::kAppearancePacketMagic;
+using skate3::multiplayer::protocol::kCapabilityAppearanceRequest;
+using skate3::multiplayer::protocol::kCapabilityAppearanceState;
+using skate3::multiplayer::protocol::kCapabilityControlV1;
+using skate3::multiplayer::protocol::kControlPacketMagic;
 using skate3::multiplayer::protocol::kMaximumAnimationFragments;
 using skate3::multiplayer::protocol::kMaximumAnimationFrameWords;
 using skate3::multiplayer::protocol::kMaximumAppearanceBytes;
@@ -57,6 +65,8 @@ void TestWireLayout() {
          "animation magic changed");
   Expect(kAppearancePacketMagic == 0x5041334Bu,
          "appearance magic changed");
+  Expect(kControlPacketMagic == 0x434D334Bu,
+         "control magic changed");
   Expect(sizeof(PosePacket) == 72, "root packet size changed");
   Expect(offsetof(AnimationFragmentPacket, words) == 56,
          "animation payload offset changed");
@@ -66,6 +76,8 @@ void TestWireLayout() {
          "appearance payload offset changed");
   Expect(sizeof(AppearanceFragmentPacket) == 1062,
          "appearance packet capacity changed");
+  Expect(sizeof(ControlPacket) == 40,
+         "control packet size changed");
   Expect(kMaximumAnimationFragments == 16,
          "animation fragment limit changed");
   Expect(kMaximumAnimationFrameWords == 8192,
@@ -173,6 +185,27 @@ void TestAppearanceGoldenBytes() {
   std::memcpy(actual.data(), &packet, actual.size());
   Expect(actual == expected,
          "appearance fragment no longer matches the v11 golden bytes");
+}
+
+void TestControlGoldenBytes() {
+  ControlPacket packet;
+  packet.sender_role = 0x01020304u;
+  packet.sender_session = 0x05060708u;
+  packet.target_role = 0x090A0B0Cu;
+  packet.map_hash = 0xA1B2C3D4u;
+  packet.capabilities = 0x11223344u;
+  packet.appearance_id = 0x0102030405060708ull;
+
+  constexpr std::array<std::uint8_t, 40> expected = {
+      0x4B, 0x33, 0x4D, 0x43, 0x0B, 0x00, 0x28, 0x00,
+      0x04, 0x03, 0x02, 0x01, 0x08, 0x07, 0x06, 0x05,
+      0x0C, 0x0B, 0x0A, 0x09, 0xD4, 0xC3, 0xB2, 0xA1,
+      0x01, 0x00, 0x00, 0x00, 0x44, 0x33, 0x22, 0x11,
+      0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01,
+  };
+
+  Expect(BytesOf<40>(packet) == expected,
+         "control packet no longer matches its golden bytes");
 }
 
 void TestVariablePacketSizes() {
@@ -288,6 +321,48 @@ void TestAppearanceFragmentShapes() {
          "oversized appearance payload was accepted");
 }
 
+void TestControlPacketShapes() {
+  ControlPacket packet;
+  packet.sender_role = 1;
+  packet.sender_session = 100;
+  packet.target_role = 2;
+  packet.map_hash = 200;
+  packet.capabilities = kCapabilityControlV1;
+  Expect(ControlPacketShapeValid(packet),
+         "valid capability advertisement was rejected");
+
+  packet.target_role = packet.sender_role;
+  Expect(!ControlPacketShapeValid(packet),
+         "self-targeted control packet was accepted");
+  packet.target_role = 2;
+
+  packet.capabilities = 0;
+  Expect(!ControlPacketShapeValid(packet),
+         "control packet without the base capability was accepted");
+
+  packet.capabilities =
+      kCapabilityControlV1 | kCapabilityAppearanceState;
+  packet.message_type = ControlMessageType::kAppearanceState;
+  packet.appearance_state = AppearanceDeliveryState::kReceived;
+  packet.appearance_id = 0x1234;
+  Expect(ControlPacketShapeValid(packet),
+         "valid appearance-state control packet was rejected");
+
+  packet.appearance_state = AppearanceDeliveryState::kUnknown;
+  Expect(!ControlPacketShapeValid(packet),
+         "appearance state without a result was accepted");
+
+  packet.message_type = ControlMessageType::kAppearanceRequest;
+  packet.capabilities =
+      kCapabilityControlV1 | kCapabilityAppearanceRequest;
+  Expect(ControlPacketShapeValid(packet),
+         "valid appearance request was rejected");
+
+  packet.appearance_id = 0;
+  Expect(!ControlPacketShapeValid(packet),
+         "appearance request without an identity was accepted");
+}
+
 void TestSequenceOrderingAcrossWrap() {
   Expect(SequenceNewer(11, 10), "ordinary newer sequence was rejected");
   Expect(SequenceOlder(10, 11), "ordinary older sequence was accepted");
@@ -318,9 +393,11 @@ int main() {
   TestPoseGoldenBytes();
   TestAnimationGoldenBytes();
   TestAppearanceGoldenBytes();
+  TestControlGoldenBytes();
   TestVariablePacketSizes();
   TestAnimationFragmentShapes();
   TestAppearanceFragmentShapes();
+  TestControlPacketShapes();
   TestSequenceOrderingAcrossWrap();
 
   if (g_failures != 0) {

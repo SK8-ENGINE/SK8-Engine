@@ -10,6 +10,8 @@ inline constexpr std::uint32_t kAnimationPacketMagic =
     0x414D334Bu;  // "K3MA"
 inline constexpr std::uint32_t kAppearancePacketMagic =
     0x5041334Bu;  // "K3AP"
+inline constexpr std::uint32_t kControlPacketMagic =
+    0x434D334Bu;  // "K3MC"
 inline constexpr std::uint16_t kProtocolVersion = 11;
 
 // Complete vanilla CAC/ABIN hierarchy (indices 0..130). Keeping this at 128
@@ -37,6 +39,23 @@ enum class AnimationTrackEncoding : std::uint16_t {
   kAffineRowsWideTranslation = 2,
   kRigidQuaternionWideTranslation = 3,
 };
+
+enum class ControlMessageType : std::uint16_t {
+  kCapabilities = 1,
+  kAppearanceState = 2,
+  kAppearanceRequest = 3,
+};
+
+enum class AppearanceDeliveryState : std::uint16_t {
+  kUnknown = 0,
+  kReceived = 1,
+  kInstalled = 2,
+  kFailed = 3,
+};
+
+inline constexpr std::uint32_t kCapabilityControlV1 = 1u << 0;
+inline constexpr std::uint32_t kCapabilityAppearanceState = 1u << 1;
+inline constexpr std::uint32_t kCapabilityAppearanceRequest = 1u << 2;
 
 #pragma pack(push, 1)
 struct PosePacket {
@@ -86,6 +105,22 @@ struct AppearanceFragmentPacket {
   std::uint16_t chunk_count = 0;
   std::uint16_t chunk_bytes = 0;
   std::uint8_t bytes[kAppearanceChunkBytes] = {};
+};
+
+struct ControlPacket {
+  std::uint32_t magic = kControlPacketMagic;
+  std::uint16_t version = kProtocolVersion;
+  std::uint16_t byte_count = sizeof(ControlPacket);
+  std::uint32_t sender_role = 0;
+  std::uint32_t sender_session = 0;
+  std::uint32_t target_role = 0;
+  std::uint32_t map_hash = 0;
+  ControlMessageType message_type =
+      ControlMessageType::kCapabilities;
+  AppearanceDeliveryState appearance_state =
+      AppearanceDeliveryState::kUnknown;
+  std::uint32_t capabilities = 0;
+  std::uint64_t appearance_id = 0;
 };
 #pragma pack(pop)
 
@@ -181,6 +216,40 @@ struct AppearanceFragmentPacket {
                  packet.total_bytes, packet.chunk_index);
 }
 
+[[nodiscard]] constexpr bool ControlPacketShapeValid(
+    const ControlPacket& packet) {
+  if (packet.magic != kControlPacketMagic ||
+      packet.version != kProtocolVersion ||
+      packet.byte_count != sizeof(ControlPacket) ||
+      packet.sender_role < 1 || packet.sender_role > 100 ||
+      packet.target_role < 1 || packet.target_role > 100 ||
+      packet.sender_role == packet.target_role ||
+      (packet.capabilities & kCapabilityControlV1) == 0) {
+    return false;
+  }
+  switch (packet.message_type) {
+    case ControlMessageType::kCapabilities:
+      return packet.appearance_state ==
+                 AppearanceDeliveryState::kUnknown &&
+             packet.appearance_id == 0;
+    case ControlMessageType::kAppearanceState:
+      return (packet.capabilities &
+              kCapabilityAppearanceState) != 0 &&
+             packet.appearance_id != 0 &&
+             packet.appearance_state >=
+                 AppearanceDeliveryState::kReceived &&
+             packet.appearance_state <=
+                 AppearanceDeliveryState::kFailed;
+    case ControlMessageType::kAppearanceRequest:
+      return (packet.capabilities &
+              kCapabilityAppearanceRequest) != 0 &&
+             packet.appearance_id != 0 &&
+             packet.appearance_state ==
+                 AppearanceDeliveryState::kUnknown;
+  }
+  return false;
+}
+
 // Sequence numbers use the standard half-range rule. Subtraction is
 // intentionally unsigned so rollover from UINT32_MAX to zero remains a
 // forward step; the signed interpretation is only used after that defined
@@ -206,5 +275,6 @@ static_assert(offsetof(AnimationFragmentPacket, words) == 56);
 static_assert(sizeof(AnimationFragmentPacket) == 1096);
 static_assert(offsetof(AppearanceFragmentPacket, bytes) == 38);
 static_assert(sizeof(AppearanceFragmentPacket) == 1062);
+static_assert(sizeof(ControlPacket) == 40);
 
 }  // namespace skate3::multiplayer::protocol

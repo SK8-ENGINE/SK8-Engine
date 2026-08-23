@@ -128,6 +128,9 @@ using protocol::AppearanceChunkByteOffset;
 using protocol::AppearanceFragmentByteCount;
 using protocol::AppearanceFragmentShapeValid;
 using protocol::AppearanceFragmentPacket;
+using protocol::ControlMessageType;
+using protocol::ControlPacket;
+using protocol::ControlPacketShapeValid;
 using protocol::PosePacket;
 using protocol::SequenceNewer;
 using protocol::SequenceNewerOrEqual;
@@ -136,6 +139,8 @@ using protocol::kAnimationKeyframeInterval;
 using protocol::kAnimationPacketMagic;
 using protocol::kAppearanceChunkBytes;
 using protocol::kAppearancePacketMagic;
+using protocol::kCapabilityControlV1;
+using protocol::kControlPacketMagic;
 using protocol::kMaximumAnimationBones;
 using protocol::kMaximumAnimationFrameWords;
 using protocol::kMaximumAnimationTracks;
@@ -343,6 +348,12 @@ struct OutboundAppearanceState {
   Clock::time_point retry_after{};
 };
 
+struct PeerControlState {
+  std::uint32_t capabilities = 0;
+  Clock::time_point last_advertisement_sent{};
+  Clock::time_point last_advertisement_received{};
+};
+
 std::int64_t PresentationDelayMicroseconds(
     const RemotePeerState& peer, std::int32_t interpolation_ms) {
   const std::int64_t configured_delay_us =
@@ -400,12 +411,16 @@ struct TelemetrySnapshot {
   std::uint64_t sent_animation_bytes = 0;
   std::uint64_t sent_appearance_chunks = 0;
   std::uint64_t sent_appearance_bytes = 0;
+  std::uint64_t sent_control_packets = 0;
+  std::uint64_t sent_control_bytes = 0;
   std::uint64_t received_root_packets = 0;
   std::uint64_t received_root_bytes = 0;
   std::uint64_t received_animation_fragments = 0;
   std::uint64_t received_animation_bytes = 0;
   std::uint64_t received_appearance_chunks = 0;
   std::uint64_t received_appearance_bytes = 0;
+  std::uint64_t received_control_packets = 0;
+  std::uint64_t received_control_bytes = 0;
   std::uint64_t rejected_packets = 0;
   std::uint64_t socket_failures = 0;
   std::uint64_t remote_age_ms = 0;
@@ -421,6 +436,7 @@ struct TelemetrySnapshot {
   std::uint64_t appearance_assembly_timeouts = 0;
   std::uint64_t appearance_budget_rejections = 0;
   std::uint64_t incomplete_appearance_bytes = 0;
+  std::uint32_t capability_peers = 0;
   std::uint64_t animation_present_interpolated = 0;
   std::uint64_t animation_present_held_latest = 0;
   std::uint64_t animation_present_held_oldest = 0;
@@ -1827,6 +1843,8 @@ class Runtime {
     relevance_cache_.clear();
     ReceivePackets(now, map_hash);
     PrunePeers(now);
+    SendCapabilityAdvertisements(
+        now, map_hash, static_cast<std::uint32_t>(role));
     const std::int32_t send_rate = network_tuning_.pose_rate;
     const auto send_interval = std::chrono::microseconds(
         1000000 / std::max(send_rate, 1));
@@ -1979,6 +1997,10 @@ class Runtime {
         << telemetry_.sent_appearance_chunks
         << " multiplayer_tx_appearance_bytes="
         << telemetry_.sent_appearance_bytes
+        << " multiplayer_tx_control_packets="
+        << telemetry_.sent_control_packets
+        << " multiplayer_tx_control_bytes="
+        << telemetry_.sent_control_bytes
         << " multiplayer_rx_root_packets="
         << telemetry_.received_root_packets
         << " multiplayer_rx_root_bytes="
@@ -1991,6 +2013,10 @@ class Runtime {
         << telemetry_.received_appearance_chunks
         << " multiplayer_rx_appearance_bytes="
         << telemetry_.received_appearance_bytes
+        << " multiplayer_rx_control_packets="
+        << telemetry_.received_control_packets
+        << " multiplayer_rx_control_bytes="
+        << telemetry_.received_control_bytes
         << " multiplayer_rejected_packets="
         << telemetry_.rejected_packets
         << " multiplayer_socket_failures=" << telemetry_.socket_failures
@@ -2018,6 +2044,8 @@ class Runtime {
         << telemetry_.appearance_budget_rejections
         << " multiplayer_incomplete_appearance_bytes="
         << telemetry_.incomplete_appearance_bytes
+        << " multiplayer_capability_peers="
+        << telemetry_.capability_peers
         << " multiplayer_animation_present_interpolated="
         << telemetry_.animation_present_interpolated
         << " multiplayer_animation_present_held_latest="
@@ -2080,6 +2108,10 @@ class Runtime {
         telemetry_.sent_appearance_bytes,
         last_rate_snapshot_.sent_appearance_bytes) /
         1024.0;
+    const double tx_control_kib = per_second(
+        telemetry_.sent_control_bytes,
+        last_rate_snapshot_.sent_control_bytes) /
+        1024.0;
     const double rx_root_kib = per_second(
         telemetry_.received_root_bytes,
         last_rate_snapshot_.received_root_bytes) /
@@ -2091,6 +2123,10 @@ class Runtime {
     const double rx_appearance_kib = per_second(
         telemetry_.received_appearance_bytes,
         last_rate_snapshot_.received_appearance_bytes) /
+        1024.0;
+    const double rx_control_kib = per_second(
+        telemetry_.received_control_bytes,
+        last_rate_snapshot_.received_control_bytes) /
         1024.0;
     const double animation_tx_fps = per_second(
         telemetry_.sent_animation_frames,
@@ -2117,8 +2153,8 @@ class Runtime {
         "multiplayer-net: role={} peers={} visible={} quality={} interp={} "
         "rates={}/{}Hz tx={:.1f}KiB/s "
         "rx={:.1f}KiB/s tx={:.1f}pps rx={:.1f}pps anim={:.1f}/{:.1f}fps "
-        "classes=tx({:.1f}r/{:.1f}a/{:.1f}p)KiB/s "
-        "rx({:.1f}r/{:.1f}a/{:.1f}p)KiB/s "
+        "classes=tx({:.1f}r/{:.1f}a/{:.1f}p/{:.1f}c)KiB/s "
+        "rx({:.1f}r/{:.1f}a/{:.1f}p/{:.1f}c)KiB/s "
         "bones={} relay={:.1f}pps relevance_drop={:.1f}pps rejected={} "
         "failures={} peer_resets={} "
         "appearance={:.2f}MiB timeout={} budget_reject={} "
@@ -2131,7 +2167,8 @@ class Runtime {
         tx_kib, rx_kib, tx_pps, rx_pps,
         animation_tx_fps, animation_rx_fps,
         tx_root_kib, tx_animation_kib, tx_appearance_kib,
-        rx_root_kib, rx_animation_kib, rx_appearance_kib,
+        tx_control_kib, rx_root_kib, rx_animation_kib,
+        rx_appearance_kib, rx_control_kib,
         telemetry_.remote_animation_bones, relay_pps, drop_pps,
         telemetry_.rejected_packets, telemetry_.socket_failures,
         telemetry_.outbound_peer_resets,
@@ -2153,6 +2190,7 @@ class Runtime {
                               std::string_view reason) {
     bool reset = outbound_animation_keyframes_.erase(role) != 0;
     reset |= outbound_appearance_.erase(role) != 0;
+    reset |= peer_control_.erase(role) != 0;
     for (auto iterator = far_presence_times_.begin();
          iterator != far_presence_times_.end();) {
       const std::uint32_t source_role =
@@ -2257,6 +2295,13 @@ class Runtime {
         static_cast<std::uint32_t>(remote_peers_.size());
     telemetry_.incomplete_appearance_bytes =
         IncompleteAppearanceBytes();
+    telemetry_.capability_peers = static_cast<std::uint32_t>(
+        std::count_if(
+            peer_control_.begin(), peer_control_.end(),
+            [](const auto& entry) {
+              return (entry.second.capabilities &
+                      kCapabilityControlV1) != 0;
+            }));
   }
 
   bool EnsureSteam(std::int32_t role) {
@@ -2535,11 +2580,84 @@ class Runtime {
             bytes, received, packet.sender_role,
             /*animation=*/true, now);
       }
+    } else if (
+        magic == kControlPacketMagic &&
+        received == static_cast<int>(sizeof(ControlPacket))) {
+      ControlPacket packet;
+      std::memcpy(&packet, bytes, sizeof(packet));
+      if (!SteamSenderValid(packet.sender_role, sender)) {
+        ++telemetry_.rejected_packets;
+        return;
+      }
+      if (ReceiveControlPacket(
+              now, map_hash, packet, received)) {
+        RegisterPeer(
+            packet.sender_role, packet.sender_session, sender, now,
+            nullptr);
+        if (packet.target_role !=
+            static_cast<std::uint32_t>(bound_role_)) {
+          RelayControlPacket(packet);
+        }
+      }
     } else {
       ++telemetry_.rejected_packets;
     }
   }
 #endif
+
+  bool ReceiveControlPacket(
+      Clock::time_point now, std::uint32_t map_hash,
+      const ControlPacket& packet, int received_bytes) {
+    bool can_relay_to_target = false;
+#if defined(_WIN32)
+    can_relay_to_target = !using_steam_ && bound_role_ == 1;
+#endif
+    if (received_bytes != static_cast<int>(sizeof(packet)) ||
+        !ControlPacketShapeValid(packet) ||
+        !CommonPacketValid(
+            packet.version, packet.sender_role,
+            packet.sender_session, packet.map_hash, map_hash) ||
+        (packet.target_role !=
+             static_cast<std::uint32_t>(bound_role_) &&
+         !can_relay_to_target)) {
+      ++telemetry_.rejected_packets;
+      return false;
+    }
+    ++telemetry_.received_packets;
+    RecordReceivedPacketClass(
+        kControlPacketMagic, sizeof(packet));
+    if (packet.target_role !=
+        static_cast<std::uint32_t>(bound_role_)) {
+      // Localhost clients send directed control traffic through role 1.
+      // The host validates the envelope and relays it without claiming the
+      // target peer's capability state as its own.
+      return true;
+    }
+    if (packet.message_type !=
+        ControlMessageType::kCapabilities) {
+      // The envelope reserves appearance state/request messages, but those
+      // transitions are enabled only after their state machine lands.
+      ++telemetry_.rejected_packets;
+      return false;
+    }
+    RemotePeerState& peer =
+        remote_peers_[packet.sender_role];
+    BeginRemoteSession(
+        packet.sender_role, peer, packet.sender_session);
+    peer.last_packet_at = now;
+    PeerControlState& control =
+        peer_control_[packet.sender_role];
+    const bool changed =
+        control.capabilities != packet.capabilities;
+    control.capabilities = packet.capabilities;
+    control.last_advertisement_received = now;
+    if (changed) {
+      REXLOG_INFO(
+          "multiplayer: peer role={} capabilities=0x{:08X}",
+          packet.sender_role, packet.capabilities);
+    }
+    return true;
+  }
 
   bool CommonPacketValid(std::uint16_t version,
                          std::uint32_t sender_role,
@@ -3050,6 +3168,9 @@ class Runtime {
     } else if (magic == kAppearancePacketMagic) {
       ++telemetry_.sent_appearance_chunks;
       telemetry_.sent_appearance_bytes += packet_bytes;
+    } else if (magic == kControlPacketMagic) {
+      ++telemetry_.sent_control_packets;
+      telemetry_.sent_control_bytes += packet_bytes;
     }
   }
 
@@ -3065,6 +3186,9 @@ class Runtime {
     } else if (magic == kAppearancePacketMagic) {
       ++telemetry_.received_appearance_chunks;
       telemetry_.received_appearance_bytes += packet_bytes;
+    } else if (magic == kControlPacketMagic) {
+      ++telemetry_.received_control_packets;
+      telemetry_.received_control_bytes += packet_bytes;
     }
   }
 
@@ -3162,7 +3286,111 @@ class Runtime {
     }
     return targets;
   }
+
+  bool SendControlPacketToRole(
+      const ControlPacket& packet, std::uint32_t target_role,
+      bool relayed) {
+    if (target_role < 1 || target_role > 100 ||
+        target_role ==
+            static_cast<std::uint32_t>(bound_role_)) {
+      return false;
+    }
+    PacketEndpoint target;
+    if (using_steam_) {
+      const auto found = steam_id_by_role_.find(target_role);
+      if (found == steam_id_by_role_.end()) {
+        return false;
+      }
+      target.steam = true;
+      target.steam_id = found->second;
+    } else if (bound_role_ == 1) {
+      const auto found = host_peers_.find(target_role);
+      if (found == host_peers_.end()) {
+        return false;
+      }
+      target = found->second.endpoint;
+    } else {
+      // A localhost client has only the host endpoint. The packet retains
+      // its final target role so role 1 can perform a directed relay.
+      target = LoopbackTarget(bound_base_port_);
+    }
+    return SendBytes(
+        &packet, static_cast<int>(sizeof(packet)), target,
+        /*animation=*/true, relayed);
+  }
+
+  std::vector<std::uint32_t> ControlTargetRoles() const {
+    std::vector<std::uint32_t> roles;
+    if (using_steam_) {
+      roles.reserve(steam_id_by_role_.size());
+      for (const auto& [role, steam_id] : steam_id_by_role_) {
+        (void)steam_id;
+        if (role != static_cast<std::uint32_t>(bound_role_)) {
+          roles.push_back(role);
+        }
+      }
+    } else if (bound_role_ == 1) {
+      roles.reserve(host_peers_.size());
+      for (const auto& [role, peer] : host_peers_) {
+        (void)peer;
+        roles.push_back(role);
+      }
+    } else {
+      roles.reserve(remote_peers_.size() + 1);
+      roles.push_back(1);
+      for (const auto& [role, peer] : remote_peers_) {
+        (void)peer;
+        if (role != static_cast<std::uint32_t>(bound_role_)) {
+          roles.push_back(role);
+        }
+      }
+    }
+    std::sort(roles.begin(), roles.end());
+    roles.erase(std::unique(roles.begin(), roles.end()), roles.end());
+    return roles;
+  }
+
+  void RelayControlPacket(const ControlPacket& packet) {
+    if (bound_role_ != 1 || using_steam_) {
+      return;
+    }
+    (void)SendControlPacketToRole(
+        packet, packet.target_role, /*relayed=*/true);
+  }
 #endif
+
+  void SendCapabilityAdvertisements(
+      Clock::time_point now, std::uint32_t map_hash,
+      std::uint32_t source_role) {
+#if defined(_WIN32)
+    constexpr auto kAdvertisementInterval =
+        std::chrono::seconds(2);
+    for (std::uint32_t target_role : ControlTargetRoles()) {
+      PeerControlState& state = peer_control_[target_role];
+      if (state.last_advertisement_sent != Clock::time_point{} &&
+          now - state.last_advertisement_sent <
+              kAdvertisementInterval) {
+        continue;
+      }
+      // Throttle attempts as well as successful sends. A temporarily
+      // unavailable Steam connection must not turn the render tick into a
+      // tight retry loop.
+      state.last_advertisement_sent = now;
+      ControlPacket packet;
+      packet.sender_role = source_role;
+      packet.sender_session = session_id_;
+      packet.target_role = target_role;
+      packet.map_hash = map_hash;
+      packet.capabilities = kCapabilityControlV1;
+      (void)SendControlPacketToRole(
+          packet, target_role, /*relayed=*/false);
+    }
+#else
+    (void)now;
+    (void)map_hash;
+    (void)source_role;
+#endif
+  }
 
   void RelayPacket(const void* bytes, int byte_count,
                    std::uint32_t source_role, bool animation,
@@ -3777,6 +4005,7 @@ class Runtime {
     animation_send_sequence_ = 0;
     outbound_animation_keyframes_.clear();
     outbound_appearance_.clear();
+    peer_control_.clear();
     peer_generations_.Clear();
     remote_peers_.clear();
 #if defined(_WIN32)
@@ -3798,6 +4027,7 @@ class Runtime {
     telemetry_.remote_animation_bones = 0;
     telemetry_.known_peers = 0;
     telemetry_.incomplete_appearance_bytes = 0;
+    telemetry_.capability_peers = 0;
   }
 
   std::mutex mutex_;
@@ -3820,6 +4050,8 @@ class Runtime {
       outbound_animation_keyframes_;
   std::unordered_map<std::uint32_t, OutboundAppearanceState>
       outbound_appearance_;
+  std::unordered_map<std::uint32_t, PeerControlState>
+      peer_control_;
   lifecycle::PeerGenerationTracker peer_generations_;
   Clock::time_point last_send_{};
   std::uint64_t last_pose_sample_time_us_ = 0;
