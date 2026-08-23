@@ -553,7 +553,8 @@ try {
         automated_tests = @(
             'skate3_multiplayer_protocol_tests',
             'skate3_multiplayer_lifecycle_tests',
-            'skate3_multiplayer_worker_tests'
+            'skate3_multiplayer_worker_tests',
+            'skate3_multiplayer_render_cache_tests'
         )
     }
     $manifest | ConvertTo-Json -Depth 4 |
@@ -616,23 +617,26 @@ Profiles: persistent per role across visual-check runs
 Visual scenario:
 1. Wait until every client has loaded the same map and all remote skaters appear.
 2. On each client, inspect every other player: body, top, trousers, shoes,
-   hair/hat, accessories, board deck, trucks, and wheels.
-3. On client 2, enter the wardrobe, change at least one obvious body item
-   (top, trousers, shoes, or hat/hair) and one board item, save/apply the
-   outfit, and return to skating. On clients 1 and 3, confirm role 2 changes
-   to that exact outfit without becoming the teal proxy. Repeat on client 3
-   while watching it from clients 1 and 2.
-4. Skate on each client. Perform pushes, carving, ollies, flip tricks, grabs,
-   spins, grinds, a bail, and a board-detached/board-return sequence.
-5. Watch nearby remote players for pose fidelity, smooth motion, snapping,
-   freezing, attachment drift, duplicated pieces, stale pieces, or flicker.
-6. Confirm the focused local client keeps normal input response and has no
-   obvious new frame stalls.
-7. Close client 3 only. Wait at least 7 seconds for it to disappear from
-   clients 1 and 2. Then run RELAUNCH_MULTIPLAYER_VISUAL_CLIENT_3.bat from
-   the repository root. Confirm role 3 returns with its correct current
-   appearance and animation, without the old remote state being reused.
-8. Continue for at least 2 minutes after the reconnect, then close all clients.
+   hair/hat, accessories, board deck, trucks, and wheels. Existing distinct
+   saved outfits are enough; do not change wardrobes for this check.
+3. Keep the players near each other and skate for about 2 minutes. Include
+   pushes, carving, ollies, a few flip tricks, one bail, and one
+   board-detached/board-return sequence.
+4. Watch remote players for pose fidelity, smooth motion, snapping, freezing,
+   attachment drift, duplicated pieces, stale pieces, flicker, or teal-proxy
+   fallback while they are nearby.
+5. Confirm the focused local client keeps normal input response and has no
+   obvious new frame stalls. Then close all clients.
+
+Success:
+- Existing outfits and boards stay complete and correct.
+- Nearby remote animation remains smooth through the bail and detached board.
+- No teal fallback, disappearing player, attachment drift, or obvious new
+  client stall occurs.
+
+Failure:
+- Any nearby player becomes teal, disappears, freezes, mixes outfit pieces,
+  loses its board/attachments, or causes a noticeable new frame stall.
 
 Outfit/profile behavior:
 - Each numbered client keeps its own writable profile under

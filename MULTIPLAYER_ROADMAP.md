@@ -119,7 +119,7 @@ The render thread should only:
 The first worker version must continue producing byte-compatible
 protocol-v11 traffic. Protocol redesign is a later phase.
 
-Current checkpoint (pending the user-run visual/performance pass):
+Current checkpoint:
 
 - The existing protocol-v11 runtime can run on one background worker behind a
   disabled-by-default cvar; the dedicated visual-check launcher enables it.
@@ -130,6 +130,11 @@ Current checkpoint (pending the user-run visual/performance pass):
   pass in the dedicated worktree.
 - Renderer-owned appearance installation and GPU drawing remain on the render
   thread. Their existing outfit and board behavior has not been redesigned.
+- A three-client user visual pass at protocol-v11 commit `7c00e28` retained
+  outfits, boards, and full animation through resets and extreme board/skater
+  separation. Telemetry independently showed no post-startup local-capture
+  loss, socket failure, appearance release, or worker stall. A five-client
+  completion pass remains outstanding.
 
 Completion:
 
@@ -157,6 +162,21 @@ Work:
 - Include appropriate high-detail remotes in shadow rendering.
 - Resolve row-vector versus column-vector canonical layout selection.
 - Validate runtime-composed shoe, skin, board, and wheel textures.
+
+Current checkpoint (pending a user visual/performance pass):
+
+- Per-appearance renderer caches now retain weighted palette rows, canonical
+  remaps, board-piece classification, and validated exact/canonical track
+  ordinals.
+- Steady rendering no longer scans installed mesh vertices or deep-copies a
+  complete canonical remap merely to rediscover invariant bindings.
+- The renderer no longer constructs a temporary remote-item pointer vector
+  for every remote player on every frame.
+- Compatibility appearances retain a safe rig-lookup retry and track-order
+  changes fall back to a validated linear scan.
+- Automated cache tests cover packed weight discovery, malformed tracks,
+  stable-index hits, and changed track layouts. Runtime telemetry reports any
+  unexpected per-frame weighted-row fallback or rig retry.
 
 Completion:
 

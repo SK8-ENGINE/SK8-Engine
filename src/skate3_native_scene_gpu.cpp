@@ -66,6 +66,7 @@
 #include "skate3_multiplayer_assets.h"
 #include "skate3_multiplayer_capture.h"
 #include "skate3_multiplayer_lifecycle.h"
+#include "skate3_multiplayer_render_cache.h"
 #include "skate3_native_collision.h"
 #include "skate3_native_raytraced_mirror.h"
 #include "skate3_trick_pipeline.h"
@@ -9411,49 +9412,8 @@ struct CapturedAppearanceTexture {
   std::vector<uint8_t> payload;
 };
 
-struct AppearanceWeightedRows {
-  std::array<bool, 256> used{};
-  std::size_t count = 0;
-  std::size_t invalid_influences = 0;
-};
-
-AppearanceWeightedRows FindAppearanceWeightedRows(
-    const std::vector<float>& vertices,
-    std::size_t palette_count) {
-  AppearanceWeightedRows result;
-  for (std::size_t vertex = 0;
-       vertex + 14 <= vertices.size(); vertex += 14) {
-    std::uint32_t packed_weights = 0;
-    std::uint32_t packed_indices = 0;
-    std::memcpy(
-        &packed_weights, vertices.data() + vertex + 7,
-        sizeof(packed_weights));
-    std::memcpy(
-        &packed_indices, vertices.data() + vertex + 8,
-        sizeof(packed_indices));
-    for (std::size_t influence = 0; influence < 4;
-         ++influence) {
-      const std::uint8_t weight =
-          static_cast<std::uint8_t>(
-              packed_weights >> (influence * 8));
-      if (weight == 0) {
-        continue;
-      }
-      const std::uint8_t palette_row =
-          static_cast<std::uint8_t>(
-              packed_indices >> (influence * 8));
-      if (palette_row >= palette_count) {
-        ++result.invalid_influences;
-        continue;
-      }
-      if (!result.used[palette_row]) {
-        result.used[palette_row] = true;
-        ++result.count;
-      }
-    }
-  }
-  return result;
-}
+using AppearanceWeightedRows =
+    multiplayer::render_cache::WeightedPaletteRows;
 
 bool CaptureAppearanceTexture(
     const NativeGuestOutputRenderContext& context,
@@ -10092,7 +10052,7 @@ multiplayer::AppearanceBlob BuildLocalAppearanceBlob(
       continue;
     }
     const AppearanceWeightedRows weighted =
-        FindAppearanceWeightedRows(
+        multiplayer::render_cache::FindWeightedPaletteRows(
             piece.bind_mesh.vertices,
             piece.rig.palette_to_canonical.size());
     std::string mapping;
@@ -10492,6 +10452,16 @@ multiplayer::AppearanceBlob BuildLocalAppearanceBlob(
   return cached;
 }
 
+struct RemoteAppearancePieceRenderCache {
+  uint32_t track_key = 0;
+  AppearanceWeightedRows weighted_rows;
+  std::vector<uint16_t> palette_to_canonical;
+  std::size_t exact_track_index =
+      multiplayer::render_cache::kInvalidAnimationTrackIndex;
+  bool rig_lookup_complete = false;
+  bool skateboard_piece = false;
+};
+
 struct RemoteAppearanceRenderState {
   uint64_t identity = 0;
   uint32_t session = 0;
@@ -10501,11 +10471,94 @@ struct RemoteAppearanceRenderState {
   float root_x_axis[3] = {1.0f, 0.0f, 0.0f};
   float root_z_axis[3] = {0.0f, 0.0f, 1.0f};
   std::vector<DrawItem> items;
+  std::vector<RemoteAppearancePieceRenderCache> piece_caches;
+  std::size_t canonical_track_index =
+      multiplayer::render_cache::kInvalidAnimationTrackIndex;
   std::vector<uint64_t> texture_store_keys;
 };
 
 std::unordered_map<uint32_t, RemoteAppearanceRenderState>
     g_remote_appearances;
+
+bool ResolveRemoteAppearanceRigCache(
+    const DrawItem& item,
+    RemoteAppearancePieceRenderCache& cache) {
+  if (cache.rig_lookup_complete) {
+    return !cache.palette_to_canonical.empty();
+  }
+  if (!item.skinned || item.bones.empty()) {
+    cache.rig_lookup_complete = true;
+    return false;
+  }
+  if (!item.multiplayer_palette_to_canonical.empty()) {
+    cache.palette_to_canonical.assign(
+        item.multiplayer_palette_to_canonical.begin(),
+        item.multiplayer_palette_to_canonical.end());
+    cache.rig_lookup_complete = true;
+  } else {
+    native_palette::CanonicalRigSample rig;
+    if (native_palette::LookupCanonicalRig(
+            item.ctx, item.mesh, rig) &&
+        !rig.palette_to_canonical.empty()) {
+      cache.palette_to_canonical =
+          std::move(rig.palette_to_canonical);
+      cache.rig_lookup_complete = true;
+    }
+  }
+  if (cache.rig_lookup_complete) {
+    cache.skateboard_piece =
+        std::any_of(
+            cache.palette_to_canonical.begin(),
+            cache.palette_to_canonical.end(),
+            [](std::size_t canonical_bone) {
+              return canonical_bone >= 25 &&
+                     canonical_bone <= 31;
+            });
+  }
+  return !cache.palette_to_canonical.empty();
+}
+
+void BuildRemoteAppearanceRenderCaches(
+    uint32_t role, RemoteAppearanceRenderState& state) {
+  state.piece_caches.clear();
+  state.piece_caches.reserve(state.items.size());
+  state.canonical_track_index =
+      multiplayer::render_cache::kInvalidAnimationTrackIndex;
+  std::size_t scanned_vertices = 0;
+  std::size_t weighted_rows = 0;
+  std::size_t resolved_rigs = 0;
+  for (const DrawItem& item : state.items) {
+    RemoteAppearancePieceRenderCache cache;
+    cache.track_key =
+        item.multiplayer_track_key != 0
+            ? item.multiplayer_track_key
+            : item.mesh;
+    const std::size_t palette_bones =
+        item.bones.size() / 12;
+    const auto installed_mesh = g_r.meshes.find(item.mesh);
+    if (item.skinned && palette_bones != 0 &&
+        installed_mesh != g_r.meshes.end()) {
+      cache.weighted_rows =
+          multiplayer::render_cache::FindWeightedPaletteRows(
+              installed_mesh->second.raytracing_verts,
+              palette_bones);
+      scanned_vertices +=
+          installed_mesh->second.raytracing_verts.size() / 14;
+      weighted_rows += cache.weighted_rows.count;
+    }
+    if (ResolveRemoteAppearanceRigCache(item, cache)) {
+      ++resolved_rigs;
+    }
+    state.piece_caches.push_back(std::move(cache));
+  }
+  REXLOG_INFO(
+      "multiplayer-render-cache: prepared role={} session={} "
+      "appearance={:016X} pieces={} vertices={} weighted_rows={} "
+      "resolved_rigs={}",
+      role, state.session, state.identity,
+      state.piece_caches.size(), scanned_vertices,
+      weighted_rows, resolved_rigs);
+}
 
 struct RemoteVisualTelemetryState {
   uint32_t session = 0;
@@ -10984,6 +11037,7 @@ bool InstallRemoteRecipeAppearance(
       }
     }
   }
+  BuildRemoteAppearanceRenderCaches(role, installed);
   state = std::move(installed);
   REXLOG_INFO(
       "multiplayer: installed recipe appearance role={} "
@@ -11369,6 +11423,7 @@ bool InstallRemoteAppearance(
       }
     }
   }
+  BuildRemoteAppearanceRenderCaches(role, installed);
   state = std::move(installed);
   REXLOG_INFO(
       "multiplayer: installed appearance role={} id={:016X} "
@@ -12777,8 +12832,8 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
     // Besides making both skaters look identical, wardrobe transitions can
     // expose a partial local piece set and duplicate malformed body parts.
     // Use the simple proxy until the sender-owned appearance is complete.
-    std::vector<const DrawItem*> appearance_items;
-    const RemoteAppearanceRenderState*
+    const std::vector<DrawItem>* appearance_items = nullptr;
+    RemoteAppearanceRenderState*
         remote_appearance_state = nullptr;
     const auto multiplayer_install_t0 = PerfClock::now();
     ObserveRemoteAppearanceSession(
@@ -12808,17 +12863,12 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
         }
         remote_appearance_state =
             &installed->second;
-        appearance_items.clear();
-        appearance_items.reserve(
-            installed->second.items.size());
-        for (const DrawItem& item :
-             installed->second.items) {
-          appearance_items.push_back(&item);
-        }
+        appearance_items = &installed->second.items;
       }
     }
     if (multiplayer_remote_items != nullptr &&
-        !appearance_items.empty()) {
+        appearance_items != nullptr &&
+        !appearance_items->empty()) {
       trick_pipeline::LiveSpatialSnapshot local_spatial;
       const bool have_presentation_root =
           local_animation.presentation_root_valid;
@@ -13042,17 +13092,14 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
           }
         }
 
-        const multiplayer::AnimationTrack* canonical_track = nullptr;
-        for (const multiplayer::AnimationTrack& track :
-             remote_animation.tracks) {
-          if (track.mesh_key ==
-                  multiplayer::kCanonicalSkeletonTrackKey &&
-              !track.bone_rows.empty() &&
-              track.bone_rows.size() % 12 == 0) {
-            canonical_track = &track;
-            break;
-          }
-        }
+        bool canonical_track_cache_hit = false;
+        const multiplayer::AnimationTrack* canonical_track =
+            multiplayer::render_cache::FindAnimationTrack(
+                remote_animation.tracks,
+                multiplayer::kCanonicalSkeletonTrackKey,
+                remote_appearance_state
+                    ->canonical_track_index,
+                &canonical_track_cache_hit);
         // Animation-track rows are already interpolated model-to-world
         // skinning affines in the receiver's map space. Do not align them
         // again to the independently smoothed pose root: that second
@@ -13063,7 +13110,7 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
 
         multiplayer_remote_items->reserve(
             multiplayer_remote_items->size() +
-            appearance_items.size());
+            appearance_items->size());
         std::size_t remapped_skinned_items = 0;
         std::size_t network_animated_bones = 0;
         std::size_t palette_bone_count = 0;
@@ -13071,8 +13118,26 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
         std::size_t network_invalid_bones = 0;
         std::size_t network_unresolved_active_bones = 0;
         std::size_t skipped_skinned_items = 0;
-        for (const DrawItem* source : appearance_items) {
-          DrawItem clone = *source;
+        std::size_t cached_track_hits =
+            canonical_track_cache_hit ? 1 : 0;
+        std::size_t track_scans =
+            canonical_track_cache_hit ? 0 : 1;
+        std::size_t runtime_weighted_scans = 0;
+        std::size_t runtime_rig_retries = 0;
+        for (std::size_t appearance_piece_index = 0;
+             appearance_piece_index < appearance_items->size();
+             ++appearance_piece_index) {
+          const DrawItem& source =
+              (*appearance_items)[appearance_piece_index];
+          RemoteAppearancePieceRenderCache* piece_cache =
+              appearance_piece_index <
+                      remote_appearance_state
+                          ->piece_caches.size()
+                  ? &remote_appearance_state
+                         ->piece_caches[
+                             appearance_piece_index]
+                  : nullptr;
+          DrawItem clone = source;
           clone.selected = false;
           clone.retained = false;
           clone.pending = false;
@@ -13082,59 +13147,99 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
           if (clone.skinned && !clone.bones.empty()) {
             const std::size_t palette_bones =
                 clone.bones.size() / 12;
-            AppearanceWeightedRows weighted_rows;
-            const auto installed_mesh =
-                g_r.meshes.find(clone.mesh);
-            if (installed_mesh != g_r.meshes.end()) {
-              weighted_rows = FindAppearanceWeightedRows(
-                  installed_mesh->second.raytracing_verts,
-                  palette_bones);
-            }
-            const multiplayer::AnimationTrack*
-                exact_track = nullptr;
-            for (const multiplayer::AnimationTrack& track :
-                 remote_animation.tracks) {
-              const uint32_t track_key =
-                  clone.multiplayer_track_key != 0
-                      ? clone.multiplayer_track_key
-                      : clone.mesh;
-              if (track.mesh_key == track_key &&
-                  !track.bone_rows.empty() &&
-                  track.bone_rows.size() % 12 == 0) {
-                exact_track = &track;
-                break;
+            AppearanceWeightedRows
+                fallback_weighted_rows;
+            if (piece_cache == nullptr) {
+              const auto installed_mesh =
+                  g_r.meshes.find(clone.mesh);
+              if (installed_mesh != g_r.meshes.end()) {
+                fallback_weighted_rows =
+                    multiplayer::render_cache::
+                        FindWeightedPaletteRows(
+                            installed_mesh->second
+                                .raytracing_verts,
+                            palette_bones);
+                ++runtime_weighted_scans;
               }
             }
-            native_palette::CanonicalRigSample rig;
-            if (!clone
-                     .multiplayer_palette_to_canonical
-                     .empty()) {
-              rig.palette_to_canonical.assign(
+            const AppearanceWeightedRows& weighted_rows =
+                piece_cache != nullptr
+                    ? piece_cache->weighted_rows
+                    : fallback_weighted_rows;
+            const uint32_t track_key =
+                piece_cache != nullptr
+                    ? piece_cache->track_key
+                    : (clone.multiplayer_track_key != 0
+                           ? clone.multiplayer_track_key
+                           : clone.mesh);
+            bool exact_track_cache_hit = false;
+            std::size_t uncached_track_index =
+                multiplayer::render_cache::
+                    kInvalidAnimationTrackIndex;
+            std::size_t& exact_track_index =
+                piece_cache != nullptr
+                    ? piece_cache->exact_track_index
+                    : uncached_track_index;
+            const multiplayer::AnimationTrack*
+                exact_track =
+                    multiplayer::render_cache::
+                        FindAnimationTrack(
+                            remote_animation.tracks,
+                            track_key,
+                            exact_track_index,
+                            &exact_track_cache_hit);
+            if (exact_track_cache_hit) {
+              ++cached_track_hits;
+            } else {
+              ++track_scans;
+            }
+            std::vector<uint16_t> fallback_remap;
+            if (piece_cache == nullptr) {
+              fallback_remap.assign(
                   clone
                       .multiplayer_palette_to_canonical
                       .begin(),
                   clone
                       .multiplayer_palette_to_canonical
                       .end());
+              if (fallback_remap.empty()) {
+                native_palette::CanonicalRigSample rig;
+                if (native_palette::LookupCanonicalRig(
+                        clone.ctx, clone.mesh, rig)) {
+                  fallback_remap =
+                      std::move(
+                          rig.palette_to_canonical);
+                }
+              }
+            } else if (
+                !piece_cache->rig_lookup_complete) {
+              ++runtime_rig_retries;
+              ResolveRemoteAppearanceRigCache(
+                  clone, *piece_cache);
             }
+            const std::vector<uint16_t>&
+                palette_to_canonical =
+                    piece_cache != nullptr
+                        ? piece_cache
+                              ->palette_to_canonical
+                        : fallback_remap;
             const bool have_rig =
-                !rig.palette_to_canonical.empty() ||
-                (native_palette::LookupCanonicalRig(
-                     clone.ctx, clone.mesh, rig) &&
-                 !rig.palette_to_canonical.empty());
+                !palette_to_canonical.empty();
             const std::size_t canonical_bones =
                 canonical_track == nullptr
                     ? 0
                     : canonical_track->bone_rows.size() / 12;
             const bool skateboard_piece =
-                have_rig &&
-                std::any_of(
-                    rig.palette_to_canonical.begin(),
-                    rig.palette_to_canonical.end(),
-                    [](std::size_t canonical_bone) {
-                      return canonical_bone >= 25 &&
-                             canonical_bone <= 31;
-                    });
+                piece_cache != nullptr
+                    ? piece_cache->skateboard_piece
+                    : have_rig &&
+                          std::any_of(
+                              palette_to_canonical.begin(),
+                              palette_to_canonical.end(),
+                              [](std::size_t canonical_bone) {
+                                return canonical_bone >= 25 &&
+                                       canonical_bone <= 31;
+                              });
             if (skateboard_piece || clone.ropa) {
               const std::uint32_t track_key =
                   clone.multiplayer_track_key != 0
@@ -13150,9 +13255,9 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
                   s_route_log_mutex);
               if (s_route_logs.insert(route_key).second) {
                 const std::size_t mapped_canonical =
-                    rig.palette_to_canonical.empty()
+                    palette_to_canonical.empty()
                         ? std::numeric_limits<std::size_t>::max()
-                        : rig.palette_to_canonical.front();
+                        : palette_to_canonical.front();
                 const float* exact_root =
                     exact_track != nullptr
                         ? exact_track->bone_rows.data()
@@ -13213,9 +13318,9 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
               } else if (
                   canonical_track != nullptr && have_rig &&
                   palette_bone <
-                      rig.palette_to_canonical.size()) {
+                      palette_to_canonical.size()) {
                 const std::size_t canonical_bone =
-                    rig.palette_to_canonical[palette_bone];
+                    palette_to_canonical[palette_bone];
                 if (canonical_bone < canonical_bones) {
                   network_bone =
                       canonical_track->bone_rows.data() +
@@ -13324,7 +13429,7 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
               "multiplayer: skater pieces local={} remote_tracks={} "
               "network_bones={} remapped_skinned={} skipped_skinned={} "
               "published={}",
-              appearance_items.size(),
+              appearance_items->size(),
               remote_animation.tracks.size(),
               network_animated_bones,
               remapped_skinned_items,
@@ -13339,6 +13444,10 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
           std::uint64_t used = 0;
           std::uint64_t invalid = 0;
           std::uint64_t unresolved_active = 0;
+          std::uint64_t cached_track_hits = 0;
+          std::uint64_t track_scans = 0;
+          std::uint64_t runtime_weighted_scans = 0;
+          std::uint64_t runtime_rig_retries = 0;
           std::size_t minimum_used =
               std::numeric_limits<std::size_t>::max();
           std::size_t maximum_used = 0;
@@ -13357,6 +13466,13 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
         s_bone_gate.invalid += network_invalid_bones;
         s_bone_gate.unresolved_active +=
             network_unresolved_active_bones;
+        s_bone_gate.cached_track_hits +=
+            cached_track_hits;
+        s_bone_gate.track_scans += track_scans;
+        s_bone_gate.runtime_weighted_scans +=
+            runtime_weighted_scans;
+        s_bone_gate.runtime_rig_retries +=
+            runtime_rig_retries;
         s_bone_gate.minimum_used =
             std::min(
                 s_bone_gate.minimum_used,
@@ -13389,6 +13505,19 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
               static_cast<double>(
                   s_bone_gate.unresolved_active) /
                   divisor);
+          REXLOG_INFO(
+              "multiplayer-render-cache: frames={} "
+              "track_hits={:.1f} track_scans={:.1f} "
+              "weighted_fallbacks={} rig_retries={}",
+              s_bone_gate.frames,
+              static_cast<double>(
+                  s_bone_gate.cached_track_hits) /
+                  divisor,
+              static_cast<double>(
+                  s_bone_gate.track_scans) /
+                  divisor,
+              s_bone_gate.runtime_weighted_scans,
+              s_bone_gate.runtime_rig_retries);
           s_bone_gate = {};
           s_bone_gate.last_log = bone_gate_now;
         }

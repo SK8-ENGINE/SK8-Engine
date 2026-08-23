@@ -70,3 +70,29 @@ add_test(
   NAME skate3_multiplayer_worker_tests
   COMMAND skate3_multiplayer_worker_tests
 )
+
+add_executable(skate3_multiplayer_render_cache_tests
+  skate3_multiplayer_render_cache_tests.cpp
+)
+
+target_include_directories(
+  skate3_multiplayer_render_cache_tests PRIVATE
+  ${CMAKE_CURRENT_LIST_DIR}/../src
+)
+target_compile_features(
+  skate3_multiplayer_render_cache_tests PRIVATE cxx_std_23)
+
+if(MSVC)
+  target_compile_options(
+    skate3_multiplayer_render_cache_tests PRIVATE
+    /W4 /permissive- /utf-8)
+else()
+  target_compile_options(
+    skate3_multiplayer_render_cache_tests PRIVATE
+    -Wall -Wextra -Wpedantic)
+endif()
+
+add_test(
+  NAME skate3_multiplayer_render_cache_tests
+  COMMAND skate3_multiplayer_render_cache_tests
+)

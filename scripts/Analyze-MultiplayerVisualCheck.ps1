@@ -102,6 +102,13 @@ foreach ($client in $clientDirectories) {
         $lines | Select-String -Pattern 'multiplayer-worker:' |
             ForEach-Object { $_.Line }
     )
+    $renderCacheRuntimeLines = @(
+        $lines |
+            Select-String -Pattern (
+                'multiplayer-render-cache: frames='
+            ) |
+            ForEach-Object { $_.Line }
+    )
     $lastRate = if ($rateLines.Count -gt 0) {
         $rateLines[-1]
     } else {
@@ -113,6 +120,10 @@ foreach ($client in $clientDirectories) {
     $summary.Add("rate_samples=$($rateLines.Count)")
     $summary.Add("multiplayer_perf_samples=$($perfLines.Count)")
     $summary.Add("multiplayer_worker_samples=$($workerLines.Count)")
+    $summary.Add(
+        "multiplayer_render_cache_samples=" +
+        $renderCacheRuntimeLines.Count
+    )
     $summary.Add(
         'max_socket_failures=' +
         (Maximum-IntegerField $rateLines 'failures')
@@ -184,6 +195,32 @@ foreach ($client in $clientDirectories) {
         (Match-Count $lines (
             'multiplayer: released renderer appearance role='
         ))
+    )
+    $summary.Add(
+        'renderer_cache_prepare_events=' +
+        (Match-Count $lines (
+            'multiplayer-render-cache: prepared role='
+        ))
+    )
+    $summary.Add(
+        'max_renderer_cache_weighted_fallbacks=' +
+        $(if ($renderCacheRuntimeLines.Count -gt 0) {
+            Maximum-IntegerField (
+                $renderCacheRuntimeLines
+            ) 'weighted_fallbacks'
+        } else {
+            'n/a'
+        })
+    )
+    $summary.Add(
+        'max_renderer_cache_rig_retries=' +
+        $(if ($renderCacheRuntimeLines.Count -gt 0) {
+            Maximum-IntegerField (
+                $renderCacheRuntimeLines
+            ) 'rig_retries'
+        } else {
+            'n/a'
+        })
     )
     $summary.Add(
         'local_capture_ready_events=' +
@@ -271,6 +308,14 @@ foreach ($client in $clientDirectories) {
         'last_multiplayer_worker=' +
         $(if ($workerLines.Count -gt 0) {
             $workerLines[-1]
+        } else {
+            'missing'
+        })
+    )
+    $summary.Add(
+        'last_multiplayer_render_cache=' +
+        $(if ($renderCacheRuntimeLines.Count -gt 0) {
+            $renderCacheRuntimeLines[-1]
         } else {
             'missing'
         })

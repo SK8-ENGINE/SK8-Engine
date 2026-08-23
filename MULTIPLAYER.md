@@ -82,6 +82,12 @@ AppID and follow Valve's setup and redistributable requirements.
   peer retirements accumulate until consumed rather than being overwritten by
   a newer presentation. The worker remains disabled by default outside this
   controlled validation path.
+- Installed remote appearances now retain their weighted palette-row masks,
+  canonical remaps, board-piece classification, and validated animation-track
+  ordinals. Steady rendering no longer rescans every clothing mesh's packed
+  vertex influences or builds a second temporary canonical-remap vector for
+  binding discovery each frame. Older compatibility appearances can still
+  retry a missing live rig lookup.
 - Localhost development still uses role 1 as a small relay because all test
   processes share one machine. Internet Steam sessions use direct peer fan-out.
 - Every receiver keeps an independent interpolation/reassembly timeline for
@@ -258,7 +264,10 @@ separately so one-time appearance spikes do not hide inside steady-state cost.
 When the replication worker is enabled, periodic `multiplayer-worker` lines
 report worker tick average/maximum time, published and superseded local
 captures, render consumptions, output sequence, and local-input age. The
-visual-check analyzer includes the latest line from both timing streams.
+renderer also emits `multiplayer-render-cache` lines for one-time cache
+preparation, validated track-index hits/scans, and any unexpected runtime
+weight or rig fallback. The visual-check analyzer includes the latest timing
+and cache lines.
 
 Steam sessions now use direct peer fan-out. With ten players all mutually
 nearby, each player uploads one detailed stream to nine peers and receives
