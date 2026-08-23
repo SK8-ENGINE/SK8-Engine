@@ -812,6 +812,49 @@ stability, and a user visual pass.
 Initial target: reduce one exact full-fidelity stream from the current measured
 approximately 274-280 KiB/s toward 90 KB/s average application payload.
 
+Current checkpoint:
+
+- A second exact delta codec reorganizes each track into same-component lanes
+  and independently chooses raw receiver-baseline differences or first-order
+  residuals for each 32-bone block. It introduces no frame chaining and no
+  precision loss: the decoded word stream is byte-for-byte identical to the
+  sender's quantized final pose.
+- The decoder is bounded, transactional, and fail-closed. Tests cover all four
+  current transform layouts, signed-difference extremes, canonical padding,
+  every truncated input prefix, wrong baseline layouts, reverse-order
+  fragmentation, and 3,000 deterministic randomized exact round trips.
+- On the synthetic typical-motion corpus, predictive packing reduced the
+  accepted block representation from approximately 3,546 to 1,818 bytes per
+  frame (about 49 percent) at approximately 16 microseconds for preflight plus
+  encode on this development machine. The synthetic stress corpus fell from
+  approximately 4,652 to 1,641 bytes. The gentle corpus correctly retained the
+  existing block codec because prediction would have been 1.4 percent larger.
+- At 60 Hz, the synthetic typical result is approximately 114 KiB/s per
+  sender/receiver stream including current datagram headers. That projects to
+  approximately 0.45 MiB/s sender upload for a five-player direct mesh,
+  2.12 MiB/s at 20 players, 5.46 MiB/s at 50, and 11.04 MiB/s at 100. A
+  host-relayed star would require approximately 1.78, 40.26, 267.77, and
+  1,093.05 MiB/s respectively, demonstrating why a single player host is not
+  a practical large-lobby relay. These are code-derived synthetic estimates,
+  not live traffic measurements.
+- The live sender now compares predictive, block, semantic, and raw sizes
+  against the same receiver-confirmed keyframe, sends only the smallest
+  materially useful exact representation, and retains every accepted fallback.
+  The receiver reconstructs the unchanged animation words before the existing
+  pose decoder. Compatibility identity changes prevent mixed codec builds from
+  joining.
+- Live telemetry reports predictive attempts, selections, logical/wire bytes,
+  average and maximum encode time, and resulting fragment totals. A five-client
+  user visual run is still required before accepting the live checkpoint;
+  telemetry cannot prove visual correctness.
+- The offline smallest-three rotation study now includes 256,000 synthetic
+  skinned vertices with one to four bone influences and 300,000 board/contact
+  probes. Maximum measured displacement was 0.0374 mm for the synthetic skin
+  and 0.0259 mm for board probes; equivalent quaternion signs encode
+  identically. This strengthens the mathematical case but does not activate a
+  lossy wire format. Retail-mesh deformation, rapid-trick, attachment, and user
+  visual gates remain required.
+
 ## Phase 6: full-fidelity scale validation
 
 Purpose: increase player count without changing what any receiver sees.
