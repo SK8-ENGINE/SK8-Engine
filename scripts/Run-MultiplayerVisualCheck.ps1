@@ -641,14 +641,14 @@ $runRoot
 Clients: 5
 Transport: localhost UDP
 Quality: Balanced, 60 Hz root, 60 Hz animation, 50 ms minimum interpolation
-Change under test: stable monotonic capture timestamps for remote playback
-Diagnostics: network-capture clock marker, source cadence, smoothed motion, renderer
-handoff cadence, timing, cursor error, and cursor slew are reported
+Change under test: full capture-to-render skeleton cadence diagnostics
+Diagnostics: captured, interpolated, and final applied bone-palette change and
+hold rates, plus network timing and renderer handoff cadence, are reported
 
 Visual scenario:
 1. Wait until all five clients have loaded the same map, every client sees
    four remote skaters, and every teal proxy has become its complete outfit.
-2. Play normally for about 2 minutes. Move whichever clients are convenient;
+2. Play normally for about 60-90 seconds. Move whichever clients are convenient;
    there is no required order and no need to identify individual roles.
 3. Keep the skaters reasonably near each other so remote movement is visible.
    Ordinary skating, turns, ollies, tricks, and bails are enough.
@@ -667,13 +667,12 @@ Visual failure:
   regression appears.
 
 Telemetry acceptance checked by the agent afterward:
-- Every client reports clock=network-capture, and source snapshot timestamps
-  follow the scheduled capture cadence rather than native scene-time pulses.
-- Per-sender complete animation rates approach the configured 60 Hz whenever
-  that sender supplies fresh captures.
-- Each receiver/sender pair reports interpolation delay, cursor margin,
-  cursor error/slew, held-latest percentage and run length, sequence gaps,
-  and superseded incomplete frames.
+- Every client reports local skeleton capture cadence and each visible remote
+  reports interpolated-pose and final applied-palette cadence.
+- The three stages reveal whether repeated or alternating full poses begin at
+  sender capture, receiver interpolation, or final renderer palette mapping.
+- Existing packet, timing, interpolation, sequence-gap, stall, and resource
+  checks remain active.
 - Delivery-policy errors, socket failures, and multiplayer errors stay zero.
 - Appearance and resource counters remain healthy.
 

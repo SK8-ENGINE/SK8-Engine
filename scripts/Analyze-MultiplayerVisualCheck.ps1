@@ -143,6 +143,25 @@ foreach ($client in $clientDirectories) {
         $lines | Select-String -Pattern 'multiplayer-render-motion:' |
             ForEach-Object { $_.Line }
     )
+    $poseCadenceLines = @(
+        $lines | Select-String -Pattern 'multiplayer-pose-cadence:' |
+            ForEach-Object { $_.Line }
+    )
+    $captureCadenceLines = @(
+        $poseCadenceLines |
+            Select-String -Pattern ' stage=capture(?:\s|$)' |
+            ForEach-Object { $_.Line }
+    )
+    $interpolatedCadenceLines = @(
+        $poseCadenceLines |
+            Select-String -Pattern ' stage=interpolated(?:\s|$)' |
+            ForEach-Object { $_.Line }
+    )
+    $appliedCadenceLines = @(
+        $poseCadenceLines |
+            Select-String -Pattern ' stage=applied(?:\s|$)' |
+            ForEach-Object { $_.Line }
+    )
     $perfLines = @(
         $lines | Select-String -Pattern 'multiplayer-perf:' |
             ForEach-Object { $_.Line }
@@ -308,6 +327,10 @@ foreach ($client in $clientDirectories) {
     $summary.Add(
         "multiplayer_render_motion_samples=" +
         $renderMotionLines.Count
+    )
+    $summary.Add(
+        "multiplayer_pose_cadence_samples=" +
+        $poseCadenceLines.Count
     )
     $summary.Add(
         "appearance_prepare_events=" +
@@ -665,6 +688,30 @@ foreach ($client in $clientDirectories) {
             'missing'
         })
     )
+    $summary.Add(
+        'last_pose_capture=' +
+        $(if ($captureCadenceLines.Count -gt 0) {
+            $captureCadenceLines[-1]
+        } else {
+            'missing'
+        })
+    )
+    $summary.Add(
+        'last_pose_interpolated=' +
+        $(if ($interpolatedCadenceLines.Count -gt 0) {
+            $interpolatedCadenceLines[-1]
+        } else {
+            'missing'
+        })
+    )
+    $summary.Add(
+        'last_pose_applied=' +
+        $(if ($appliedCadenceLines.Count -gt 0) {
+            $appliedCadenceLines[-1]
+        } else {
+            'missing'
+        })
+    )
     foreach ($sender in 1..5) {
         $senderRenderMotionLines = @(
             $renderMotionLines |
@@ -677,6 +724,32 @@ foreach ($client in $clientDirectories) {
             $summary.Add(
                 "last_render_motion_sender_$sender=" +
                 $senderRenderMotionLines[-1]
+            )
+        }
+        $senderInterpolatedCadenceLines = @(
+            $interpolatedCadenceLines |
+                Select-String -Pattern (
+                    " role=$sender(?:\s|$)"
+                ) |
+                ForEach-Object { $_.Line }
+        )
+        if ($senderInterpolatedCadenceLines.Count -gt 0) {
+            $summary.Add(
+                "last_pose_interpolated_sender_$sender=" +
+                $senderInterpolatedCadenceLines[-1]
+            )
+        }
+        $senderAppliedCadenceLines = @(
+            $appliedCadenceLines |
+                Select-String -Pattern (
+                    " role=$sender(?:\s|$)"
+                ) |
+                ForEach-Object { $_.Line }
+        )
+        if ($senderAppliedCadenceLines.Count -gt 0) {
+            $summary.Add(
+                "last_pose_applied_sender_$sender=" +
+                $senderAppliedCadenceLines[-1]
             )
         }
     }

@@ -3,6 +3,7 @@
 #include "skate3_multiplayer_latest_request.h"
 #include "skate3_multiplayer_motion_trace.h"
 #include "skate3_multiplayer_playback_clock.h"
+#include "skate3_multiplayer_pose_cadence.h"
 #include "skate3_multiplayer_pose_curve.h"
 #include "skate3_multiplayer_send_schedule.h"
 
@@ -588,6 +589,38 @@ void TestMotionTraceMeasuresCadenceAndKeepsContinuity() {
          "motion trace lost cross-window speed variation");
 }
 
+void TestPoseCadenceMeasuresRepeatsAndAlternation() {
+  using skate3::multiplayer::pose_cadence::Snapshot;
+  using skate3::multiplayer::pose_cadence::Window;
+
+  Window window;
+  window.Record(1000000, 10, 0xAA);
+  window.Record(1010000, 10, 0xAA);
+  window.Record(1020000, 11, 0xBB);
+  window.Record(1030000, 11, 0xAA);
+  window.Record(1040000, 11, 0xAA);
+
+  const Snapshot first = window.ReadAndReset();
+  Expect(first.samples == 4,
+         "pose cadence reported the wrong sample count");
+  Expect(first.changes == 2 && first.repeats == 2,
+         "pose cadence did not separate changed and repeated poses");
+  Expect(first.sequence_changes == 1,
+         "pose cadence reported the wrong source-sequence count");
+  Expect(first.alternations == 1,
+         "pose cadence missed an A/B/A palette alternation");
+  Expect(first.maximum_repeat_run == 1 &&
+             std::fabs(first.maximum_hold_ms - 10.0) < 0.001,
+         "pose cadence reported the wrong repeated-pose hold");
+
+  window.Record(1050000, 12, 0xCC);
+  const Snapshot second = window.ReadAndReset();
+  Expect(second.samples == 1 && second.changes == 1,
+         "pose cadence discarded continuity across log windows");
+  Expect(second.sequence_changes == 1,
+         "pose cadence lost sequence continuity across log windows");
+}
+
 }  // namespace
 
 int main() {
@@ -607,6 +640,7 @@ int main() {
   TestBoundedPoseCurvePreservesSamplesAndLimits();
   TestPoseCurveHasContinuousSegmentVelocity();
   TestMotionTraceMeasuresCadenceAndKeepsContinuity();
+  TestPoseCadenceMeasuresRepeatsAndAlternation();
 
   if (g_failures != 0) {
     std::cerr << g_failures << " multiplayer worker test(s) failed\n";

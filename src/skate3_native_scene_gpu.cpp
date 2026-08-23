@@ -64,6 +64,7 @@
 #include "skate3_mechanics_sandbox_map.h"
 #include "skate3_multiplayer.h"
 #include "skate3_multiplayer_motion_trace.h"
+#include "skate3_multiplayer_pose_cadence.h"
 #include "skate3_multiplayer_assets.h"
 #include "skate3_multiplayer_capture.h"
 #include "skate3_multiplayer_lifecycle.h"
@@ -10806,10 +10807,83 @@ std::unordered_map<uint32_t, RemoteVisualTelemetryState>
 struct RemoteRenderMotionTelemetry {
   uint32_t session = 0;
   multiplayer::motion::Window motion;
+  multiplayer::pose_cadence::Window interpolated_pose;
+  multiplayer::pose_cadence::Window applied_palette;
 };
 
 std::unordered_map<uint32_t, RemoteRenderMotionTelemetry>
     g_remote_render_motion;
+
+multiplayer::pose_cadence::Window g_local_capture_cadence;
+
+std::uint64_t PoseCadenceNowMicroseconds() {
+  return static_cast<std::uint64_t>(
+      std::chrono::duration_cast<std::chrono::microseconds>(
+          std::chrono::steady_clock::now().time_since_epoch())
+          .count());
+}
+
+std::uint64_t HashAnimationPose(
+    const multiplayer::AnimationPose& animation) {
+  std::uint64_t hash = 1469598103934665603ull;
+  hash = AppearanceHashBytes(
+      hash, &animation.root_bone, sizeof(animation.root_bone));
+  hash = AppearanceHashBytes(
+      hash, animation.root_position,
+      sizeof(animation.root_position));
+  hash = AppearanceHashBytes(
+      hash, &animation.presentation_root_valid,
+      sizeof(animation.presentation_root_valid));
+  hash = AppearanceHashBytes(
+      hash, animation.presentation_root_position,
+      sizeof(animation.presentation_root_position));
+  hash = AppearanceHashBytes(
+      hash, animation.presentation_root_x_axis,
+      sizeof(animation.presentation_root_x_axis));
+  hash = AppearanceHashBytes(
+      hash, animation.presentation_root_z_axis,
+      sizeof(animation.presentation_root_z_axis));
+  for (const multiplayer::AnimationTrack& track :
+       animation.tracks) {
+    hash = AppearanceHashBytes(
+        hash, &track.mesh_key, sizeof(track.mesh_key));
+    const std::size_t row_count = track.bone_rows.size();
+    hash = AppearanceHashBytes(
+        hash, &row_count, sizeof(row_count));
+    if (!track.bone_rows.empty()) {
+      hash = AppearanceHashBytes(
+          hash, track.bone_rows.data(),
+          track.bone_rows.size() * sizeof(float));
+    }
+  }
+  return hash;
+}
+
+void RecordLocalCaptureCadence(
+    const multiplayer::AnimationPose& animation) {
+  if (animation.tracks.empty()) {
+    return;
+  }
+  g_local_capture_cadence.Record(
+      PoseCadenceNowMicroseconds(), animation.sequence,
+      HashAnimationPose(animation));
+}
+
+void RecordRemoteAppliedPalette(
+    uint32_t role, uint32_t session, uint32_t sequence,
+    std::uint64_t palette_hash, std::size_t palette_bones) {
+  if (palette_bones == 0) {
+    return;
+  }
+  RemoteRenderMotionTelemetry& remote =
+      g_remote_render_motion[role];
+  if (remote.session != session) {
+    remote = {};
+    remote.session = session;
+  }
+  remote.applied_palette.Record(
+      PoseCadenceNowMicroseconds(), sequence, palette_hash);
+}
 
 void RecordRemotePresentationHandoff(
     const multiplayer::RemotePresentationFrame& presentation) {
@@ -10857,6 +10931,17 @@ void RecordRemotePresentationHandoff(
       telemetry.skipped_presentations,
       static_cast<double>(telemetry.render_calls) / seconds,
       static_cast<double>(telemetry.unique_presentations) / seconds);
+  const multiplayer::pose_cadence::Snapshot local_capture =
+      g_local_capture_cadence.ReadAndReset();
+  REXLOG_INFO(
+      "multiplayer-pose-cadence: stage=capture role=local "
+      "samples={} changes={} repeats={} seq_changes={} "
+      "alternations={} max_repeat={} hold={:.1f}ms",
+      local_capture.samples, local_capture.changes,
+      local_capture.repeats, local_capture.sequence_changes,
+      local_capture.alternations,
+      local_capture.maximum_repeat_run,
+      local_capture.maximum_hold_ms);
   for (auto& [role, remote] : g_remote_render_motion) {
     const multiplayer::motion::Snapshot motion =
         remote.motion.ReadAndReset();
@@ -10871,6 +10956,31 @@ void RecordRemotePresentationHandoff(
         motion.average_speed,
         motion.average_speed_change,
         motion.maximum_speed_change);
+    const multiplayer::pose_cadence::Snapshot interpolated =
+        remote.interpolated_pose.ReadAndReset();
+    REXLOG_INFO(
+        "multiplayer-pose-cadence: stage=interpolated "
+        "role={} session={} samples={} changes={} repeats={} "
+        "seq_changes={} alternations={} max_repeat={} "
+        "hold={:.1f}ms",
+        role, remote.session, interpolated.samples,
+        interpolated.changes, interpolated.repeats,
+        interpolated.sequence_changes,
+        interpolated.alternations,
+        interpolated.maximum_repeat_run,
+        interpolated.maximum_hold_ms);
+    const multiplayer::pose_cadence::Snapshot applied =
+        remote.applied_palette.ReadAndReset();
+    REXLOG_INFO(
+        "multiplayer-pose-cadence: stage=applied "
+        "role={} session={} samples={} changes={} repeats={} "
+        "seq_changes={} alternations={} max_repeat={} "
+        "hold={:.1f}ms",
+        role, remote.session, applied.samples,
+        applied.changes, applied.repeats,
+        applied.sequence_changes, applied.alternations,
+        applied.maximum_repeat_run,
+        applied.maximum_hold_ms);
   }
   telemetry.render_calls = 0;
   telemetry.unique_presentations = 0;
@@ -10893,6 +11003,9 @@ void RecordRemoteRenderMotion(
   }
   remote.motion.Record(
       animation.sender_time_us, animation.root_position);
+  remote.interpolated_pose.Record(
+      PoseCadenceNowMicroseconds(), animation.sequence,
+      HashAnimationPose(animation));
 }
 
 void ReleaseRemoteAppearanceResources(
@@ -13730,6 +13843,7 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
           std::move(exact_track));
     }
   }
+  RecordLocalCaptureCadence(local_animation);
 
   // One-shot audit of the rows the character meshes actually weight against
   // versus the canonical remap currently used for multiplayer. This exposes
@@ -14196,6 +14310,9 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
             canonical_track_cache_hit ? 0 : 1;
         std::size_t runtime_weighted_scans = 0;
         std::size_t runtime_rig_retries = 0;
+        std::uint64_t applied_palette_hash =
+            1469598103934665603ull;
+        std::size_t applied_palette_bones = 0;
         for (std::size_t appearance_piece_index = 0;
              appearance_piece_index < appearance_items->size();
              ++appearance_piece_index) {
@@ -14498,8 +14615,26 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
             std::memcpy(
                 clone.world, transformed, sizeof(clone.world));
           }
+          if (clone.skinned && !clone.bones.empty()) {
+            applied_palette_hash = AppearanceHashBytes(
+                applied_palette_hash, &clone.mesh,
+                sizeof(clone.mesh));
+            const std::size_t bone_count =
+                clone.bones.size() / 12;
+            applied_palette_hash = AppearanceHashBytes(
+                applied_palette_hash, &bone_count,
+                sizeof(bone_count));
+            applied_palette_hash = AppearanceHashBytes(
+                applied_palette_hash, clone.bones.data(),
+                clone.bones.size() * sizeof(float));
+            applied_palette_bones += bone_count;
+          }
           multiplayer_remote_items->push_back(std::move(clone));
         }
+        RecordRemoteAppliedPalette(
+            remote_player.role, remote_player.session,
+            remote_animation.sequence, applied_palette_hash,
+            applied_palette_bones);
         static std::atomic<std::uint32_t> s_replication_logs{0};
         const std::uint32_t log_index =
             s_replication_logs.fetch_add(1, std::memory_order_relaxed);
