@@ -558,7 +558,7 @@ try {
         guest_fps_cap = 120
         replication_quality = 'full-fidelity'
         root_protocol = 'v12-after-negotiation'
-        animation_protocol = 'v11'
+        animation_protocol = 'v12-grouped-after-negotiation'
         appearance_protocol = 'v11'
         root_rate_hz = 60
         animation_rate_hz = 60
@@ -650,10 +650,11 @@ Clients: 5
 Transport: localhost UDP
 Quality: Full fidelity, 60 Hz root, 60 Hz animation, 50 ms minimum interpolation
 Change under test: directly negotiated peers now exchange their 60 Hz
-root-position, board-orientation, and board-state snapshot through the
-explicit-endian protocol-v12 envelope. Skeletal animation, outfits, and
-attachments remain on protocol v11. Full-fidelity direct peer fan-out and the
-120 fps per-client test budget remain unchanged.
+root/board snapshot and exact skeletal animation words through explicit-endian
+protocol-v12 envelopes. Animation uses one independently reassembled group
+while preserving the current quantization, keyframes/deltas, interpolation,
+attachments, and renderer path. Outfits remain on protocol v11. Full-fidelity
+direct peer fan-out and the 120 fps per-client test budget remain unchanged.
 Diagnostics: representative visible body vertices are sampled before send and
 after remote reconstruction, alongside skeleton, network, and GPU timing
 
@@ -686,8 +687,8 @@ Telemetry acceptance checked by the agent afterward:
 - GPU upload-ring pressure remains healthy with zero unsafe region reuse.
 - Client 1 reports direct-mesh topology and zero relayed realtime packets.
 - Every client negotiates v12 with all four peers, sends and receives v12
-  root snapshots continuously, and reports zero v12 compatibility or root
-  rejection.
+  root snapshots and grouped animation continuously, and reports zero v12
+  compatibility, sustained root-stream, or animation-group rejection.
 - Every active sender/receiver pair reports the full-fidelity contract,
   continuous pose/animation traffic, and zero relevance drops.
 - Playback cursor margins remain inside the animation buffer, with no
@@ -712,7 +713,7 @@ $runRoot
 Clients: 5
 Transport: localhost UDP
 Quality: Full fidelity, 60 Hz root, 60 Hz animation, 50 ms interpolation
-Wire format: v12 root snapshots after negotiation; v11 animation and outfits
+Wire format: v12 root and grouped animation after negotiation; v11 outfits
 Delivery policy: root/animation unreliable and latest-wins; control/outfits
 reliable
 

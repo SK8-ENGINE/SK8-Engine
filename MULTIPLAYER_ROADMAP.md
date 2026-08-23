@@ -505,6 +505,22 @@ Current checkpoint:
   packetizer and reassembler. Golden bytes, malformed input, maximum 8,192
   word frames, reverse-order 15-fragment reassembly, and bit-exact recovery
   are covered without changing live send, receive, or rendering behavior.
+- The live grouped-animation checkpoint advertises the v12 pose-group
+  feature under a new build-compatibility identity. After two-way
+  negotiation, each complete 60 Hz animation is encoded once as the exact
+  current word stream plus its root metadata, fragmented into at most 1,200
+  byte v12 datagrams, and reassembled with bounded latest-pose state. It then
+  enters the same word decoder, interpolation buffer, attachments, and
+  renderer used by v11. Peers without the negotiated feature and dynamic
+  localhost host-relay sessions retain the v11 path. The first frame after a
+  peer switches from v11 is forced to be a self-contained keyframe, so the
+  new stream never depends on a pre-negotiation v11 baseline having arrived.
+- This first live pose-group step deliberately keeps one complete group and
+  the existing v11 keyframe/delta choice. It does not yet claim independent
+  body-part recovery or receiver-confirmed baselines. Dedicated counters
+  distinguish v12 animation fragments, completed groups, and rejections; a
+  five-client user visual and telemetry gate is required before baseline
+  acknowledgement and recovery controls are enabled.
 
 Completion:
 

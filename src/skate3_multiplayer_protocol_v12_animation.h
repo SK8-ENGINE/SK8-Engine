@@ -40,6 +40,27 @@ inline constexpr std::uint32_t kMaximumAnimationWordStreamBytes =
          words[1] <= protocol::kMaximumAnimationTracks;
 }
 
+[[nodiscard]] inline bool AnimationWordStreamMatchesPoseGroup(
+    MessageKind kind, const PoseGroupHeader& header,
+    std::span<const std::uint16_t> words) {
+  if (words.size() < 4 ||
+      header.encoding != PoseGroupEncoding::kV11WordStream ||
+      header.element_count != words[1]) {
+    return false;
+  }
+  const bool keyframe = (words[0] & 1u) != 0;
+  const std::uint32_t embedded_baseline =
+      static_cast<std::uint32_t>(words[2]) |
+      (static_cast<std::uint32_t>(words[3]) << 16);
+  if (kind == MessageKind::kPoseBaseline) {
+    return keyframe && header.baseline_id == 0 &&
+           embedded_baseline == header.pose_id;
+  }
+  return kind == MessageKind::kPoseDelta && !keyframe &&
+         header.baseline_id != 0 &&
+         embedded_baseline == header.baseline_id;
+}
+
 [[nodiscard]] inline bool EncodeAnimationWordStream(
     const float root_position[3], std::uint16_t root_bone,
     std::span<const std::uint16_t> words,

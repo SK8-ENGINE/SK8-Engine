@@ -149,6 +149,32 @@ void TestAnimationWordStreamGoldenBytesAndRoundTrip() {
              decoded_root_bone == 0x7788 &&
              decoded_words == words,
          "animation word stream round trip changed data");
+
+  PoseGroupHeader group;
+  group.pose_id = 0x11223344;
+  group.element_count = 2;
+  group.encoding = PoseGroupEncoding::kV11WordStream;
+  Expect(AnimationWordStreamMatchesPoseGroup(
+             MessageKind::kPoseBaseline, group, decoded_words),
+         "matching animation baseline metadata was rejected");
+  group.element_count = 3;
+  Expect(!AnimationWordStreamMatchesPoseGroup(
+             MessageKind::kPoseBaseline, group, decoded_words),
+         "animation group accepted the wrong track count");
+  group.element_count = 2;
+  group.pose_id = 0x11223345;
+  Expect(!AnimationWordStreamMatchesPoseGroup(
+             MessageKind::kPoseBaseline, group, decoded_words),
+         "animation baseline accepted a mismatched embedded ID");
+  decoded_words[0] = 0;
+  group.baseline_id = 0x11223344;
+  Expect(AnimationWordStreamMatchesPoseGroup(
+             MessageKind::kPoseDelta, group, decoded_words),
+         "matching animation delta metadata was rejected");
+  group.baseline_id = 0x11223343;
+  Expect(!AnimationWordStreamMatchesPoseGroup(
+             MessageKind::kPoseDelta, group, decoded_words),
+         "animation delta accepted a mismatched baseline ID");
 }
 
 void TestAnimationWordStreamMaximumGroupRoundTrip() {

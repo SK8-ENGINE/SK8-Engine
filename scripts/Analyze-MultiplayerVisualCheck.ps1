@@ -564,6 +564,22 @@ foreach ($client in $clientDirectories) {
         (Maximum-IntegerField $rateLines 'v12_root_rejected')
     )
     $summary.Add(
+        'max_v12_animation_fragments_sent=' +
+        (Maximum-IntegerField $rateLines 'v12_anim_tx')
+    )
+    $summary.Add(
+        'max_v12_animation_fragments_received=' +
+        (Maximum-IntegerField $rateLines 'v12_anim_rx')
+    )
+    $summary.Add(
+        'max_v12_animation_fragment_rejections=' +
+        (Maximum-IntegerField $rateLines 'v12_anim_rejected')
+    )
+    $summary.Add(
+        'max_v12_animation_groups_completed=' +
+        (Maximum-IntegerField $rateLines 'v12_anim_complete')
+    )
+    $summary.Add(
         'appearance_byte_receipts=' +
         (Match-Count $lines 'multiplayer: peer role=.*appearance .*state=1')
     )

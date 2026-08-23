@@ -8,9 +8,11 @@
 #include "skate3_multiplayer_playback_clock.h"
 #include "skate3_multiplayer_pose_curve.h"
 #include "skate3_multiplayer_protocol.h"
+#include "skate3_multiplayer_protocol_v12_animation.h"
 #include "skate3_multiplayer_protocol_v12_live.h"
 #include "skate3_multiplayer_protocol_v12_root.h"
 #include "skate3_multiplayer_protocol_v12_state.h"
+#include "skate3_multiplayer_protocol_v12_transport.h"
 #include "skate3_multiplayer_send_schedule.h"
 #include "skate3_multiplayer_worker.h"
 #include "skate3_steam_backend.h"
@@ -63,7 +65,7 @@ REXCVAR_DEFINE_BOOL(
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 REXCVAR_DEFINE_BOOL(
     skate3_multiplayer_replication_worker, false, "Skate 3",
-    "Run the existing protocol-v11 transport, packet processing, send "
+    "Run the negotiated multiplayer transport, packet processing, send "
     "scheduling, reassembly, interpolation, and relevance work on a "
     "background replication worker. Local capture and prepared remote "
     "presentation remain renderer-owned.")
@@ -240,6 +242,11 @@ const char* NetworkQualityName(const NetworkTuning&) {
 constexpr auto kRemoteTimeout = std::chrono::milliseconds(1500);
 constexpr std::size_t kMaximumBufferedSamples = 16;
 constexpr std::size_t kMaximumBufferedAnimationSamples = 16;
+constexpr std::uint16_t kV12AnimationStreamId = 2;
+constexpr std::uint8_t kV12AnimationGroupId = 0;
+constexpr std::size_t kMaximumV12AnimationFragments =
+    protocol_v12::PoseGroupFragmentCount(
+        protocol_v12::kMaximumAnimationWordStreamBytes);
 constexpr std::uint32_t kLocalControlCapabilities =
     kCapabilityControlV1 | kCapabilityAppearanceState |
     kCapabilityAppearanceRequest | kCapabilityProtocolV12;
@@ -377,6 +384,7 @@ struct RemotePeerState {
   std::deque<ReceivedSample> samples;
   std::deque<ReceivedAnimationSample> animation_samples;
   AnimationAssembly animation_assembly;
+  protocol_v12::PoseGroupReassembler v12_animation_reassembler{};
   QuantizedAnimationFrame animation_keyframe;
   PeerTimingTelemetry timing;
   motion::Window received_motion;
@@ -395,7 +403,9 @@ struct PeerControlState {
   protocol_v12::ReceiveHistory v12_control_receive_history;
   std::uint64_t v12_negotiated_features = 0;
   std::uint32_t last_v12_capability_sequence_sent = 0;
+  std::uint32_t v12_animation_send_sequence = 0;
   bool v12_capability_acknowledged = false;
+  bool v12_animation_started = false;
   std::uint64_t pending_appearance = 0;
   AppearanceDeliveryState pending_appearance_state =
       AppearanceDeliveryState::kUnknown;
@@ -505,6 +515,10 @@ struct TelemetrySnapshot {
   std::uint64_t sent_v12_root_snapshots = 0;
   std::uint64_t received_v12_root_snapshots = 0;
   std::uint64_t rejected_v12_root_snapshots = 0;
+  std::uint64_t sent_v12_animation_fragments = 0;
+  std::uint64_t received_v12_animation_fragments = 0;
+  std::uint64_t rejected_v12_animation_fragments = 0;
+  std::uint64_t completed_v12_animation_groups = 0;
   std::uint64_t animation_present_interpolated = 0;
   std::uint64_t animation_present_held_latest = 0;
   std::uint64_t animation_present_held_oldest = 0;
@@ -2171,6 +2185,14 @@ class Runtime {
         << telemetry_.received_v12_root_snapshots
         << " multiplayer_rejected_v12_root_snapshots="
         << telemetry_.rejected_v12_root_snapshots
+        << " multiplayer_tx_v12_animation_fragments="
+        << telemetry_.sent_v12_animation_fragments
+        << " multiplayer_rx_v12_animation_fragments="
+        << telemetry_.received_v12_animation_fragments
+        << " multiplayer_rejected_v12_animation_fragments="
+        << telemetry_.rejected_v12_animation_fragments
+        << " multiplayer_completed_v12_animation_groups="
+        << telemetry_.completed_v12_animation_groups
         << " multiplayer_animation_present_interpolated="
         << telemetry_.animation_present_interpolated
         << " multiplayer_animation_present_held_latest="
@@ -2309,7 +2331,8 @@ class Runtime {
         "policy=anim_u:{} appearance_r:{} control_r:{} errors:{} "
         "v12_tx={} v12_rx={} v12_peers={} v12_rejected={} "
         "v12_incompatible={} v12_root_tx={} v12_root_rx={} "
-        "v12_root_rejected={} "
+        "v12_root_rejected={} v12_anim_tx={} v12_anim_rx={} "
+        "v12_anim_rejected={} v12_anim_complete={} "
         "bones={} relay={:.1f}pps relevance_drop={:.1f}pps rejected={} "
         "failures={} peer_resets={} "
         "appearance={:.2f}MiB timeout={} budget_reject={} "
@@ -2339,6 +2362,10 @@ class Runtime {
         telemetry_.sent_v12_root_snapshots,
         telemetry_.received_v12_root_snapshots,
         telemetry_.rejected_v12_root_snapshots,
+        telemetry_.sent_v12_animation_fragments,
+        telemetry_.received_v12_animation_fragments,
+        telemetry_.rejected_v12_animation_fragments,
+        telemetry_.completed_v12_animation_groups,
         telemetry_.remote_animation_bones, relay_pps, drop_pps,
         telemetry_.rejected_packets, telemetry_.socket_failures,
         telemetry_.outbound_peer_resets,
@@ -2955,11 +2982,24 @@ class Runtime {
       const auto packet = std::span<const std::uint8_t>(
           reinterpret_cast<const std::uint8_t*>(bytes),
           static_cast<std::size_t>(received));
-      if (protocol_v12::DecodeEnvelope(packet, envelope) &&
+      if (!protocol_v12::DecodeEnvelope(packet, envelope)) {
+        ++telemetry_.rejected_packets;
+      } else if (
           envelope.kind ==
-              protocol_v12::MessageKind::kRootSnapshot) {
+          protocol_v12::MessageKind::kRootSnapshot) {
         if (ReceiveV12RootSnapshot(
                 now, map_hash, bytes, received, sender)) {
+          RegisterPeer(
+              envelope.sender_role, envelope.sender_session,
+              sender, now, nullptr);
+        }
+      } else if (
+          envelope.kind ==
+              protocol_v12::MessageKind::kPoseBaseline ||
+          envelope.kind ==
+              protocol_v12::MessageKind::kPoseDelta) {
+        if (ReceiveV12AnimationPacket(
+                now, bytes, received, sender)) {
           RegisterPeer(
               envelope.sender_role, envelope.sender_session,
               sender, now, nullptr);
@@ -3117,6 +3157,99 @@ class Runtime {
       ++telemetry_.rejected_v12_root_snapshots;
       return false;
     }
+    return true;
+  }
+
+  bool ReceiveV12AnimationPacket(
+      Clock::time_point now, const std::byte* bytes,
+      int received_bytes, const PacketEndpoint& sender) {
+    const auto reject = [this]() {
+      ++telemetry_.rejected_v12_animation_fragments;
+      ++telemetry_.rejected_packets;
+      return false;
+    };
+    if (bytes == nullptr || received_bytes <= 0 ||
+        (!using_steam_ &&
+         !topology::DirectLocalMeshEnabled(
+             ConfiguredLocalPeerCount()))) {
+      return reject();
+    }
+    const auto packet = std::span<const std::uint8_t>(
+        reinterpret_cast<const std::uint8_t*>(bytes),
+        static_cast<std::size_t>(received_bytes));
+    protocol_v12::Envelope envelope;
+    protocol_v12::PoseGroupHeader header;
+    std::span<const std::uint8_t> fragment;
+    if (!protocol_v12::DecodePoseGroupDatagram(
+            packet, envelope, header, fragment) ||
+        envelope.stream_id != kV12AnimationStreamId ||
+        header.group_id != kV12AnimationGroupId ||
+        header.encoding !=
+            protocol_v12::PoseGroupEncoding::kV11WordStream ||
+        !SteamSenderValid(envelope.sender_role, sender) ||
+        envelope.sender_role ==
+            static_cast<std::uint32_t>(bound_role_) ||
+        envelope.sender_session == session_id_) {
+      return reject();
+    }
+    const auto control = peer_control_.find(envelope.sender_role);
+    const auto peer_iterator =
+        remote_peers_.find(envelope.sender_role);
+    if (control == peer_control_.end() ||
+        peer_iterator == remote_peers_.end() ||
+        !control->second.v12_generation.Matches(
+            envelope.sender_role, envelope.sender_session) ||
+        (control->second.v12_negotiated_features &
+         protocol_v12::kFeaturePoseGroups) == 0 ||
+        peer_iterator->second.session != envelope.sender_session) {
+      return reject();
+    }
+
+    RemotePeerState& peer = peer_iterator->second;
+    ++telemetry_.received_packets;
+    ++telemetry_.received_animation_fragments;
+    telemetry_.received_animation_bytes += packet.size();
+    ++telemetry_.received_v12_animation_fragments;
+    peer.last_packet_at = now;
+    protocol_v12::ReassemblyPushResult result =
+        peer.v12_animation_reassembler.Push(
+            envelope, header, fragment, NowMicroseconds());
+    peer.timing.superseded_animation_assemblies +=
+        result.evicted_slots;
+    switch (result.disposition) {
+      case protocol_v12::ReassemblyDisposition::kFragmentStored:
+      case protocol_v12::ReassemblyDisposition::kDuplicateFragment:
+      case protocol_v12::ReassemblyDisposition::kStalePose:
+        return true;
+      case protocol_v12::ReassemblyDisposition::kGroupComplete:
+        break;
+      case protocol_v12::ReassemblyDisposition::kConflictingFragment:
+      case protocol_v12::ReassemblyDisposition::kResourceLimit:
+      case protocol_v12::ReassemblyDisposition::kInvalidFragment:
+        return reject();
+    }
+    if (!result.completed.has_value()) {
+      return reject();
+    }
+
+    const protocol_v12::ReassembledPoseGroup& completed =
+        *result.completed;
+    float root_position[3] = {};
+    std::uint16_t root_bone = 0;
+    std::vector<std::uint16_t> words;
+    if (!protocol_v12::DecodeAnimationWordStream(
+            completed.bytes, root_position, root_bone, words) ||
+        !protocol_v12::AnimationWordStreamMatchesPoseGroup(
+            completed.kind, header, words)) {
+      return reject();
+    }
+    if (!CommitAnimationFrame(
+            now, peer, completed.pose_id,
+            envelope.sender_time_us, root_bone,
+            root_position, words)) {
+      return reject();
+    }
+    ++telemetry_.completed_v12_animation_groups;
     return true;
   }
 
@@ -3434,7 +3567,7 @@ class Runtime {
           role, "process session changed");
     }
     AdvancePeerTransportGeneration(role);
-    peer = {};
+    peer = RemotePeerState{};
     peer.session = sender_session;
   }
 
@@ -3519,6 +3652,94 @@ class Runtime {
           bound_role_, packet.sender_role, packet.sender_session,
           packet.sequence, packet.map_hash);
     }
+    return true;
+  }
+
+  bool CommitAnimationFrame(
+      Clock::time_point now, RemotePeerState& peer,
+      std::uint32_t sequence, std::uint64_t sender_time_us,
+      std::uint16_t root_bone, const float root_position[3],
+      const std::vector<std::uint16_t>& words) {
+    if (!Finite3(root_position) ||
+        (!peer.animation_samples.empty() &&
+         !SequenceNewer(
+             sequence,
+             peer.animation_samples.back().pose.sequence))) {
+      return false;
+    }
+    ReceivedAnimationSample complete;
+    complete.received_at = now;
+    complete.pose.sender_time_us = sender_time_us;
+    complete.pose.sequence = sequence;
+    complete.pose.root_bone = root_bone;
+    std::copy_n(
+        root_position, 3, complete.pose.root_position);
+    std::uint32_t total_bones = 0;
+    if (!DecodeAnimationFrameWords(
+            words, sequence, root_position,
+            peer.animation_keyframe,
+            complete.pose.tracks, total_bones)) {
+      return false;
+    }
+    const std::uint64_t arrival_time_us = NowMicroseconds();
+    if (peer.last_animation_sender_time_us != 0 &&
+        peer.last_animation_arrival_time_us != 0 &&
+        complete.pose.sender_time_us >
+            peer.last_animation_sender_time_us &&
+        SequenceNewer(
+            complete.pose.sequence,
+            peer.last_animation_sequence)) {
+      const std::uint64_t sender_delta =
+          complete.pose.sender_time_us -
+          peer.last_animation_sender_time_us;
+      const std::uint64_t arrival_delta =
+          arrival_time_us -
+          peer.last_animation_arrival_time_us;
+      const std::uint32_t sequence_delta =
+          complete.pose.sequence -
+          peer.last_animation_sequence;
+      if (sequence_delta > 1) {
+        peer.timing.animation_sequence_gaps +=
+            static_cast<std::uint64_t>(sequence_delta - 1);
+      }
+      const std::int64_t period_sample =
+          static_cast<std::int64_t>(
+              sender_delta / sequence_delta);
+      if (period_sample >= 8000 &&
+          period_sample <= 150000) {
+        peer.animation_period_us +=
+            (period_sample -
+             peer.animation_period_us) /
+            8;
+      }
+      const std::int64_t timing_variation =
+          arrival_delta >= sender_delta
+              ? static_cast<std::int64_t>(
+                    arrival_delta - sender_delta)
+              : static_cast<std::int64_t>(
+                    sender_delta - arrival_delta);
+      peer.animation_jitter_us +=
+          (timing_variation -
+           peer.animation_jitter_us) /
+          16;
+    }
+    peer.last_animation_sender_time_us =
+        complete.pose.sender_time_us;
+    peer.last_animation_arrival_time_us =
+        arrival_time_us;
+    peer.last_animation_sequence =
+        complete.pose.sequence;
+    peer.received_motion.Record(
+        complete.pose.sender_time_us,
+        complete.pose.root_position);
+    peer.animation_samples.push_back(std::move(complete));
+    while (peer.animation_samples.size() >
+           kMaximumBufferedAnimationSamples) {
+      peer.animation_samples.pop_front();
+    }
+    ++peer.timing.completed_animation_frames;
+    ++telemetry_.received_animation_frames;
+    telemetry_.remote_animation_bones = total_bones;
     return true;
   }
 
@@ -3615,87 +3836,17 @@ class Runtime {
         complete_mask) {
       return true;
     }
-    ReceivedAnimationSample complete;
-    complete.received_at = now;
-    complete.pose.sender_time_us =
-        peer.animation_assembly.sender_time_us;
-    complete.pose.sequence = peer.animation_assembly.sequence;
-    complete.pose.root_bone =
-        peer.animation_assembly.root_bone;
-    std::memcpy(
-        complete.pose.root_position,
-        peer.animation_assembly.root_position,
-        sizeof(complete.pose.root_position));
-    std::uint32_t total_bones = 0;
-    if (!DecodeAnimationFrameWords(
-            peer.animation_assembly.words,
+    if (!CommitAnimationFrame(
+            now, peer,
             peer.animation_assembly.sequence,
+            peer.animation_assembly.sender_time_us,
+            peer.animation_assembly.root_bone,
             peer.animation_assembly.root_position,
-            peer.animation_keyframe,
-            complete.pose.tracks, total_bones)) {
+            peer.animation_assembly.words)) {
       ++telemetry_.rejected_packets;
       peer.animation_assembly = {};
       return false;
     }
-    const std::uint64_t arrival_time_us = NowMicroseconds();
-    if (peer.last_animation_sender_time_us != 0 &&
-        peer.last_animation_arrival_time_us != 0 &&
-        complete.pose.sender_time_us >
-            peer.last_animation_sender_time_us &&
-        SequenceNewer(
-            complete.pose.sequence,
-            peer.last_animation_sequence)) {
-      const std::uint64_t sender_delta =
-          complete.pose.sender_time_us -
-          peer.last_animation_sender_time_us;
-      const std::uint64_t arrival_delta =
-          arrival_time_us -
-          peer.last_animation_arrival_time_us;
-      const std::uint32_t sequence_delta =
-          complete.pose.sequence -
-          peer.last_animation_sequence;
-      if (sequence_delta > 1) {
-        peer.timing.animation_sequence_gaps +=
-            static_cast<std::uint64_t>(sequence_delta - 1);
-      }
-      const std::int64_t period_sample =
-          static_cast<std::int64_t>(
-              sender_delta / sequence_delta);
-      if (period_sample >= 8000 &&
-          period_sample <= 150000) {
-        peer.animation_period_us +=
-            (period_sample -
-             peer.animation_period_us) /
-            8;
-      }
-      const std::int64_t timing_variation =
-          arrival_delta >= sender_delta
-              ? static_cast<std::int64_t>(
-                    arrival_delta - sender_delta)
-              : static_cast<std::int64_t>(
-                    sender_delta - arrival_delta);
-      peer.animation_jitter_us +=
-          (timing_variation -
-           peer.animation_jitter_us) /
-          16;
-    }
-    peer.last_animation_sender_time_us =
-        complete.pose.sender_time_us;
-    peer.last_animation_arrival_time_us =
-        arrival_time_us;
-    peer.last_animation_sequence =
-        complete.pose.sequence;
-    peer.received_motion.Record(
-        complete.pose.sender_time_us,
-        complete.pose.root_position);
-    peer.animation_samples.push_back(std::move(complete));
-    while (peer.animation_samples.size() >
-           kMaximumBufferedAnimationSamples) {
-      peer.animation_samples.pop_front();
-    }
-    ++peer.timing.completed_animation_frames;
-    ++telemetry_.received_animation_frames;
-    telemetry_.remote_animation_bones = total_bones;
     peer.animation_assembly = {};
     return true;
   }
@@ -3886,6 +4037,24 @@ class Runtime {
         ++telemetry_.sent_root_packets;
         telemetry_.sent_root_bytes += packet_bytes;
         ++telemetry_.sent_v12_root_snapshots;
+      } else if (
+          (envelope.kind ==
+               protocol_v12::MessageKind::kPoseBaseline ||
+           envelope.kind ==
+               protocol_v12::MessageKind::kPoseDelta) &&
+          traffic_class == OutboundTrafficClass::kRealtime) {
+        protocol_v12::PoseGroupHeader header;
+        std::span<const std::uint8_t> fragment;
+        protocol_v12::Envelope decoded_envelope;
+        if (!protocol_v12::DecodePoseGroupDatagram(
+                packet, decoded_envelope, header, fragment)) {
+          ++telemetry_.delivery_policy_errors;
+          return;
+        }
+        ++telemetry_.sent_animation_fragments;
+        telemetry_.sent_animation_bytes += packet_bytes;
+        ++telemetry_.sent_animation_unreliable_fragments;
+        ++telemetry_.sent_v12_animation_fragments;
       } else {
         ++telemetry_.delivery_policy_errors;
       }
@@ -4095,6 +4264,17 @@ class Runtime {
             protocol_v12::kFeatureExplicitLittleEndian) != 0;
   }
 
+  bool V12AnimationReadyForRole(
+      std::uint32_t target_role) const {
+    if (!V12RealtimeReadyForRole(target_role)) {
+      return false;
+    }
+    const auto control = peer_control_.find(target_role);
+    return control != peer_control_.end() &&
+           (control->second.v12_negotiated_features &
+            protocol_v12::kFeaturePoseGroups) != 0;
+  }
+
   bool SendV12RootSnapshot(
       const PosePacket& source, const PacketEndpoint& target) {
     std::array<std::uint8_t,
@@ -4128,6 +4308,87 @@ class Runtime {
     return SendBytes(
         packet.data(), static_cast<int>(packet.size()), target,
         OutboundTrafficClass::kRealtime, /*relayed=*/false);
+  }
+
+  bool SendV12Animation(
+      std::uint32_t target_role, const PacketEndpoint& target,
+      std::uint32_t pose_id, std::uint64_t sender_time_us,
+      std::span<const std::uint16_t> words,
+      std::span<const std::uint8_t> group_bytes) {
+    if (words.size() < 4 ||
+        group_bytes.size() !=
+            protocol_v12::AnimationWordStreamByteCount(
+                words.size())) {
+      ++telemetry_.delivery_policy_errors;
+      return false;
+    }
+    const auto control_iterator = peer_control_.find(target_role);
+    if (control_iterator == peer_control_.end()) {
+      ++telemetry_.delivery_policy_errors;
+      return false;
+    }
+    PeerControlState& control = control_iterator->second;
+    const bool keyframe = (words[0] & 1u) != 0;
+    const std::uint32_t embedded_baseline =
+        static_cast<std::uint32_t>(words[2]) |
+        (static_cast<std::uint32_t>(words[3]) << 16);
+    protocol_v12::PoseGroupPacketizeRequest request;
+    request.envelope.kind =
+        keyframe
+            ? protocol_v12::MessageKind::kPoseBaseline
+            : protocol_v12::MessageKind::kPoseDelta;
+    request.envelope.sender_role =
+        static_cast<std::uint16_t>(bound_role_);
+    request.envelope.stream_id = kV12AnimationStreamId;
+    request.envelope.sender_session = session_id_;
+    request.envelope.sequence =
+        control.v12_animation_send_sequence + 1;
+    request.envelope.sender_time_us = sender_time_us;
+    request.pose_id = pose_id;
+    request.baseline_id = keyframe ? 0 : embedded_baseline;
+    request.element_count = words[1];
+    request.group_id = kV12AnimationGroupId;
+    request.encoding =
+        protocol_v12::PoseGroupEncoding::kV11WordStream;
+    request.group_bytes = group_bytes;
+    std::array<protocol_v12::PoseGroupDatagram,
+               kMaximumV12AnimationFragments>
+        descriptors{};
+    const std::size_t fragment_count =
+        protocol_v12::BuildPoseGroupDatagrams(
+            request, descriptors);
+    if (fragment_count == 0) {
+      ++telemetry_.delivery_policy_errors;
+      return false;
+    }
+    control.v12_animation_send_sequence =
+        descriptors[fragment_count - 1].envelope.sequence;
+    bool complete = true;
+    for (std::size_t index = 0;
+         index < fragment_count; ++index) {
+      const protocol_v12::PoseGroupDatagram& descriptor =
+          descriptors[index];
+      const std::size_t packet_bytes =
+          protocol_v12::kEnvelopeBytes +
+          descriptor.envelope.payload_bytes;
+      std::array<std::uint8_t,
+                 protocol_v12::kMaximumDatagramBytes>
+          packet{};
+      if (!protocol_v12::EncodePoseGroupDatagram(
+              descriptor, group_bytes,
+              std::span<std::uint8_t>(packet).first(
+                  packet_bytes))) {
+        ++telemetry_.delivery_policy_errors;
+        complete = false;
+        continue;
+      }
+      complete &=
+          SendBytes(
+              packet.data(), static_cast<int>(packet_bytes),
+              target, OutboundTrafficClass::kRealtime,
+              /*relayed=*/false);
+    }
+    return complete;
   }
 
   bool SendV12CapabilityToRole(
@@ -4520,6 +4781,7 @@ class Runtime {
       QuantizedAnimationFrame base_keyframe;
       QuantizedAnimationFrame proposed_keyframe;
       std::vector<std::uint16_t> words;
+      std::vector<std::uint8_t> v12_group_bytes;
       bool valid = false;
     };
     std::vector<PreparedAnimationFrame> prepared_frames;
@@ -4529,6 +4791,18 @@ class Runtime {
       std::vector<const AnimationTrack*> target_tracks = tracks;
       QuantizedAnimationFrame& target_keyframe =
           outbound_animation_keyframes_[target_role];
+      const bool use_v12_animation =
+          V12AnimationReadyForRole(target_role);
+      PeerControlState* target_control = nullptr;
+      if (use_v12_animation) {
+        target_control = &peer_control_.at(target_role);
+        if (!target_control->v12_animation_started) {
+          // The first packet in the negotiated stream must be independently
+          // decodable; it cannot assume a v11 keyframe happened to arrive
+          // before the capability handshake completed.
+          target_keyframe = {};
+        }
+      }
       auto prepared = std::find_if(
           prepared_frames.begin(), prepared_frames.end(),
           [&](const PreparedAnimationFrame& candidate) {
@@ -4544,6 +4818,22 @@ class Runtime {
         frame.valid = BuildAnimationFrameWords(
             pose, target_tracks, sequence, frame.proposed_keyframe,
             frame.words);
+        if (frame.valid) {
+          float relative_root[3] = {};
+          for (std::size_t component = 0; component < 3;
+               ++component) {
+            relative_root[component] =
+                pose.root_position[component] -
+                map_origin[component];
+          }
+          frame.v12_group_bytes.resize(
+              protocol_v12::AnimationWordStreamByteCount(
+                  frame.words.size()));
+          frame.valid =
+              protocol_v12::EncodeAnimationWordStream(
+                  relative_root, pose.root_bone,
+                  frame.words, frame.v12_group_bytes);
+        }
         prepared_frames.push_back(std::move(frame));
         prepared = std::prev(prepared_frames.end());
       }
@@ -4551,53 +4841,63 @@ class Runtime {
         complete = false;
         continue;
       }
-      const std::size_t fragment_count =
-          (prepared->words.size() +
-               kAnimationFragmentWords - 1) /
-          kAnimationFragmentWords;
       bool target_complete = true;
-      for (std::size_t fragment_index = 0;
-           fragment_index < fragment_count; ++fragment_index) {
-        AnimationFragmentPacket packet;
-        packet.sender_role = static_cast<std::uint32_t>(role);
-        packet.sender_session = session_id_;
-        packet.sequence = sequence;
-        packet.map_hash = map_hash;
-        packet.sender_time_us = sender_time_us;
-        for (std::size_t component = 0; component < 3;
-             ++component) {
-          packet.root_position[component] =
-              pose.root_position[component] -
-              map_origin[component];
+      if (use_v12_animation) {
+        target_complete = SendV12Animation(
+            target_role, target, sequence, sender_time_us,
+            prepared->words, prepared->v12_group_bytes);
+      } else {
+        const std::size_t fragment_count =
+            (prepared->words.size() +
+                 kAnimationFragmentWords - 1) /
+            kAnimationFragmentWords;
+        for (std::size_t fragment_index = 0;
+             fragment_index < fragment_count; ++fragment_index) {
+          AnimationFragmentPacket packet;
+          packet.sender_role = static_cast<std::uint32_t>(role);
+          packet.sender_session = session_id_;
+          packet.sequence = sequence;
+          packet.map_hash = map_hash;
+          packet.sender_time_us = sender_time_us;
+          for (std::size_t component = 0; component < 3;
+               ++component) {
+            packet.root_position[component] =
+                pose.root_position[component] -
+                map_origin[component];
+          }
+          packet.root_bone = pose.root_bone;
+          packet.fragment_index =
+              static_cast<std::uint16_t>(fragment_index);
+          packet.fragment_count =
+              static_cast<std::uint16_t>(fragment_count);
+          const std::size_t offset =
+              fragment_index * kAnimationFragmentWords;
+          packet.word_offset =
+              static_cast<std::uint16_t>(offset);
+          packet.total_words =
+              static_cast<std::uint16_t>(prepared->words.size());
+          packet.word_count = static_cast<std::uint16_t>(
+              std::min<std::size_t>(
+                  kAnimationFragmentWords,
+                  prepared->words.size() - offset));
+          std::copy_n(
+              prepared->words.begin() + offset,
+              packet.word_count, packet.words);
+          packet.byte_count = static_cast<std::uint16_t>(
+              AnimationFragmentByteCount(packet.word_count));
+          target_complete &=
+              SendBytes(
+                  &packet, packet.byte_count, target,
+                  OutboundTrafficClass::kRealtime,
+                  /*relayed=*/false);
         }
-        packet.root_bone = pose.root_bone;
-        packet.fragment_index =
-            static_cast<std::uint16_t>(fragment_index);
-        packet.fragment_count =
-            static_cast<std::uint16_t>(fragment_count);
-        const std::size_t offset =
-            fragment_index * kAnimationFragmentWords;
-        packet.word_offset =
-            static_cast<std::uint16_t>(offset);
-        packet.total_words =
-            static_cast<std::uint16_t>(prepared->words.size());
-        packet.word_count = static_cast<std::uint16_t>(
-            std::min<std::size_t>(
-                kAnimationFragmentWords,
-                prepared->words.size() - offset));
-        std::copy_n(
-            prepared->words.begin() + offset,
-            packet.word_count, packet.words);
-        packet.byte_count = static_cast<std::uint16_t>(
-            AnimationFragmentByteCount(packet.word_count));
-        target_complete &=
-            SendBytes(&packet, packet.byte_count, target,
-                      OutboundTrafficClass::kRealtime,
-                      /*relayed=*/false);
       }
       if (target_complete) {
         outbound_animation_keyframes_[target_role] =
             prepared->proposed_keyframe;
+        if (target_control != nullptr) {
+          target_control->v12_animation_started = true;
+        }
       }
       complete &= target_complete;
     }
