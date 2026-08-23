@@ -183,8 +183,20 @@ Current checkpoint:
 - That pass measured one-time recipe installation spikes of 221-257 ms on the
   render thread. A guarded background asset worker now prepares recipe models
   and textures with latest-outfit/session rejection before the renderer sees
-  them. The wire protocol is unchanged, and the visual/performance pass for
-  this worker is the next acceptance gate.
+  them. The wire protocol is unchanged.
+- Three-client visual passes through `3486fc4` retained complete outfits,
+  boards, detached-board animation, attached ROPA hair, authored hair strand
+  transparency, and stable ROPA shirts. Telemetry independently showed no
+  socket or appearance failure, incomplete recipe, weighted-row fallback, rig
+  retry, or dropped-garment corruption. Receiver hair fade was normalized
+  from transient join values such as 0.188-0.275 to 1.0, and recipe ROPA
+  pieces used canonical body tracks.
+- Background preparation reduced the remaining one-time render-thread
+  installation work to 21.6-51.4 ms for 10-11 pieces and 23-25 textures.
+  Steady multiplayer render work averaged about 0.20-0.25 ms in that pass.
+  The next acceptance gate is a transactional incremental GPU installer that
+  keeps the complete proxy visible until every resource is ready and bounds
+  each render frame's upload work.
 
 Completion:
 
