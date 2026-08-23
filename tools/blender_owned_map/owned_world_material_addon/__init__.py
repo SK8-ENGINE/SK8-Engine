@@ -1,4 +1,4 @@
-"""Human-friendly Blender authoring and export tools for SKATE v9.
+"""Human-friendly Blender authoring and export tools for SKATE v10.
 
 This addon and exporter are original project code. They do not import,
 invoke, redistribute, or depend on ArenaBuilder.
@@ -44,7 +44,7 @@ exporter = importlib.reload(_exporter)
 bl_info = {
     "name": "Owned World Authoring",
     "author": "Skate 3 Custom Engine Layer contributors",
-    "version": (1, 9, 0),
+    "version": (1, 10, 0),
     "blender": (5, 0, 0),
     "location": "3D View > Sidebar > Skate 3 Map",
     "description": "Create, validate, and export Skate 3 Custom Engine maps",

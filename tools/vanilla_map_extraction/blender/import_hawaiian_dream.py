@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import re
+import struct
 import sys
 
 import bpy
@@ -106,6 +107,113 @@ def _new_material(
     return material
 
 
+def _runtime_point_to_blender(
+    point: tuple[float, float, float],
+) -> tuple[float, float, float]:
+    return point[0], -point[2], point[1]
+
+
+def _retail_grind_controls(
+    payload_hex: str,
+) -> tuple[
+    tuple[float, float, float],
+    tuple[float, float, float],
+    tuple[float, float, float],
+    tuple[float, float, float],
+]:
+    payload = bytes.fromhex(payload_hex)
+    if len(payload) != 120:
+        raise ValueError("retail grind segment payload must contain 120 bytes")
+    values = struct.unpack(">30f", payload)
+    coefficient_a = values[0:3]
+    coefficient_b = values[4:7]
+    coefficient_c = values[8:11]
+    coefficient_d = values[12:15]
+    point_0 = coefficient_d
+    point_1 = tuple(
+        coefficient_d[axis] + coefficient_c[axis] / 3.0
+        for axis in range(3)
+    )
+    point_2 = tuple(
+        coefficient_d[axis]
+        + (2.0 * coefficient_c[axis] + coefficient_b[axis]) / 3.0
+        for axis in range(3)
+    )
+    point_3 = tuple(
+        coefficient_d[axis]
+        + coefficient_c[axis]
+        + coefficient_b[axis]
+        + coefficient_a[axis]
+        for axis in range(3)
+    )
+    return tuple(
+        _runtime_point_to_blender(point)
+        for point in (point_0, point_1, point_2, point_3)
+    )
+
+
+def _import_retail_grinds(
+    manifest: dict[str, object],
+    collection: bpy.types.Collection,
+) -> tuple[int, int]:
+    rail_count = 0
+    segment_count = 0
+    for entry in manifest.get("grind_splines", []):
+        payloads = entry["native_segment_payloads"]
+        expected_segments = int(entry["segment_count"])
+        if len(payloads) != expected_segments or expected_segments == 0:
+            raise ValueError("retail grind manifest has invalid segment count")
+        controls = [_retail_grind_controls(payload) for payload in payloads]
+        closed = bool(entry["closed"])
+        point_count = expected_segments if closed else expected_segments + 1
+        curve_name = (
+            f"GRIND_{entry['asset_id'][2:]}_"
+            f"{int(entry['rail_index']):04d}"
+        )
+        curve_data = bpy.data.curves.new(curve_name, type="CURVE")
+        curve_data.dimensions = "3D"
+        curve_data.resolution_u = 8
+        curve_data.bevel_depth = 0.015
+        curve_data.bevel_resolution = 0
+        spline = curve_data.splines.new("BEZIER")
+        spline.bezier_points.add(point_count - 1)
+        spline.use_cyclic_u = closed
+        for point in spline.bezier_points:
+            point.handle_left_type = "FREE"
+            point.handle_right_type = "FREE"
+
+        for segment_index, segment_controls in enumerate(controls):
+            point_0, point_1, point_2, point_3 = segment_controls
+            current_index = segment_index
+            next_index = (segment_index + 1) % point_count
+            current = spline.bezier_points[current_index]
+            following = spline.bezier_points[next_index]
+            current.co = point_0
+            current.handle_right = point_1
+            following.handle_left = point_2
+            if not closed or next_index != 0:
+                following.co = point_3
+
+        obj = bpy.data.objects.new(curve_name, curve_data)
+        collection.objects.link(obj)
+        obj.color = (1.0, 0.12, 0.02, 1.0)
+        obj["skate3_retail_grind"] = True
+        obj["skate3_asset_id"] = entry["asset_id"]
+        obj["skate3_stream_file"] = entry["stream_file"]
+        obj["skate3_retail_grind_rail_index"] = int(entry["rail_index"])
+        obj["skate3_retail_grind_spline_id"] = entry["spline_id"]
+        obj["skate3_retail_grind_type_signature"] = entry["type_signature"]
+        obj["skate3_retail_grind_flags"] = int(entry["flags"])
+        obj["skate3_retail_grind_trailing_word"] = int(
+            entry["trailing_word"]
+        )
+        obj["skate3_retail_grind_segment_count"] = expected_segments
+        obj["skate3_retail_grind_segment_payload"] = "".join(payloads)
+        rail_count += 1
+        segment_count += expected_segments
+    return rail_count, segment_count
+
+
 def build_scene(manifest_path: Path) -> dict[str, int]:
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     cache_root = manifest_path.parent
@@ -119,6 +227,7 @@ def build_scene(manifest_path: Path) -> dict[str, int]:
 
     root = _new_child_collection(scene, scene_name)
     presentation = _new_child_collection(root, "Presentation")
+    retail_grinds = _new_child_collection(root, "Retail_Grinds")
     collision = _new_child_collection(root, "Collision_RAW")
     collision.hide_viewport = True
     collision.hide_render = True
@@ -235,6 +344,11 @@ def build_scene(manifest_path: Path) -> dict[str, int]:
                 vertex_count += len(vertices)
                 triangle_count += len(faces)
 
+    grind_rail_count, grind_segment_count = _import_retail_grinds(
+        manifest,
+        retail_grinds,
+    )
+
     for simulation_entry in manifest["simulation_assets"]:
         empty = bpy.data.objects.new(
             f"SIM_{simulation_entry['asset_id'][2:]}",
@@ -266,12 +380,17 @@ def build_scene(manifest_path: Path) -> dict[str, int]:
     scene["skate3_manifest"] = str(manifest_path)
     scene["skate3_import_format"] = manifest["format"]
     scene["skate3_collision_status"] = "raw assets preserved; decoder pending"
+    scene["skate3_grind_status"] = (
+        f"{grind_rail_count} retail native cubic splines imported"
+    )
     return {
         "objects": object_count,
         "vertices": vertex_count,
         "triangles": triangle_count,
         "textures": len(images),
         "materials": len(materials),
+        "grind_rails": grind_rail_count,
+        "grind_segments": grind_segment_count,
         "simulation_assets": len(manifest["simulation_assets"]),
         "expected_objects": manifest["summary"]["mesh_parts"],
     }

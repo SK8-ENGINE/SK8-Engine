@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cctype>
 #include <cmath>
 #include <cstddef>
@@ -39,6 +40,8 @@ constexpr std::array<char, 8> kMagicV8 = {
     'S', 'K', 'A', 'T', 'E', '0', '8', '\0'};
 constexpr std::array<char, 8> kMagicV9 = {
     'S', 'K', 'A', 'T', 'E', '0', '9', '\0'};
+constexpr std::array<char, 8> kMagicV10 = {
+    'S', 'K', 'A', 'T', 'E', '1', '0', '\0'};
 constexpr std::uint32_t kEndianMarker = 0x12345678u;
 constexpr std::uint32_t kStorageRaw = 0;
 constexpr std::uint32_t kStorageDeflate = 1;
@@ -340,10 +343,27 @@ void Validate(MapDefinition& map) {
     triangle.normal = Normalize(cross);
   }
   for (const GrindRail& rail : map.grind_rails) {
-    if (rail.id == 0 || rail.name.empty() || rail.points.size() < 2 ||
-        !std::all_of(
+    const bool native = !rail.native_segments.empty();
+    const bool points_valid =
+        rail.points.size() >= 2 &&
+        std::all_of(
             rail.points.begin(), rail.points.end(),
-            [](Vec3 point) { return Finite(point); })) {
+            [](Vec3 point) { return Finite(point); });
+    const bool native_valid =
+        native && rail.points.empty() &&
+        rail.retail_spline_id != 0 &&
+        rail.retail_type_signature != 0 &&
+        std::all_of(
+            rail.native_segments.begin(), rail.native_segments.end(),
+            [](const NativeGrindSegment& segment) {
+              return std::all_of(
+                  segment.words.begin(), segment.words.end(),
+                  [](std::uint32_t word) {
+                    return std::isfinite(std::bit_cast<float>(word));
+                  });
+            });
+    if (rail.id == 0 || rail.name.empty() ||
+        (!native && !points_valid) || (native && !native_valid)) {
       throw std::runtime_error("SKATE grind path is invalid");
     }
   }
@@ -492,6 +512,7 @@ MapDefinition LoadOwnedMapPackage(const std::filesystem::path& path) {
   const bool version_7 = magic == kMagicV7;
   const bool version_8 = magic == kMagicV8;
   const bool version_9 = magic == kMagicV9;
+  const bool version_10 = magic == kMagicV10;
   const bool skate_magic =
       std::memcmp(magic.data(), "SKATE", 5) == 0 &&
       std::isdigit(static_cast<unsigned char>(magic[5])) &&
@@ -499,17 +520,17 @@ MapDefinition LoadOwnedMapPackage(const std::filesystem::path& path) {
       magic[7] == '\0';
   const int package_version =
       skate_magic ? (magic[5] - '0') * 10 + (magic[6] - '0') : 0;
-  if (skate_magic && package_version > 9) {
+  if (skate_magic && package_version > 10) {
     throw std::runtime_error(
         "SKATE v" + std::to_string(package_version) +
         " requires a newer Custom Engine Layer release");
   }
   if ((!version_1 && !version_2 && !version_3 && !version_4 &&
        !version_5 && !version_6 && !version_7 && !version_8 &&
-       !version_9) ||
+       !version_9 && !version_10) ||
       reader.Scalar<std::uint32_t>() != kEndianMarker) {
     throw std::runtime_error(
-        "file is not a supported little-endian SKATE v1-v9 package");
+        "file is not a supported little-endian SKATE v1-v10 package");
   }
 
   MapDefinition map;
@@ -620,7 +641,7 @@ MapDefinition LoadOwnedMapPackage(const std::filesystem::path& path) {
         expected_byte_count > kMaximumTextureBytes) {
       throw std::runtime_error("SKATE embedded texture is invalid");
     }
-    if (version_9) {
+    if (package_version >= 9) {
       texture.rgba8 = ReadStoredBytes(
           reader,
           static_cast<std::size_t>(expected_byte_count),
@@ -635,7 +656,7 @@ MapDefinition LoadOwnedMapPackage(const std::filesystem::path& path) {
     map.textures.push_back(std::move(texture));
   }
 
-  if (version_9) {
+  if (package_version >= 9) {
     Reader vertex_reader(ReadStoredBytes(
         reader,
         std::size_t(vertex_count) * sizeof(float) * 10u +
@@ -673,11 +694,32 @@ MapDefinition LoadOwnedMapPackage(const std::filesystem::path& path) {
     rail.id = index + 1;
     rail.name = reader.String();
     rail.closed = reader.Scalar<std::uint32_t>() != 0;
-    const std::uint32_t point_count = reader.Scalar<std::uint32_t>();
-    RequireCount(point_count, "grind point");
-    rail.points.reserve(point_count);
-    for (std::uint32_t point = 0; point < point_count; ++point) {
-      rail.points.push_back(reader.Vector3());
+    const std::uint32_t representation =
+        version_10 ? reader.Scalar<std::uint32_t>() : 0;
+    if (representation == 0) {
+      const std::uint32_t point_count = reader.Scalar<std::uint32_t>();
+      RequireCount(point_count, "grind point");
+      rail.points.reserve(point_count);
+      for (std::uint32_t point = 0; point < point_count; ++point) {
+        rail.points.push_back(reader.Vector3());
+      }
+    } else if (representation == 1 && version_10) {
+      rail.retail_spline_id = reader.Scalar<std::uint64_t>();
+      rail.retail_type_signature = reader.Scalar<std::uint64_t>();
+      rail.retail_flags = reader.Scalar<std::uint32_t>();
+      rail.retail_trailing_word = reader.Scalar<std::uint32_t>();
+      const std::uint32_t segment_count =
+          reader.Scalar<std::uint32_t>();
+      RequireCount(segment_count, "native grind segment");
+      rail.native_segments.resize(segment_count);
+      for (NativeGrindSegment& segment : rail.native_segments) {
+        for (std::uint32_t& word : segment.words) {
+          word = reader.Scalar<std::uint32_t>();
+        }
+      }
+    } else {
+      throw std::runtime_error(
+          "SKATE grind representation is unsupported");
     }
     map.grind_rails.push_back(std::move(rail));
   }

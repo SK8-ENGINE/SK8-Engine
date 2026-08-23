@@ -184,7 +184,7 @@ def main() -> int:
     group_1 = _new_group(GROUP_1)
     _new_group(GROUP_2)
     group_3 = _new_group(GROUP_3)
-    _new_group(GROUP_4)
+    group_4 = _new_group(GROUP_4)
     _new_group(GROUP_5)
     fallback = _default_material()
     _configure_material(fallback)
@@ -216,6 +216,20 @@ def main() -> int:
             group_1.objects.link(obj)
             collidable += 1
 
+    grind_objects = sorted(
+        (
+            obj
+            for obj in bpy.data.objects
+            if obj.type == "CURVE"
+            and bool(obj.get("skate3_retail_grind", False))
+        ),
+        key=lambda obj: obj.name_full,
+    )
+    grind_segments = 0
+    for obj in grind_objects:
+        group_4.objects.link(obj)
+        grind_segments += int(obj["skate3_retail_grind_segment_count"])
+
     spawn_runtime = _create_spawn()
     scene = bpy.context.scene
     scene["ow_map_name"] = "University District"
@@ -231,6 +245,9 @@ def main() -> int:
     scene["university_collision_source"] = (
         "full-detail presentation geometry; retail simulation RX2 decoder pending"
     )
+    scene["university_grind_source"] = (
+        "exact retail Pegasus tSplineData cubic segment payloads"
+    )
     scene["university_spawn_runtime"] = spawn_runtime
     output.parent.mkdir(parents=True, exist_ok=True)
     bpy.ops.wm.save_as_mainfile(filepath=str(output))
@@ -243,6 +260,8 @@ def main() -> int:
                 "triangles": triangle_count,
                 "collidable_objects": collidable,
                 "presentation_only_objects": presentation_only,
+                "grind_rails": len(grind_objects),
+                "grind_segments": grind_segments,
                 "spawn_runtime": spawn_runtime,
                 "collision_source": scene["university_collision_source"],
             },

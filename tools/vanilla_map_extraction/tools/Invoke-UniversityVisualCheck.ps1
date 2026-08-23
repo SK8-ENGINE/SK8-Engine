@@ -257,6 +257,12 @@ try {
     $analyzer = Join-Path (
         $repoRoot
     ) 'tools\blender_owned_map\analyze_skate.py'
+    $grindVerifier = Join-Path (
+        $workspace
+    ) 'tools\verify_university_grinds.py'
+    $extractionManifest = Join-Path (
+        $workspace
+    ) 'intermediate\university\manifest.json'
     $expectedPath = Join-Path (
         $workspace
     ) 'schemas\university_expected.json'
@@ -330,7 +336,7 @@ try {
             $exportArguments += '--force'
         }
         Invoke-Checked -FilePath $blender -Arguments $exportArguments `
-            -Description 'Export University SKATE v9 package'
+            -Description 'Export University SKATE v10 package'
     } else {
         Write-Host "SKATE package is current: $package"
     }
@@ -346,6 +352,11 @@ try {
         ConvertFrom-Json
     $expected = Get-Content -LiteralPath $expectedPath -Raw |
         ConvertFrom-Json
+    Invoke-Checked -FilePath 'python' -Arguments @(
+        $grindVerifier,
+        $extractionManifest,
+        $package
+    ) -Description 'Verify exact retail grind byte round trip'
 
     Assert-Equal 'format version' $actual.version $expected.format_version
     Assert-Equal 'map name' $actual.map_name $expected.map_name
@@ -363,6 +374,7 @@ try {
             'indices',
             'collision_triangles',
             'grind_rails',
+            'native_grind_segments',
             'hinged_doors',
             'local_lights',
             'npc_routes'
@@ -382,6 +394,7 @@ try {
             'expanded_visual_triangles_sha256',
             'expanded_visual_triangles_1e6_sha256',
             'collision_sha256',
+            'grind_rails_sha256',
             'authored_features_sha256'
         )) {
         Assert-Equal "integrity $name" $actual.integrity.$name `
@@ -468,6 +481,11 @@ try {
             $compiled.render_output_triangles,
             $compiled.render_chunks
         (
+            'SKATE_GRIND_WORLD_OK rails={0} segments={1} bytes={2}'
+        ) -f $compiled.grind_rails,
+            $compiled.grind_segments,
+            $compiled.grind_bytes
+        (
             'SKATE_COLLISION_WORLD_OK mode={0} cell_size={1} chunks={2} ' +
             'triangles={3}'
         ) -f $compiled.collision_mode,
@@ -529,9 +547,11 @@ try {
         Get-ChildItem -LiteralPath $seedRoot -Directory |
             Where-Object Name -Match '^[0-9A-Fa-f]{16}$' |
             ForEach-Object {
-                Copy-Item -LiteralPath $_.FullName -Destination (
-                    Join-Path $runRoot $_.Name
-                ) -Recurse
+                $seedDestination = Join-Path $runRoot $_.Name
+                New-Item -ItemType Directory -Path $seedDestination `
+                    -Force | Out-Null
+                Get-ChildItem -LiteralPath $_.FullName -Force |
+                    Copy-Item -Destination $seedDestination -Recurse -Force
             }
     }
 

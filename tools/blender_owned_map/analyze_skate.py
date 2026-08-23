@@ -35,6 +35,9 @@ class Reader:
     def u32(self, label: str) -> int:
         return struct.unpack("<I", self.take(4, label))[0]
 
+    def u64(self, label: str) -> int:
+        return struct.unpack("<Q", self.take(8, label))[0]
+
     def string(self, label: str) -> str:
         size = self.u32(f"{label} length")
         try:
@@ -89,9 +92,9 @@ def analyze_package(
 
     start = reader.offset
     magic = reader.take(8, "magic")
-    if magic not in (b"SKATE08\0", b"SKATE09\0"):
+    if magic not in (b"SKATE08\0", b"SKATE09\0", b"SKATE10\0"):
         raise PackageError(
-            f"unsupported magic {magic!r}; expected SKATE v8 or v9"
+            f"unsupported magic {magic!r}; expected SKATE v8-v10"
         )
     version = int(magic[5:7])
     if reader.u32("endian marker") != 0x12345678:
@@ -207,12 +210,37 @@ def analyze_package(
 
     authored_features_start = reader.offset
     start = reader.offset
+    grind_section_start = reader.offset
+    native_grind_segments = 0
     for index in range(rail_count):
         reader.string(f"rail {index} name")
         reader.u32(f"rail {index} closed")
-        point_count = reader.u32(f"rail {index} point count")
-        reader.skip(point_count * 12, f"rail {index} points")
+        representation = (
+            reader.u32(f"rail {index} representation")
+            if version >= 10
+            else 0
+        )
+        if representation == 0:
+            point_count = reader.u32(f"rail {index} point count")
+            reader.skip(point_count * 12, f"rail {index} points")
+        elif representation == 1 and version >= 10:
+            reader.u64(f"rail {index} retail spline id")
+            reader.u64(f"rail {index} retail type signature")
+            reader.u32(f"rail {index} retail flags")
+            reader.u32(f"rail {index} retail trailing word")
+            segment_count = reader.u32(f"rail {index} segment count")
+            reader.skip(
+                segment_count * 120,
+                f"rail {index} native segments",
+            )
+            native_grind_segments += segment_count
+        else:
+            raise PackageError(
+                f"rail {index} uses unsupported representation "
+                f"{representation}"
+            )
     _section(sections, reader, "grind_rails", start)
+    grind_section_bytes = reader.data[grind_section_start : reader.offset]
 
     start = reader.offset
     for index in range(door_count):
@@ -301,6 +329,7 @@ def analyze_package(
             "indices": index_count,
             "collision_triangles": collision_count,
             "grind_rails": rail_count,
+            "native_grind_segments": native_grind_segments,
             "hinged_doors": door_count,
             "local_lights": light_count,
             "npc_routes": route_count,
@@ -328,6 +357,9 @@ def analyze_package(
             ),
             "collision_sha256": hashlib.sha256(
                 collision_bytes
+            ).hexdigest(),
+            "grind_rails_sha256": hashlib.sha256(
+                grind_section_bytes
             ).hexdigest(),
             "authored_features_sha256": hashlib.sha256(
                 reader.data[authored_features_start : reader.offset]

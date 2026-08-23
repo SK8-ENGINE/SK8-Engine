@@ -465,8 +465,12 @@ GrindRailId MapBuilder::AddGrindRail(std::string name,
   }
 
   const GrindRailId id = next_grind_rail_id_++;
-  map_.grind_rails.push_back(
-      {id, std::move(name), std::move(points), closed});
+  GrindRail rail;
+  rail.id = id;
+  rail.name = std::move(name);
+  rail.points = std::move(points);
+  rail.closed = closed;
+  map_.grind_rails.push_back(std::move(rail));
   return id;
 }
 

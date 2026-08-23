@@ -1,10 +1,10 @@
-# SKATE v9 binary format
+# SKATE v10 binary format
 
 All integers and IEEE-754 floats are little-endian. Strings are a `u32` byte
 length followed by UTF-8 bytes. Coordinates are right-handed Y-up metres.
 
 ```text
-char[8] magic = "SKATE09\0"
+char[8] magic = "SKATE10\0"
 u32 endian_marker = 0x12345678
 string map_name
 f32 spawn_position[3]
@@ -67,8 +67,17 @@ stored_bytes collision:
 grind_rail[grind_rail_count]:
   string name
   u32 closed
-  u32 point_count
-  f32 point[point_count][3]
+  u32 representation             # 0 authored points, 1 retail native cubic
+  if representation == 0:
+    u32 point_count
+    f32 point[point_count][3]
+  if representation == 1:
+    u64 retail_spline_id
+    u64 retail_type_signature
+    u32 retail_flags
+    u32 retail_trailing_word
+    u32 segment_count
+    u32 native_segment[segment_count][30]
 
 hinged_door[hinged_door_count]:
   string name
@@ -161,7 +170,16 @@ NPC routes provide navigation intent to Skate 3's native AI skater
 controller. They do not contain scripted transforms: native steering, board
 physics, collision, animation, tricks, and bails remain authoritative.
 
-The loader retains read compatibility with SKATE v1 through v9. Missing v2
+Retail native grind segments preserve the first 120 bytes of each Pegasus
+`tSplineData` segment as 30 exact IEEE-754 word patterns. Their polynomial is
+`D + C*t + B*t^2 + A*t^3`; the runtime translates only D and the native
+bounds, regenerates parent/previous/next guest links, and leaves coefficients
+and auxiliary values unchanged. Blender Bezier handles are a review/edit
+representation. Export rejects a retail curve if its controls no longer match
+the retained native payload, preventing an edit from silently emitting stale
+grind data.
+
+The loader retains read compatibility with SKATE v1 through v10. Missing v2
 material fields use opaque, polished-concrete/smooth defaults with no
 additional PBR maps. Missing v3 cycle fields retain the original full-day
 behavior. Missing v6 environment fields use the engine's neutral sky grading

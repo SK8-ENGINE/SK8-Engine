@@ -76,7 +76,7 @@ int main() {
         std::filesystem::temp_directory_path() /
         "skate_owned_world_future_format_test.skate";
     const std::array<std::uint8_t, 12> header = {
-        'S', 'K', 'A', 'T', 'E', '1', '0', '\0',
+        'S', 'K', 'A', 'T', 'E', '1', '1', '\0',
         0x78, 0x56, 0x34, 0x12};
     {
       std::ofstream output(
@@ -607,6 +607,98 @@ int main() {
   Require(!FixupGrindSplineDataForGuest(
               fixed_grind, grind_guest_base),
           "repeated grind spline fixup was not rejected");
+
+  MapDefinition native_grind_definition;
+  GrindRail native_rail;
+  native_rail.id = 1;
+  native_rail.name = "retail_cubic";
+  native_rail.retail_spline_id = 0x1122334455667788ull;
+  native_rail.retail_type_signature = 0x8877665544332211ull;
+  native_rail.retail_flags = 0x12345678u;
+  native_rail.retail_trailing_word = 0x13572468u;
+  native_rail.native_segments.resize(1);
+  NativeGrindSegment& native_segment =
+      native_rail.native_segments.front();
+  const auto FloatWord = [](float value) {
+    return std::bit_cast<std::uint32_t>(value);
+  };
+  native_segment.words[0] = FloatWord(3.5f);
+  native_segment.words[12] = FloatWord(1.0f);
+  native_segment.words[13] = FloatWord(2.0f);
+  native_segment.words[14] = FloatWord(3.0f);
+  native_segment.words[15] = FloatWord(1.0f);
+  native_segment.words[16] = FloatWord(0.25f);
+  native_segment.words[20] = FloatWord(-4.0f);
+  native_segment.words[21] = FloatWord(-5.0f);
+  native_segment.words[22] = FloatWord(-6.0f);
+  native_segment.words[24] = FloatWord(7.0f);
+  native_segment.words[25] = FloatWord(8.0f);
+  native_segment.words[26] = FloatWord(9.0f);
+  native_grind_definition.grind_rails.push_back(
+      std::move(native_rail));
+
+  GrindSplineBuildResult native_grind = BuildGrindSplineData(
+      native_grind_definition, {10.0f, 20.0f, 30.0f});
+  Require(native_grind.ok, native_grind.error);
+  Require(native_grind.blob.rail_count == 1 &&
+              native_grind.blob.segment_count == 1 &&
+              native_grind.blob.bytes.size() == 16 + 32 + 144,
+          "native grind spline accounting is wrong");
+  Require(ReadBeU64(native_grind.blob.bytes, 16) ==
+                  0x1122334455667788ull &&
+              ReadBeU64(native_grind.blob.bytes, 24) ==
+                  0x8877665544332211ull &&
+              ReadBeU32(native_grind.blob.bytes, 32) == 0x12345678u &&
+              ReadBeU32(native_grind.blob.bytes, 44) == 0x13572468u,
+          "native grind rail metadata was not preserved");
+  const std::size_t native_segment_offset = 16 + 32;
+  Require(
+      NearlyEqual(
+          ReadBeF32(native_grind.blob.bytes, native_segment_offset),
+          3.5f) &&
+          NearlyEqual(
+              ReadBeF32(
+                  native_grind.blob.bytes,
+                  native_segment_offset + 48),
+              11.0f) &&
+          NearlyEqual(
+              ReadBeF32(
+                  native_grind.blob.bytes,
+                  native_segment_offset + 52),
+              22.0f) &&
+          NearlyEqual(
+              ReadBeF32(
+                  native_grind.blob.bytes,
+                  native_segment_offset + 56),
+              33.0f) &&
+          NearlyEqual(
+              ReadBeF32(
+                  native_grind.blob.bytes,
+                  native_segment_offset + 64),
+              0.25f) &&
+          NearlyEqual(
+              ReadBeF32(
+                  native_grind.blob.bytes,
+                  native_segment_offset + 80),
+              6.0f) &&
+          NearlyEqual(
+              ReadBeF32(
+                  native_grind.blob.bytes,
+                  native_segment_offset + 96),
+              17.0f),
+      "native grind payload did not preserve coefficients and translate "
+      "positions/bounds");
+  Require(
+      ReadBeU32(
+          native_grind.blob.bytes,
+          native_segment_offset + 120) == 16 &&
+          ReadBeU32(
+              native_grind.blob.bytes,
+              native_segment_offset + 124) == 0 &&
+          ReadBeU32(
+              native_grind.blob.bytes,
+              native_segment_offset + 128) == 0,
+      "native grind links were not regenerated");
 
   RwCollisionBuildOptions rw_options;
   rw_options.default_surface_id = EncodeRwSurfaceId(0, 1, 0);

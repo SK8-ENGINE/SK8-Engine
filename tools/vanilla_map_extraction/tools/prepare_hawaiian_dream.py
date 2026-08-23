@@ -12,6 +12,7 @@ import sys
 
 import numpy
 
+from retail_grind_splines import decode_grind_splines
 from skate3_streams import (
     ASSET_TYPE_MODEL,
     ASSET_TYPE_TEXTURE,
@@ -320,11 +321,13 @@ def prepare(
         "textures": {},
         "models": [],
         "simulation_assets": [],
+        "grind_splines": [],
         "other_presentation_assets": [],
     }
     textures: dict[str, object] = manifest["textures"]  # type: ignore[assignment]
     models: list[object] = manifest["models"]  # type: ignore[assignment]
     simulation: list[object] = manifest["simulation_assets"]  # type: ignore[assignment]
+    grind_splines: list[object] = manifest["grind_splines"]  # type: ignore[assignment]
     other: list[object] = manifest["other_presentation_assets"]  # type: ignore[assignment]
     texture_digests: dict[str, set[bytes]] = {}
 
@@ -515,8 +518,19 @@ def prepare(
                 }
             )
 
+    grind_spline_asset_count = 0
     for asset in simulation_assets:
         rx2_path = _write_rx2(output_root, "simulation", asset)
+        asset_grinds = decode_grind_splines(asset.data)
+        grind_spline_asset_count += bool(asset_grinds)
+        for rail in asset_grinds:
+            grind_splines.append(
+                {
+                    "asset_id": f"0x{asset.record.asset_id:016X}",
+                    "stream_file": asset.source_path.name,
+                    **rail,
+                }
+            )
         simulation.append(
             {
                 "asset_id": f"0x{asset.record.asset_id:016X}",
@@ -557,6 +571,14 @@ def prepare(
             }
         },
         "simulation_assets": len(simulation_assets),
+        "grind_spline_assets": grind_spline_asset_count,
+        "grind_rails": len(grind_splines),
+        "grind_segments": sum(
+            rail["segment_count"] for rail in grind_splines  # type: ignore[index]
+        ),
+        "closed_grind_rails": sum(
+            bool(rail["closed"]) for rail in grind_splines  # type: ignore[index]
+        ),
         "unmatched_diffuse_textures": sorted(used_texture_ids - set(textures)),
     }
 

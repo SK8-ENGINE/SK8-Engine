@@ -1,23 +1,24 @@
 {
-  "format_version": 9,
+  "format_version": 10,
   "map_name": "University District",
-  "file_bytes": 123936717,
-  "texture_decoded_bytes": 222193664,
+  "file_bytes": 120455833,
+  "texture_decoded_bytes": 222980096,
   "maximum_visual_index": 2081270,
   "counts": {
-    "materials": 353,
-    "textures": 325,
+    "materials": 332,
+    "textures": 327,
     "vertices": 2081271,
     "indices": 4936851,
-    "collision_triangles": 1329399,
-    "grind_rails": 0,
+    "collision_triangles": 1014852,
+    "grind_rails": 4201,
+    "native_grind_segments": 27008,
     "hinged_doors": 0,
     "local_lights": 0,
     "npc_routes": 0
   },
   "material_alpha_modes": {
-    "opaque": 296,
-    "mask": 52,
+    "opaque": 277,
+    "mask": 50,
     "blend": 5
   },
   "bounds_min": [
@@ -32,20 +33,24 @@
   ],
   "integrity": {
     "semantic_metadata_sha256": "d9886c7edc5a07ee94552615ffc0cd58b7407017a36f6876ab3615bdcce50011",
-    "materials_sha256": "d2e3b15a02695ee90d4ee9e715e0cbd0db252c54ae9e964ea17681f07203144f",
-    "decoded_textures_sha256": "464c6c03aaafa91126b758149667e4bf3aaf0b178759e59d94c6e0005dbc77b4",
-    "expanded_visual_triangles_sha256": "ca69bbe89e6a2994ddd81529c14b42113c74478f66b4ee20d4e81ef774687a60",
-    "expanded_visual_triangles_1e6_sha256": "aee3e6d44dd3bbd12d2fb3c62801de88c6bbf02e1d89dc7eeb2e4d245e49e73b",
-    "collision_sha256": "9e5bdf4409a67d7a86395f68bef48c1417c689969a72f37cb02bf3129ea63816",
-    "authored_features_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    "materials_sha256": "773a5186d39ea2c8fe76fbdc75de7d66495aba8e62a7a5b1876c7de75bc81cb3",
+    "decoded_textures_sha256": "4c53c5985412ef2e01b8dd1ecdba6d09d0140d3055cefc9778e70958ec3b0f2e",
+    "expanded_visual_triangles_sha256": "3ff7d44e96c4d44882b7bcc95f6bcc0d053350613d3e005c32cdda8562cbb71b",
+    "expanded_visual_triangles_1e6_sha256": "94febef1bdb16f13b6c3e06d8b3199eccb2204198088d81e1f8eb832debbe4bd",
+    "collision_sha256": "b9f1e4a48a8e4450b5ecfdd528c55df1f15ee4f07744325a36663a0968426e01",
+    "grind_rails_sha256": "0cc406dd4f68b0dad57215cec3f9cbe9e93be52fe124197ec5bb62c092d63501",
+    "authored_features_sha256": "0cc406dd4f68b0dad57215cec3f9cbe9e93be52fe124197ec5bb62c092d63501"
   },
   "compiled_world": {
     "render_source_triangles": 1645617,
     "render_output_triangles": 1777954,
     "render_chunks": 515,
+    "grind_rails": 4201,
+    "grind_segments": 27008,
+    "grind_bytes": 4023600,
     "collision_mode": "spatial",
     "collision_cell_size": 256,
     "collision_chunks": 44,
-    "collision_triangles": 1329399
+    "collision_triangles": 1014852
   }
 }

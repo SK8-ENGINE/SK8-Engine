@@ -1,4 +1,4 @@
-"""Original Blender -> SKATE v9 exporter.
+"""Original Blender -> SKATE v10 exporter.
 
 This module intentionally targets the narrow project-owned scene contract
 documented beside it. It has no ArenaBuilder imports or runtime dependency.
@@ -27,7 +27,7 @@ except ImportError:
     numpy = None
 
 
-MAGIC = b"SKATE09\0"
+MAGIC = b"SKATE10\0"
 ENDIAN_MARKER = 0x12345678
 STORAGE_RAW = 0
 STORAGE_DEFLATE = 1
@@ -60,7 +60,7 @@ _HELPER_OBJECT_MARKERS = (
     "scale_reference",
     "scale reference",
 )
-CACHE_SCHEMA = 10
+CACHE_SCHEMA = 11
 METADATA_FLOAT_COUNT = 49
 METADATA_BYTE_COUNT = METADATA_FLOAT_COUNT * 4
 
@@ -124,6 +124,18 @@ class ExportLocalLight:
 
 
 @dataclass
+class ExportGrindRail:
+    name: str
+    closed: bool
+    points: list[tuple[float, float, float]]
+    retail_spline_id: int = 0
+    retail_type_signature: int = 0
+    retail_flags: int = 0
+    retail_trailing_word: int = 0
+    native_segment_payload: bytes = b""
+
+
+@dataclass
 class SceneContentFingerprint:
     digest: str
     visual_vertices: int
@@ -170,6 +182,10 @@ def _report_progress(
 
 def _write_u32(stream: BinaryIO, value: int) -> None:
     stream.write(struct.pack("<I", value))
+
+
+def _write_u64(stream: BinaryIO, value: int) -> None:
+    stream.write(struct.pack("<Q", value))
 
 
 def _write_f32(stream: BinaryIO, value: float) -> None:
@@ -530,8 +546,24 @@ def _scene_content_fingerprint(
                     grind_rails += 1
             elif spline.type == "BEZIER":
                 _hash_foreach(digest, spline.bezier_points, "co", 3, "f")
+                _hash_foreach(
+                    digest, spline.bezier_points, "handle_left", 3, "f"
+                )
+                _hash_foreach(
+                    digest, spline.bezier_points, "handle_right", 3, "f"
+                )
                 if len(spline.bezier_points) >= 2:
                     grind_rails += 1
+        for property_name in (
+            "skate3_retail_grind",
+            "skate3_retail_grind_spline_id",
+            "skate3_retail_grind_type_signature",
+            "skate3_retail_grind_flags",
+            "skate3_retail_grind_trailing_word",
+            "skate3_retail_grind_segment_count",
+            "skate3_retail_grind_segment_payload",
+        ):
+            _hash_text(digest, repr(obj.get(property_name, None)))
         object_complete(f"Hashing grind paths: {obj.name}")
 
     npc_routes = 0
@@ -657,7 +689,7 @@ def _sun_metadata() -> tuple[tuple[float, float, float], float, float]:
 def _read_package_header(output: Path) -> tuple[str, int, tuple[int, ...]]:
     with output.open("rb") as stream:
         if stream.read(len(MAGIC)) != MAGIC:
-            raise ValueError(f"{output} is not an SKATE v9 package")
+            raise ValueError(f"{output} is not an SKATE v10 package")
         marker = struct.unpack("<I", stream.read(4))[0]
         if marker != ENDIAN_MARKER:
             raise ValueError(f"{output} has an invalid endian marker")
@@ -1540,10 +1572,135 @@ def _export_collision(
     return triangles, audit
 
 
-def _export_grinds(grind_objects: list[bpy.types.Object]) -> list[tuple]:
-    rails: list[tuple] = []
+def _retail_grind_controls(
+    payload: bytes,
+) -> tuple[tuple[float, float, float], ...]:
+    values = struct.unpack(">30f", payload)
+    coefficient_a = values[0:3]
+    coefficient_b = values[4:7]
+    coefficient_c = values[8:11]
+    coefficient_d = values[12:15]
+    return (
+        tuple(coefficient_d),
+        tuple(
+            coefficient_d[axis] + coefficient_c[axis] / 3.0
+            for axis in range(3)
+        ),
+        tuple(
+            coefficient_d[axis]
+            + (2.0 * coefficient_c[axis] + coefficient_b[axis]) / 3.0
+            for axis in range(3)
+        ),
+        tuple(
+            coefficient_d[axis]
+            + coefficient_c[axis]
+            + coefficient_b[axis]
+            + coefficient_a[axis]
+            for axis in range(3)
+        ),
+    )
+
+
+def _close_enough(
+    left: tuple[float, float, float],
+    right: tuple[float, float, float],
+    tolerance: float = 2.0e-3,
+) -> bool:
+    return all(
+        abs(left[axis] - right[axis]) <= tolerance
+        for axis in range(3)
+    )
+
+
+def _export_retail_grind(
+    obj: bpy.types.Object,
+) -> ExportGrindRail:
+    if len(obj.data.splines) != 1:
+        raise ValueError(
+            f"retail grind {obj.name!r} must contain exactly one spline"
+        )
+    spline = obj.data.splines[0]
+    if spline.type != "BEZIER":
+        raise ValueError(
+            f"retail grind {obj.name!r} must remain a Bezier spline"
+        )
+    segment_count = int(obj["skate3_retail_grind_segment_count"])
+    actual_segments = (
+        len(spline.bezier_points)
+        if spline.use_cyclic_u
+        else len(spline.bezier_points) - 1
+    )
+    if segment_count <= 0 or actual_segments != segment_count:
+        raise ValueError(
+            f"retail grind {obj.name!r} segment count changed: "
+            f"{actual_segments} versus {segment_count}"
+        )
+    payload_hex = str(obj["skate3_retail_grind_segment_payload"])
+    try:
+        payload = bytes.fromhex(payload_hex)
+    except ValueError as error:
+        raise ValueError(
+            f"retail grind {obj.name!r} has invalid native payload"
+        ) from error
+    if len(payload) != segment_count * 120:
+        raise ValueError(
+            f"retail grind {obj.name!r} native payload size changed"
+        )
+
+    points = spline.bezier_points
+    for segment_index in range(segment_count):
+        current = points[segment_index]
+        following = points[(segment_index + 1) % len(points)]
+        actual_controls = (
+            _to_runtime(obj.matrix_world @ current.co),
+            _to_runtime(obj.matrix_world @ current.handle_right),
+            _to_runtime(obj.matrix_world @ following.handle_left),
+            _to_runtime(obj.matrix_world @ following.co),
+        )
+        expected_controls = _retail_grind_controls(
+            payload[segment_index * 120 : (segment_index + 1) * 120]
+        )
+        if not all(
+            _close_enough(actual, expected)
+            for actual, expected in zip(
+                actual_controls,
+                expected_controls,
+            )
+        ):
+            raise ValueError(
+                f"retail grind {obj.name!r} was edited; exact native "
+                f"segment {segment_index} no longer matches its Blender curve"
+            )
+
+    return ExportGrindRail(
+        name=obj.name,
+        closed=bool(spline.use_cyclic_u),
+        points=[],
+        retail_spline_id=int(
+            str(obj["skate3_retail_grind_spline_id"]),
+            16,
+        ),
+        retail_type_signature=int(
+            str(obj["skate3_retail_grind_type_signature"]),
+            16,
+        ),
+        retail_flags=int(obj["skate3_retail_grind_flags"]),
+        retail_trailing_word=int(
+            obj["skate3_retail_grind_trailing_word"]
+        ),
+        native_segment_payload=payload,
+    )
+
+
+def _export_grinds(
+    grind_objects: list[bpy.types.Object],
+) -> list[ExportGrindRail]:
+    rails: list[ExportGrindRail] = []
     for obj in grind_objects:
         if obj.type != "CURVE":
+            continue
+        if bool(obj.get("skate3_retail_grind", False)):
+            rails.append(_export_retail_grind(obj))
             continue
         for spline_index, spline in enumerate(obj.data.splines):
             points: list[tuple[float, float, float]] = []
@@ -1562,7 +1719,13 @@ def _export_grinds(grind_objects: list[bpy.types.Object]) -> list[tuple]:
             name = obj.name if len(obj.data.splines) == 1 else (
                 f"{obj.name}_{spline_index}"
             )
-            rails.append((name, bool(spline.use_cyclic_u), points))
+            rails.append(
+                ExportGrindRail(
+                    name=name,
+                    closed=bool(spline.use_cyclic_u),
+                    points=points,
+                )
+            )
     return rails
 
 
@@ -2288,12 +2451,34 @@ def export_scene(
                     f"{len(collision)})",
                 )
         _write_stored_chunks(stream, collision_chunks)
-        for name, closed, points in rails:
-            _write_string(stream, name)
-            _write_u32(stream, 1 if closed else 0)
-            _write_u32(stream, len(points))
-            for point in points:
-                _write_vec(stream, point)
+        for rail in rails:
+            _write_string(stream, rail.name)
+            _write_u32(stream, 1 if rail.closed else 0)
+            if rail.native_segment_payload:
+                _write_u32(stream, 1)
+                _write_u64(stream, rail.retail_spline_id)
+                _write_u64(stream, rail.retail_type_signature)
+                _write_u32(stream, rail.retail_flags)
+                _write_u32(stream, rail.retail_trailing_word)
+                segment_count = len(rail.native_segment_payload) // 120
+                _write_u32(stream, segment_count)
+                for offset in range(
+                    0,
+                    len(rail.native_segment_payload),
+                    4,
+                ):
+                    _write_u32(
+                        stream,
+                        int.from_bytes(
+                            rail.native_segment_payload[offset : offset + 4],
+                            "big",
+                        ),
+                    )
+            else:
+                _write_u32(stream, 0)
+                _write_u32(stream, len(rail.points))
+                for point in rail.points:
+                    _write_vec(stream, point)
         for door in doors:
             _write_string(stream, door.name)
             _write_vec(stream, door.hinge_position)

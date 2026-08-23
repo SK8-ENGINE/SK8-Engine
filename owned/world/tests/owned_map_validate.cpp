@@ -1,3 +1,4 @@
+#include "skate/world/grind_spline.h"
 #include "skate/world/owned_map_package.h"
 #include "skate/world/render_world.h"
 #include "skate/world/rw_collision_mesh.h"
@@ -88,6 +89,24 @@ int main(int argc, char** argv) {
             << " source_triangles=" << render_world.source_triangle_count
             << " output_triangles=" << render_world.output_triangle_count
             << " chunks=" << render_world.chunks.size()
+            << '\n';
+      }
+
+      if (!map.grind_rails.empty()) {
+        const skate::world::GrindSplineBuildResult grind =
+            skate::world::BuildGrindSplineData(map, {});
+        if (!grind.ok || grind.blob.bytes.empty()) {
+          std::cerr
+              << "SKATE_GRIND_WORLD_FAIL"
+              << " error=" << grind.error
+              << '\n';
+          return 1;
+        }
+        std::cout
+            << "SKATE_GRIND_WORLD_OK"
+            << " rails=" << grind.blob.rail_count
+            << " segments=" << grind.blob.segment_count
+            << " bytes=" << grind.blob.bytes.size()
             << '\n';
       }
 

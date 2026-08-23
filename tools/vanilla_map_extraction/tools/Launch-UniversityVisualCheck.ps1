@@ -73,7 +73,7 @@ try {
         '--skate3_mechanics_sandbox_visual_map=true',
         '--skate3_mechanics_sandbox_native_collision=true',
         '--skate3_mechanics_sandbox_native_collision_replace_retail=true',
-        '--skate3_mechanics_sandbox_native_grinds=false',
+        '--skate3_mechanics_sandbox_native_grinds=true',
         '--skate3_native_render=true',
         '--skate3_native_render_scene=true',
         '--skate3_native_render_log_interval=300',

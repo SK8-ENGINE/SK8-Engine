@@ -21,7 +21,7 @@ One readable `MapDefinition` owns:
 - renderer-neutral vertices and indices;
 - a spatial render-world compiler with exact chunk bounds;
 - matching collision triangles;
-- named grind-rail polylines;
+- named grind-rail polylines and exact retail native cubic segments;
 - authored native-AI route polylines and population intent;
 - stable surface IDs;
 - downward ray/ground queries;
@@ -46,7 +46,9 @@ start point, inverse length, bounds, cumulative length, parent rail, and
 previous/next links. The recomp adapter relocates the blob into persistent
 guest memory and registers it through Skate 3's authoritative `GrindData`
 runtime; it does not implement proximity snapping or a parallel grind
-simulation.
+simulation. Retail imports use the same path while preserving their original
+spline ID, type signature, cubic coefficients, and auxiliary segment words;
+only translated positions/bounds and regenerated guest links differ.
 
 `NpcRoute` supplies map-local guide points, target speed, spacing, and an
 authored population count. The recomp adapter replaces the future navigation

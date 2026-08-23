@@ -2,6 +2,7 @@
 
 #include "skate/world/math.h"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -218,14 +219,26 @@ struct CollisionTriangle {
   MaterialId material = 0;
 };
 
-// A grind rail is an authored path, independent from its visible/collision
-// mesh. Skate's physics uses this centerline to select and follow a grind;
-// the surrounding collision remains authoritative for ordinary contact.
+// The first 120 bytes of one retail Pegasus tSplineData segment. Values are
+// stored as host-order IEEE-754 bit patterns so an extracted retail segment
+// can round-trip without changing a single coefficient or auxiliary field.
+struct NativeGrindSegment {
+  std::array<std::uint32_t, 30> words{};
+};
+
+// A grind rail is independent from its visible/collision mesh. Hand-authored
+// maps use readable points. Retail imports instead preserve exact native cubic
+// segment payloads plus their original spline identity/type.
 struct GrindRail {
   GrindRailId id = 0;
   std::string name;
   std::vector<Vec3> points;
   bool closed = false;
+  std::uint64_t retail_spline_id = 0;
+  std::uint64_t retail_type_signature = 0;
+  std::uint32_t retail_flags = 0;
+  std::uint32_t retail_trailing_word = 0;
+  std::vector<NativeGrindSegment> native_segments;
 };
 
 // A route consumed by Skate's native AI skater controller. The owned map

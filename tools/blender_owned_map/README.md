@@ -129,7 +129,7 @@ work is Blender data extraction and binary file packing, where avoiding Python
 scalar overhead is substantially more useful than transferring the data to a
 graphics device. Complete float32 vertex records are indexed exactly, so
 shared corners no longer duplicate position, normal, UV, lightmap UV, and
-material data. SKATE v9 then applies bounded lossless DEFLATE to RGBA8
+material data. SKATE v10 then applies bounded lossless DEFLATE to RGBA8
 textures, vertices, indices, and collision. The loader reconstructs and
 validates the original runtime records; export does not simplify meshes,
 reduce texture resolution, omit maps, quantize attributes, or merge UV/hard
@@ -191,6 +191,10 @@ Create these exclusive collections:
 - `OW_GROUP_3_NO_COLLISION`: rendered decals, vegetation, support railings,
   and phase-through meshes.
 - `OW_GROUP_4_GRINDS`: curve objects whose splines become grind centerlines.
+  Normal curves export as authored point paths. Extracted retail curves carry
+  protected `skate3_retail_grind_*` provenance and exact native cubic
+  payloads; moving their points or handles causes export to fail instead of
+  silently replacing the original spline.
 - `OW_GROUP_5_PATHING`: optional/experimental route records for native AI
   skaters. Object
   properties `ow_npc_skater_count`, `ow_npc_speed`, and

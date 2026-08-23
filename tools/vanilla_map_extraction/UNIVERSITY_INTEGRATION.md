@@ -3,21 +3,24 @@
 ## Current package
 
 The ignored local output
-`intermediate/university/University.skate` is a SKATE v9 package exported from
+`intermediate/university/University.skate` is a SKATE v10 package exported from
 `blender/DIST_University_Owned.blend`. Its tracked expected contract is
 `schemas/university_expected.json`.
 
 | Property | Verified value |
 | --- | ---: |
-| Package bytes | 123,936,717 |
-| Materials | 353 |
-| Opaque / mask / blend materials | 296 / 52 / 5 |
-| Embedded textures | 325 |
-| Decoded RGBA8 texture bytes | 222,193,664 |
+| Package bytes | 120,455,833 |
+| Materials | 332 |
+| Opaque / mask / blend materials | 277 / 50 / 5 |
+| Embedded textures | 327 |
+| Decoded RGBA8 texture bytes | 222,980,096 |
 | Indexed visual vertices | 2,081,271 |
 | Visual indices | 4,936,851 |
 | Render triangles | 1,645,617 |
-| Collision triangles | 1,329,399 |
+| Collision triangles | 1,014,852 |
+| Retail grind rails | 4,201 |
+| Native cubic segments | 27,008 |
+| Compiled native grind bytes | 4,023,600 |
 | Render chunks after clipping | 515 |
 | Render triangles after clipping | 1,777,954 |
 | Collision fallback cell size | 256 m |
@@ -40,7 +43,8 @@ reviewed export:
 - expanded indexed triangle-corner records, including normals, both UV sets,
   and material IDs;
 - collision records and authored feature records;
-- downstream render-world and native collision-world counts.
+- byte-exact retail grind records against the extraction manifest;
+- downstream render-world, native grind-world, and collision-world counts.
 
 The C++ validator is the actual engine loader linked against the same
 owned-world library as the game. A smaller file alone is never accepted as
@@ -59,11 +63,10 @@ parameter and the old Blender preparation forced all alpha modes to opaque.
   is generated from structural presentation geometry.
 - Twenty-three unresolved shared texture references use explicit fallback
   materials.
-- The extracted stream does not currently provide owned-world grind rails,
-  AI routes, hinged doors, or local lights.
+- AI routes, hinged doors, and local lights are not recovered yet.
 - All current collision surfaces use the provisional concrete/polished
   surface mapping.
-- No runtime object/instance table exists in SKATE v9. The importer does not
+- No runtime object/instance table exists in SKATE v10. The importer does not
   retain authoritative retail instance references, so transforms are baked
   into vertices rather than inventing unsafe instance relationships.
 
