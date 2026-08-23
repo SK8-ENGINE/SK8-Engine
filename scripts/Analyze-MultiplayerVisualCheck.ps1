@@ -161,6 +161,13 @@ foreach ($client in $clientDirectories) {
             ) |
             ForEach-Object { $_.Line }
     )
+    $hairRouteLines = @(
+        $lines |
+            Select-String -Pattern (
+                'multiplayer-animation-route: .*kind=hair'
+            ) |
+            ForEach-Object { $_.Line }
+    )
     $lastRate = if ($rateLines.Count -gt 0) {
         $rateLines[-1]
     } else {
@@ -203,6 +210,22 @@ foreach ($client in $clientDirectories) {
     $summary.Add(
         'max_appearance_gpu_install_ms=' +
         (Maximum-DecimalField $appearanceInstallLines 'upload')
+    )
+    $summary.Add(
+        'remote_hair_route_events=' +
+        $hairRouteLines.Count
+    )
+    $summary.Add(
+        'local_ropa_hair_rigid_guards=' +
+        (Match-Count $lines (
+            'native-scene: ropa hair rigid guard'
+        ))
+    )
+    $summary.Add(
+        'local_ropa_hair_rigid_rescues=' +
+        (Match-Count $lines (
+            'native-scene: ropa hair rigid rescue'
+        ))
     )
     $summary.Add(
         'max_socket_failures=' +
@@ -412,6 +435,14 @@ foreach ($client in $clientDirectories) {
         'last_appearance_gpu_install=' +
         $(if ($appearanceInstallLines.Count -gt 0) {
             $appearanceInstallLines[-1]
+        } else {
+            'missing'
+        })
+    )
+    $summary.Add(
+        'last_remote_hair_route=' +
+        $(if ($hairRouteLines.Count -gt 0) {
+            $hairRouteLines[-1]
         } else {
             'missing'
         })

@@ -13308,7 +13308,7 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
                                 return canonical_bone >= 25 &&
                                        canonical_bone <= 31;
                               });
-            if (skateboard_piece || clone.ropa) {
+            if (skateboard_piece || clone.ropa || clone.hair) {
               const std::uint32_t track_key =
                   clone.multiplayer_track_key != 0
                       ? clone.multiplayer_track_key
@@ -13340,13 +13340,20 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
                     "multiplayer-animation-route: role={} "
                     "kind={} rx_mesh={:08X} track={:08X} "
                     "palette={} weighted={} remap_first={} "
+                    "alpha_tex={:08X} alpha_scale={:.3f} "
+                    "char_valid={} "
                     "exact_bones={} exact_t=({:.3f},{:.3f},{:.3f}) "
                     "canonical_t=({:.3f},{:.3f},{:.3f}) "
                     "anim_root=({:.3f},{:.3f},{:.3f})",
                     remote_player.role,
-                    skateboard_piece ? "board" : "ropa",
+                    skateboard_piece
+                        ? "board"
+                        : (clone.hair ? "hair" : "ropa"),
                     clone.mesh, track_key, palette_bones,
                     weighted_rows.count, mapped_canonical,
+                    clone.hair_alpha_tex,
+                    clone.char_rows[13 * 4 + 3],
+                    clone.char_rows[14 * 4 + 1] > 0.0f ? 1 : 0,
                     exact_track == nullptr
                         ? 0
                         : exact_track->bone_rows.size() / 12,

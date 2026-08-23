@@ -3926,6 +3926,28 @@ bool CaptureSkinnedState(uint8_t* base, uint32_t bank, uint32_t palette_base,
     const bool authoritative_rigid =
         skate3::native_entity::ServeRopaWorld(
             base, item.ctx, item.vb_obj, authoritative_ropa_rows);
+    // The game's sim-inactive marker is bit-exact 1.0. Any other positive
+    // value may be the x component of a foreign matrix row. Long ROPA hair
+    // is not represented in the ordinary garment table, so it cannot use
+    // ServeRopaWorld's mode proof; treating the rotating matrix row as a
+    // flag made the same CPU-deformed hair alternate between rigid and
+    // skinned handling as the character turned.
+    const bool exact_skinned_flag = flag_x == 1.0f;
+    const bool hair_rigid_fallback = item.hair && !exact_skinned_flag;
+    if (hair_rigid_fallback) {
+      static std::atomic<uint32_t> s_hair_rigid_guard{0};
+      const uint32_t n =
+          s_hair_rigid_guard.fetch_add(
+              1, std::memory_order_relaxed);
+      if (n < 8 || (n & 4095u) == 0) {
+        REXLOG_INFO(
+            "native-scene: ropa hair rigid guard "
+            "mesh={:08X} ctx={:08X} vb={:08X} "
+            "nonflag_x={:.3f} (n={})",
+            item.mesh, item.ctx, item.vb_obj, flag_x,
+            n + 1);
+      }
+    }
     if (authoritative_rigid && flag_x > 0.0f) {
       static std::atomic<uint32_t> s_mode_override{0};
       const uint32_t n =
@@ -3967,7 +3989,7 @@ bool CaptureSkinnedState(uint8_t* base, uint32_t bank, uint32_t palette_base,
           LoadGuestF32(base, bank + ((m + 2) * 4 + 2) * 4),
           LoadGuestF32(base, bank + ((m + 2) * 4 + 3) * 4));
     }
-    if (flag_x > 0.0f && !authoritative_rigid) {
+    if (exact_skinned_flag && !authoritative_rigid) {
       // Sim inactive: the palette sits one register late (c5/c8). The LAYOUT
       // is exact, but the BANK can still be foreign, the same stale-bank
       // hazard the rigid branch below scores against (the flag itself was
@@ -3995,7 +4017,7 @@ bool CaptureSkinnedState(uint8_t* base, uint32_t bank, uint32_t palette_base,
       // 0, VB objects freed) must never publish rigid; whatever this bank
       // holds is foreign (the game draws the ctx skinned now), and a rigid
       // publish would pair a live world with our retained stale drape.
-      if (!authoritative_rigid &&
+      if (!authoritative_rigid && !hair_rigid_fallback &&
           skate3::native_entity::RopaGarmentDropped(base, item.ctx,
                                                     item.vb_obj)) {
         g_ropa_stale.fetch_add(1, std::memory_order_relaxed);
@@ -4077,8 +4099,11 @@ bool CaptureSkinnedState(uint8_t* base, uint32_t bank, uint32_t palette_base,
           src_rows = authoritative_ropa_rows;
         } else if (
             REXCVAR_GET(skate3_native_render_scene_entity_ropa_world_primary) &&
-            skate3::native_entity::ServeRopaWorld(base, item.ctx, item.vb_obj,
-                                                  ent_rows)) {
+            (skate3::native_entity::ServeRopaWorld(
+                 base, item.ctx, item.vb_obj, ent_rows) ||
+             (hair_rigid_fallback &&
+              skate3::native_entity::ReadEntityWorldRows(
+                  base, item.ctx, ent_rows)))) {
           skate3::native_entity::NoteAcceptedWorldCompare(rows, ent_rows);
           src_rows = ent_rows;
         }
@@ -4118,8 +4143,12 @@ bool CaptureSkinnedState(uint8_t* base, uint32_t bank, uint32_t palette_base,
       const float* served_rows = nullptr;
       if (authoritative_rigid) {
         served_rows = authoritative_ropa_rows;
-      } else if (skate3::native_entity::ServeRopaWorld(
-                     base, item.ctx, item.vb_obj, ent_rows)) {
+      } else if (
+          skate3::native_entity::ServeRopaWorld(
+              base, item.ctx, item.vb_obj, ent_rows) ||
+          (hair_rigid_fallback &&
+           skate3::native_entity::ReadEntityWorldRows(
+               base, item.ctx, ent_rows))) {
         served_rows = ent_rows;
       }
       if (served_rows != nullptr) {
@@ -4133,6 +4162,20 @@ bool CaptureSkinnedState(uint8_t* base, uint32_t bank, uint32_t palette_base,
         item.world[15] = 1.0f;
         item.skinned = false;
         item.bones.clear();
+        if (hair_rigid_fallback) {
+          static std::atomic<uint32_t> s_hair_rigid_rescue{0};
+          const uint32_t n =
+              s_hair_rigid_rescue.fetch_add(
+                  1, std::memory_order_relaxed);
+          if (n < 8 || (n & 4095u) == 0) {
+            REXLOG_INFO(
+                "native-scene: ropa hair rigid rescue "
+                "mesh={:08X} ctx={:08X} vb={:08X} "
+                "nonflag_x={:.3f} (n={})",
+                item.mesh, item.ctx, item.vb_obj, flag_x,
+                n + 1);
+          }
+        }
         return true;
       }
       g_ropa_stale.fetch_add(1, std::memory_order_relaxed);

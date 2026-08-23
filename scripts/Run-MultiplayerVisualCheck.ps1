@@ -620,13 +620,16 @@ Visual scenario:
 1. Watch initial map entry closely. Remote players may briefly use the teal
    proxy while their outfit is prepared, but each should change once to its
    complete outfit. Note any obvious freeze when that change occurs.
-2. On each client, inspect every other player: body, top, trousers, shoes,
-   hair/hat, accessories, board deck, trucks, and wheels. Existing distinct
-   saved outfits are enough; do not change wardrobes for this check.
-3. Keep the players near each other and skate for about 2 minutes. Include
-   pushes, carving, ollies, a few flip tricks, one bail, and one
-   board-detached/board-return sequence.
-4. Watch remote players for pose fidelity, smooth motion, snapping, freezing,
+2. Focus on the female skater with medium-length hair. On her own client,
+   rotate in place, skate in circles, push, ollie, and bail. Her hair should
+   stay attached to her head throughout; it must not float, lag behind,
+   rotate separately, collapse, or disappear.
+3. On both other clients, inspect that female skater from the front, sides,
+   and rear while she performs the same movement. Her hair should be present,
+   attached to her head, correctly cut out at the strands, and stable.
+4. Keep all players near each other and continue for about 2 minutes. Also
+   glance over the other outfits and boards to catch any unrelated regression.
+5. Watch remote players for pose fidelity, smooth motion, snapping, freezing,
    attachment drift, duplicated pieces, stale pieces, flicker, or teal-proxy
    fallback while they are nearby.
 5. Confirm the focused local client keeps normal input response and has no
