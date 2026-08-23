@@ -9,15 +9,15 @@ The ignored local output
 
 | Property | Verified value |
 | --- | ---: |
-| Package bytes | 120,455,833 |
-| Materials | 332 |
-| Opaque / mask / blend materials | 277 / 50 / 5 |
+| Package bytes | 121,962,132 |
+| Materials | 515 |
+| Opaque / mask / blend materials | 460 / 50 / 5 |
 | Embedded textures | 327 |
 | Decoded RGBA8 texture bytes | 222,980,096 |
 | Indexed visual vertices | 2,081,271 |
 | Visual indices | 4,936,851 |
 | Render triangles | 1,645,617 |
-| Collision triangles | 1,014,852 |
+| Collision triangles | 1,122,951 |
 | Retail grind rails | 4,201 |
 | Native cubic segments | 27,008 |
 | Compiled native grind bytes | 4,023,600 |
@@ -44,6 +44,8 @@ reviewed export:
   and material IDs;
 - collision records and authored feature records;
 - byte-exact retail grind records against the extraction manifest;
+- decoded retail collision geometry, winding, and packed surface channels
+  against all 301 source `ClusteredMesh` sections;
 - downstream render-world, native grind-world, and collision-world counts.
 
 The C++ validator is the actual engine loader linked against the same
@@ -59,13 +61,14 @@ parameter and the old Blender preparation forced all alpha modes to opaque.
 
 ## Known fidelity limits
 
-- Retail simulation RX2 data is preserved but not decoded. Current collision
-  is generated from structural presentation geometry.
-- Twenty-three unresolved shared texture references use explicit fallback
-  materials.
+- Retail collision exports 1,122,951 triangles after rejecting six
+  degenerate source triangles and 10,692 exact/opposite-wound duplicates from
+  the complete 1,133,649-triangle extraction.
+- The current UTT presentation parser computes averaged geometry normals;
+  authoritative packed retail normals are not yet transported.
 - AI routes, hinged doors, and local lights are not recovered yet.
-- All current collision surfaces use the provisional concrete/polished
-  surface mapping.
+- All 183 packed retail collision surfaces are preserved, including the three
+  surface IDs that use native physics channel 13.
 - No runtime object/instance table exists in SKATE v10. The importer does not
   retain authoritative retail instance references, so transforms are baked
   into vertices rather than inventing unsafe instance relationships.

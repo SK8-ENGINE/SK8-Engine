@@ -284,7 +284,7 @@ void Validate(MapDefinition& map) {
             static_cast<std::uint32_t>(
                 SurfaceMaterial::AlphaMode::Blend) ||
         material.skate_audio_surface > 93 ||
-        material.skate_physics_surface > 12 ||
+        material.skate_physics_surface > 13 ||
         material.skate_surface_pattern > 15 ||
         (material.albedo_texture != 0 &&
          FindTexture(map, material.albedo_texture) == nullptr) ||

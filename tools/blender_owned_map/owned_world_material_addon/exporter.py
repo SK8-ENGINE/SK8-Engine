@@ -1007,12 +1007,13 @@ def _is_helper_object(obj: bpy.types.Object) -> bool:
     return any(marker in identity for marker in _HELPER_OBJECT_MARKERS)
 
 
-def _used_visual_materials(
+def _used_export_materials(
     visual_objects: list[bpy.types.Object],
+    collision_objects: list[bpy.types.Object],
 ) -> list[bpy.types.Material]:
     result: list[bpy.types.Material] = []
     seen: set[int] = set()
-    for obj in visual_objects:
+    for obj in [*visual_objects, *collision_objects]:
         if obj.type != "MESH":
             continue
         for slot in obj.material_slots:
@@ -1024,7 +1025,7 @@ def _used_visual_materials(
                 result.append(material)
                 seen.add(identity)
     if not result:
-        raise ValueError("presentation groups do not reference any materials")
+        raise ValueError("export groups do not reference any materials")
     return result
 
 
@@ -2118,7 +2119,7 @@ def export_scene(
     npc_path_objects = _objects_from_collections(
         NPC_PATH_COLLECTION, LEGACY_NPC_PATH_COLLECTION
     )
-    materials = _used_visual_materials(visual_objects)
+    materials = _used_export_materials(visual_objects, collision_objects)
     images, image_ids = _referenced_images(materials)
     material_ids = {
         material.as_pointer(): index + 1
@@ -2383,7 +2384,7 @@ def export_scene(
             )
             _write_u32(
                 stream,
-                _bounded_int(material, "ow_physics_surface", 1, 12),
+                _bounded_int(material, "ow_physics_surface", 1, 13),
             )
             _write_u32(
                 stream,

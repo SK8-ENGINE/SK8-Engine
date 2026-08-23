@@ -120,8 +120,9 @@ def analyze_package(
 
     start = reader.offset
     material_alpha_modes = {0: 0, 1: 0, 2: 0}
+    material_records: list[dict[str, object]] = []
     for index in range(material_count):
-        reader.string(f"material {index} name")
+        name = reader.string(f"material {index} name")
         fields = reader.take(76, f"material {index} fields")
         alpha_mode = struct.unpack_from("<I", fields, 56)[0]
         if alpha_mode not in material_alpha_modes:
@@ -129,6 +130,15 @@ def analyze_package(
                 f"material {index} uses invalid alpha mode {alpha_mode}"
             )
         material_alpha_modes[alpha_mode] += 1
+        material_records.append(
+            {
+                "id": index + 1,
+                "name": name,
+                "audio_surface": struct.unpack_from("<I", fields, 64)[0],
+                "physics_surface": struct.unpack_from("<I", fields, 68)[0],
+                "surface_pattern": struct.unpack_from("<I", fields, 72)[0],
+            }
+        )
     material_bytes = reader.data[start : reader.offset]
     _section(sections, reader, "materials", start)
 
@@ -369,6 +379,7 @@ def analyze_package(
         },
     }
     if include_payloads:
+        result["_materials"] = material_records
         result["_vertex_bytes"] = vertex_bytes
         result["_indices"] = indices
         result["_collision_bytes"] = collision_bytes

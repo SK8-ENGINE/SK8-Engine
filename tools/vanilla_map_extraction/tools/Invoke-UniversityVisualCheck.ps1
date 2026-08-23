@@ -260,6 +260,9 @@ try {
     $grindVerifier = Join-Path (
         $workspace
     ) 'tools\verify_university_grinds.py'
+    $collisionVerifier = Join-Path (
+        $workspace
+    ) 'tools\verify_university_collision.py'
     $extractionManifest = Join-Path (
         $workspace
     ) 'intermediate\university\manifest.json'
@@ -357,6 +360,13 @@ try {
         $extractionManifest,
         $package
     ) -Description 'Verify exact retail grind byte round trip'
+    Invoke-Checked -FilePath 'python' -Arguments @(
+        $collisionVerifier,
+        $extractionManifest,
+        $package,
+        '--expected',
+        $expectedPath
+    ) -Description 'Verify retail collision geometry and packed surfaces'
 
     Assert-Equal 'format version' $actual.version $expected.format_version
     Assert-Equal 'map name' $actual.map_name $expected.map_name
@@ -576,8 +586,7 @@ try {
         map_analysis = $analysisPath
         map_validation = $validationPath
         collision_source = (
-            'full-detail presentation geometry; retail simulation RX2 ' +
-            'decoder pending'
+            'retail RenderWare ClusteredMesh geometry and packed surfaces'
         )
     }
     $manifestJson = $stageManifest | ConvertTo-Json -Depth 4

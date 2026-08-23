@@ -91,7 +91,9 @@ def _configure_material(material: bpy.types.Material) -> None:
     material["ow_audio_surface"] = 3
     material["ow_physics_surface"] = 1
     material["ow_surface_pattern"] = 0
-    material["ow_collision_enabled"] = True
+    # Presentation meshes keep their established export ordering, but retail
+    # ClusteredMesh objects are now the sole collision authority.
+    material["ow_collision_enabled"] = False
 
 
 def _ensure_export_uvs(mesh: bpy.types.Mesh) -> None:
@@ -184,7 +186,7 @@ def main() -> int:
         )
     output = Path(arguments[0]).resolve()
     group_1 = _new_group(GROUP_1)
-    _new_group(GROUP_2)
+    group_2 = _new_group(GROUP_2)
     group_3 = _new_group(GROUP_3)
     group_4 = _new_group(GROUP_4)
     _new_group(GROUP_5)
@@ -199,8 +201,21 @@ def main() -> int:
     collidable = 0
     presentation_only = 0
     triangle_count = 0
+    retail_collision_objects = 0
+    retail_collision_triangles = 0
     for obj in mesh_objects:
         if obj.name == SPAWN:
+            continue
+        if bool(obj.get("skate3_retail_collision", False)):
+            if not obj.data.materials:
+                raise RuntimeError(
+                    f"{obj.name!r} has no retail collision material"
+                )
+            material = obj.data.materials[0]
+            obj["ow_material"] = material.name
+            group_2.objects.link(obj)
+            retail_collision_objects += 1
+            retail_collision_triangles += len(obj.data.polygons)
             continue
         _ensure_export_uvs(obj.data)
         if not obj.data.materials:
@@ -245,7 +260,7 @@ def main() -> int:
     scene["ow_day_ambient"] = 0.34
     scene["ow_night_ambient"] = 0.10
     scene["university_collision_source"] = (
-        "full-detail presentation geometry; retail simulation RX2 decoder pending"
+        "exact retail RenderWare ClusteredMesh triangles and packed surfaces"
     )
     scene["university_grind_source"] = (
         "exact retail Pegasus tSplineData cubic segment payloads"
@@ -262,6 +277,8 @@ def main() -> int:
                 "triangles": triangle_count,
                 "collidable_objects": collidable,
                 "presentation_only_objects": presentation_only,
+                "retail_collision_objects": retail_collision_objects,
+                "retail_collision_triangles": retail_collision_triangles,
                 "grind_rails": len(grind_objects),
                 "grind_segments": grind_segments,
                 "spawn_runtime": spawn_runtime,

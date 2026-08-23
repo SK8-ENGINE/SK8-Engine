@@ -1,15 +1,15 @@
 {
   "format_version": 10,
   "map_name": "University District",
-  "file_bytes": 120455833,
+  "file_bytes": 121962132,
   "texture_decoded_bytes": 222980096,
   "maximum_visual_index": 2081270,
   "counts": {
-    "materials": 332,
+    "materials": 515,
     "textures": 327,
     "vertices": 2081271,
     "indices": 4936851,
-    "collision_triangles": 1014852,
+    "collision_triangles": 1122951,
     "grind_rails": 4201,
     "native_grind_segments": 27008,
     "hinged_doors": 0,
@@ -17,7 +17,7 @@
     "npc_routes": 0
   },
   "material_alpha_modes": {
-    "opaque": 277,
+    "opaque": 460,
     "mask": 50,
     "blend": 5
   },
@@ -31,13 +31,25 @@
     296.1000061035156,
     792.677978515625
   ],
+  "retail_collision": {
+    "assets": 299,
+    "meshes": 301,
+    "clusters": 5537,
+    "surfaces": 183,
+    "source_triangles": 1133649,
+    "removed_degenerate": 6,
+    "removed_duplicates": 10692,
+    "package_triangles": 1122951,
+    "position_tolerance": 1e-06,
+    "canonical_sha256": "b1229beebc5fd5fb05cac6dda52b3a80f8ec4ab43c3a60f1d8cd76c0cb948e52"
+  },
   "integrity": {
     "semantic_metadata_sha256": "01b3b1150bb715c9bec7078723a8cef81f53b7ee6868adda7839417fd17e5093",
-    "materials_sha256": "773a5186d39ea2c8fe76fbdc75de7d66495aba8e62a7a5b1876c7de75bc81cb3",
+    "materials_sha256": "3222cf6c45b3430a80f18390aac41915e5b90c48f418c47750cce75ac7f8fb76",
     "decoded_textures_sha256": "4c53c5985412ef2e01b8dd1ecdba6d09d0140d3055cefc9778e70958ec3b0f2e",
     "expanded_visual_triangles_sha256": "3ff7d44e96c4d44882b7bcc95f6bcc0d053350613d3e005c32cdda8562cbb71b",
     "expanded_visual_triangles_1e6_sha256": "94febef1bdb16f13b6c3e06d8b3199eccb2204198088d81e1f8eb832debbe4bd",
-    "collision_sha256": "b9f1e4a48a8e4450b5ecfdd528c55df1f15ee4f07744325a36663a0968426e01",
+    "collision_sha256": "68ee4edde93a384b601e979a71ca529b04548c9c718ced4c2635e9e81974c021",
     "grind_rails_sha256": "0cc406dd4f68b0dad57215cec3f9cbe9e93be52fe124197ec5bb62c092d63501",
     "authored_features_sha256": "0cc406dd4f68b0dad57215cec3f9cbe9e93be52fe124197ec5bb62c092d63501"
   },
@@ -51,6 +63,6 @@
     "collision_mode": "spatial",
     "collision_cell_size": 256,
     "collision_chunks": 44,
-    "collision_triangles": 1014852
+    "collision_triangles": 1122951
   }
 }

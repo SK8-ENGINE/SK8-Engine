@@ -41,7 +41,7 @@ material[material_count]:
   u32 alpha_mode                 # 0 opaque, 1 mask, 2 blend
   f32 alpha_cutoff
   u32 skate_audio_surface        # 0..93
-  u32 skate_physics_surface      # 0..12
+  u32 skate_physics_surface      # 0..13 (13 appears in retail collision)
   u32 skate_surface_pattern      # 0..15
 
 texture[texture_count]:

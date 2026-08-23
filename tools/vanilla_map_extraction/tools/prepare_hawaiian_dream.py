@@ -12,6 +12,7 @@ import sys
 
 import numpy
 
+from retail_collision_mesh import decode_rx2_clustered_meshes
 from retail_grind_splines import decode_grind_splines
 from skate3_streams import (
     ASSET_TYPE_MODEL,
@@ -519,16 +520,45 @@ def prepare(
             )
 
     grind_spline_asset_count = 0
+    collision_mesh_asset_count = 0
+    collision_mesh_count = 0
+    collision_cluster_count = 0
+    collision_triangle_count = 0
     for asset in simulation_assets:
         rx2_path = _write_rx2(output_root, "simulation", asset)
         asset_grinds = decode_grind_splines(asset.data)
+        asset_collision_meshes = decode_rx2_clustered_meshes(asset.data)
         grind_spline_asset_count += bool(asset_grinds)
+        collision_mesh_asset_count += bool(asset_collision_meshes)
+        collision_mesh_count += len(asset_collision_meshes)
         for rail in asset_grinds:
             grind_splines.append(
                 {
                     "asset_id": f"0x{asset.record.asset_id:016X}",
                     "stream_file": asset.source_path.name,
                     **rail,
+                }
+            )
+        collision_entries = []
+        for mesh_index, mesh in enumerate(asset_collision_meshes):
+            triangle_count = len(mesh.triangles)
+            collision_cluster_count += mesh.cluster_count
+            collision_triangle_count += triangle_count
+            collision_entries.append(
+                {
+                    "index": mesh_index,
+                    "bounds": {
+                        "minimum": mesh.bounds_min,
+                        "maximum": mesh.bounds_max,
+                    },
+                    "triangles": triangle_count,
+                    "clusters": mesh.cluster_count,
+                    "vertices": mesh.vertex_count,
+                    "units": mesh.unit_count,
+                    "compression_cluster_counts": {
+                        str(compression): count
+                        for compression, count in mesh.compression_counts
+                    },
                 }
             )
         simulation.append(
@@ -539,6 +569,7 @@ def prepare(
                 "source_offset": asset.source_offset,
                 "size": len(asset.data),
                 "rx2": str(rx2_path.relative_to(output_root)),
+                "collision_meshes": collision_entries,
             }
         )
 
@@ -571,6 +602,10 @@ def prepare(
             }
         },
         "simulation_assets": len(simulation_assets),
+        "collision_mesh_assets": collision_mesh_asset_count,
+        "collision_meshes": collision_mesh_count,
+        "collision_clusters": collision_cluster_count,
+        "collision_triangles": collision_triangle_count,
         "grind_spline_assets": grind_spline_asset_count,
         "grind_rails": len(grind_splines),
         "grind_segments": sum(

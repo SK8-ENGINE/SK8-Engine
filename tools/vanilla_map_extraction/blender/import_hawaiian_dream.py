@@ -11,6 +11,9 @@ import sys
 import bpy
 import numpy
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
+from retail_collision_mesh import decode_rx2_clustered_meshes
+
 
 def _safe_name(value: str, fallback: str) -> str:
     cleaned = re.sub(r"[^A-Za-z0-9_.-]+", "_", value).strip("_")
@@ -214,6 +217,105 @@ def _import_retail_grinds(
     return rail_count, segment_count
 
 
+def _retail_collision_material(surface: int) -> bpy.types.Material:
+    name = f"MAT_RETAIL_COLLISION_{surface:04X}"
+    material = bpy.data.materials.get(name)
+    if material is None:
+        material = bpy.data.materials.new(name)
+    material.diffuse_color = (
+        ((surface * 37) & 0xFF) / 255.0,
+        ((surface * 67) & 0xFF) / 255.0,
+        ((surface * 97) & 0xFF) / 255.0,
+        1.0,
+    )
+    material["skate3_retail_surface_id"] = f"0x{surface:04X}"
+    material["ow_flags"] = 1
+    material["ow_friction"] = 0.82
+    material["ow_restitution"] = 0.0
+    material["ow_display_color"] = tuple(material.diffuse_color[:3])
+    material["ow_roughness"] = 0.68
+    material["ow_emissive"] = 0.0
+    material["ow_baked_strength"] = 0.0
+    material["ow_albedo_image"] = ""
+    material["ow_lightmap_image"] = ""
+    material["ow_normal_image"] = ""
+    material["ow_orm_image"] = ""
+    material["ow_emissive_image"] = ""
+    material["ow_alpha_mode"] = 0
+    material["ow_alpha_cutoff"] = 0.5
+    material["ow_audio_surface"] = surface & 0x7F
+    material["ow_physics_surface"] = (surface >> 7) & 0x1F
+    material["ow_surface_pattern"] = (surface >> 12) & 0x0F
+    material["ow_collision_enabled"] = True
+    return material
+
+
+def _import_retail_collision(
+    manifest: dict[str, object],
+    cache_root: Path,
+    collection: bpy.types.Collection,
+) -> tuple[int, int, int]:
+    by_surface: dict[
+        int,
+        tuple[
+            list[tuple[float, float, float]],
+            list[tuple[int, int, int]],
+            dict[tuple[float, float, float], int],
+        ],
+    ] = {}
+    mesh_count = 0
+    source_triangle_count = 0
+    for entry in manifest["simulation_assets"]:
+        if not entry.get("collision_meshes"):
+            continue
+        path = cache_root / Path(str(entry["rx2"]).replace("\\", "/"))
+        meshes = decode_rx2_clustered_meshes(path.read_bytes())
+        if len(meshes) != len(entry["collision_meshes"]):
+            raise ValueError(
+                f"{entry['asset_id']} retail collision section count changed"
+            )
+        for mesh in meshes:
+            mesh_count += 1
+            source_triangle_count += len(mesh.triangles)
+            for triangle in mesh.triangles:
+                vertices, faces, indices = by_surface.setdefault(
+                    triangle.surface,
+                    ([], [], {}),
+                )
+                face = []
+                for runtime_point in (triangle.a, triangle.b, triangle.c):
+                    point = _runtime_point_to_blender(runtime_point)
+                    index = indices.get(point)
+                    if index is None:
+                        index = len(vertices)
+                        indices[point] = index
+                        vertices.append(point)
+                    face.append(index)
+                faces.append(tuple(face))
+
+    imported_triangles = 0
+    for surface, (vertices, faces, _indices) in sorted(by_surface.items()):
+        name = f"RETAIL_COLLISION_{surface:04X}"
+        mesh_data = bpy.data.meshes.new(f"{name}_MESH")
+        mesh_data.from_pydata(vertices, [], faces)
+        mesh_data.update(calc_edges=False)
+        material = _retail_collision_material(surface)
+        mesh_data.materials.append(material)
+        obj = bpy.data.objects.new(name, mesh_data)
+        collection.objects.link(obj)
+        obj["skate3_retail_collision"] = True
+        obj["skate3_retail_surface_id"] = f"0x{surface:04X}"
+        obj["skate3_retail_triangle_count"] = len(faces)
+        obj["ow_material"] = material.name
+        imported_triangles += len(faces)
+
+    if imported_triangles != source_triangle_count:
+        raise ValueError(
+            "retail collision import changed the decoded triangle count"
+        )
+    return mesh_count, len(by_surface), imported_triangles
+
+
 def build_scene(manifest_path: Path) -> dict[str, int]:
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     cache_root = manifest_path.parent
@@ -348,6 +450,11 @@ def build_scene(manifest_path: Path) -> dict[str, int]:
         manifest,
         retail_grinds,
     )
+    (
+        collision_mesh_count,
+        collision_surface_count,
+        collision_triangle_count,
+    ) = _import_retail_collision(manifest, cache_root, collision)
 
     for simulation_entry in manifest["simulation_assets"]:
         empty = bpy.data.objects.new(
@@ -367,9 +474,9 @@ def build_scene(manifest_path: Path) -> dict[str, int]:
     info.empty_display_type = "PLAIN_AXES"
     info.empty_display_size = 2.0
     info["status"] = (
-        "Presentation geometry and diffuse textures imported. "
-        "Original presentation and simulation RX2 assets are preserved in the cache. "
-        "Collision decoding is pending."
+        "Presentation geometry, diffuse textures, exact retail collision, "
+        "and retail grind splines imported. Original RX2 assets are preserved "
+        "in the cache."
     )
     info["source_manifest"] = str(manifest_path)
     metadata.objects.link(info)
@@ -379,7 +486,10 @@ def build_scene(manifest_path: Path) -> dict[str, int]:
     scene["skate3_district_name"] = manifest["district_name"]
     scene["skate3_manifest"] = str(manifest_path)
     scene["skate3_import_format"] = manifest["format"]
-    scene["skate3_collision_status"] = "raw assets preserved; decoder pending"
+    scene["skate3_collision_status"] = (
+        f"{collision_triangle_count} exact retail ClusteredMesh triangles "
+        f"across {collision_surface_count} packed surfaces"
+    )
     scene["skate3_grind_status"] = (
         f"{grind_rail_count} retail native cubic splines imported"
     )
@@ -391,6 +501,9 @@ def build_scene(manifest_path: Path) -> dict[str, int]:
         "materials": len(materials),
         "grind_rails": grind_rail_count,
         "grind_segments": grind_segment_count,
+        "collision_meshes": collision_mesh_count,
+        "collision_surfaces": collision_surface_count,
+        "collision_triangles": collision_triangle_count,
         "simulation_assets": len(manifest["simulation_assets"]),
         "expected_objects": manifest["summary"]["mesh_parts"],
     }

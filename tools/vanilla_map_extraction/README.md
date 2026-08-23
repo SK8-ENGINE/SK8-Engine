@@ -55,29 +55,32 @@ To rebuild without making a preview render:
 
 `blender/prepare_university_owned.py` converts that extraction scene into the
 owned-world authoring contract and saves
-`blender/DIST_University_Owned.blend`. It preserves retail vertex normals,
-base UVs, material textures, transforms, and the full visual mesh. The current
-owned package has:
+`blender/DIST_University_Owned.blend`. It preserves base UVs, material
+textures, transforms, and the full visual mesh. The configured UTT model
+parser currently supplies geometry-derived averaged normals rather than
+authoritative packed retail normals. The current owned package has:
 
-- 332 materials and 327 embedded textures;
-- 277 opaque, 50 alpha-mask, and 5 alpha-blended material variants;
+- 515 materials and 327 embedded textures;
+- 460 opaque, 50 alpha-mask, and 5 alpha-blended material variants;
 - 2,081,271 indexed visual vertices and 1,645,617 render triangles;
-- 1,014,852 visual-derived collision triangles;
+- 1,122,951 cleaned retail collision triangles;
 - 4,201 retail grind rails containing 27,008 exact native cubic segments;
 - bounds from `(-727.373, -6.849, -1413.082)` to
   `(807.640, 296.100, 792.678)`;
 - a runtime spawn at `(330, 133.006, -710)` on a flat wooden starting deck
   inside Super Ultra Mega Park.
 
-The 1,013 retail simulation resources remain preserved, but their collision
-format is not decoded. Collision is therefore derived from structural
-presentation meshes; water, foliage, decals, reflections, and other obvious
-non-physical presentation objects are excluded. This is an explicit
-approximation, not a claim of retail collision parity. AI routes, doors, and
-local lights are not yet recovered.
+The 1,013 retail simulation resources remain preserved. All 301 native
+RenderWare `ClusteredMesh` sections are decoded into 1,133,649 source
+triangles across 183 packed retail surfaces. Export rejects six degenerate
+triangles and removes 10,692 exact/opposite-wound duplicates, leaving the
+1,122,951 stable runtime triangles above. An offline verifier checks geometry
+to 1e-6 metres, winding, counts, and packed audio/physics/pattern surface
+channels against the retail RX2 source. AI routes, doors, and local lights are
+not yet recovered.
 
 The SKATE v10 package is
-`intermediate/university/University.skate`. It is 120,455,833 bytes and
+`intermediate/university/University.skate`. It is 121,962,132 bytes and
 losslessly decodes to the counts and bounds above. The offline engine validator
 also compiles it into 515 render chunks, a 4,023,600-byte native
 `tSplineData` blob, and 44 collision chunks using the verified 256 metre

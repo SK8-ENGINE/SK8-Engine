@@ -14,6 +14,8 @@ EXPECTED_MODE_COUNTS = {0: 6389, 1: 2118, 2: 39}
 EXPECTED_GRIND_RAILS = 4201
 EXPECTED_GRIND_SEGMENTS = 27008
 EXPECTED_CLOSED_GRIND_RAILS = 372
+EXPECTED_COLLISION_SURFACES = 183
+EXPECTED_COLLISION_TRIANGLES = 1_133_649
 REGRESSION_BINDINGS = {
     ("0xF6CC7BFCC2C45F8C", 40): (
         "0x861894DE4209CE82",
@@ -247,6 +249,47 @@ def main() -> int:
             f"segments={grind_segments}, closed={closed_grinds}"
         )
 
+    collision_objects = [
+        obj
+        for obj in bpy.data.objects
+        if obj.type == "MESH"
+        and bool(obj.get("skate3_retail_collision", False))
+    ]
+    if len(collision_objects) != EXPECTED_COLLISION_SURFACES:
+        raise RuntimeError(
+            f"University has {len(collision_objects)} retail collision "
+            f"surfaces, expected {EXPECTED_COLLISION_SURFACES}"
+        )
+    collision_triangles = 0
+    for obj in collision_objects:
+        if len(obj.data.materials) != 1 or obj.data.materials[0] is None:
+            raise RuntimeError(
+                f"{obj.name!r} does not have one retail collision material"
+            )
+        surface = int(str(obj["skate3_retail_surface_id"]), 16)
+        material = obj.data.materials[0]
+        encoded = (
+            int(material["ow_audio_surface"])
+            | (int(material["ow_physics_surface"]) << 7)
+            | (int(material["ow_surface_pattern"]) << 12)
+        )
+        if encoded != surface:
+            raise RuntimeError(
+                f"{obj.name!r} packed surface changed: "
+                f"0x{encoded:04X} != 0x{surface:04X}"
+            )
+        triangle_count = len(obj.data.polygons)
+        if triangle_count != int(obj["skate3_retail_triangle_count"]):
+            raise RuntimeError(
+                f"{obj.name!r} retail triangle count changed"
+            )
+        collision_triangles += triangle_count
+    if collision_triangles != EXPECTED_COLLISION_TRIANGLES:
+        raise RuntimeError(
+            f"University has {collision_triangles} retail collision triangles, "
+            f"expected {EXPECTED_COLLISION_TRIANGLES}"
+        )
+
     print(
         json.dumps(
             {
@@ -258,6 +301,8 @@ def main() -> int:
                 "grind_rails": len(grind_objects),
                 "grind_segments": grind_segments,
                 "closed_grind_rails": closed_grinds,
+                "collision_surfaces": len(collision_objects),
+                "collision_triangles": collision_triangles,
             },
             indent=2,
         )

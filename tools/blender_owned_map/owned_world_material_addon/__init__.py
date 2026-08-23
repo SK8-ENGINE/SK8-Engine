@@ -100,6 +100,7 @@ PHYSICS_ITEMS = [
     ("10", "SlipperyRagdoll", "Low-friction bail behavior"),
     ("11", "BouncyRagdoll", "Bouncy bail behavior"),
     ("12", "Water", "Native water/swimming behavior"),
+    ("13", "Retail13", "Retail collision behavior 13"),
 ]
 
 PATTERN_ITEMS = [
@@ -3216,7 +3217,7 @@ def _hydrate_material(material: Material) -> None:
         max(0, min(93, int(material.get("ow_audio_surface", 3))))
     )
     settings.physics_surface = str(
-        max(0, min(12, int(material.get("ow_physics_surface", 1))))
+        max(0, min(13, int(material.get("ow_physics_surface", 1))))
     )
     settings.surface_pattern = str(
         max(0, min(15, int(material.get("ow_surface_pattern", 0))))
