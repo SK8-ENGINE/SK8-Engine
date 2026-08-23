@@ -316,10 +316,37 @@ Current checkpoint:
   unchanged protocol-v11 golden tests.
 - The live runtime remains byte-for-byte protocol v11, so this second
   checkpoint also does not require an in-game visual pass.
-- The next isolated slice is a bounded group fragment reassembler and sender
-  packetizer exercised by synthetic loss, reorder, duplication, expiry, and
-  baseline-recovery scenarios. Runtime capability advertisements remain
-  v11-only until that end-to-end offline path is deterministic.
+- Commit `011cfec` adds the offline v12 pose packetizer and bounded fragment
+  reassembler. The packetizer emits transport-neutral descriptors, then
+  copies each source range directly into one caller-owned datagram; it does
+  not allocate or duplicate the complete pose once per fragment.
+- Reassembly is latest-wins independently per sender, session, stream,
+  message kind, and group. A newer pose supersedes an incomplete older pose,
+  obsolete fragments are rejected, and duplicate fragments must have
+  identical bytes, timestamp, metadata, and rollover-safe base sequence.
+  Conflicts fail closed instead of combining two frames.
+- Default reassembly limits are eight active groups, 256 KiB buffered data,
+  64 KiB per group, 58 fragments per group, and a 250 ms incomplete-fragment
+  lifetime. Completion, expiry, conflict, supersession, generation reset, and
+  resource-pressure eviction release their owned buffers deterministically.
+- Expired or evicted baseline groups report a recovery mask into the bounded
+  request latch. Ordinary expired deltas are simply discarded and do not
+  request a baseline. Packet receipt still enters the receive bitmap before
+  reassembly, while only complete decoded group sets confirm a baseline.
+- The synthetic end-to-end path now exercises encode, decode, packet history,
+  reordered reassembly, grouped baseline completion, and delta acceptance.
+  It also covers exact fragment boundaries from 1 byte through 64 KiB,
+  58-fragment groups, sequence rollover, loss, duplication, conflicting
+  bytes and timestamps, latest-pose supersession, expiry, slot and byte
+  limits, and recovery retry behavior.
+- All eight multiplayer suites pass, including unchanged protocol-v11 golden
+  tests. The live runtime remains byte-for-byte protocol v11, so this
+  checkpoint does not require an in-game visual pass.
+- The next isolated slice is a transport-neutral outbound scheduler with
+  separate reliable control, expirable pose, and rate-limited appearance
+  budgets. Synthetic overload tests must prove that appearance bulk cannot
+  head-of-line block a fresh pose or recovery control before any v12
+  capability advertisement is enabled in live sessions.
 
 Completion:
 
