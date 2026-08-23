@@ -641,8 +641,9 @@ $runRoot
 Clients: 5
 Transport: localhost UDP
 Quality: Balanced, 60 Hz root, 60 Hz animation, 50 ms minimum interpolation
-Change under test: adaptive interpolation reserve with deeper pose history
-Diagnostics: timing is reported separately for every receiver/sender pair
+Change under test: monotonic per-player playback clock with bounded timing slew
+Diagnostics: timing, cursor error, and cursor slew are reported separately for
+every receiver/sender pair
 
 Visual scenario:
 1. Wait until all five clients have loaded the same map, every client sees
@@ -669,8 +670,8 @@ Telemetry acceptance checked by the agent afterward:
 - Per-sender complete animation rates approach the configured 60 Hz whenever
   that sender supplies fresh captures.
 - Each receiver/sender pair reports interpolation delay, cursor margin,
-  held-latest percentage and run length, sequence gaps, and superseded
-  incomplete frames.
+  cursor error/slew, held-latest percentage and run length, sequence gaps,
+  and superseded incomplete frames.
 - Delivery-policy errors, socket failures, and multiplayer errors stay zero.
 - Appearance and resource counters remain healthy.
 

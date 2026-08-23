@@ -3,6 +3,7 @@
 #include "skate3_multiplayer_interpolation.h"
 #include "skate3_multiplayer_lifecycle.h"
 #include "skate3_multiplayer_outbound_scheduler.h"
+#include "skate3_multiplayer_playback_clock.h"
 #include "skate3_multiplayer_protocol.h"
 #include "skate3_multiplayer_send_schedule.h"
 #include "skate3_multiplayer_worker.h"
@@ -448,6 +449,7 @@ struct RemotePeerState {
   std::uint64_t last_animation_sender_time_us = 0;
   std::uint64_t last_animation_arrival_time_us = 0;
   std::uint32_t last_animation_sequence = 0;
+  playback::PresentationClock presentation_clock;
   std::deque<ReceivedSample> samples;
   std::deque<ReceivedAnimationSample> animation_samples;
   AnimationAssembly animation_assembly;
@@ -2439,6 +2441,7 @@ class Runtime {
           "multiplayer-peer-timing: receiver={} sender={} "
           "rx={:.1f}fps period={:.1f}ms jitter={:.1f}ms "
           "delay={:.1f}ms margin={:.1f}/{:.1f}/{:.1f}ms "
+          "cursor_error={:.1f}ms cursor_slew={:.3f}ms "
           "buffered={} present={}/{}/{} latest={:.1f}% "
           "latest_run={} gaps={} superseded={}",
           bound_role_, remote_role,
@@ -2454,7 +2457,14 @@ class Runtime {
                   peer, network_tuning_.interpolation_ms)) /
               1000.0,
           margin_average_ms, margin_minimum_ms,
-          margin_maximum_ms, peer.animation_samples.size(),
+          margin_maximum_ms,
+          static_cast<double>(
+              peer.presentation_clock.ideal_error_us()) /
+              1000.0,
+          static_cast<double>(
+              peer.presentation_clock.applied_correction_us()) /
+              1000.0,
+          peer.animation_samples.size(),
           timing.present_interpolated,
           timing.present_held_latest,
           timing.present_held_oldest,
@@ -4436,9 +4446,12 @@ class Runtime {
         ++peer.clock_rebase_count;
       }
     }
-    const std::int64_t target_sender_time_us =
+    const std::int64_t ideal_sender_time_us =
         local_now_us - peer.clock_offset_us -
         interpolation_delay_us;
+    const std::int64_t target_sender_time_us =
+        peer.presentation_clock.Advance(
+            local_now_us, ideal_sender_time_us);
     if (target_sender_time_us <=
         static_cast<std::int64_t>(
             peer.samples.front().sender_time_us)) {
@@ -4516,12 +4529,14 @@ class Runtime {
         !peer.clock_offset_valid) {
       return false;
     }
+    // SmoothRemote advances this once per replication tick. Reuse that exact
+    // sender-time target so root motion and every skeleton track are sampled
+    // from the same monotonic timeline.
+    if (!peer.presentation_clock.valid()) {
+      return false;
+    }
     const std::int64_t target_sender_time_us =
-        static_cast<std::int64_t>(NowMicroseconds()) -
-        peer.clock_offset_us -
-        std::chrono::duration_cast<std::chrono::microseconds>(
-            interpolation_delay)
-            .count();
+        peer.presentation_clock.target_sender_time_us();
     const std::int64_t cursor_margin_us =
         static_cast<std::int64_t>(
             peer.animation_samples.back().pose.sender_time_us) -

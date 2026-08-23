@@ -1,6 +1,7 @@
 #include "skate3_multiplayer_interpolation.h"
 #include "skate3_multiplayer_worker.h"
 #include "skate3_multiplayer_latest_request.h"
+#include "skate3_multiplayer_playback_clock.h"
 #include "skate3_multiplayer_send_schedule.h"
 
 #include <atomic>
@@ -398,6 +399,81 @@ void TestAdaptiveInterpolationDelayCoversMeasuredStalls() {
       "empty animation history ignored the configured delay");
 }
 
+void TestPresentationClockRejectsCursorJumps() {
+  using skate3::multiplayer::playback::PresentationClock;
+
+  PresentationClock clock;
+  Expect(clock.Advance(1000000, 900000) == 900000,
+         "presentation clock did not initialize at the ideal cursor");
+
+  const std::int64_t normal =
+      clock.Advance(1004000, 904000);
+  Expect(normal == 904000,
+         "presentation clock changed a stable one-to-one cadence");
+
+  const std::int64_t delayed =
+      clock.Advance(1008000, 858000);
+  Expect(delayed == 907600,
+         "presentation clock did not bound a backwards delay jump");
+  Expect(delayed >= normal,
+         "presentation clock moved backwards");
+  Expect(clock.applied_correction_us() == -400,
+         "presentation clock exceeded its negative slew limit");
+
+  const std::int64_t advanced =
+      clock.Advance(1012000, 962000);
+  Expect(advanced == 912000,
+         "presentation clock did not bound a forwards delay jump");
+  Expect(clock.applied_correction_us() == 400,
+         "presentation clock exceeded its positive slew limit");
+  Expect(clock.ideal_error_us() == 50000,
+         "presentation clock reported the wrong ideal-cursor error");
+}
+
+void TestPresentationClockConvergesWithoutRewinding() {
+  using skate3::multiplayer::playback::PresentationClock;
+
+  PresentationClock clock;
+  std::int64_t local_us = 1000000;
+  std::int64_t ideal_us = 900000;
+  std::int64_t previous_us =
+      clock.Advance(local_us, ideal_us);
+
+  // Increase desired buffering by 40 ms. The cursor should run at 90% until
+  // it reaches the new delay, never stopping or moving backwards.
+  for (int tick = 0; tick < 120; ++tick) {
+    local_us += 4000;
+    ideal_us += 4000;
+    const std::int64_t desired_with_more_delay =
+        ideal_us - 40000;
+    const std::int64_t current_us =
+        clock.Advance(local_us, desired_with_more_delay);
+    Expect(current_us >= previous_us,
+           "presentation clock rewound while increasing its delay");
+    Expect(current_us - previous_us >= 3600 &&
+               current_us - previous_us <= 4000,
+           "presentation clock exceeded its bounded slow cadence");
+    previous_us = current_us;
+  }
+  Expect(clock.ideal_error_us() == 0,
+         "presentation clock did not converge on increased delay");
+
+  // Decrease desired buffering by 40 ms. Convergence may run at 110%, but
+  // must still be gradual rather than a visible one-frame jump.
+  for (int tick = 0; tick < 120; ++tick) {
+    local_us += 4000;
+    ideal_us += 4000;
+    const std::int64_t current_us =
+        clock.Advance(local_us, ideal_us);
+    Expect(current_us - previous_us >= 4000 &&
+               current_us - previous_us <= 4400,
+           "presentation clock exceeded its bounded fast cadence");
+    previous_us = current_us;
+  }
+  Expect(clock.ideal_error_us() == 0,
+         "presentation clock did not converge on reduced delay");
+}
+
 }  // namespace
 
 int main() {
@@ -411,6 +487,8 @@ int main() {
   TestPeriodicDeadlineRetainsTargetRate();
   TestPeriodicDeadlineDoesNotBurstAfterStall();
   TestAdaptiveInterpolationDelayCoversMeasuredStalls();
+  TestPresentationClockRejectsCursorJumps();
+  TestPresentationClockConvergesWithoutRewinding();
 
   if (g_failures != 0) {
     std::cerr << g_failures << " multiplayer worker test(s) failed\n";
