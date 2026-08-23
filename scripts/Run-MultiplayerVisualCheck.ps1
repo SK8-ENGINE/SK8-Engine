@@ -49,10 +49,12 @@ if ($SmoothnessCheck -and $Clients -ne 5) {
     throw 'The smoothness check requires exactly five clients.'
 }
 $specializedChecks = @(
-    [bool]$AppearanceRecoveryCheck,
-    [bool]$RealtimePriorityCheck,
-    [bool]$SmoothnessCheck
-) | Where-Object { $_ }
+    @(
+        [bool]$AppearanceRecoveryCheck,
+        [bool]$RealtimePriorityCheck,
+        [bool]$SmoothnessCheck
+    ) | Where-Object { $_ }
+)
 if ($specializedChecks.Count -gt 1) {
     throw 'Select only one specialized multiplayer visual check.'
 }
