@@ -1,3 +1,4 @@
+#include "skate3_multiplayer_interpolation.h"
 #include "skate3_multiplayer_worker.h"
 #include "skate3_multiplayer_latest_request.h"
 #include "skate3_multiplayer_send_schedule.h"
@@ -371,6 +372,32 @@ void TestPeriodicDeadlineDoesNotBurstAfterStall() {
          "reset periodic deadline was not immediately due");
 }
 
+void TestAdaptiveInterpolationDelayCoversMeasuredStalls() {
+  using skate3::multiplayer::interpolation::
+      RecommendedDelayMicroseconds;
+
+  Expect(
+      RecommendedDelayMicroseconds(
+          50, 20000, 8000, true) == 164000,
+      "measured five-client jitter did not receive enough safety delay");
+  Expect(
+      RecommendedDelayMicroseconds(
+          50, 16300, 3300, true) == 107900,
+      "smooth sender was assigned the wrong adaptive delay");
+  Expect(
+      RecommendedDelayMicroseconds(
+          120, 16300, 3300, true) == 120000,
+      "configured interpolation floor was not preserved");
+  Expect(
+      RecommendedDelayMicroseconds(
+          50, 50000, 50000, true) == 250000,
+      "adaptive interpolation delay exceeded its safety cap");
+  Expect(
+      RecommendedDelayMicroseconds(
+          50, 50000, 50000, false) == 50000,
+      "empty animation history ignored the configured delay");
+}
+
 }  // namespace
 
 int main() {
@@ -383,6 +410,7 @@ int main() {
   TestLatestRequestTransfersResultOwnership();
   TestPeriodicDeadlineRetainsTargetRate();
   TestPeriodicDeadlineDoesNotBurstAfterStall();
+  TestAdaptiveInterpolationDelayCoversMeasuredStalls();
 
   if (g_failures != 0) {
     std::cerr << g_failures << " multiplayer worker test(s) failed\n";

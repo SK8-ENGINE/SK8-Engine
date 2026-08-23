@@ -1,5 +1,6 @@
 #include "skate3_multiplayer.h"
 
+#include "skate3_multiplayer_interpolation.h"
 #include "skate3_multiplayer_lifecycle.h"
 #include "skate3_multiplayer_outbound_scheduler.h"
 #include "skate3_multiplayer_protocol.h"
@@ -313,7 +314,7 @@ const char* NetworkQualityName(const NetworkTuning& tuning) {
 
 constexpr auto kRemoteTimeout = std::chrono::milliseconds(1500);
 constexpr std::size_t kMaximumBufferedSamples = 16;
-constexpr std::size_t kMaximumBufferedAnimationSamples = 8;
+constexpr std::size_t kMaximumBufferedAnimationSamples = 16;
 constexpr std::uint32_t kLocalControlCapabilities =
     kCapabilityControlV1 | kCapabilityAppearanceState |
     kCapabilityAppearanceRequest;
@@ -474,25 +475,13 @@ struct PeerControlState {
 
 std::int64_t PresentationDelayMicroseconds(
     const RemotePeerState& peer, std::int32_t interpolation_ms) {
-  const std::int64_t configured_delay_us =
-      std::int64_t{std::clamp(interpolation_ms, 0, 250)} * 1000;
-  if (peer.animation_samples.empty()) {
-    return configured_delay_us;
-  }
-  const std::int64_t stable_period_us =
-      std::clamp<std::int64_t>(
-          peer.animation_period_us, 8000, 150000);
-  const std::int64_t stable_jitter_us =
-      std::clamp<std::int64_t>(
-          peer.animation_jitter_us, 0, 50000);
   // Root and skeleton must be sampled from one sender-time point. Presenting
-  // the higher-rate root 50 ms ahead of the skeleton makes a clone oscillate
-  // between two moments even when both individual streams are smooth.
-  return std::clamp<std::int64_t>(
-      std::max(
-          configured_delay_us,
-          stable_period_us * 2 + stable_jitter_us * 3),
-      0, 250000);
+  // either stream ahead of the other makes a clone oscillate between two
+  // moments even when both individual streams are smooth.
+  return interpolation::RecommendedDelayMicroseconds(
+      interpolation_ms, peer.animation_period_us,
+      peer.animation_jitter_us,
+      !peer.animation_samples.empty());
 }
 
 #if defined(_WIN32)
