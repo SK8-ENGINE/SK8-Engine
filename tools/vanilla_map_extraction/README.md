@@ -207,10 +207,16 @@ contains the exact launch arguments, prepared hashes/commit metadata, and
 the game and reports failures clearly.
 
 `Run-University-Retail-Collision-Check.bat` is a diagnostic A/B launcher. It
-keeps the owned University presentation and map origin but does not register
-the rebuilt owned collision mesh or suppress streamed retail collision.
-Movement telemetry from the same route can therefore distinguish an engine
-or retail-map barrier from one introduced by owned collision reconstruction.
+places the extracted University presentation and grinds at their preserved
+original retail world coordinates, but does not register the rebuilt owned
+collision mesh or suppress streamed retail collision. Movement telemetry from
+the same route can therefore compare corresponding retail and extracted
+geometry without a spawn-derived translation confounding the result. Retail
+collision remains physically authoritative; selected retail line contacts are
+also ranked and the highest-ranked contact is replayed as a read-only ray
+against the extracted package each telemetry interval. The resulting
+`native-collision-shadow-compare` records avoid doubled contacts while
+reporting position, normal, and packed-surface agreement.
 
 Agents must never execute this `.bat` file or launch `skate3.exe`. Offline
 preparation is performed separately with:

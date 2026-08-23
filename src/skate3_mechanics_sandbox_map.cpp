@@ -1609,6 +1609,34 @@ bool QueryContact(const float position[3], float radius, Contact& out) {
   return true;
 }
 
+bool QueryRaySegment(const float start[3], const float delta[3], RayHit& out) {
+  if (start == nullptr || delta == nullptr ||
+      !std::isfinite(start[0]) || !std::isfinite(start[1]) ||
+      !std::isfinite(start[2]) || !std::isfinite(delta[0]) ||
+      !std::isfinite(delta[1]) || !std::isfinite(delta[2])) {
+    return false;
+  }
+  const skate::world::Vec3 direction{delta[0], delta[1], delta[2]};
+  const float distance = std::sqrt(skate::world::LengthSquared(direction));
+  if (!std::isfinite(distance) || distance <= 1.0e-6f) {
+    return false;
+  }
+  const skate::world::RayHit source = ActiveWorld().RayCast(
+      {start[0], start[1], start[2]}, direction, distance);
+  if (!source.hit) {
+    return false;
+  }
+  out.id = source.surface;
+  out.point[0] = source.point.x;
+  out.point[1] = source.point.y;
+  out.point[2] = source.point.z;
+  out.normal[0] = source.normal.x;
+  out.normal[1] = source.normal.y;
+  out.normal[2] = source.normal.z;
+  out.distance = source.distance;
+  return true;
+}
+
 bool QueryGround(const float position[3], float probe_above,
                  float probe_below, GroundHit& out) {
   if (position == nullptr || probe_above < 0.0f || probe_below < 0.0f) {

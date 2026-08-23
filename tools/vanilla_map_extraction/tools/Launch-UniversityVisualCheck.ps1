@@ -116,7 +116,7 @@ try {
     ) -Encoding UTF8
 
     $collisionMode = if ($RetailCollisionOnly) {
-        'retail-only A/B collision'
+        'retail-only coordinate-locked A/B collision'
     } else {
         'owned University collision'
     }

@@ -81,6 +81,13 @@ struct GroundHit {
   float distance = 0.0f;
 };
 
+struct RayHit {
+  uint32_t id = 0;
+  float point[3] = {};
+  float normal[3] = {};
+  float distance = 0.0f;
+};
+
 struct WaterTelemetry {
   uint64_t simulation_steps = 0;
   uint64_t dropped_frames = 0;
@@ -212,6 +219,7 @@ bool ActiveWaterPusherPose(float out_position[3]);
 WaterTelemetry ActiveWaterTelemetry();
 
 bool QueryContact(const float position[3], float radius, Contact& out);
+bool QueryRaySegment(const float start[3], const float delta[3], RayHit& out);
 bool QueryGround(const float position[3], float probe_above,
                  float probe_below, GroundHit& out);
 bool QueryLowestGround(const float position[3], float probe_above,

@@ -2,7 +2,7 @@
 setlocal
 pushd "%~dp0"
 
-echo Launching University visuals with retail-only collision...
+echo Launching coordinate-locked University visuals with retail-only collision...
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\vanilla_map_extraction\tools\Launch-UniversityVisualCheck.ps1" -RetailCollisionOnly
 set "RESULT=%ERRORLEVEL%"
 

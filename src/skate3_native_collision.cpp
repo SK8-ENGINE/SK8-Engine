@@ -40,9 +40,10 @@ REXCVAR_DEFINE_BOOL(
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 REXCVAR_DEFINE_BOOL(
     skate3_mechanics_sandbox_native_collision_retail_only, false, "Skate 3",
-    "Diagnostic A/B mode: publish the owned map origin for presentation and "
-    "grinds, but do not compile or register owned static collision. Leave "
-    "the game's streamed retail collision collection authoritative.")
+    "Diagnostic A/B mode: place the extracted presentation and grinds in "
+    "their original retail world coordinates, but do not compile or register "
+    "owned static collision. Leave the game's streamed retail collision "
+    "collection authoritative.")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 
 namespace skate3::native_collision {
@@ -314,6 +315,11 @@ std::mutex g_primitive_pair_contact_mutex;
 std::vector<PrimitivePairContact> g_primitive_pair_contacts;
 std::mutex g_native_line_contact_mutex;
 std::vector<NativeLineContact> g_native_line_contacts;
+
+bool ObserveCurrentTriangleQuery() {
+  return g_querying_owned_mesh ||
+         g_state.load(std::memory_order_acquire) == State::RetailOnly;
+}
 
 bool IsGuestDataAddress(std::uint32_t address) {
   return address >= 0x00010000u && address < 0x80000000u;
@@ -1391,7 +1397,7 @@ void PrepareNativeBoxQueryBatch(std::uint32_t batch,
 
 void ObserveNativeClusterDecode(
     std::uint32_t triangle_count) noexcept {
-  if (!g_querying_owned_mesh) {
+  if (!ObserveCurrentTriangleQuery()) {
     return;
   }
   g_native_cluster_decodes.fetch_add(1, std::memory_order_relaxed);
@@ -1426,7 +1432,7 @@ void PrepareNativeTriangleTest(std::uint32_t result,
 void ObserveNativeTriangleResult(std::uint32_t hit,
                                  std::uint32_t decoded_triangle,
                                  std::uint8_t* base) noexcept {
-  if (!g_querying_owned_mesh) {
+  if (!ObserveCurrentTriangleQuery()) {
     return;
   }
   g_native_triangle_tests.fetch_add(1, std::memory_order_relaxed);
@@ -1578,7 +1584,7 @@ void ObserveNativeTriangleResult(std::uint32_t hit,
 void ObserveNativeTriangleAccepted(std::uint32_t decoded_triangle,
                                    std::uint32_t worker,
                                    std::uint8_t* base) noexcept {
-  if (!g_querying_owned_mesh || base == nullptr ||
+  if (!ObserveCurrentTriangleQuery() || base == nullptr ||
       decoded_triangle < 136 ||
       !IsGuestDataAddress(decoded_triangle - 136)) {
     return;
@@ -1618,7 +1624,7 @@ void ObserveNativeTriangleSelected(std::uint32_t decoded_triangle,
                                    std::uint32_t candidate,
                                    std::uint32_t worker,
                                    std::uint8_t* base) noexcept {
-  if (!g_querying_owned_mesh || base == nullptr ||
+  if (!ObserveCurrentTriangleQuery() || base == nullptr ||
       decoded_triangle < 136 ||
       !IsGuestDataAddress(decoded_triangle - 136) ||
       !IsGuestDataAddress(result) ||
@@ -1658,6 +1664,17 @@ void ObserveNativeTriangleSelected(std::uint32_t decoded_triangle,
     }
     ++contact.selected_count;
     contact.selected_worker = worker;
+    contact.surface = REX_LOAD_U16(decoded_triangle);
+    const PendingNativeTriangleTest query =
+        g_pending_native_triangle_test;
+    if (query.valid &&
+        IsGuestDataAddress(query.result + 64)) {
+      contact.line_start = query.line_start;
+      contact.line_delta = query.line_delta;
+      contact.hit_position = LoadVec3(base, query.result + 16);
+      contact.hit_normal = LoadVec3(base, query.result + 32);
+      contact.hit_fraction = LoadF32(base, query.result + 64);
+    }
     return;
   }
 }
@@ -2149,6 +2166,7 @@ void ObservePlayerCollisionTelemetry(const float world_position[3],
   constexpr std::size_t kMaximumLoggedLineContacts = 16;
   const std::size_t logged_line_contact_count = std::min(
       line_contacts.size(), kMaximumLoggedLineContacts);
+  std::size_t shadow_comparison_count = 0;
   for (std::size_t index = 0;
        index < logged_line_contact_count; ++index) {
     const NativeLineContact& contact = line_contacts[index];
@@ -2210,6 +2228,64 @@ void ObservePlayerCollisionTelemetry(const float world_position[3],
         local_vertices[1].y, local_vertices[1].z,
         local_vertices[2].x, local_vertices[2].y,
         local_vertices[2].z);
+    constexpr std::size_t kMaximumShadowComparisons = 1;
+    if (state != State::RetailOnly ||
+        contact.selected_count == 0 ||
+        shadow_comparison_count >= kMaximumShadowComparisons) {
+      continue;
+    }
+    ++shadow_comparison_count;
+    const float shadow_start[3] = {
+        local_line_start.x, local_line_start.y, local_line_start.z};
+    const float shadow_delta[3] = {
+        contact.line_delta.x, contact.line_delta.y, contact.line_delta.z};
+    mechanics_sandbox::map::RayHit shadow_hit;
+    const bool package_hit =
+        mechanics_sandbox::map::QueryRaySegment(
+            shadow_start, shadow_delta, shadow_hit);
+    const skate::world::Vec3 package_point{
+        shadow_hit.point[0], shadow_hit.point[1], shadow_hit.point[2]};
+    const skate::world::Vec3 package_normal =
+        skate::world::Normalize(
+            {shadow_hit.normal[0], shadow_hit.normal[1],
+             shadow_hit.normal[2]});
+    const float point_error =
+        package_hit
+            ? std::sqrt(skate::world::LengthSquared(
+                  package_point - local_hit_position))
+            : std::numeric_limits<float>::infinity();
+    const float retail_distance = std::sqrt(
+        skate::world::LengthSquared(
+            local_hit_position - local_line_start));
+    const float distance_error =
+        package_hit ? std::fabs(shadow_hit.distance - retail_distance)
+                    : std::numeric_limits<float>::infinity();
+    const float normal_dot =
+        package_hit ? skate::world::Dot(
+                          package_normal,
+                          skate::world::Normalize(contact.hit_normal))
+                    : 0.0f;
+    const bool surface_match =
+        package_hit &&
+        shadow_hit.id == static_cast<std::uint32_t>(contact.surface);
+    const bool geometry_match =
+        package_hit && point_error <= 0.002f &&
+        distance_error <= 0.002f && normal_dot >= 0.999f;
+    REXLOG_INFO(
+        "native-collision-shadow-compare: frame={} rank={} "
+        "retail_selected={} package_hit={} geometry_match={} "
+        "surface_match={} retail_surface=0x{:04X} "
+        "package_surface=0x{:04X} point_error={:.6f} "
+        "distance_error={:.6f} normal_dot={:.6f} "
+        "package_hit_position=({:.4f},{:.4f},{:.4f})",
+        frame, index + 1, contact.selected_count,
+        package_hit ? 1 : 0, geometry_match ? 1 : 0,
+        surface_match ? 1 : 0, contact.surface,
+        package_hit ? shadow_hit.id : 0u, point_error,
+        distance_error, normal_dot,
+        package_hit ? shadow_hit.point[0] : 0.0f,
+        package_hit ? shadow_hit.point[1] : 0.0f,
+        package_hit ? shadow_hit.point[2] : 0.0f);
   }
   constexpr std::size_t kMaximumLoggedPhysicalContacts = 12;
   const std::size_t logged_contact_count = std::min(
@@ -2382,14 +2458,21 @@ void EnsureInstalled(PPCContext& ctx,
       map_origin[2] - spawn.position.z};
   if (REXCVAR_GET(
           skate3_mechanics_sandbox_native_collision_retail_only)) {
+    // University extraction preserves retail world coordinates. Anchoring
+    // its authored spawn to the current skater position shifts the owned
+    // presentation away from the streamed retail collision and invalidates
+    // an A/B comparison. Keep every extracted subsystem in the original
+    // coordinate frame while retail collision remains authoritative.
+    constexpr float retail_coordinate_origin[3] = {
+        0.0f, 0.0f, 0.0f};
     g_world_origin_x_bits.store(
-        std::bit_cast<std::uint32_t>(translation[0]),
+        std::bit_cast<std::uint32_t>(retail_coordinate_origin[0]),
         std::memory_order_relaxed);
     g_world_origin_y_bits.store(
-        std::bit_cast<std::uint32_t>(translation[1]),
+        std::bit_cast<std::uint32_t>(retail_coordinate_origin[1]),
         std::memory_order_relaxed);
     g_world_origin_z_bits.store(
-        std::bit_cast<std::uint32_t>(translation[2]),
+        std::bit_cast<std::uint32_t>(retail_coordinate_origin[2]),
         std::memory_order_relaxed);
     g_collection_count_before.store(count, std::memory_order_release);
     g_collection_count_after.store(count, std::memory_order_release);
@@ -2397,9 +2480,10 @@ void EnsureInstalled(PPCContext& ctx,
     REX_KERNEL_MEMORY()->SystemHeapFree(auxiliary);
     g_state.store(State::RetailOnly, std::memory_order_release);
     REXLOG_INFO(
-        "native-collision: retail-only A/B mode active "
+        "native-collision: retail-only coordinate-locked A/B mode active "
         "(collection_count={} origin=({:.3f},{:.3f},{:.3f}))",
-        count, translation[0], translation[1], translation[2]);
+        count, retail_coordinate_origin[0], retail_coordinate_origin[1],
+        retail_coordinate_origin[2]);
     return;
   }
   OwnedCollisionBuildSet builds;
