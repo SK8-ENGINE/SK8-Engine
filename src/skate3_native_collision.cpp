@@ -38,6 +38,12 @@ REXCVAR_DEFINE_BOOL(
     "collection, remove the previously streamed retail static volumes. The "
     "owned mesh remains the sole static-world collision provider.")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+REXCVAR_DEFINE_BOOL(
+    skate3_mechanics_sandbox_native_collision_retail_only, false, "Skate 3",
+    "Diagnostic A/B mode: publish the owned map origin for presentation and "
+    "grinds, but do not compile or register owned static collision. Leave "
+    "the game's streamed retail collision collection authoritative.")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 
 namespace skate3::native_collision {
 namespace {
@@ -54,6 +60,7 @@ enum class State : std::uint8_t {
   RegistrationFailed,
   InstalledAdditive,
   InstalledExclusive,
+  RetailOnly,
   ReplacementFailed,
 };
 
@@ -503,6 +510,8 @@ const char* StateName(State state) {
       return "installed_additive";
     case State::InstalledExclusive:
       return "installed_exclusive";
+    case State::RetailOnly:
+      return "retail_only";
     case State::ReplacementFailed:
       return "replacement_failed";
   }
@@ -568,6 +577,7 @@ bool IsTerminal(State state) {
          state == State::RegistrationFailed ||
          state == State::InstalledAdditive ||
          state == State::InstalledExclusive ||
+         state == State::RetailOnly ||
          state == State::ReplacementFailed;
 }
 
@@ -1959,9 +1969,10 @@ bool ShouldSuppressWorldStreamerAddVolume(const PPCContext& ctx,
 
 void ObservePlayerCollisionTelemetry(const float world_position[3],
                                      std::uint64_t frame) noexcept {
+  const State state = g_state.load(std::memory_order_acquire);
   if (world_position == nullptr ||
-      g_state.load(std::memory_order_acquire) !=
-          State::InstalledExclusive) {
+      (state != State::InstalledExclusive &&
+       state != State::RetailOnly)) {
     return;
   }
   float translation[3] = {};
@@ -2369,6 +2380,28 @@ void EnsureInstalled(PPCContext& ctx,
       map_origin[0] - spawn.position.x,
       ground[1] - spawn.position.y,
       map_origin[2] - spawn.position.z};
+  if (REXCVAR_GET(
+          skate3_mechanics_sandbox_native_collision_retail_only)) {
+    g_world_origin_x_bits.store(
+        std::bit_cast<std::uint32_t>(translation[0]),
+        std::memory_order_relaxed);
+    g_world_origin_y_bits.store(
+        std::bit_cast<std::uint32_t>(translation[1]),
+        std::memory_order_relaxed);
+    g_world_origin_z_bits.store(
+        std::bit_cast<std::uint32_t>(translation[2]),
+        std::memory_order_relaxed);
+    g_collection_count_before.store(count, std::memory_order_release);
+    g_collection_count_after.store(count, std::memory_order_release);
+    g_world_origin_valid.store(true, std::memory_order_release);
+    REX_KERNEL_MEMORY()->SystemHeapFree(auxiliary);
+    g_state.store(State::RetailOnly, std::memory_order_release);
+    REXLOG_INFO(
+        "native-collision: retail-only A/B mode active "
+        "(collection_count={} origin=({:.3f},{:.3f},{:.3f}))",
+        count, translation[0], translation[1], translation[2]);
+    return;
+  }
   OwnedCollisionBuildSet builds;
   try {
     builds = CompileOwnedMapChunks(translation);
@@ -3370,6 +3403,11 @@ void AppendTelemetry(std::ostream& out) {
       << " sandbox_native_collision_replace="
       << (REXCVAR_GET(
               skate3_mechanics_sandbox_native_collision_replace_retail)
+              ? 1
+              : 0)
+      << " sandbox_native_collision_retail_only="
+      << (REXCVAR_GET(
+              skate3_mechanics_sandbox_native_collision_retail_only)
               ? 1
               : 0)
       << " sandbox_native_collision_state="

@@ -206,6 +206,12 @@ contains the exact launch arguments, prepared hashes/commit metadata, and
 `skate3_university.log`. The launcher prints the exact path before starting
 the game and reports failures clearly.
 
+`Run-University-Retail-Collision-Check.bat` is a diagnostic A/B launcher. It
+keeps the owned University presentation and map origin but does not register
+the rebuilt owned collision mesh or suppress streamed retail collision.
+Movement telemetry from the same route can therefore distinguish an engine
+or retail-map barrier from one introduced by owned collision reconstruction.
+
 Agents must never execute this `.bat` file or launch `skate3.exe`. Offline
 preparation is performed separately with:
 

@@ -1,5 +1,7 @@
 [CmdletBinding()]
-param()
+param(
+    [switch]$RetailCollisionOnly
+)
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -74,6 +76,8 @@ try {
     Assert-PreparedHash 'run runtime copy' $runRuntime `
         $manifest.runtime_sha256
     $runtimeLog = Join-Path $logRoot 'skate3_university.log'
+    $replaceRetail = if ($RetailCollisionOnly) { 'false' } else { 'true' }
+    $retailOnly = if ($RetailCollisionOnly) { 'true' } else { 'false' }
     $arguments = @(
         '--fullscreen=false',
         '--window_width=1280',
@@ -84,7 +88,8 @@ try {
         '--skate3_mechanics_sandbox=true',
         '--skate3_mechanics_sandbox_visual_map=true',
         '--skate3_mechanics_sandbox_native_collision=true',
-        '--skate3_mechanics_sandbox_native_collision_replace_retail=true',
+        "--skate3_mechanics_sandbox_native_collision_replace_retail=$replaceRetail",
+        "--skate3_mechanics_sandbox_native_collision_retail_only=$retailOnly",
         '--skate3_mechanics_sandbox_native_grinds=true',
         '--skate3_native_render=true',
         '--skate3_native_render_scene=true',
@@ -110,7 +115,14 @@ try {
         Join-Path $logRoot 'prepared-manifest.json'
     ) -Encoding UTF8
 
-    Write-Host "Launching the offline-prepared University build."
+    $collisionMode = if ($RetailCollisionOnly) {
+        'retail-only A/B collision'
+    } else {
+        'owned University collision'
+    }
+    Write-Host (
+        "Launching the offline-prepared University build ($collisionMode)."
+    )
     Write-Host "This run's logs: $logRoot"
     $process = Start-Process -FilePath $runExecutable `
         -WorkingDirectory $preparedRoot `
