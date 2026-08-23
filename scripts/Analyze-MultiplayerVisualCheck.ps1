@@ -175,6 +175,30 @@ foreach ($client in $clientDirectories) {
             ) |
             ForEach-Object { $_.Line }
     )
+    $appearanceResourceLines = @(
+        $lines |
+            Select-String -Pattern (
+                'multiplayer-appearance-resources:'
+            ) |
+            ForEach-Object { $_.Line }
+    )
+    $appearanceResourceFaultLines = @(
+        $appearanceResourceLines |
+            Select-String -Pattern 'faults=[1-9][0-9]*' |
+            ForEach-Object { $_.Line }
+    )
+    $appearanceReleaseLines = @(
+        $lines |
+            Select-String -Pattern (
+                'multiplayer: released renderer appearance role='
+            ) |
+            ForEach-Object { $_.Line }
+    )
+    $appearanceReleaseFaultLines = @(
+        $appearanceReleaseLines |
+            Select-String -Pattern 'faults=[1-9][0-9]*' |
+            ForEach-Object { $_.Line }
+    )
     $hairRouteLines = @(
         $lines |
             Select-String -Pattern (
@@ -275,6 +299,38 @@ foreach ($client in $clientDirectories) {
         (Maximum-IntegerField $appearanceInstallLines 'operations')
     )
     $summary.Add(
+        'appearance_resource_audits=' +
+        $appearanceResourceLines.Count
+    )
+    $summary.Add(
+        'appearance_resource_fault_events=' +
+        $appearanceResourceFaultLines.Count
+    )
+    $summary.Add(
+        'max_appearance_installed_roles=' +
+        (Maximum-IntegerField $appearanceResourceLines 'installed_roles')
+    )
+    $summary.Add(
+        'max_appearance_pending_roles=' +
+        (Maximum-IntegerField $appearanceResourceLines 'pending_roles')
+    )
+    $summary.Add(
+        'max_appearance_installed_meshes=' +
+        (Maximum-IntegerField $appearanceResourceLines 'installed_meshes')
+    )
+    $summary.Add(
+        'max_appearance_pending_meshes=' +
+        (Maximum-IntegerField $appearanceResourceLines 'pending_meshes')
+    )
+    $summary.Add(
+        'max_appearance_installed_textures=' +
+        (Maximum-IntegerField $appearanceResourceLines 'installed_textures')
+    )
+    $summary.Add(
+        'max_appearance_pending_textures=' +
+        (Maximum-IntegerField $appearanceResourceLines 'pending_textures')
+    )
+    $summary.Add(
         'remote_hair_route_events=' +
         $hairRouteLines.Count
     )
@@ -370,9 +426,15 @@ foreach ($client in $clientDirectories) {
     )
     $summary.Add(
         'renderer_release_events=' +
-        (Match-Count $lines (
-            'multiplayer: released renderer appearance role='
-        ))
+        $appearanceReleaseLines.Count
+    )
+    $summary.Add(
+        'renderer_release_fault_events=' +
+        $appearanceReleaseFaultLines.Count
+    )
+    $summary.Add(
+        'max_renderer_release_faults=' +
+        (Maximum-IntegerField $appearanceReleaseLines 'faults')
     )
     $summary.Add(
         'renderer_cache_prepare_events=' +
@@ -526,6 +588,14 @@ foreach ($client in $clientDirectories) {
         'last_appearance_gpu_install_cancel=' +
         $(if ($appearanceInstallCancelLines.Count -gt 0) {
             $appearanceInstallCancelLines[-1]
+        } else {
+            'missing'
+        })
+    )
+    $summary.Add(
+        'last_appearance_resource_audit=' +
+        $(if ($appearanceResourceLines.Count -gt 0) {
+            $appearanceResourceLines[-1]
         } else {
             'missing'
         })

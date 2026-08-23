@@ -4,6 +4,8 @@
 #include <chrono>
 #include <iostream>
 #include <string_view>
+#include <unordered_set>
+#include <vector>
 
 namespace {
 
@@ -153,6 +155,64 @@ void TestRemoteAppearanceStagingNamespaces() {
          "invalid staging coordinates must not create renderer keys");
 }
 
+void TestRemoteAppearanceStagingChurn() {
+  constexpr std::uint32_t role = 2;
+  constexpr std::size_t piece_count = 11;
+  constexpr std::size_t texture_count = 25;
+  std::vector<std::uint32_t> current_meshes;
+  std::vector<std::uint32_t> current_textures;
+  std::unordered_set<std::uint32_t> live_meshes;
+  std::unordered_set<std::uint32_t> live_textures;
+
+  for (std::size_t change = 0; change < 128; ++change) {
+    const std::uint8_t slot =
+        NextRemoteAppearanceResourceSlot(
+            !current_meshes.empty(),
+            current_meshes.empty() ? 0 : current_meshes.front());
+    std::vector<std::uint32_t> pending_meshes;
+    std::vector<std::uint32_t> pending_textures;
+    for (std::size_t piece = 0; piece < piece_count; ++piece) {
+      const std::uint32_t key =
+          RemoteAppearanceMeshKey(slot, role, piece);
+      Expect(live_meshes.insert(key).second,
+             "staged mesh overwrote a live appearance during churn");
+      pending_meshes.push_back(key);
+    }
+    for (std::size_t texture = 0;
+         texture < texture_count; ++texture) {
+      const std::uint32_t key =
+          RemoteAppearanceTextureObjectKey(
+              slot, role, texture);
+      Expect(live_textures.insert(key).second,
+             "staged texture route overwrote a live appearance during churn");
+      pending_textures.push_back(key);
+    }
+
+    for (std::uint32_t key : current_meshes) {
+      Expect(live_meshes.erase(key) == 1,
+             "committed churn left an old mesh unowned");
+    }
+    for (std::uint32_t key : current_textures) {
+      Expect(live_textures.erase(key) == 1,
+             "committed churn left an old texture route unowned");
+    }
+    current_meshes = std::move(pending_meshes);
+    current_textures = std::move(pending_textures);
+    Expect(live_meshes.size() == piece_count &&
+               live_textures.size() == texture_count,
+           "committed churn retained more than one appearance generation");
+  }
+
+  for (std::uint32_t key : current_meshes) {
+    live_meshes.erase(key);
+  }
+  for (std::uint32_t key : current_textures) {
+    live_textures.erase(key);
+  }
+  Expect(live_meshes.empty() && live_textures.empty(),
+         "peer retirement did not return simulated resources to zero");
+}
+
 void TestRemoteAppearanceGenerationRetirement() {
   Expect(!RemoteAppearanceSessionChanged(111, 111),
          "stable process session must retain renderer resources");
@@ -291,6 +351,7 @@ int main() {
   TestInvalidIdentityDoesNotCreateState();
   TestRemoteAppearanceTextureOwnership();
   TestRemoteAppearanceStagingNamespaces();
+  TestRemoteAppearanceStagingChurn();
   TestRemoteAppearanceGenerationRetirement();
   TestLocalPresentationCaptureOwnership();
   TestAppearanceAssemblyBudget();

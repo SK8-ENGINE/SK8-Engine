@@ -10564,6 +10564,112 @@ struct RemoteAppearanceInstallFrameBudget {
 RemoteAppearanceInstallFrameBudget
     g_remote_appearance_install_budget;
 
+struct RemoteAppearanceResourceAudit {
+  std::size_t installed_roles = 0;
+  std::size_t pending_roles = 0;
+  std::size_t installed_meshes = 0;
+  std::size_t pending_meshes = 0;
+  std::size_t installed_textures = 0;
+  std::size_t pending_textures = 0;
+  std::size_t missing_meshes = 0;
+  std::size_t missing_textures = 0;
+  std::size_t duplicate_mesh_owners = 0;
+  std::size_t duplicate_texture_owners = 0;
+};
+
+RemoteAppearanceResourceAudit
+CollectRemoteAppearanceResourceAudit() {
+  RemoteAppearanceResourceAudit audit;
+  std::unordered_set<uint32_t> owned_meshes;
+  std::unordered_set<uint64_t> owned_textures;
+
+  const auto observe_state =
+      [&audit, &owned_meshes, &owned_textures](
+          const RemoteAppearanceRenderState& state,
+          bool pending) {
+        if (state.identity == 0 && state.items.empty() &&
+            state.texture_store_keys.empty()) {
+          return;
+        }
+        if (pending) {
+          ++audit.pending_roles;
+          audit.pending_meshes += state.items.size();
+          audit.pending_textures +=
+              state.texture_store_keys.size();
+        } else {
+          ++audit.installed_roles;
+          audit.installed_meshes += state.items.size();
+          audit.installed_textures +=
+              state.texture_store_keys.size();
+        }
+        for (const DrawItem& item : state.items) {
+          if (!owned_meshes.insert(item.mesh).second) {
+            ++audit.duplicate_mesh_owners;
+          }
+          if (!g_r.meshes.contains(item.mesh)) {
+            ++audit.missing_meshes;
+          }
+        }
+        for (uint64_t store_key :
+             state.texture_store_keys) {
+          if (!owned_textures.insert(store_key).second) {
+            ++audit.duplicate_texture_owners;
+          }
+          if (!g_r.tex_store.contains(store_key)) {
+            ++audit.missing_textures;
+          }
+        }
+      };
+
+  for (const auto& [role, state] : g_remote_appearances) {
+    static_cast<void>(role);
+    observe_state(state, false);
+  }
+  for (const auto& [role, transaction] :
+       g_pending_remote_recipe_installs) {
+    static_cast<void>(role);
+    observe_state(transaction.staged, true);
+  }
+
+  return audit;
+}
+
+void LogRemoteAppearanceResourceAudit(
+    const char* event, uint32_t role) {
+  const RemoteAppearanceResourceAudit audit =
+      CollectRemoteAppearanceResourceAudit();
+  const std::size_t faults =
+      audit.missing_meshes + audit.missing_textures +
+      audit.duplicate_mesh_owners +
+      audit.duplicate_texture_owners;
+  if (faults == 0) {
+    REXLOG_INFO(
+        "multiplayer-appearance-resources: event={} role={} "
+        "installed_roles={} pending_roles={} "
+        "installed_meshes={} pending_meshes={} "
+        "installed_textures={} pending_textures={} faults=0",
+        event, role, audit.installed_roles,
+        audit.pending_roles, audit.installed_meshes,
+        audit.pending_meshes, audit.installed_textures,
+        audit.pending_textures);
+    return;
+  }
+  REXLOG_WARN(
+      "multiplayer-appearance-resources: event={} role={} "
+      "installed_roles={} pending_roles={} "
+      "installed_meshes={} pending_meshes={} "
+      "installed_textures={} pending_textures={} faults={} "
+      "missing_meshes={} missing_textures={} "
+      "duplicate_meshes={} duplicate_textures={}",
+      event, role, audit.installed_roles,
+      audit.pending_roles, audit.installed_meshes,
+      audit.pending_meshes, audit.installed_textures,
+      audit.pending_textures, faults,
+      audit.missing_meshes, audit.missing_textures,
+      audit.duplicate_mesh_owners,
+      audit.duplicate_texture_owners);
+}
+
 bool AcquireRemoteAppearanceInstallOperation(uint64_t frame) {
   RemoteAppearanceInstallFrameBudget& budget =
       g_remote_appearance_install_budget;
@@ -10702,6 +10808,7 @@ void ReleaseRemoteAppearanceResources(
     const RemoteAppearanceRenderState& state,
     const char* reason) {
   std::size_t released_textures = 0;
+  std::size_t released_texture_routes = 0;
   for (uint64_t store_key : state.texture_store_keys) {
     const auto texture = g_r.tex_store.find(store_key);
     if (texture != g_r.tex_store.end()) {
@@ -10715,6 +10822,7 @@ void ReleaseRemoteAppearanceResources(
          route != g_r.tex_routes.end();) {
       if (route->second.key == store_key) {
         route = g_r.tex_routes.erase(route);
+        ++released_texture_routes;
       } else {
         ++route;
       }
@@ -10738,11 +10846,39 @@ void ReleaseRemoteAppearanceResources(
     ++released_meshes;
   }
 
-  REXLOG_INFO(
-      "multiplayer: released renderer appearance role={} "
-      "session={} id={:016X} meshes={} textures={} reason={}",
-      role, state.session, state.identity, released_meshes,
-      released_textures, reason);
+  const auto mismatch =
+      [](std::size_t expected, std::size_t actual) {
+        return expected > actual ? expected - actual
+                                 : actual - expected;
+      };
+  const std::size_t release_faults =
+      mismatch(state.texture_store_keys.size(),
+               released_textures) +
+      mismatch(released_mesh_keys.size(), released_meshes) +
+      mismatch(state.texture_store_keys.size(),
+               released_texture_routes);
+  if (release_faults == 0) {
+    REXLOG_INFO(
+        "multiplayer: released renderer appearance role={} "
+        "session={} id={:016X} meshes={}/{} textures={}/{} "
+        "routes={}/{} faults=0 reason={}",
+        role, state.session, state.identity,
+        released_meshes, released_mesh_keys.size(),
+        released_textures, state.texture_store_keys.size(),
+        released_texture_routes,
+        state.texture_store_keys.size(), reason);
+  } else {
+    REXLOG_WARN(
+        "multiplayer: released renderer appearance role={} "
+        "session={} id={:016X} meshes={}/{} textures={}/{} "
+        "routes={}/{} faults={} reason={}",
+        role, state.session, state.identity,
+        released_meshes, released_mesh_keys.size(),
+        released_textures, state.texture_store_keys.size(),
+        released_texture_routes,
+        state.texture_store_keys.size(), release_faults,
+        reason);
+  }
 }
 
 void CancelPendingRemoteRecipeInstall(
@@ -10769,6 +10905,7 @@ void CancelPendingRemoteRecipeInstall(
           : pending->second.resolved->pieces.size(),
       reason);
   g_pending_remote_recipe_installs.erase(pending);
+  LogRemoteAppearanceResourceAudit("cancel", role);
 }
 
 void ObserveRemoteAppearanceSession(
@@ -10797,6 +10934,8 @@ void ObserveRemoteAppearanceSession(
         context, role, installed->second, "session changed");
     g_remote_appearances.erase(installed);
     g_remote_visual_telemetry.erase(role);
+    LogRemoteAppearanceResourceAudit(
+        "session-release", role);
   }
 }
 
@@ -10828,6 +10967,8 @@ void ReleaseRetiredRemoteAppearance(
       "peer retired");
   g_remote_appearances.erase(installed);
   g_remote_visual_telemetry.erase(retirement.role);
+  LogRemoteAppearanceResourceAudit(
+      "peer-retire", retirement.role);
 }
 
 bool InstallRemoteRecipeAppearanceIncremental(
@@ -11000,6 +11141,7 @@ bool InstallRemoteRecipeAppearanceIncremental(
         pending->second.resource_slot,
         pending->second.resolved->pieces.size(),
         pending->second.texture_ids.size());
+    LogRemoteAppearanceResourceAudit("start", role);
   }
 
   PendingRemoteRecipeInstall& transaction =
@@ -11372,6 +11514,7 @@ bool InstallRemoteRecipeAppearanceIncremental(
   multiplayer_assets::ForgetRecipeAppearanceResolve(
       role, session);
   g_pending_remote_recipe_installs.erase(role);
+  LogRemoteAppearanceResourceAudit("commit", role);
   REXLOG_INFO(
       "multiplayer-appearance-install: role={} session={} "
       "appearance={:016X} upload={:.3f}ms total={:.3f}ms "
@@ -11839,6 +11982,8 @@ bool InstallRemoteRecipeAppearance(
   }
   BuildRemoteAppearanceRenderCaches(role, installed);
   state = std::move(installed);
+  LogRemoteAppearanceResourceAudit(
+      "synchronous-install", role);
   if (async_prepare) {
     // Leave the table as the final owner so its asset worker, rather than
     // this render thread, releases the large CPU-side decode result.
@@ -12251,6 +12396,8 @@ bool InstallRemoteAppearance(
   }
   BuildRemoteAppearanceRenderCaches(role, installed);
   state = std::move(installed);
+  LogRemoteAppearanceResourceAudit(
+      "legacy-install", role);
   REXLOG_INFO(
       "multiplayer: installed appearance role={} id={:016X} "
       "pieces={} textures={}",

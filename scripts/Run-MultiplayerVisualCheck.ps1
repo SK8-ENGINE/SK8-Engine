@@ -644,7 +644,13 @@ Visual scenario:
    attachment drift, duplicated pieces, stale pieces, flicker, or teal-proxy
    fallback while they are nearby.
 7. Confirm the focused local client keeps normal input response and has no
-   obvious new frame stalls. Then close all clients.
+   obvious new frame stalls.
+8. Close client 3 while the other clients remain running. Wait 7 seconds, then
+   run RELAUNCH_MULTIPLAYER_VISUAL_CLIENT_3.bat from the repository root.
+   Client 3 should rejoin in the same role and outfit. Every other client should
+   show one proxy-to-complete transition without stale pieces, duplicated
+   clothing, missing boards, or disruption to the players who stayed connected.
+9. Continue for 30 seconds after client 3 has recovered, then close all clients.
 
 Success:
 - Existing outfits and boards stay complete and correct.
@@ -657,6 +663,8 @@ Success:
 - Nearby remote animation remains smooth through the bail and detached board.
 - No teal fallback, disappearing player, attachment drift, or obvious new
   client stall occurs.
+- Client 3 can leave and rejoin without disturbing another role or retaining
+  resources from its previous process session.
 
 Failure:
 - Any nearby player becomes teal, disappears, freezes, mixes outfit pieces,
@@ -664,6 +672,8 @@ Failure:
   new frame stall.
 - The female hair remains broadly see-through, or the male T-shirt disappears,
   stretches, trails away, or reaches toward the session marker.
+- Rejoining client 3 inherits a stale appearance, fails to recover, duplicates
+  pieces, or makes another player disappear or change outfit.
 
 Outfit/profile behavior:
 - Each numbered client keeps its own writable profile under
