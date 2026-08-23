@@ -533,6 +533,7 @@ try {
             Join-Path $runRoot 'submodules.txt'
         ) -Encoding UTF8
 
+    $replicationWorker = -not $SmoothnessCheck
     $manifest = [ordered]@{
         schema = 1
         created_local = (Get-Date).ToString('o')
@@ -556,7 +557,7 @@ try {
         root_rate_hz = 60
         animation_rate_hz = 60
         interpolation_ms = 50
-        replication_worker = $true
+        replication_worker = $replicationWorker
         async_appearance_prepare = $true
         incremental_appearance_install = $true
         appearance_install_ops_per_frame = 4
@@ -641,9 +642,9 @@ $runRoot
 Clients: 5
 Transport: localhost UDP
 Quality: Balanced, 60 Hz root, 60 Hz animation, 50 ms minimum interpolation
-Change under test: fence-safe GPU bone and garment upload-ring reuse
-Diagnostics: GPU submission lag, busy upload regions, unsafe reuse, full
-skeleton cadence, network timing, and renderer handoff cadence are reported
+Change under test: render-clock presentation without asynchronous worker handoff
+Diagnostics: full skeleton cadence, render motion, network timing, GPU upload
+ownership, and synchronous presentation cost are reported
 
 Visual scenario:
 1. Wait until all five clients have loaded the same map, every client sees
@@ -669,7 +670,8 @@ Visual failure:
 Telemetry acceptance checked by the agent afterward:
 - Every client reports local skeleton capture cadence and each visible remote
   reports interpolated-pose and final applied-palette cadence.
-- Every client reports GPU upload-ring pressure with zero unsafe region reuse.
+- Render motion no longer inherits irregular asynchronous worker publication.
+- GPU upload-ring pressure remains healthy with zero unsafe region reuse.
 - Existing packet, timing, interpolation, sequence-gap, stall, and resource
   checks remain active.
 - Delivery-policy errors, socket failures, and multiplayer errors stay zero.
@@ -885,7 +887,10 @@ separately, then ask the agent to analyze this run directory.
             '--skate3_multiplayer_local_animation_rate=60',
             '--skate3_multiplayer_local_interpolation_ms=50',
             '--skate3_multiplayer_animation_interpolation_mode=2',
-            '--skate3_multiplayer_replication_worker=true',
+            (
+                '--skate3_multiplayer_replication_worker={0}' -f
+                $replicationWorker.ToString().ToLowerInvariant()
+            ),
             '--skate3_multiplayer_async_appearance_prepare=true',
             '--skate3_multiplayer_incremental_appearance_install=true',
             '--skate3_multiplayer_appearance_install_ops_per_frame=4',
