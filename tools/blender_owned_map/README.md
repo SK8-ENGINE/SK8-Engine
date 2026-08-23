@@ -159,7 +159,9 @@ players can experiment non-destructively through **Settings > World** and
 restore the authored values at any time. **Dynamic Lighting** independently
 disables the moving sun, moon, ambient fill, and their world shadows while
 leaving the clock, sky, baked lightmaps, emissive materials, and local lights
-active.
+active. Imported lightmapped surfaces use the retained retail
+fog/exposure/tonemap chain in this mode, providing the vanilla baked-lighting
+baseline rather than an unlit debug view.
 
 ## Material and physics UI
 

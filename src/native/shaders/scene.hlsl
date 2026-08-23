@@ -437,6 +437,56 @@ float4 ShadePixel(VSOut i) {
                            float3(0.35, 0.47, 0.64), sky_amount);
     bool dynamic_lighting = mat_tint.w >= 0.0;
     float celestial_ambient = max(mat_tint.w, 0.0);
+    if (imported_material && !dynamic_lighting) {
+      // "Dynamic Lighting: Off" is the retail-baked presentation mode,
+      // not an unlit/debug isolation. Imported albedo pages are uploaded
+      // scene-linear, while the retail lightmap pages retain their encoded
+      // sqrt energy. Reconstruct the retail diffuse body and then use the
+      // same captured fog, exposure and ToneOut chain as Alex's exact
+      // environment-family renderer. Sending this linear value through
+      // PassGamma made correctly decoded University lightmaps look far too
+      // dark because it marked them as already display-ready.
+      float3 retail_linear;
+      if (has_indirect_lightmap) {
+        float3 retail_lm =
+            lightmap.SampleLevel(smp_clamp, i.uv2, 0.0).rgb;
+        retail_linear =
+            albedo * (retail_lm * retail_lm) *
+            (4.0 * max(misc.y, 0.0)) * 0.93429;
+      } else {
+        // Water and a small number of non-lightmapped imported surfaces
+        // still need a stable neutral body until their original shader
+        // families are preserved by the interchange format.
+        retail_linear = albedo * 0.25;
+      }
+
+      retail_linear += OwnedMovingLightContribution(
+          world_pos, normal, view_dir, albedo, roughness);
+      float3 retail_emissive =
+          has_emissive_map
+              ? decal_art.Sample(smp, i.uv).rgb
+              : albedo;
+      retail_linear += retail_emissive * emissive_intensity;
+
+      if (sh_sun.w > 0.01) {
+        float fdist = length(i.rpos);
+        float f1 = saturate(fdist * sh_fogp.x + sh_fogp.y);
+        if (sh_fogp.z != 1.0) {
+          f1 = pow(max(f1, 1e-6), sh_fogp.z);
+        }
+        float material_multiplier =
+            sh_env.x > 0.0 ? sh_env.x : 1.0;
+        float3 retail_xe =
+            (retail_linear *
+                 ((1.0 + sh_fogc.a * f1) * material_multiplier) +
+             sh_fogc.rgb * f1) *
+            sh_sun.w;
+        return ToneOut(retail_xe, output_alpha, false);
+      }
+      // Keep standalone imported maps readable when no retained retail
+      // environment frame has supplied exact exposure/fog rows.
+      return ToneOut(retail_linear, output_alpha, false);
+    }
     float3 ambient_light =
         dynamic_lighting
             ? sky_fill *

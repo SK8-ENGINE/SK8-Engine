@@ -159,8 +159,10 @@ The addon preserves every retail page byte and exports material strength
 uses the retail renderer's `encoded²` energy rather than four times that
 energy. The verifier rejects any selected retail material at another scale.
 The World menu's independent **Dynamic Lighting** switch can remove moving
-sun/moon, ambient fill, and world shadows without removing these baked pages,
-which provides an in-game isolation check while retaining the changing sky.
+sun/moon, ambient fill, and world shadows without removing these baked pages.
+Off presents imported lightmapped surfaces through the retained retail
+fog/exposure/tonemap chain while retaining the changing clock and sky; it is
+the vanilla baked-lighting baseline rather than an unlit isolation view.
 
 ### Point-level collision diagnosis
 

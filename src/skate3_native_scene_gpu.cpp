@@ -11342,7 +11342,8 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
   constants[42] = celestial.light_direction_to_light.z;
   // A negative ambient is an owned-world-only sentinel: preserve the
   // clock/sky state but remove its ambient, direct and shadow lighting.
-  // The shader still evaluates imported baked lightmaps at full exposure.
+  // Imported maps then use their baked lightmaps through the captured
+  // retail fog/exposure/tonemap chain instead of the custom hybrid path.
   constants[43] = dynamic_lighting ? celestial.ambient : -1.0f;
   constants[44] = celestial.light_color.x;
   constants[45] = celestial.light_color.y;
