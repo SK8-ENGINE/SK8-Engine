@@ -761,6 +761,26 @@ Current checkpoint:
   offline. This activation still requires a five-client user visual gate;
   telemetry can establish protocol integrity, traffic, and timing but not
   visual correctness.
+- In run `20260823-214401-568491b9`, the user reported that five-client
+  skating looked visually perfect with the gentler presentation-clock
+  correction and exact block deltas active. Telemetry independently showed
+  all four peers known and visible on every client, zero animation-fragment,
+  pose-control, delivery-policy, socket, baseline-recovery, appearance-
+  resource, renderer-release, or unsafe GPU-reuse faults.
+- Block packing sent approximately 2,000-2,900 groups per client and reduced
+  those selected groups by 20.8-22.2 percent, from approximately 5.1-5.6 KiB
+  logical to 4.0-4.5 KiB on wire. Average shared block preflight/encode cost
+  was approximately 29-45 microseconds. One client recorded an isolated
+  12.8 ms wall-clock maximum, consistent with scheduling interruption; it did
+  not coincide with a completed-pose gap, playback underrun, or reported
+  visual stall and remains a profiling watch item.
+- Every one of the 20 sender/receiver paths reported zero held-latest
+  presentation, zero completed-frame gaps, and zero superseded assemblies in
+  its final active timing window. Final receive rates were 57.2-60.0 Hz with
+  positive buffer margins and the correction slew bounded at 2.5 percent.
+  Total five-player client upload remained approximately 1.23-1.43 MiB/s, so
+  this gate accepts the exact codec and smoother correction but does not
+  complete Phase 5 bandwidth reduction.
 
 Completion:
 
