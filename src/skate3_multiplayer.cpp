@@ -1,5 +1,6 @@
 #include "skate3_multiplayer.h"
 
+#include "skate3_multiplayer_lifecycle.h"
 #include "skate3_multiplayer_protocol.h"
 #include "skate3_steam_backend.h"
 #include "skate3_trick_pipeline.h"
@@ -409,6 +410,7 @@ struct TelemetrySnapshot {
   std::uint64_t relayed_packets = 0;
   std::uint64_t relevance_drops = 0;
   std::uint64_t far_presence_packets = 0;
+  std::uint64_t outbound_peer_resets = 0;
   std::uint64_t animation_present_interpolated = 0;
   std::uint64_t animation_present_held_latest = 0;
   std::uint64_t animation_present_held_oldest = 0;
@@ -1999,6 +2001,8 @@ class Runtime {
         << telemetry_.relevance_drops
         << " multiplayer_far_presence_packets="
         << telemetry_.far_presence_packets
+        << " multiplayer_outbound_peer_resets="
+        << telemetry_.outbound_peer_resets
         << " multiplayer_animation_present_interpolated="
         << telemetry_.animation_present_interpolated
         << " multiplayer_animation_present_held_latest="
@@ -2101,7 +2105,8 @@ class Runtime {
         "classes=tx({:.1f}r/{:.1f}a/{:.1f}p)KiB/s "
         "rx({:.1f}r/{:.1f}a/{:.1f}p)KiB/s "
         "bones={} relay={:.1f}pps relevance_drop={:.1f}pps rejected={} "
-        "failures={} present={:.1f}i/{:.1f}new/{:.1f}old fps "
+        "failures={} peer_resets={} "
+        "present={:.1f}i/{:.1f}new/{:.1f}old fps "
         "timing={:.1f}ms jitter={:.1f}ms buffered={}",
         bound_role_, telemetry_.known_peers,
         telemetry_.visible_players, NetworkQualityName(network_tuning_),
@@ -2113,6 +2118,7 @@ class Runtime {
         rx_root_kib, rx_animation_kib, rx_appearance_kib,
         telemetry_.remote_animation_bones, relay_pps, drop_pps,
         telemetry_.rejected_packets, telemetry_.socket_failures,
+        telemetry_.outbound_peer_resets,
         animation_interpolated_fps, animation_held_latest_fps,
         animation_held_oldest_fps,
         static_cast<double>(telemetry_.animation_period_us) / 1000.0,
@@ -2120,6 +2126,50 @@ class Runtime {
         telemetry_.animation_buffered_samples);
     last_rate_log_ = now;
     last_rate_snapshot_ = telemetry_;
+  }
+
+  void ResetOutboundPeerState(std::uint32_t role,
+                              std::string_view reason) {
+    bool reset = outbound_animation_keyframes_.erase(role) != 0;
+    reset |= outbound_appearance_.erase(role) != 0;
+    for (auto iterator = far_presence_times_.begin();
+         iterator != far_presence_times_.end();) {
+      const std::uint32_t source_role =
+          static_cast<std::uint32_t>(iterator->first >> 32);
+      const std::uint32_t target_role =
+          static_cast<std::uint32_t>(iterator->first);
+      if (source_role == role || target_role == role) {
+        iterator = far_presence_times_.erase(iterator);
+        reset = true;
+      } else {
+        ++iterator;
+      }
+    }
+    for (auto iterator = relevance_cache_.begin();
+         iterator != relevance_cache_.end();) {
+      const std::uint32_t source_role =
+          static_cast<std::uint32_t>(iterator->first >> 32);
+      const std::uint32_t target_role =
+          static_cast<std::uint32_t>(iterator->first);
+      if (source_role == role || target_role == role) {
+        iterator = relevance_cache_.erase(iterator);
+      } else {
+        ++iterator;
+      }
+    }
+    if (!reset) {
+      return;
+    }
+    ++telemetry_.outbound_peer_resets;
+    REXLOG_INFO(
+        "multiplayer: reset outbound state for role {} ({})",
+        role, reason);
+  }
+
+  void ForgetPeerGeneration(std::uint32_t role,
+                            std::string_view reason) {
+    (void)peer_generations_.Forget(role);
+    ResetOutboundPeerState(role, reason);
   }
 
   void PrunePeers(Clock::time_point now) {
@@ -2135,6 +2185,8 @@ class Runtime {
               : peer.samples.back().received_at;
       if (newest != Clock::time_point{} &&
           now - newest > kForgetPeerAfter) {
+        ForgetPeerGeneration(
+            iterator->first, "remote timeout");
         iterator = remote_peers_.erase(iterator);
       } else {
         ++iterator;
@@ -2145,6 +2197,8 @@ class Runtime {
       for (auto iterator = host_peers_.begin();
            iterator != host_peers_.end();) {
         if (now - iterator->second.last_seen > kForgetPeerAfter) {
+          ForgetPeerGeneration(
+              iterator->first, "host peer timeout");
           iterator = host_peers_.erase(iterator);
         } else {
           ++iterator;
@@ -2182,11 +2236,36 @@ class Runtime {
           role, state.lobby_id, kProtocolVersion, session_id_);
     }
 
-    steam_id_by_role_.clear();
+    std::array<bool, 101> observed_roles{};
     steam_role_by_id_.clear();
     for (const steam::Peer& peer : steam::LobbyPeers()) {
+      if (peer.role < 1 || peer.role >= observed_roles.size() ||
+          peer.steam_id == 0) {
+        continue;
+      }
+      observed_roles[peer.role] = true;
       steam_id_by_role_[peer.role] = peer.steam_id;
       steam_role_by_id_[peer.steam_id] = peer.role;
+      if (peer.role != static_cast<std::uint32_t>(role) &&
+          peer_generations_.ObserveTransportIdentity(
+              peer.role, peer.steam_id)) {
+        ResetOutboundPeerState(
+            peer.role, "Steam identity changed");
+      }
+    }
+    for (auto iterator = steam_id_by_role_.begin();
+         iterator != steam_id_by_role_.end();) {
+      const std::uint32_t previous_role = iterator->first;
+      if (previous_role < observed_roles.size() &&
+          observed_roles[previous_role]) {
+        ++iterator;
+        continue;
+      }
+      if (previous_role != static_cast<std::uint32_t>(role)) {
+        ForgetPeerGeneration(
+            previous_role, "left Steam lobby");
+      }
+      iterator = steam_id_by_role_.erase(iterator);
     }
     telemetry_.known_peers = static_cast<std::uint32_t>(
         steam_id_by_role_.empty() ? 0 : steam_id_by_role_.size() - 1);
@@ -2425,10 +2504,16 @@ class Runtime {
            packet_map_hash == map_hash;
   }
 
-  void BeginRemoteSession(RemotePeerState& peer,
+  void BeginRemoteSession(std::uint32_t role,
+                          RemotePeerState& peer,
                           std::uint32_t sender_session) {
     if (peer.session == sender_session) {
       return;
+    }
+    if (peer_generations_.ObserveProcessSession(
+            role, sender_session)) {
+      ResetOutboundPeerState(
+          role, "process session changed");
     }
     peer = {};
     peer.session = sender_session;
@@ -2444,7 +2529,8 @@ class Runtime {
       return false;
     }
     RemotePeerState& peer = remote_peers_[packet.sender_role];
-    BeginRemoteSession(peer, packet.sender_session);
+    BeginRemoteSession(
+        packet.sender_role, peer, packet.sender_session);
     if (!peer.samples.empty() &&
         (packet.sequence <= peer.samples.back().sequence ||
          packet.sender_time_us <=
@@ -2541,7 +2627,8 @@ class Runtime {
       return true;
     }
     RemotePeerState& peer = remote_peers_[packet.sender_role];
-    BeginRemoteSession(peer, packet.sender_session);
+    BeginRemoteSession(
+        packet.sender_role, peer, packet.sender_session);
     ++telemetry_.received_packets;
     RecordReceivedPacketClass(
         kAnimationPacketMagic, expected_bytes);
@@ -2720,7 +2807,8 @@ class Runtime {
     }
     RemotePeerState& peer =
         remote_peers_[packet.sender_role];
-    BeginRemoteSession(peer, packet.sender_session);
+    BeginRemoteSession(
+        packet.sender_role, peer, packet.sender_session);
     ++telemetry_.received_packets;
     RecordReceivedPacketClass(
         kAppearancePacketMagic, expected_bytes);
@@ -2772,6 +2860,11 @@ class Runtime {
     }
     HostPeer& peer = host_peers_[role];
     if (peer.session != session) {
+      if (peer_generations_.ObserveProcessSession(
+              role, session)) {
+        ResetOutboundPeerState(
+            role, "host peer session changed");
+      }
       peer = {};
       peer.session = session;
     }
@@ -3649,6 +3742,7 @@ class Runtime {
     animation_send_sequence_ = 0;
     outbound_animation_keyframes_.clear();
     outbound_appearance_.clear();
+    peer_generations_.Clear();
     remote_peers_.clear();
 #if defined(_WIN32)
     host_peers_.clear();
@@ -3690,6 +3784,7 @@ class Runtime {
       outbound_animation_keyframes_;
   std::unordered_map<std::uint32_t, OutboundAppearanceState>
       outbound_appearance_;
+  lifecycle::PeerGenerationTracker peer_generations_;
   Clock::time_point last_send_{};
   std::uint64_t last_pose_sample_time_us_ = 0;
   Clock::time_point last_animation_send_{};
