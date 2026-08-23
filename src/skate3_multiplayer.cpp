@@ -2609,7 +2609,7 @@ class Runtime {
           "multiplayer-peer-timing: receiver={} sender={} "
           "rx={:.1f}fps period={:.1f}ms jitter={:.1f}ms "
           "delay={:.1f}ms margin={:.1f}/{:.1f}/{:.1f}ms "
-          "cursor_error={:.1f}ms cursor_slew={:.3f}ms "
+          "cursor_error={:.1f}ms cursor_slew={:.3f}ms/{:.2f}% "
           "buffered={} present={}/{}/{} latest={:.1f}% "
           "latest_run={} gaps={} superseded={}",
           bound_role_, remote_role,
@@ -2632,6 +2632,14 @@ class Runtime {
           static_cast<double>(
               peer.presentation_clock.applied_correction_us()) /
               1000.0,
+          peer.presentation_clock.last_elapsed_us() == 0
+              ? 0.0
+              : static_cast<double>(
+                    peer.presentation_clock.
+                        applied_correction_us()) *
+                    100.0 /
+                    static_cast<double>(
+                        peer.presentation_clock.last_elapsed_us()),
           peer.animation_samples.size(),
           timing.present_interpolated,
           timing.present_held_latest,

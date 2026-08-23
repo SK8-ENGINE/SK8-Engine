@@ -420,18 +420,20 @@ void TestPresentationClockRejectsCursorJumps() {
 
   const std::int64_t delayed =
       clock.Advance(1008000, 858000);
-  Expect(delayed == 907600,
+  Expect(delayed == 907900,
          "presentation clock did not bound a backwards delay jump");
   Expect(delayed >= normal,
          "presentation clock moved backwards");
-  Expect(clock.applied_correction_us() == -400,
+  Expect(clock.applied_correction_us() == -100,
          "presentation clock exceeded its negative slew limit");
+  Expect(clock.last_elapsed_us() == 4000,
+         "presentation clock did not retain correction interval");
 
   const std::int64_t advanced =
       clock.Advance(1012000, 962000);
   Expect(advanced == 912000,
          "presentation clock did not bound a forwards delay jump");
-  Expect(clock.applied_correction_us() == 400,
+  Expect(clock.applied_correction_us() == 100,
          "presentation clock exceeded its positive slew limit");
   Expect(clock.ideal_error_us() == 50000,
          "presentation clock reported the wrong ideal-cursor error");
@@ -448,7 +450,7 @@ void TestPresentationClockConvergesWithoutRewinding() {
 
   // Increase desired buffering by 40 ms. The cursor should run at 90% until
   // it reaches the new delay, never stopping or moving backwards.
-  for (int tick = 0; tick < 120; ++tick) {
+  for (int tick = 0; tick < 480; ++tick) {
     local_us += 4000;
     ideal_us += 4000;
     const std::int64_t desired_with_more_delay =
@@ -457,7 +459,7 @@ void TestPresentationClockConvergesWithoutRewinding() {
         clock.Advance(local_us, desired_with_more_delay);
     Expect(current_us >= previous_us,
            "presentation clock rewound while increasing its delay");
-    Expect(current_us - previous_us >= 3600 &&
+    Expect(current_us - previous_us >= 3900 &&
                current_us - previous_us <= 4000,
            "presentation clock exceeded its bounded slow cadence");
     previous_us = current_us;
@@ -467,13 +469,13 @@ void TestPresentationClockConvergesWithoutRewinding() {
 
   // Decrease desired buffering by 40 ms. Convergence may run at 110%, but
   // must still be gradual rather than a visible one-frame jump.
-  for (int tick = 0; tick < 120; ++tick) {
+  for (int tick = 0; tick < 480; ++tick) {
     local_us += 4000;
     ideal_us += 4000;
     const std::int64_t current_us =
         clock.Advance(local_us, ideal_us);
     Expect(current_us - previous_us >= 4000 &&
-               current_us - previous_us <= 4400,
+               current_us - previous_us <= 4100,
            "presentation clock exceeded its bounded fast cadence");
     previous_us = current_us;
   }
@@ -500,8 +502,8 @@ void TestPresentationClockSmoothsSteppedSceneAnchors() {
     }
     const std::int64_t current_us =
         clock.Advance(wall_time_us, scene_anchor_us);
-    Expect(current_us - previous_us >= 3600 &&
-               current_us - previous_us <= 4400,
+    Expect(current_us - previous_us >= 3900 &&
+               current_us - previous_us <= 4100,
            "stepped scene anchors leaked into presentation cadence");
     previous_us = current_us;
   }

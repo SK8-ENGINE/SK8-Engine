@@ -670,6 +670,9 @@ baseline when doing so materially reduces bytes or packet count. The receiver
 reconstructs the byte-identical word stream before the unchanged animation
 decoder runs. Keyframes, raw fallback, protocol v11, pose precision, and the
 60 Hz full-fidelity schedule remain unchanged.
+Small presentation-clock corrections now converge at no more than 2.5%
+playback-speed change instead of 10%, reducing visible pull-back/forward
+pulses without filtering actual pose motion or delaying the local skater.
 Diagnostics: representative visible body vertices are sampled before send and
 after remote reconstruction, alongside skeleton, network, and GPU timing
 
@@ -684,7 +687,8 @@ Visual scenario:
 
 Visual success:
 - Remote skaters look smooth during normal play, without repeated
-  freeze-then-catch-up movement, pulsing, or snapping.
+  freeze-then-catch-up movement, pulsing, snapping, or abrupt small
+  pull-back/forward corrections.
 - Tricks, feet, boards, hair, and clothing remain coherent.
 - Outfits remain complete, no player returns to teal or disappears, and local
   input response remains normal.
@@ -717,6 +721,8 @@ Telemetry acceptance checked by the agent afterward:
   continuous pose/animation traffic, and zero relevance drops.
 - Playback cursor margins remain inside the animation buffer, with no
   hundreds-of-milliseconds held-latest runs after a scheduler stall.
+- Normal timing convergence remains bounded to a 2.5% playback-speed
+  correction while preserving monotonic root and skeletal presentation.
 - Render cadence respects the explicit five-instance 120 fps test budget.
 - Existing packet, timing, interpolation, sequence-gap, stall, and resource
   checks remain active.

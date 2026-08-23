@@ -700,6 +700,23 @@ Current checkpoint:
   locks raw, byte-run, semantic-delta, semantic-keyframe, and unknown-encoding
   decisions. The compatibility identity is advanced so the rejected build
   cannot negotiate a live stream with the corrected contract.
+- In corrected run `20260823-211952-40b66080`, the user reported that skating
+  looked good again. Telemetry independently showed zero delivery-policy,
+  socket, and animation-fragment errors. Four clients rejected no root
+  snapshots; the fifth rejected seven isolated root snapshots without a
+  sustained stream fault.
+  Semantic exact deltas were transmitted successfully and saved roughly
+  14-23 percent on selected groups at approximately 7-11 microseconds average
+  shared encode cost. Three isolated baseline requests recovered with forced
+  keyframes; client 2 rejected four delayed controls without a sustained
+  stream fault. This telemetry does not establish the user's visual result.
+- Small residual pull-back/forward pulses are now addressed at the shared
+  presentation clock rather than by filtering final skater transforms. The
+  maximum timing correction changes from ten percent to 2.5 percent of
+  elapsed real time. This makes convergence four times gentler while keeping
+  root, final pose, board, and attachments on one sender timeline. It adds no
+  local input latency, does not reduce fidelity or send rate, and leaves
+  explicit teleport/respawn samples intact.
 
 Completion:
 
