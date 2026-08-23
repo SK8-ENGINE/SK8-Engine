@@ -10808,9 +10808,15 @@ struct RemoteRenderMotionTelemetry {
   uint32_t session = 0;
   multiplayer::motion::Window motion;
   multiplayer::motion::Window visible_motion;
+  multiplayer::motion::Window screen_motion;
   uint32_t visible_mesh = 0;
   multiplayer::pose_cadence::Window interpolated_pose;
   multiplayer::pose_cadence::Window applied_palette;
+  double distance_sum = 0.0;
+  double distance_min = std::numeric_limits<double>::max();
+  double distance_max = 0.0;
+  std::uint64_t distance_samples = 0;
+  std::uint64_t offscreen_samples = 0;
 };
 
 std::unordered_map<uint32_t, RemoteRenderMotionTelemetry>
@@ -10820,7 +10826,13 @@ multiplayer::pose_cadence::Window g_local_capture_cadence;
 
 struct LocalVisibleMotionTelemetry {
   multiplayer::motion::Window motion;
+  multiplayer::motion::Window screen_motion;
   uint32_t mesh = 0;
+  double distance_sum = 0.0;
+  double distance_min = std::numeric_limits<double>::max();
+  double distance_max = 0.0;
+  std::uint64_t distance_samples = 0;
+  std::uint64_t offscreen_samples = 0;
 };
 
 LocalVisibleMotionTelemetry g_local_visible_motion;
@@ -10994,8 +11006,66 @@ bool SampleSkinnedVisiblePoint(
   return true;
 }
 
+void RecordProjectedVisibleMotion(
+    multiplayer::motion::Window& screen_motion,
+    double& distance_sum, double& distance_min,
+    double& distance_max, std::uint64_t& distance_samples,
+    std::uint64_t& offscreen_samples,
+    const float world_position[3], const FrameScene& scene,
+    uint32_t viewport_width, uint32_t viewport_height) {
+  if (world_position == nullptr ||
+      viewport_width == 0 || viewport_height == 0) {
+    return;
+  }
+  const double dx =
+      static_cast<double>(world_position[0]) - scene.cam_pos[0];
+  const double dy =
+      static_cast<double>(world_position[1]) - scene.cam_pos[1];
+  const double dz =
+      static_cast<double>(world_position[2]) - scene.cam_pos[2];
+  const double distance = std::sqrt(dx * dx + dy * dy + dz * dz);
+  distance_sum += distance;
+  distance_min = std::min(distance_min, distance);
+  distance_max = std::max(distance_max, distance);
+  ++distance_samples;
+
+  float clip[4] = {};
+  for (std::size_t column = 0; column < 4; ++column) {
+    clip[column] =
+        world_position[0] * scene.view_proj[column] +
+        world_position[1] * scene.view_proj[4 + column] +
+        world_position[2] * scene.view_proj[8 + column] +
+        scene.view_proj[12 + column];
+  }
+  if (!std::isfinite(clip[0]) || !std::isfinite(clip[1]) ||
+      !std::isfinite(clip[3]) || clip[3] <= 0.01f) {
+    ++offscreen_samples;
+    return;
+  }
+  const float ndc_x = clip[0] / clip[3];
+  const float ndc_y = clip[1] / clip[3];
+  // Only compare motion while the representative body point is actually
+  // visible. Near-plane crossings and points behind the camera otherwise
+  // produce meaningless million-pixel velocities.
+  if (!std::isfinite(ndc_x) || !std::isfinite(ndc_y) ||
+      std::fabs(ndc_x) > 1.1f || std::fabs(ndc_y) > 1.1f) {
+    ++offscreen_samples;
+    return;
+  }
+  const float viewport_position[3] = {
+      (ndc_x * 0.5f + 0.5f) *
+          static_cast<float>(viewport_width),
+      (0.5f - ndc_y * 0.5f) *
+          static_cast<float>(viewport_height),
+      0.0f};
+  screen_motion.Record(
+      PoseCadenceNowMicroseconds(), viewport_position);
+}
+
 void RecordLocalVisibleMotion(
-    const std::vector<const DrawItem*>& local_player_items) {
+    const std::vector<const DrawItem*>& local_player_items,
+    const FrameScene& scene, uint32_t viewport_width,
+    uint32_t viewport_height) {
   const DrawItem* selected = nullptr;
   std::size_t selected_vertex_count = 0;
   float selected_position[3] = {};
@@ -11024,11 +11094,20 @@ void RecordLocalVisibleMotion(
   }
   g_local_visible_motion.motion.Record(
       PoseCadenceNowMicroseconds(), selected_position);
+  RecordProjectedVisibleMotion(
+      g_local_visible_motion.screen_motion,
+      g_local_visible_motion.distance_sum,
+      g_local_visible_motion.distance_min,
+      g_local_visible_motion.distance_max,
+      g_local_visible_motion.distance_samples,
+      g_local_visible_motion.offscreen_samples,
+      selected_position, scene, viewport_width, viewport_height);
 }
 
 void RecordRemoteVisibleMotion(
     uint32_t role, uint32_t session, uint32_t mesh,
-    const float position[3]) {
+    const float position[3], const FrameScene& scene,
+    uint32_t viewport_width, uint32_t viewport_height) {
   if (mesh == 0 || position == nullptr) {
     return;
   }
@@ -11044,6 +11123,11 @@ void RecordRemoteVisibleMotion(
   }
   remote.visible_motion.Record(
       PoseCadenceNowMicroseconds(), position);
+  RecordProjectedVisibleMotion(
+      remote.screen_motion, remote.distance_sum,
+      remote.distance_min, remote.distance_max,
+      remote.distance_samples, remote.offscreen_samples,
+      position, scene, viewport_width, viewport_height);
 }
 
 std::uint64_t HashAnimationPose(
@@ -11178,6 +11262,36 @@ void RecordRemotePresentationHandoff(
       local_visible.average_speed,
       local_visible.average_speed_change,
       local_visible.maximum_speed_change);
+  const multiplayer::motion::Snapshot local_screen =
+      g_local_visible_motion.screen_motion.ReadAndReset();
+  REXLOG_INFO(
+      "multiplayer-screen-motion: stage=projected role=local "
+      "mesh={:08X} n={} dt={:.2f}/{:.2f}/{:.2f}ms "
+      "speed={:.1f}px/s speed_change={:.1f}/{:.1f}px/s "
+      "distance={:.2f}/{:.2f}/{:.2f} offscreen={}",
+      g_local_visible_motion.mesh, local_screen.samples,
+      local_screen.average_interval_ms,
+      local_screen.minimum_interval_ms,
+      local_screen.maximum_interval_ms,
+      local_screen.average_speed,
+      local_screen.average_speed_change,
+      local_screen.maximum_speed_change,
+      g_local_visible_motion.distance_samples == 0
+          ? 0.0
+          : g_local_visible_motion.distance_sum /
+                static_cast<double>(
+                    g_local_visible_motion.distance_samples),
+      g_local_visible_motion.distance_samples == 0
+          ? 0.0
+          : g_local_visible_motion.distance_min,
+      g_local_visible_motion.distance_max,
+      g_local_visible_motion.offscreen_samples);
+  g_local_visible_motion.distance_sum = 0.0;
+  g_local_visible_motion.distance_min =
+      std::numeric_limits<double>::max();
+  g_local_visible_motion.distance_max = 0.0;
+  g_local_visible_motion.distance_samples = 0;
+  g_local_visible_motion.offscreen_samples = 0;
   for (auto& [role, remote] : g_remote_render_motion) {
     const multiplayer::motion::Snapshot motion =
         remote.motion.ReadAndReset();
@@ -11207,6 +11321,36 @@ void RecordRemotePresentationHandoff(
         visible_motion.average_speed,
         visible_motion.average_speed_change,
         visible_motion.maximum_speed_change);
+    const multiplayer::motion::Snapshot screen_motion =
+        remote.screen_motion.ReadAndReset();
+    REXLOG_INFO(
+        "multiplayer-screen-motion: stage=projected role={} "
+        "session={} mesh={:08X} n={} "
+        "dt={:.2f}/{:.2f}/{:.2f}ms "
+        "speed={:.1f}px/s speed_change={:.1f}/{:.1f}px/s "
+        "distance={:.2f}/{:.2f}/{:.2f} offscreen={}",
+        role, remote.session, remote.visible_mesh,
+        screen_motion.samples,
+        screen_motion.average_interval_ms,
+        screen_motion.minimum_interval_ms,
+        screen_motion.maximum_interval_ms,
+        screen_motion.average_speed,
+        screen_motion.average_speed_change,
+        screen_motion.maximum_speed_change,
+        remote.distance_samples == 0
+            ? 0.0
+            : remote.distance_sum /
+                  static_cast<double>(
+                      remote.distance_samples),
+        remote.distance_samples == 0
+            ? 0.0
+            : remote.distance_min,
+        remote.distance_max, remote.offscreen_samples);
+    remote.distance_sum = 0.0;
+    remote.distance_min = std::numeric_limits<double>::max();
+    remote.distance_max = 0.0;
+    remote.distance_samples = 0;
+    remote.offscreen_samples = 0;
     const multiplayer::pose_cadence::Snapshot interpolated =
         remote.interpolated_pose.ReadAndReset();
     REXLOG_INFO(
@@ -14094,7 +14238,9 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
           std::move(exact_track));
     }
   }
-  RecordLocalVisibleMotion(local_player_items);
+  RecordLocalVisibleMotion(
+      local_player_items, scene, context.guest_output_width,
+      context.guest_output_height);
   RecordLocalCaptureCadence(local_animation);
 
   // One-shot audit of the rows the character meshes actually weight against
@@ -14906,7 +15052,9 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
         }
         RecordRemoteVisibleMotion(
             remote_player.role, remote_player.session,
-            visible_motion_mesh, visible_motion_position);
+            visible_motion_mesh, visible_motion_position, scene,
+            context.guest_output_width,
+            context.guest_output_height);
         RecordRemoteAppliedPalette(
             remote_player.role, remote_player.session,
             remote_animation.sequence, applied_palette_hash,
