@@ -165,9 +165,11 @@ triangle physically stopped the skater.
 
 `native-collision-line-contact` aggregates every unique successful triangle
 test in that path over each telemetry interval. It reports hit frequency,
-triangle normal/vertices, and the representative query segment so a blocking
-side face cannot be hidden by whichever support triangle happened to run
-last.
+triangle normal/vertices, the native start-plus-delta query, hit fraction,
+resolved hit position, and result normal. Direction vectors are never
+translated as points, so the reported delta length is the actual probe length
+and a blocking side face cannot be hidden by whichever support triangle
+happened to run last.
 
 `native-collision-physical-contact` separately brackets RenderWare
 `PrimitivePairIntersect` and records only successful triangle-volume

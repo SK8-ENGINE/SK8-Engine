@@ -279,14 +279,17 @@ struct PendingNativeTriangleTest {
   bool valid = false;
   std::uint32_t result = 0;
   skate::world::Vec3 line_start{};
-  skate::world::Vec3 line_end{};
+  skate::world::Vec3 line_delta{};
 };
 
 struct NativeLineContact {
   std::uint64_t count = 0;
   float player_distance = 0.0f;
+  float hit_fraction = 0.0f;
   skate::world::Vec3 line_start{};
-  skate::world::Vec3 line_end{};
+  skate::world::Vec3 line_delta{};
+  skate::world::Vec3 hit_position{};
+  skate::world::Vec3 hit_normal{};
   std::array<skate::world::Vec3, 3> vertices{};
 };
 
@@ -1382,26 +1385,26 @@ void ObserveNativeClusterDecode(
 
 void PrepareNativeTriangleTest(std::uint32_t result,
                                std::uint32_t line_start,
-                               std::uint32_t line_end,
+                               std::uint32_t line_delta,
                                std::uint8_t* base) noexcept {
   g_pending_native_triangle_test = {};
   if (!base || !IsGuestDataAddress(result) ||
       !IsGuestDataAddress(line_start) ||
       !IsGuestDataAddress(line_start + 8) ||
-      !IsGuestDataAddress(line_end) ||
-      !IsGuestDataAddress(line_end + 8)) {
+      !IsGuestDataAddress(line_delta) ||
+      !IsGuestDataAddress(line_delta + 8)) {
     return;
   }
   const skate::world::Vec3 start =
       LoadVec3(base, line_start);
-  const skate::world::Vec3 end = LoadVec3(base, line_end);
-  if (!IsFiniteVec3(start) || !IsFiniteVec3(end)) {
+  const skate::world::Vec3 delta = LoadVec3(base, line_delta);
+  if (!IsFiniteVec3(start) || !IsFiniteVec3(delta)) {
     return;
   }
   g_pending_native_triangle_test.valid = true;
   g_pending_native_triangle_test.result = result;
   g_pending_native_triangle_test.line_start = start;
-  g_pending_native_triangle_test.line_end = end;
+  g_pending_native_triangle_test.line_delta = delta;
 }
 
 void ObserveNativeTriangleResult(std::uint32_t hit,
@@ -1483,11 +1486,29 @@ void ObserveNativeTriangleResult(std::uint32_t hit,
 
           const PendingNativeTriangleTest query =
               g_pending_native_triangle_test;
+          const bool query_result_valid =
+              query.valid && query.result != 0 &&
+              IsGuestDataAddress(query.result + 64);
+          const skate::world::Vec3 hit_position =
+              query_result_valid
+                  ? LoadVec3(base, query.result + 16)
+                  : skate::world::Vec3{};
+          const skate::world::Vec3 hit_normal =
+              query_result_valid
+                  ? LoadVec3(base, query.result + 32)
+                  : skate::world::Vec3{};
+          const float hit_fraction =
+              query_result_valid
+                  ? LoadF32(base, query.result + 64)
+                  : 0.0f;
           NativeLineContact sample{
               .count = 1,
               .player_distance = std::sqrt(distance_squared),
+              .hit_fraction = hit_fraction,
               .line_start = query.line_start,
-              .line_end = query.line_end,
+              .line_delta = query.line_delta,
+              .hit_position = hit_position,
+              .hit_normal = hit_normal,
               .vertices = vertices,
           };
           std::scoped_lock lock(g_native_line_contact_mutex);
@@ -1505,7 +1526,10 @@ void ObserveNativeTriangleResult(std::uint32_t hit,
                   sample.player_distance;
               if (query.valid) {
                 contact.line_start = sample.line_start;
-                contact.line_end = sample.line_end;
+                contact.line_delta = sample.line_delta;
+                contact.hit_fraction = sample.hit_fraction;
+                contact.hit_position = sample.hit_position;
+                contact.hit_normal = sample.hit_normal;
               }
             }
             merged = true;
@@ -2016,13 +2040,11 @@ void ObservePlayerCollisionTelemetry(const float world_position[3],
         skate::world::Cross(
             contact.vertices[1] - contact.vertices[0],
             contact.vertices[2] - contact.vertices[0]));
-    const skate::world::Vec3 segment =
-        contact.line_end - contact.line_start;
-    const float segment_length =
-        std::sqrt(skate::world::LengthSquared(segment));
+    const float segment_length = std::sqrt(
+        skate::world::LengthSquared(contact.line_delta));
     const skate::world::Vec3 direction =
         segment_length > 1.0e-6f
-            ? segment * (1.0f / segment_length)
+            ? contact.line_delta * (1.0f / segment_length)
             : skate::world::Vec3{};
     std::array<skate::world::Vec3, 3> local_vertices =
         contact.vertices;
@@ -2032,29 +2054,36 @@ void ObservePlayerCollisionTelemetry(const float world_position[3],
       vertex.z -= translation[2];
     }
     skate::world::Vec3 local_line_start = contact.line_start;
-    skate::world::Vec3 local_line_end = contact.line_end;
+    skate::world::Vec3 local_hit_position = contact.hit_position;
     local_line_start.x -= translation[0];
     local_line_start.y -= translation[1];
     local_line_start.z -= translation[2];
-    local_line_end.x -= translation[0];
-    local_line_end.y -= translation[1];
-    local_line_end.z -= translation[2];
+    local_hit_position.x -= translation[0];
+    local_hit_position.y -= translation[1];
+    local_hit_position.z -= translation[2];
     REXLOG_INFO(
         "native-collision-line-contact: frame={} rank={} count={} "
-        "player_distance={:.4f} segment_length={:.4f} "
+        "player_distance={:.4f} delta_length={:.4f} "
+        "hit_fraction={:.6f} delta=({:.4f},{:.4f},{:.4f}) "
         "direction=({:.4f},{:.4f},{:.4f}) "
-        "normal=({:.4f},{:.4f},{:.4f}) "
-        "local_line=(({:.4f},{:.4f},{:.4f}),"
-        "({:.4f},{:.4f},{:.4f})) "
+        "triangle_normal=({:.4f},{:.4f},{:.4f}) "
+        "result_normal=({:.4f},{:.4f},{:.4f}) "
+        "local_start=({:.4f},{:.4f},{:.4f}) "
+        "local_hit=({:.4f},{:.4f},{:.4f}) "
         "local_triangle=(({:.4f},{:.4f},{:.4f}),"
         "({:.4f},{:.4f},{:.4f}),({:.4f},{:.4f},{:.4f}))",
         frame, index + 1, contact.count,
         contact.player_distance, segment_length,
+        contact.hit_fraction,
+        contact.line_delta.x, contact.line_delta.y,
+        contact.line_delta.z,
         direction.x, direction.y, direction.z,
         normal.x, normal.y, normal.z,
+        contact.hit_normal.x, contact.hit_normal.y,
+        contact.hit_normal.z,
         local_line_start.x, local_line_start.y,
-        local_line_start.z, local_line_end.x,
-        local_line_end.y, local_line_end.z,
+        local_line_start.z, local_hit_position.x,
+        local_hit_position.y, local_hit_position.z,
         local_vertices[0].x, local_vertices[0].y,
         local_vertices[0].z, local_vertices[1].x,
         local_vertices[1].y, local_vertices[1].z,
