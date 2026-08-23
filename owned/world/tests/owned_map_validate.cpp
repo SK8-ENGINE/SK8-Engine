@@ -9,19 +9,37 @@
 #include <cstdint>
 #include <exception>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <limits>
 #include <map>
+#include <optional>
 #include <string_view>
 #include <utility>
 #include <vector>
 
 int main(int argc, char** argv) {
-  if (argc < 2 || argc > 3 ||
-      (argc == 3 && std::string_view(argv[2]) != "--compile-world")) {
+  bool compile_world = false;
+  std::optional<std::filesystem::path> collision_output;
+  for (int argument = 2; argument < argc; ++argument) {
+    const std::string_view option = argv[argument];
+    if (option == "--compile-world") {
+      compile_world = true;
+    } else if (option == "--collision-output" &&
+               argument + 1 < argc) {
+      collision_output = std::filesystem::path(argv[++argument]);
+      compile_world = true;
+    } else {
+      std::cerr
+          << "usage: skate_owned_map_validate <package.skate> "
+             "[--compile-world] [--collision-output <mesh.bin>]\n";
+      return 2;
+    }
+  }
+  if (argc < 2) {
     std::cerr
         << "usage: skate_owned_map_validate <package.skate> "
-           "[--compile-world]\n";
+           "[--compile-world] [--collision-output <mesh.bin>]\n";
     return 2;
   }
   try {
@@ -80,7 +98,7 @@ int main(int argc, char** argv) {
         << " bounds_max=" << maximum.x << "," << maximum.y << ","
         << maximum.z
         << '\n';
-    if (argc == 3) {
+    if (compile_world) {
       {
         const skate::world::RenderWorld render_world =
             skate::world::BuildRenderWorld(map);
@@ -124,6 +142,19 @@ int main(int argc, char** argv) {
       skate::world::RwCollisionBuildResult unified =
           skate::world::BuildRwCollisionMesh(map, options);
       if (unified.ok && !unified.mesh.bytes.empty()) {
+        if (collision_output) {
+          std::ofstream output(
+              *collision_output, std::ios::binary | std::ios::trunc);
+          output.write(
+              reinterpret_cast<const char*>(unified.mesh.bytes.data()),
+              static_cast<std::streamsize>(unified.mesh.bytes.size()));
+          if (!output) {
+            std::cerr
+                << "SKATE_COLLISION_WORLD_FAIL"
+                << " error=unable to write collision output\n";
+            return 1;
+          }
+        }
         std::cout
             << "SKATE_COLLISION_WORLD_OK"
             << " mode=continuous"
@@ -133,6 +164,12 @@ int main(int argc, char** argv) {
             << " bytes=" << unified.mesh.bytes.size()
             << '\n';
       } else {
+        if (collision_output) {
+          std::cerr
+              << "SKATE_COLLISION_WORLD_FAIL"
+              << " error=continuous collision required for binary output\n";
+          return 1;
+        }
         constexpr float cell_size = 256.0f;
         using Cell = std::pair<std::int32_t, std::int32_t>;
         std::map<Cell, std::vector<skate::world::CollisionTriangle>> cells;

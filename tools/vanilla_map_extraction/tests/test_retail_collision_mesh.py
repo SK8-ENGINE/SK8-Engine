@@ -76,6 +76,7 @@ class RetailCollisionMeshTests(unittest.TestCase):
         decoded = decode_clustered_mesh(_mesh_with_cluster(cluster, 1))
         self.assertEqual(decoded.cluster_count, 1)
         self.assertEqual(decoded.vertex_count, 3)
+        self.assertEqual(decoded.triangle_cluster_indices, (0,))
         self.assertEqual(decoded.compression_counts, ((1, 1),))
         self.assertEqual(decoded.triangles[0].surface, 0x8312)
         self.assertEqual(decoded.triangles[0].edge_codes, (0, 0, 0))
@@ -120,6 +121,7 @@ class RetailCollisionMeshTests(unittest.TestCase):
         decoded = decode_clustered_mesh(_mesh_with_cluster(cluster, 2))
         self.assertEqual(decoded.compression_counts, ((2, 1),))
         self.assertEqual(len(decoded.triangles), 2)
+        self.assertEqual(decoded.triangle_cluster_indices, (0, 0))
         self.assertEqual(decoded.triangles[0].surface, 0x8101)
         self.assertIsNone(decoded.triangles[0].edge_codes)
         self.assertEqual(

@@ -100,11 +100,13 @@ retail-collision replacement by default. The owned map is compiled into Skate
 flags. No board-height correction or grounded-state override is required.
 Human play validation has confirmed the floor and ramps.
 
-The collision compiler now partitions KD-tree leaves into native clusters,
-keeping every cluster within RenderWare's 255-local-vertex limit while
-retaining a larger global welded mesh. This removes the old whole-map limit
-but is not yet collision streaming: the complete map is still one registered
-aggregate and must next adopt renderer-cell lifetime management.
+The collision compiler now partitions KD-tree leaves using RenderWare's real
+cluster limits: at most 255 local vertices and at most 65,520 aligned bytes.
+It no longer splits every leaf at an arbitrary triangle count, so connected
+vertex-sharing strips can remain in one native cluster while the larger
+global mesh stays welded. This removes the old whole-map limit but is not yet
+collision streaming: the complete map is still one registered aggregate and
+must next adopt renderer-cell lifetime management.
 
 Materials carry a project-owned pattern, world-space texture scale,
 roughness, and variation. The current shader evaluates those patterns

@@ -13,6 +13,7 @@
 #include <optional>
 #include <stdexcept>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -148,13 +149,44 @@ struct KdNode {
   }
 };
 
-// A ClusteredMesh cluster stores at most 255 vertices. Sixty-four arbitrary
-// triangles can use at most 192 vertices, so this remains valid even when no
-// vertices are shared. The previous eight-triangle leaves forced University
-// above the native 16-bit cluster-index limit (more than 65,536 leaves),
-// unnecessarily splitting one continuous collision world into 44 top-level
-// volumes and creating artificial adjacency seams.
-constexpr std::size_t kMaximumKdLeafTriangles = 64;
+constexpr std::size_t kMaximumClusterVertices = 255;
+// Cluster sizes are stored in a big-endian uint16 and each serialized cluster
+// is 16-byte aligned. 65520 is therefore the largest representable aligned
+// cluster span.
+constexpr std::size_t kMaximumClusterBytes =
+    std::numeric_limits<std::uint16_t>::max() & ~std::size_t{15};
+
+bool RangeFitsCluster(
+    const std::vector<std::size_t>& order,
+    std::size_t first,
+    std::size_t count,
+    const std::vector<Triangle>& triangles) {
+  // Reject ranges that cannot fit even before accounting for vertices. This
+  // avoids building large temporary sets near the root of a map-sized KD tree.
+  if (count >
+      (kMaximumClusterBytes - kClusterHeaderSize) /
+          kBytesPerTriangleUnit) {
+    return false;
+  }
+
+  std::unordered_set<std::uint32_t> unique_vertices;
+  unique_vertices.reserve(
+      std::min(kMaximumClusterVertices + 1, count * 3));
+  for (std::size_t index = first; index < first + count; ++index) {
+    for (std::uint32_t vertex : triangles[order[index]].vertices) {
+      unique_vertices.insert(vertex);
+      if (unique_vertices.size() > kMaximumClusterVertices) {
+        return false;
+      }
+    }
+  }
+
+  const std::size_t serialized_bytes = Align16(
+      kClusterHeaderSize +
+      unique_vertices.size() * sizeof(float) * 4 +
+      count * kBytesPerTriangleUnit);
+  return serialized_bytes <= kMaximumClusterBytes;
+}
 
 Bounds TriangleBounds(const Triangle& triangle,
                       const std::vector<Vec3>& vertices) {
@@ -213,7 +245,10 @@ std::unique_ptr<KdNode> BuildKdTree(
       RangeBounds(order, first, count, triangles, vertices);
   node->first = first;
   node->count = count;
-  if (count <= kMaximumKdLeafTriangles) {
+  // Retail ClusteredMesh leaves are bounded by the format, not an arbitrary
+  // triangle count. Keeping connected, vertex-sharing strips together avoids
+  // introducing unnecessary internal partitions in ramps and curved floors.
+  if (RangeFitsCluster(order, first, count, triangles)) {
     return node;
   }
 
@@ -584,7 +619,7 @@ RwCollisionBuildResult BuildRwCollisionMesh(
           output.vertices[corner] = found->second;
           continue;
         }
-        if (cluster.vertices.size() >= 255u) {
+        if (cluster.vertices.size() >= kMaximumClusterVertices) {
           result.error =
               "KD leaf exceeds the native 255-vertex cluster limit";
           return result;

@@ -30,6 +30,7 @@ class ClusteredMesh:
     bounds_min: tuple[float, float, float]
     bounds_max: tuple[float, float, float]
     triangles: tuple[CollisionTriangle, ...]
+    triangle_cluster_indices: tuple[int, ...]
     cluster_count: int
     vertex_count: int
     unit_count: int
@@ -332,6 +333,7 @@ def decode_clustered_mesh(data: bytes) -> ClusteredMesh:
         "collision cluster offsets are not strictly increasing",
     )
     triangles: list[CollisionTriangle] = []
+    triangle_cluster_indices: list[int] = []
     vertex_count = 0
     unit_count = 0
     compression_counts: dict[int, int] = {}
@@ -364,6 +366,7 @@ def decode_clustered_mesh(data: bytes) -> ClusteredMesh:
                 f"0x{cluster_offset:X}: {error}"
             ) from error
         triangles.extend(decoded)
+        triangle_cluster_indices.extend([cluster_index] * len(decoded))
         vertex_count += vertices
         unit_count += units
         compression_counts[compression] = (
@@ -378,6 +381,7 @@ def decode_clustered_mesh(data: bytes) -> ClusteredMesh:
         bounds_min=bounds_min,
         bounds_max=bounds_max,
         triangles=tuple(triangles),
+        triangle_cluster_indices=tuple(triangle_cluster_indices),
         cluster_count=cluster_count,
         vertex_count=vertex_count,
         unit_count=unit_count,

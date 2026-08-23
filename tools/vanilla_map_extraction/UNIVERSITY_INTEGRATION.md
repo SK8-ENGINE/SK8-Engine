@@ -24,13 +24,19 @@ The ignored local output
 | Compiled native grind bytes | 4,023,600 |
 | Render chunks after clipping | 515 |
 | Render triangles after clipping | 1,777,954 |
-| Native collision clusters | 32,768 |
+| Native collision clusters | 4,346 |
+| Compiled native collision bytes | 23,993,440 |
 | Top-level collision meshes | 1 |
 
-The continuous RenderWare collision build uses 64-triangle KD leaves, staying
-within the native 16-bit cluster index at exactly 32,768 clusters. University
-therefore installs as one authoritative collision volume rather than the old
-44-volume spatial fallback.
+The continuous RenderWare collision build sizes KD leaves by the native
+255-local-vertex and 65,520-aligned-byte cluster limits. It no longer cuts
+continuous geometry at an arbitrary 64 triangles. University therefore
+installs as one authoritative collision volume with 4,346 clusters rather
+than the old 44-volume spatial fallback. The reported Mega Park ramp strip
+around local `(255.27, 74.36, -628.31)` was also decoded from the compiled blob:
+the reported contact triangle and its surrounding downhill rows now reside
+together in cluster 1,209 with their retail winding, surface `0x0083`, and
+edge codes unchanged.
 
 ## Integrity boundary
 

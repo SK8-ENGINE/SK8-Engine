@@ -79,7 +79,7 @@
     "collision_mode": "continuous",
     "collision_triangles": 1133642,
     "collision_vertices": 654751,
-    "collision_clusters": 32768,
-    "collision_bytes": 31326256
+    "collision_clusters": 4346,
+    "collision_bytes": 23993440
   }
 }
