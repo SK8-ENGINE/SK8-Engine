@@ -534,6 +534,11 @@ try {
         ) -Encoding UTF8
 
     $replicationWorker = $true
+    # Five native-renderer instances at 120 fps can exceed the shared local
+    # CPU/GPU scheduling budget and starve later windows, which makes their
+    # otherwise healthy 60 Hz network streams inherit 100-250 ms capture
+    # holes. This cap affects only the local visual-check processes.
+    $guestFpsCap = if ($Clients -ge 5) { 90 } else { 120 }
     $manifest = [ordered]@{
         schema = 1
         created_local = (Get-Date).ToString('o')
@@ -555,10 +560,10 @@ try {
         transport = 'localhost-udp'
         localhost_topology = 'direct-mesh'
         fidelity_contract = 'full-for-1-to-100-players'
-        guest_fps_cap = 120
+        guest_fps_cap = $guestFpsCap
         replication_quality = 'full-fidelity'
         root_protocol = 'v12-after-negotiation'
-        animation_protocol = 'v12-semantic-exact-confirmed-deltas'
+        animation_protocol = 'v12-smallest-exact-confirmed-delta'
         appearance_protocol = 'v11'
         root_rate_hz = 60
         animation_rate_hz = 60
@@ -661,8 +666,10 @@ decoded keyframe and can immediately request a fresh keyframe when a delta's
 baseline is unavailable. Each sender now constructs deltas only against the
 exact keyframe that the receiving peer confirmed decoding; it sends
 self-contained keyframes while confirmation is pending. Outfits remain on
-protocol v11. Full-fidelity direct peer fan-out and the 120 fps per-client test
-budget remain unchanged.
+protocol v11. Full-fidelity direct peer fan-out is unchanged. The five local
+test processes are evenly capped at $guestFpsCap fps so shared-machine
+contention cannot starve individual senders; this does not alter the 60 Hz
+replication contract or normal single-client settings.
 Protocol v12 keeps a receiver-confirmed baseline until layout changes or an
 explicit recovery request. Exact deltas may encode each changed 16-bit
 transform word as a variable-length signed difference from that confirmed
@@ -714,16 +721,18 @@ Telemetry acceptance checked by the agent afterward:
 - Every client installs receiver-confirmed outbound baselines. Animation
   deltas must flow afterward and never depend on an offered-but-unconfirmed
   keyframe; the runtime fail-closed invariant must report no policy error.
-- Semantic exact deltas should be selected after baseline confirmation, reduce
-  wire bytes and fragment counts, and remain free of animation rejection.
-  Their measured encoding cost must not coincide with client-FPS stalls.
+- The smallest exact delta representation should be selected after baseline
+  confirmation, reduce wire bytes and fragment counts, and remain free of
+  animation rejection. Its measured encoding cost must not coincide with
+  client-FPS stalls.
 - Every active sender/receiver pair reports the full-fidelity contract,
   continuous pose/animation traffic, and zero relevance drops.
 - Playback cursor margins remain inside the animation buffer, with no
   hundreds-of-milliseconds held-latest runs after a scheduler stall.
 - Normal timing convergence remains bounded to a 2.5% playback-speed
   correction while preserving monotonic root and skeletal presentation.
-- Render cadence respects the explicit five-instance 120 fps test budget.
+- Every local instance sustains the explicit $guestFpsCap fps shared-machine
+  test budget without sender-specific capture starvation.
 - Existing packet, timing, interpolation, sequence-gap, stall, and resource
   checks remain active.
 - Delivery-policy errors, socket failures, and multiplayer errors stay zero.
@@ -948,7 +957,7 @@ separately, then ask the agent to analyze this run directory.
             '--skate3_multiplayer_appearance_install_ops_per_frame=4',
             '--skate3_multiplayer_appearance_install_budget_ms=4',
             '--skate3_guest_fps_cap_auto=false',
-            '--skate3_guest_fps_cap=120',
+            "--skate3_guest_fps_cap=$guestFpsCap",
             '--skate3_native_render_scene_perf_log=true',
             '--skate3_native_render_scene_perf_interval=300',
             (
