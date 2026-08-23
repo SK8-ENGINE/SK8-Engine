@@ -528,6 +528,70 @@ if(NOT _native_collision_triangle_context_patched)
     "Failed to apply native triangle-test context observers")
 endif()
 
+set(_native_collision_triangle_acceptance_patched FALSE)
+foreach(_file IN LISTS _skate3_recomp_files)
+  file(READ "${_file}" _contents)
+  if(_contents MATCHES "ctx\\.r31\\.u32, 1u, base\\)" AND
+      _contents MATCHES "ctx\\.r31\\.u32, 2u, base\\)")
+    set(_native_collision_triangle_acceptance_patched TRUE)
+    break()
+  endif()
+  if(_contents MATCHES "ObserveNativeTriangleAccepted")
+    message(FATAL_ERROR
+      "Found a partial native triangle-acceptance observer patch")
+  endif()
+  if(NOT _contents MATCHES "DEFINE_REX_FUNC\\(sub_827719B8\\)")
+    continue()
+  endif()
+
+  set(_accepted_one_site
+"	// bne cr6,0x82771c58
+	if (!ctx.cr6.eq) goto loc_82771C58;
+	// lfs f0,960(r1)")
+  set(_accepted_one_patch
+"	// bne cr6,0x82771c58
+	if (!ctx.cr6.eq) goto loc_82771C58;
+	skate3::native_collision::ObserveNativeTriangleAccepted(
+		ctx.r31.u32, 1u, base);
+	// lfs f0,960(r1)")
+  string(REPLACE "${_accepted_one_site}" "${_accepted_one_patch}"
+    _patched "${_contents}")
+  if(_patched STREQUAL _contents)
+    message(FATAL_ERROR
+      "Failed to patch first native triangle-acceptance observer")
+  endif()
+  set(_contents "${_patched}")
+
+  set(_accepted_two_site
+"	// bne cr6,0x82771f94
+	if (!ctx.cr6.eq) goto loc_82771F94;
+	// lfs f0,848(r1)")
+  set(_accepted_two_patch
+"	// bne cr6,0x82771f94
+	if (!ctx.cr6.eq) goto loc_82771F94;
+	skate3::native_collision::ObserveNativeTriangleAccepted(
+		ctx.r31.u32, 2u, base);
+	// lfs f0,848(r1)")
+  string(REPLACE "${_accepted_two_site}" "${_accepted_two_patch}"
+    _patched "${_contents}")
+  if(_patched STREQUAL _contents)
+    message(FATAL_ERROR
+      "Failed to patch second native triangle-acceptance observer")
+  endif()
+  set(_contents "${_patched}")
+
+  _skate3_add_include(_contents "skate3_native_collision.h")
+  file(WRITE "${_file}" "${_contents}")
+  set(_native_collision_triangle_acceptance_patched TRUE)
+  message(STATUS
+    "Applied native triangle-acceptance observers in ${_file}")
+  break()
+endforeach()
+if(NOT _native_collision_triangle_acceptance_patched)
+  message(FATAL_ERROR
+    "Failed to apply native triangle-acceptance observers")
+endif()
+
 set(_native_collision_primitive_pair_observer_patched FALSE)
 foreach(_file IN LISTS _skate3_recomp_files)
   file(READ "${_file}" _contents)

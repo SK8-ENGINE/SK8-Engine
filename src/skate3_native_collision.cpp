@@ -153,6 +153,7 @@ std::atomic<std::uint64_t> g_native_cluster_decodes{0};
 std::atomic<std::uint64_t> g_native_decoded_triangles{0};
 std::atomic<std::uint64_t> g_native_triangle_tests{0};
 std::atomic<std::uint64_t> g_native_triangle_hits{0};
+std::atomic<std::uint64_t> g_native_accepted_triangle_hits{0};
 std::atomic<std::uint32_t> g_native_last_hit_mesh{0};
 std::atomic<bool> g_native_player_position_valid{false};
 std::array<std::atomic<std::uint32_t>, 3>
@@ -284,6 +285,9 @@ struct PendingNativeTriangleTest {
 
 struct NativeLineContact {
   std::uint64_t count = 0;
+  std::uint64_t accepted_count = 0;
+  std::uint32_t accepted_worker = 0;
+  std::uint16_t surface = 0;
   float player_distance = 0.0f;
   float hit_fraction = 0.0f;
   skate::world::Vec3 line_start{};
@@ -1559,6 +1563,44 @@ void ObserveNativeTriangleResult(std::uint32_t hit,
   }
 }
 
+void ObserveNativeTriangleAccepted(std::uint32_t decoded_triangle,
+                                   std::uint32_t worker,
+                                   std::uint8_t* base) noexcept {
+  if (!g_querying_owned_mesh || base == nullptr ||
+      decoded_triangle < 136 ||
+      !IsGuestDataAddress(decoded_triangle - 136)) {
+    return;
+  }
+  g_native_accepted_triangle_hits.fetch_add(
+      1, std::memory_order_relaxed);
+  if (!g_native_player_position_valid.load(
+          std::memory_order_acquire)) {
+    return;
+  }
+
+  const std::array<skate::world::Vec3, 3> vertices{
+      LoadVec3(base, decoded_triangle - 104),
+      LoadVec3(base, decoded_triangle - 88),
+      LoadVec3(base, decoded_triangle - 136),
+  };
+  if (!IsFiniteVec3(vertices[0]) ||
+      !IsFiniteVec3(vertices[1]) ||
+      !IsFiniteVec3(vertices[2])) {
+    return;
+  }
+
+  std::scoped_lock lock(g_native_line_contact_mutex);
+  for (NativeLineContact& contact : g_native_line_contacts) {
+    if (!SameContactTriangle(contact.vertices, vertices)) {
+      continue;
+    }
+    ++contact.accepted_count;
+    contact.accepted_worker = worker;
+    contact.surface = REX_LOAD_U16(decoded_triangle);
+    return;
+  }
+}
+
 void BeginNativePrimitivePair(std::uint32_t result,
                               std::uint32_t volume_a,
                               std::uint32_t transform_a,
@@ -1894,6 +1936,7 @@ void ObservePlayerCollisionTelemetry(const float world_position[3],
 
   thread_local std::uint64_t previous_frame = 0;
   thread_local std::uint64_t previous_hits = 0;
+  thread_local std::uint64_t previous_accepted_hits = 0;
   thread_local std::uint64_t previous_pair_tests = 0;
   thread_local std::uint64_t previous_pair_hits = 0;
   thread_local float previous_position[3] = {};
@@ -1905,6 +1948,9 @@ void ObservePlayerCollisionTelemetry(const float world_position[3],
 
   const std::uint64_t hits =
       g_native_triangle_hits.load(std::memory_order_relaxed);
+  const std::uint64_t accepted_hits =
+      g_native_accepted_triangle_hits.load(
+          std::memory_order_relaxed);
   const std::uint64_t pair_tests =
       g_native_primitive_pair_tests.load(
           std::memory_order_relaxed);
@@ -1987,6 +2033,9 @@ void ObservePlayerCollisionTelemetry(const float world_position[3],
       line_contacts.begin(), line_contacts.end(),
       [](const NativeLineContact& left,
          const NativeLineContact& right) {
+        if (left.accepted_count != right.accepted_count) {
+          return left.accepted_count > right.accepted_count;
+        }
         if (left.count != right.count) {
           return left.count > right.count;
         }
@@ -2002,7 +2051,8 @@ void ObservePlayerCollisionTelemetry(const float world_position[3],
       "move={:.3f} package_support={} support_y={:.3f} "
       "support_delta={:.3f} "
       "normal_y={:.3f} legacy_cell=({}, {}) seam_distance={:.3f} "
-      "native_line_hits_delta={} last_line_hit_mesh=0x{:08X} "
+      "native_line_hits_delta={} accepted_line_hits_delta={} "
+      "last_line_hit_mesh=0x{:08X} "
       "primitive_tests_delta={} primitive_hits_delta={} "
       "near_physical_hits={} collection_count={} "
       "retail_suppressed={} retail_reconciled={}",
@@ -2010,6 +2060,7 @@ void ObservePlayerCollisionTelemetry(const float world_position[3],
       ground_hit ? 1 : 0, ground_hit ? ground.point[1] : 0.0f,
       ground_delta, ground_hit ? ground.normal[1] : 0.0f,
       cell_x, cell_z, seam_distance, hits - previous_hits,
+      accepted_hits - previous_accepted_hits,
       g_native_last_hit_mesh.load(std::memory_order_relaxed),
       pair_tests - previous_pair_tests,
       pair_hits - previous_pair_hits,
@@ -2063,6 +2114,7 @@ void ObservePlayerCollisionTelemetry(const float world_position[3],
     local_hit_position.z -= translation[2];
     REXLOG_INFO(
         "native-collision-line-contact: frame={} rank={} count={} "
+        "accepted={} worker={} surface=0x{:04X} "
         "player_distance={:.4f} delta_length={:.4f} "
         "hit_fraction={:.6f} delta=({:.4f},{:.4f},{:.4f}) "
         "direction=({:.4f},{:.4f},{:.4f}) "
@@ -2073,6 +2125,8 @@ void ObservePlayerCollisionTelemetry(const float world_position[3],
         "local_triangle=(({:.4f},{:.4f},{:.4f}),"
         "({:.4f},{:.4f},{:.4f}),({:.4f},{:.4f},{:.4f}))",
         frame, index + 1, contact.count,
+        contact.accepted_count, contact.accepted_worker,
+        contact.surface,
         contact.player_distance, segment_length,
         contact.hit_fraction,
         contact.line_delta.x, contact.line_delta.y,
@@ -2128,6 +2182,7 @@ void ObservePlayerCollisionTelemetry(const float world_position[3],
 
   previous_frame = frame;
   previous_hits = hits;
+  previous_accepted_hits = accepted_hits;
   previous_pair_tests = pair_tests;
   previous_pair_hits = pair_hits;
   std::copy(std::begin(local), std::end(local), previous_position);

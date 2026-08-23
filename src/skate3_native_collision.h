@@ -32,6 +32,12 @@ void PrepareNativeTriangleTest(std::uint32_t result,
 void ObserveNativeTriangleResult(std::uint32_t hit,
                                  std::uint32_t decoded_triangle,
                                  std::uint8_t* base) noexcept;
+// Called only after Skate's native audio/physics/pattern query masks accept a
+// geometric triangle hit. This separates contacts that can influence a query
+// from the broader TriangleLineSegIntersect candidate stream.
+void ObserveNativeTriangleAccepted(std::uint32_t decoded_triangle,
+                                   std::uint32_t worker,
+                                   std::uint8_t* base) noexcept;
 
 // Brackets rw::collision::PrimitivePairIntersect so telemetry can distinguish
 // physical volume contacts from the line/box query hits above.

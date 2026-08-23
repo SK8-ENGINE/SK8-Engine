@@ -171,6 +171,11 @@ translated as points, so the reported delta length is the actual probe length
 and a blocking side face cannot be hidden by whichever support triangle
 happened to run last.
 
+The `accepted` count is recorded later, after Skate applies the native
+audio/physics/pattern masks for the enclosing query. A geometric triangle hit
+with `accepted=0` was rejected before it could influence that query; this
+post-filter count is the relevant signal when diagnosing a blocking contact.
+
 `native-collision-physical-contact` separately brackets RenderWare
 `PrimitivePairIntersect` and records only successful triangle-volume
 intersections within four metres of the player. It reports the exact triangle,
