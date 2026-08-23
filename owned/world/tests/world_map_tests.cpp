@@ -76,7 +76,7 @@ int main() {
         std::filesystem::temp_directory_path() /
         "skate_owned_world_future_format_test.skate";
     const std::array<std::uint8_t, 12> header = {
-        'S', 'K', 'A', 'T', 'E', '0', '9', '\0',
+        'S', 'K', 'A', 'T', 'E', '1', '0', '\0',
         0x78, 0x56, 0x34, 0x12};
     {
       std::ofstream output(

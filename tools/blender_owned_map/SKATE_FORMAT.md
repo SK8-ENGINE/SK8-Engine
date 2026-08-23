@@ -1,10 +1,10 @@
-# SKATE v8 binary format
+# SKATE v9 binary format
 
 All integers and IEEE-754 floats are little-endian. Strings are a `u32` byte
 length followed by UTF-8 bytes. Coordinates are right-handed Y-up metres.
 
 ```text
-char[8] magic = "SKATE08\0"
+char[8] magic = "SKATE09\0"
 u32 endian_marker = 0x12345678
 string map_name
 f32 spawn_position[3]
@@ -48,19 +48,21 @@ texture[texture_count]:
   string name
   u32 width, height
   u32 color_space       # 0 linear, 1 sRGB metadata
-  u32 rgba8_byte_count
-  u8 rgba8[rgba8_byte_count]
+  stored_bytes rgba8    # decoded size is width * height * 4
 
-vertex[vertex_count]:
-  f32 position[3], normal[3]
-  f32 uv0[2], lightmap_uv[2]
-  u32 material_id
+stored_bytes visual_vertices:
+  vertex[vertex_count]:
+    f32 position[3], normal[3]
+    f32 uv0[2], lightmap_uv[2]
+    u32 material_id
 
-u32 index[index_count]
+stored_bytes visual_indices:
+  u32 index[index_count]
 
-collision[collision_triangle_count]:
-  f32 a[3], b[3], c[3]
-  u32 surface_id, material_id
+stored_bytes collision:
+  collision_triangle[collision_triangle_count]:
+    f32 a[3], b[3], c[3]
+    u32 surface_id, material_id
 
 grind_rail[grind_rail_count]:
   string name
@@ -109,6 +111,26 @@ npc_route[npc_route_count]:
   f32 point[point_count][3]
 ```
 
+Each `stored_bytes` record is:
+
+```text
+u32 storage_method       # 0 raw, 1 zlib-wrapped DEFLATE
+u32 stored_byte_count
+u8 payload[stored_byte_count]
+```
+
+The decoded byte count is inferred from the corresponding dimensions or
+record count and checked before allocation. The exporter uses raw storage
+only when DEFLATE would not reduce a texture. Visual vertices, indices, and
+collision are emitted as bounded DEFLATE blocks. Compression is lossless:
+the runtime reconstructs the same float32/u32 records and RGBA8 texels before
+normal validation and renderer upload.
+
+Visual vertices are indexed by their complete record. Two corners share a
+vertex only when position, normal, both UV channels, and material ID are
+bit-identical. UV seams, hard normals, material boundaries, triangle order,
+and all index references are therefore preserved.
+
 `day_night_duration_seconds == 0` freezes celestial lighting at
 `day_night_start_hour`. With a positive duration and
 `day_night_ping_pong == 0`, the duration describes one complete 24-hour
@@ -139,7 +161,7 @@ NPC routes provide navigation intent to Skate 3's native AI skater
 controller. They do not contain scripted transforms: native steering, board
 physics, collision, animation, tricks, and bails remain authoritative.
 
-The loader retains read compatibility with SKATE v1 through v8. Missing v2
+The loader retains read compatibility with SKATE v1 through v9. Missing v2
 material fields use opaque, polished-concrete/smooth defaults with no
 additional PBR maps. Missing v3 cycle fields retain the original full-day
 behavior. Missing v6 environment fields use the engine's neutral sky grading

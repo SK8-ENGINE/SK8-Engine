@@ -234,7 +234,7 @@ def main() -> None:
         require(output.is_file(), "Quick Export did not create an SKATE")
         require(cache.is_file(), "Quick Export did not create its cache")
         require(
-            output.read_bytes()[:8] == b"SKATE08\0",
+            output.read_bytes()[:8] == b"SKATE09\0",
             "Exported package has the wrong magic",
         )
         _, _, counts = addon.exporter._read_package_header(output)

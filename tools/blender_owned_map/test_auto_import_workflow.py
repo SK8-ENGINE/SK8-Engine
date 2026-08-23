@@ -12,6 +12,7 @@ if str(TOOL_ROOT) not in sys.path:
     sys.path.insert(0, str(TOOL_ROOT))
 
 import owned_world_material_addon as addon
+from compare_skate import compare_packages
 
 
 def require(condition: bool, message: str) -> None:
@@ -424,10 +425,16 @@ def main() -> None:
             scalar_output
         )
         require(
-            scalar_counts == counts
-            and scalar_output.stat().st_size == output.stat().st_size,
-            "Bulk and scalar geometry paths produced different package "
-            "structure",
+            scalar_counts == counts,
+            "Bulk and scalar geometry paths produced different counts",
+        )
+        semantic_failures, _, _, _ = compare_packages(
+            scalar_output, output
+        )
+        require(
+            not semantic_failures,
+            "Bulk and scalar geometry paths produced different decoded "
+            f"content: {'; '.join(semantic_failures)}",
         )
         print(
             "AUTO_IMPORT_WORKFLOW_OK",

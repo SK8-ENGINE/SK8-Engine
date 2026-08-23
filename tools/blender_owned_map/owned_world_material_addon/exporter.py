@@ -1,4 +1,4 @@
-"""Original Blender -> SKATE v8 exporter.
+"""Original Blender -> SKATE v9 exporter.
 
 This module intentionally targets the narrow project-owned scene contract
 documented beside it. It has no ArenaBuilder imports or runtime dependency.
@@ -16,6 +16,7 @@ import os
 import struct
 import sys
 import time
+import zlib
 from typing import BinaryIO, Callable
 
 import bpy
@@ -26,8 +27,10 @@ except ImportError:
     numpy = None
 
 
-MAGIC = b"SKATE08\0"
+MAGIC = b"SKATE09\0"
 ENDIAN_MARKER = 0x12345678
+STORAGE_RAW = 0
+STORAGE_DEFLATE = 1
 PRESENTATION_COLLISION_COLLECTION = "OW_GROUP_1_PRESENTATION_COLLISION"
 NO_PRESENTATION_COLLECTION = "OW_GROUP_2_NO_PRESENTATION"
 NO_COLLISION_COLLECTION = "OW_GROUP_3_NO_COLLISION"
@@ -57,7 +60,7 @@ _HELPER_OBJECT_MARKERS = (
     "scale_reference",
     "scale reference",
 )
-CACHE_SCHEMA = 9
+CACHE_SCHEMA = 10
 METADATA_FLOAT_COUNT = 49
 METADATA_BYTE_COUNT = METADATA_FLOAT_COUNT * 4
 
@@ -100,13 +103,10 @@ class ExportHingedDoor:
 
 @dataclass
 class PackedVisualGeometry:
-    chunks: list[bytes]
+    vertex_chunks: list[bytes]
+    index_chunks: list[bytes]
     vertex_count: int
-
-    @property
-    def index_count(self) -> int:
-        # SKATE v8 currently stores one unique vertex per triangle corner.
-        return self.vertex_count
+    index_count: int
 
 
 @dataclass
@@ -189,29 +189,45 @@ def _write_string(stream: BinaryIO, value: str) -> None:
     stream.write(encoded)
 
 
-def _write_sequential_indices(
+def _write_stored_bytes(
     stream: BinaryIO,
-    count: int,
-    progress: ProgressCallback | None = None,
-) -> None:
-    chunk_size = 262_144
-    for start in range(0, count, chunk_size):
-        end = min(count, start + chunk_size)
-        if numpy is not None:
-            packed = numpy.arange(
-                start, end, dtype=numpy.dtype("<u4")
-            ).tobytes()
-        else:
-            values = array("I", range(start, end))
-            if sys.byteorder != "little":
-                values.byteswap()
-            packed = values.tobytes()
-        stream.write(packed)
-        _report_progress(
-            progress,
-            end / max(1, count),
-            "Writing visual indices",
-        )
+    decoded: bytes,
+) -> tuple[int, int]:
+    compressed = zlib.compress(decoded, level=6)
+    if len(compressed) >= len(decoded):
+        _write_u32(stream, STORAGE_RAW)
+        _write_u32(stream, len(decoded))
+        stream.write(decoded)
+        return STORAGE_RAW, len(decoded)
+    _write_u32(stream, STORAGE_DEFLATE)
+    _write_u32(stream, len(compressed))
+    stream.write(compressed)
+    return STORAGE_DEFLATE, len(compressed)
+
+
+def _write_stored_chunks(
+    stream: BinaryIO,
+    chunks: list[bytes],
+) -> tuple[int, int]:
+    header_offset = stream.tell()
+    _write_u32(stream, STORAGE_DEFLATE)
+    _write_u32(stream, 0)
+    compressor = zlib.compressobj(level=6)
+    stored_size = 0
+    for chunk in chunks:
+        compressed = compressor.compress(chunk)
+        stream.write(compressed)
+        stored_size += len(compressed)
+    compressed = compressor.flush()
+    stream.write(compressed)
+    stored_size += len(compressed)
+    if stored_size > 0xFFFFFFFF:
+        raise ValueError("compressed SKATE block exceeds the u32 size limit")
+    end = stream.tell()
+    stream.seek(header_offset + 4)
+    _write_u32(stream, stored_size)
+    stream.seek(end)
+    return STORAGE_DEFLATE, stored_size
 
 
 def _cache_manifest_path(output: Path) -> Path:
@@ -641,7 +657,7 @@ def _sun_metadata() -> tuple[tuple[float, float, float], float, float]:
 def _read_package_header(output: Path) -> tuple[str, int, tuple[int, ...]]:
     with output.open("rb") as stream:
         if stream.read(len(MAGIC)) != MAGIC:
-            raise ValueError(f"{output} is not an SKATE v8 package")
+            raise ValueError(f"{output} is not an SKATE v9 package")
         marker = struct.unpack("<I", stream.read(4))[0]
         if marker != ENDIAN_MARKER:
             raise ValueError(f"{output} has an invalid endian marker")
@@ -756,8 +772,8 @@ def _write_cache_manifest(
         "content_sha256": fingerprint.digest,
         "material_count": material_count,
         "texture_count": texture_count,
-        "visual_vertex_count": fingerprint.visual_vertices,
-        "visual_index_count": fingerprint.visual_indices,
+        "visual_vertex_count": counts[2],
+        "visual_index_count": counts[3],
         "collision_triangle_count": fingerprint.collision_triangles,
         "grind_rail_count": fingerprint.grind_rails,
         "npc_route_count": fingerprint.npc_routes,
@@ -1049,8 +1065,10 @@ def _export_visual_geometry(
     progress: ProgressCallback | None = None,
 ) -> PackedVisualGeometry:
     depsgraph = bpy.context.evaluated_depsgraph_get()
-    chunks: list[bytes] = []
+    vertex_chunks: list[bytes] = []
+    index_chunks: list[bytes] = []
     vertex_count = 0
+    index_count = 0
     mesh_objects = [
         obj for obj in visual_objects if obj.type == "MESH"
     ]
@@ -1237,8 +1255,23 @@ def _export_visual_geometry(
                 records["uv0"] = base_uvs[triangle_loops]
                 records["uv1"] = light_uvs[triangle_loops]
                 records["material"] = corner_materials
-                chunks.append(records.tobytes())
-                vertex_count += corner_count
+                unique_records, inverse = numpy.unique(
+                    records,
+                    return_inverse=True,
+                )
+                if vertex_count + len(unique_records) > 0xFFFFFFFF:
+                    raise ValueError(
+                        "visual geometry exceeds the SKATE u32 index limit"
+                    )
+                indices = inverse.astype(
+                    numpy.dtype("<u4"), copy=False
+                )
+                if vertex_count:
+                    indices += vertex_count
+                vertex_chunks.append(unique_records.tobytes())
+                index_chunks.append(indices.tobytes())
+                vertex_count += len(unique_records)
+                index_count += corner_count
             else:
                 normal_matrix = (
                     source_object.matrix_world
@@ -1246,7 +1279,9 @@ def _export_visual_geometry(
                     .inverted()
                     .transposed()
                 )
-                chunk = bytearray()
+                unique_vertices: dict[bytes, int] = {}
+                vertex_chunk = bytearray()
+                index_values = array("I")
                 for triangle in mesh.loop_triangles:
                     polygon = mesh.polygons[triangle.polygon_index]
                     if polygon.material_index >= len(mesh.materials):
@@ -1288,11 +1323,19 @@ def _export_visual_geometry(
                                 f"visual mesh {source_object.name!r} "
                                 "contains non-finite geometry or UV values"
                             )
-                        chunk.extend(
-                            packed_vertex.pack(*values, material_id)
-                        )
-                        vertex_count += 1
-                chunks.append(bytes(chunk))
+                        record = packed_vertex.pack(*values, material_id)
+                        local_index = unique_vertices.get(record)
+                        if local_index is None:
+                            local_index = len(unique_vertices)
+                            unique_vertices[record] = local_index
+                            vertex_chunk.extend(record)
+                        index_values.append(vertex_count + local_index)
+                        index_count += 1
+                if sys.byteorder != "little":
+                    index_values.byteswap()
+                vertex_chunks.append(bytes(vertex_chunk))
+                index_chunks.append(index_values.tobytes())
+                vertex_count += len(unique_vertices)
         finally:
             if evaluated is not None:
                 evaluated.to_mesh_clear()
@@ -1307,7 +1350,12 @@ def _export_visual_geometry(
 
     if not vertex_count:
         raise ValueError("presentation groups contain no exportable triangles")
-    return PackedVisualGeometry(chunks, vertex_count)
+    return PackedVisualGeometry(
+        vertex_chunks,
+        index_chunks,
+        vertex_count,
+        index_count,
+    )
 
 
 def audit_collision_geometry(
@@ -1981,10 +2029,9 @@ def export_scene(
         )
         package_name, _, package_counts = _read_package_header(output)
         expected_name, _ = _scene_metadata(output)
-        expected_counts = (
+        expected_counts_except_vertices = (
             len(export_materials),
             len(images),
-            fingerprint.visual_vertices,
             fingerprint.visual_indices,
             fingerprint.collision_triangles,
             fingerprint.grind_rails,
@@ -1992,7 +2039,18 @@ def export_scene(
             fingerprint.local_lights,
             fingerprint.npc_routes,
         )
-        if package_name != expected_name or package_counts != expected_counts:
+        actual_counts_except_vertices = (
+            package_counts[0],
+            package_counts[1],
+            *package_counts[3:],
+        )
+        if (
+            package_name != expected_name
+            or actual_counts_except_vertices
+            != expected_counts_except_vertices
+            or package_counts[2] == 0
+            or package_counts[2] > fingerprint.visual_vertices
+        ):
             raise ValueError(
                 "existing package counts do not match the Blender scene; "
                 "a full export is required"
@@ -2182,11 +2240,10 @@ def export_scene(
             _write_u32(stream, int(image.size[0]))
             _write_u32(stream, int(image.size[1]))
             # Blender exposes generated/baked image pixels in scene-linear
-            # space. Preserve those values directly in v2; a future
-            # compressed texture stage may encode albedo as sRGB.
+            # space. Compression is lossless; the loader reconstructs these
+            # exact RGBA8 bytes before renderer upload.
             _write_u32(stream, 0)
-            _write_u32(stream, len(rgba8))
-            stream.write(rgba8)
+            _write_stored_bytes(stream, rgba8)
             _report_progress(
                 progress,
                 0.72
@@ -2195,27 +2252,12 @@ def export_scene(
                 f"{image.name}",
             )
 
-        for chunk_index, chunk in enumerate(geometry.chunks, start=1):
-            stream.write(chunk)
-            _report_progress(
-                progress,
-                0.78
-                + 0.08
-                * chunk_index
-                / max(1, len(geometry.chunks)),
-                f"Writing visuals ({chunk_index}/"
-                f"{len(geometry.chunks)})",
-            )
-        _write_sequential_indices(
-            stream,
-            geometry.index_count,
-            progress=lambda fraction, stage: _report_progress(
-                progress,
-                0.86 + fraction * 0.03,
-                stage,
-            ),
-        )
+        _write_stored_chunks(stream, geometry.vertex_chunks)
+        _report_progress(progress, 0.86, "Compressed visual vertices")
+        _write_stored_chunks(stream, geometry.index_chunks)
+        _report_progress(progress, 0.89, "Compressed visual indices")
         packed_collision = struct.Struct("<9fII")
+        collision_chunks: list[bytes] = []
         collision_buffer = bytearray()
         collision_flush_size = 16_384
         for collision_index, (
@@ -2234,7 +2276,7 @@ def export_scene(
                 collision_index % collision_flush_size == 0
                 or collision_index == len(collision)
             ):
-                stream.write(collision_buffer)
+                collision_chunks.append(bytes(collision_buffer))
                 collision_buffer.clear()
                 _report_progress(
                     progress,
@@ -2245,6 +2287,7 @@ def export_scene(
                     f"Writing collision ({collision_index}/"
                     f"{len(collision)})",
                 )
+        _write_stored_chunks(stream, collision_chunks)
         for name, closed, points in rails:
             _write_string(stream, name)
             _write_u32(stream, 1 if closed else 0)

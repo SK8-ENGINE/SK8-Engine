@@ -7,7 +7,8 @@ The exporter treats the Blender file as authoring data and writes one
 renderer-neutral package containing:
 
 - visual triangles with base-texture UVs and independent lightmap UVs;
-- embedded RGBA8 base textures and baked indirect-light textures;
+- losslessly compressed RGBA8 base textures and baked indirect-light
+  textures;
 - normal, packed ORM, emissive, cutout, and blended-transparent materials;
 - native Skate 3 audio, physics, and contact-pattern channels per material;
 - independent authoritative collision triangles;
@@ -126,7 +127,13 @@ byte-checked against the scalar fallback; it does not simplify meshes, reduce
 texture resolution, or remove materials. GPU compute is not used because this
 work is Blender data extraction and binary file packing, where avoiding Python
 scalar overhead is substantially more useful than transferring the data to a
-graphics device.
+graphics device. Complete float32 vertex records are indexed exactly, so
+shared corners no longer duplicate position, normal, UV, lightmap UV, and
+material data. SKATE v9 then applies bounded lossless DEFLATE to RGBA8
+textures, vertices, indices, and collision. The loader reconstructs and
+validates the original runtime records; export does not simplify meshes,
+reduce texture resolution, omit maps, quantize attributes, or merge UV/hard
+normal seams.
 
 Maps can contain any number of local lights. The renderer dynamically keeps
 the lights relevant to the current view active instead of evaluating every

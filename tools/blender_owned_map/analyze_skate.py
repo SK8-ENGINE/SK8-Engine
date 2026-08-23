@@ -1,0 +1,372 @@
+#!/usr/bin/env python3
+"""Report the byte layout and integrity-relevant counts of a SKATE package."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import struct
+import zlib
+from dataclasses import dataclass
+from pathlib import Path
+
+
+VERTEX_BYTES = 44
+COLLISION_TRIANGLE_BYTES = 44
+
+
+class PackageError(ValueError):
+    """Raised when a package cannot be parsed without guessing."""
+
+
+@dataclass
+class Reader:
+    data: bytes
+    offset: int = 0
+
+    def take(self, size: int, label: str) -> bytes:
+        if size < 0 or self.offset + size > len(self.data):
+            raise PackageError(f"{label} extends past the end of the package")
+        start = self.offset
+        self.offset += size
+        return self.data[start : self.offset]
+
+    def u32(self, label: str) -> int:
+        return struct.unpack("<I", self.take(4, label))[0]
+
+    def string(self, label: str) -> str:
+        size = self.u32(f"{label} length")
+        try:
+            return self.take(size, label).decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise PackageError(f"{label} is not valid UTF-8") from error
+
+    def skip(self, size: int, label: str) -> None:
+        self.take(size, label)
+
+    def stored(self, expected_size: int, label: str) -> bytes:
+        method = self.u32(f"{label} storage method")
+        stored_size = self.u32(f"{label} stored size")
+        stored = self.take(stored_size, f"{label} payload")
+        if method == 0:
+            if stored_size != expected_size:
+                raise PackageError(
+                    f"{label} raw size is {stored_size}; "
+                    f"expected {expected_size}"
+                )
+            return stored
+        if method != 1:
+            raise PackageError(f"{label} uses unsupported method {method}")
+        try:
+            decoded = zlib.decompress(stored)
+        except zlib.error as error:
+            raise PackageError(f"{label} DEFLATE payload is invalid") from error
+        if len(decoded) != expected_size:
+            raise PackageError(
+                f"{label} decoded to {len(decoded)} bytes; "
+                f"expected {expected_size}"
+            )
+        return decoded
+
+
+def _section(
+    sections: dict[str, int],
+    reader: Reader,
+    name: str,
+    start: int,
+) -> None:
+    sections[name] = reader.offset - start
+
+
+def analyze_package(
+    path: Path,
+    *,
+    include_payloads: bool = False,
+) -> dict[str, object]:
+    reader = Reader(path.read_bytes())
+    sections: dict[str, int] = {}
+
+    start = reader.offset
+    magic = reader.take(8, "magic")
+    if magic not in (b"SKATE08\0", b"SKATE09\0"):
+        raise PackageError(
+            f"unsupported magic {magic!r}; expected SKATE v8 or v9"
+        )
+    version = int(magic[5:7])
+    if reader.u32("endian marker") != 0x12345678:
+        raise PackageError("invalid endian marker")
+    semantic_metadata_start = reader.offset
+    map_name = reader.string("map name")
+    # Spawn/environment metadata between the map name and count table.
+    reader.skip(49 * 4, "map metadata")
+    counts = struct.unpack("<9I", reader.take(9 * 4, "count table"))
+    (
+        material_count,
+        texture_count,
+        vertex_count,
+        index_count,
+        collision_count,
+        rail_count,
+        door_count,
+        light_count,
+        route_count,
+    ) = counts
+    semantic_metadata = reader.data[semantic_metadata_start : reader.offset - 36]
+    _section(sections, reader, "header_and_map_metadata", start)
+
+    start = reader.offset
+    for index in range(material_count):
+        reader.string(f"material {index} name")
+        reader.skip(76, f"material {index} fields")
+    material_bytes = reader.data[start : reader.offset]
+    _section(sections, reader, "materials", start)
+
+    start = reader.offset
+    texture_decoded_bytes = 0
+    texture_dimensions: list[dict[str, object]] = []
+    texture_digest = hashlib.sha256()
+    for index in range(texture_count):
+        name = reader.string(f"texture {index} name")
+        width = reader.u32(f"texture {index} width")
+        height = reader.u32(f"texture {index} height")
+        color_space = reader.u32(f"texture {index} color space")
+        expected = width * height * 4
+        if version >= 9:
+            rgba8 = reader.stored(expected, f"texture {index}")
+        else:
+            byte_count = reader.u32(f"texture {index} byte count")
+            if byte_count != expected:
+                raise PackageError(
+                    f"texture {index} has {byte_count} bytes; expected {expected}"
+                )
+            rgba8 = reader.take(byte_count, f"texture {index} RGBA8")
+        encoded_name = name.encode("utf-8")
+        texture_digest.update(struct.pack("<I", len(encoded_name)))
+        texture_digest.update(encoded_name)
+        texture_digest.update(struct.pack("<3I", width, height, color_space))
+        texture_digest.update(rgba8)
+        texture_decoded_bytes += len(rgba8)
+        texture_dimensions.append(
+            {
+                "name": name,
+                "width": width,
+                "height": height,
+                "color_space": color_space,
+                "decoded_bytes": len(rgba8),
+            }
+        )
+    _section(sections, reader, "textures", start)
+
+    start = reader.offset
+    vertex_byte_count = vertex_count * VERTEX_BYTES
+    if version >= 9:
+        vertex_bytes = reader.stored(
+            vertex_byte_count, "visual vertex block"
+        )
+    else:
+        vertex_bytes = reader.take(vertex_byte_count, "visual vertices")
+    _section(sections, reader, "visual_vertices", start)
+
+    start = reader.offset
+    index_byte_count = index_count * 4
+    if version >= 9:
+        index_bytes = reader.stored(index_byte_count, "visual index block")
+    else:
+        index_bytes = reader.take(index_byte_count, "visual indices")
+    if index_count:
+        indices = struct.unpack(f"<{index_count}I", index_bytes)
+        maximum_index = max(indices)
+        if maximum_index >= vertex_count:
+            raise PackageError(
+                f"visual index {maximum_index} exceeds vertex count {vertex_count}"
+            )
+    else:
+        indices = ()
+        maximum_index = None
+    _section(sections, reader, "visual_indices", start)
+
+    start = reader.offset
+    collision_byte_count = collision_count * COLLISION_TRIANGLE_BYTES
+    if version >= 9:
+        collision_bytes = reader.stored(
+            collision_byte_count, "collision block"
+        )
+    else:
+        collision_bytes = reader.take(
+            collision_byte_count, "collision triangles"
+        )
+    _section(sections, reader, "collision", start)
+
+    authored_features_start = reader.offset
+    start = reader.offset
+    for index in range(rail_count):
+        reader.string(f"rail {index} name")
+        reader.u32(f"rail {index} closed")
+        point_count = reader.u32(f"rail {index} point count")
+        reader.skip(point_count * 12, f"rail {index} points")
+    _section(sections, reader, "grind_rails", start)
+
+    start = reader.offset
+    for index in range(door_count):
+        reader.string(f"door {index} name")
+        reader.skip(28 * 4, f"door {index} float fields")
+        reader.u32(f"door {index} surface")
+        door_vertex_count = reader.u32(f"door {index} vertex count")
+        door_index_count = reader.u32(f"door {index} index count")
+        door_collision_count = reader.u32(f"door {index} collision count")
+        reader.skip(
+            door_vertex_count * VERTEX_BYTES,
+            f"door {index} vertices",
+        )
+        door_indices = reader.take(
+            door_index_count * 4,
+            f"door {index} indices",
+        )
+        if door_index_count:
+            maximum_door_index = max(
+                struct.unpack(f"<{door_index_count}I", door_indices)
+            )
+            if maximum_door_index >= door_vertex_count:
+                raise PackageError(
+                    f"door {index} index {maximum_door_index} exceeds "
+                    f"vertex count {door_vertex_count}"
+                )
+        reader.skip(
+            door_collision_count * COLLISION_TRIANGLE_BYTES,
+            f"door {index} collision",
+        )
+    _section(sections, reader, "hinged_doors", start)
+
+    start = reader.offset
+    for index in range(light_count):
+        reader.string(f"light {index} name")
+        reader.skip(4 + 14 * 4, f"light {index} fields")
+    _section(sections, reader, "local_lights", start)
+
+    start = reader.offset
+    for index in range(route_count):
+        reader.string(f"route {index} name")
+        reader.skip(4 + 4 + 4 + 4, f"route {index} fields")
+        point_count = reader.u32(f"route {index} point count")
+        reader.skip(point_count * 12, f"route {index} points")
+    _section(sections, reader, "npc_routes", start)
+
+    if reader.offset != len(reader.data):
+        raise PackageError(
+            f"package has {len(reader.data) - reader.offset} trailing bytes"
+        )
+
+    triangle_digest = hashlib.sha256()
+    quantized_triangle_digest = hashlib.sha256()
+    for index in indices:
+        offset = index * VERTEX_BYTES
+        record = vertex_bytes[offset : offset + VERTEX_BYTES]
+        triangle_digest.update(record)
+        values = struct.unpack("<10fI", record)
+        quantized_triangle_digest.update(
+            struct.pack(
+                "<10qI",
+                *(round(value * 1_000_000.0) for value in values[:10]),
+                values[10],
+            )
+        )
+    positions = [
+        struct.unpack_from("<3f", vertex_bytes, offset)
+        for offset in range(0, len(vertex_bytes), VERTEX_BYTES)
+    ]
+    bounds_min = [
+        min(position[axis] for position in positions) for axis in range(3)
+    ]
+    bounds_max = [
+        max(position[axis] for position in positions) for axis in range(3)
+    ]
+
+    result = {
+        "path": str(path.resolve()),
+        "version": version,
+        "map_name": map_name,
+        "file_bytes": len(reader.data),
+        "counts": {
+            "materials": material_count,
+            "textures": texture_count,
+            "vertices": vertex_count,
+            "indices": index_count,
+            "collision_triangles": collision_count,
+            "grind_rails": rail_count,
+            "hinged_doors": door_count,
+            "local_lights": light_count,
+            "npc_routes": route_count,
+        },
+        "sections": sections,
+        "texture_decoded_bytes": texture_decoded_bytes,
+        "texture_dimensions": texture_dimensions,
+        "maximum_visual_index": maximum_index,
+        "integrity": {
+            "semantic_metadata_sha256": hashlib.sha256(
+                semantic_metadata
+            ).hexdigest(),
+            "materials_sha256": hashlib.sha256(material_bytes).hexdigest(),
+            "decoded_textures_sha256": texture_digest.hexdigest(),
+            "expanded_visual_triangles_sha256": (
+                triangle_digest.hexdigest()
+            ),
+            "expanded_visual_triangles_1e6_sha256": (
+                quantized_triangle_digest.hexdigest()
+            ),
+            "collision_sha256": hashlib.sha256(
+                collision_bytes
+            ).hexdigest(),
+            "authored_features_sha256": hashlib.sha256(
+                reader.data[authored_features_start : reader.offset]
+            ).hexdigest(),
+            "bounds_min": bounds_min,
+            "bounds_max": bounds_max,
+        },
+    }
+    if include_payloads:
+        result["_vertex_bytes"] = vertex_bytes
+        result["_indices"] = indices
+    return result
+
+
+def _format_bytes(value: int) -> str:
+    units = ("B", "KiB", "MiB", "GiB")
+    amount = float(value)
+    for unit in units:
+        if amount < 1024.0 or unit == units[-1]:
+            return f"{amount:.2f} {unit}"
+        amount /= 1024.0
+    raise AssertionError("unreachable")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("package", type=Path)
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="write machine-readable JSON instead of a table",
+    )
+    args = parser.parse_args()
+    result = analyze_package(args.package)
+    if args.json:
+        print(json.dumps(result, indent=2))
+        return 0
+
+    total = int(result["file_bytes"])
+    print(f"{result['map_name']} — SKATE v{result['version']}")
+    print(f"File: {_format_bytes(total)} ({total:,} bytes)")
+    print()
+    print(f"{'Section':<26} {'Bytes':>14} {'Share':>9}")
+    for name, size_value in result["sections"].items():
+        size = int(size_value)
+        share = 100.0 * size / max(1, total)
+        print(f"{name:<26} {size:>14,} {share:>8.2f}%")
+    print()
+    print("Counts:", json.dumps(result["counts"], sort_keys=True))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
