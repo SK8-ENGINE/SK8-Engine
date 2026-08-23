@@ -1,6 +1,7 @@
 #include "skate3_multiplayer_interpolation.h"
 #include "skate3_multiplayer_worker.h"
 #include "skate3_multiplayer_latest_request.h"
+#include "skate3_multiplayer_motion_trace.h"
 #include "skate3_multiplayer_playback_clock.h"
 #include "skate3_multiplayer_pose_curve.h"
 #include "skate3_multiplayer_send_schedule.h"
@@ -524,6 +525,42 @@ void TestPoseCurveHasContinuousSegmentVelocity() {
          "adjacent pose-curve segments changed velocity at a sample");
 }
 
+void TestMotionTraceMeasuresCadenceAndKeepsContinuity() {
+  using skate3::multiplayer::motion::Snapshot;
+  using skate3::multiplayer::motion::Window;
+
+  Window window;
+  const float first[3] = {0.0f, 0.0f, 0.0f};
+  const float second[3] = {1.0f, 0.0f, 0.0f};
+  const float third[3] = {2.0f, 0.0f, 0.0f};
+  window.Record(1000000, first);
+  window.Record(2000000, second);
+  window.Record(3000000, third);
+  window.Record(3000000, third);
+
+  const Snapshot first_window = window.ReadAndReset();
+  Expect(first_window.samples == 2,
+         "motion trace counted a repeated timestamp");
+  Expect(std::fabs(first_window.average_interval_ms - 1000.0) <
+             0.001,
+         "motion trace reported the wrong sample cadence");
+  Expect(std::fabs(first_window.average_speed - 1.0) < 0.001,
+         "motion trace reported the wrong constant speed");
+  Expect(first_window.maximum_speed_change < 0.001,
+         "motion trace invented variation at constant speed");
+
+  const float fourth[3] = {4.0f, 0.0f, 0.0f};
+  window.Record(4000000, fourth);
+  const Snapshot second_window = window.ReadAndReset();
+  Expect(second_window.samples == 1,
+         "motion trace discarded continuity across log windows");
+  Expect(std::fabs(second_window.average_speed - 2.0) < 0.001,
+         "motion trace lost the next-window speed");
+  Expect(std::fabs(second_window.maximum_speed_change - 1.0) <
+             0.001,
+         "motion trace lost cross-window speed variation");
+}
+
 }  // namespace
 
 int main() {
@@ -541,6 +578,7 @@ int main() {
   TestPresentationClockConvergesWithoutRewinding();
   TestBoundedPoseCurvePreservesSamplesAndLimits();
   TestPoseCurveHasContinuousSegmentVelocity();
+  TestMotionTraceMeasuresCadenceAndKeepsContinuity();
 
   if (g_failures != 0) {
     std::cerr << g_failures << " multiplayer worker test(s) failed\n";

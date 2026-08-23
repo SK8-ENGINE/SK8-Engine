@@ -63,6 +63,7 @@
 #include "skate3_mechanics_sandbox.h"
 #include "skate3_mechanics_sandbox_map.h"
 #include "skate3_multiplayer.h"
+#include "skate3_multiplayer_motion_trace.h"
 #include "skate3_multiplayer_assets.h"
 #include "skate3_multiplayer_capture.h"
 #include "skate3_multiplayer_lifecycle.h"
@@ -10802,6 +10803,98 @@ struct RemoteVisualTelemetryState {
 std::unordered_map<uint32_t, RemoteVisualTelemetryState>
     g_remote_visual_telemetry;
 
+struct RemoteRenderMotionTelemetry {
+  uint32_t session = 0;
+  multiplayer::motion::Window motion;
+};
+
+std::unordered_map<uint32_t, RemoteRenderMotionTelemetry>
+    g_remote_render_motion;
+
+void RecordRemotePresentationHandoff(
+    const multiplayer::RemotePresentationFrame& presentation) {
+  struct HandoffTelemetry {
+    std::chrono::steady_clock::time_point last_log{};
+    std::uint64_t last_sequence = 0;
+    std::uint64_t render_calls = 0;
+    std::uint64_t unique_presentations = 0;
+    std::uint64_t repeated_presentations = 0;
+    std::uint64_t skipped_presentations = 0;
+  };
+  static HandoffTelemetry telemetry;
+  const auto now = std::chrono::steady_clock::now();
+  ++telemetry.render_calls;
+  if (presentation.sequence == telemetry.last_sequence) {
+    ++telemetry.repeated_presentations;
+  } else {
+    if (telemetry.last_sequence != 0 &&
+        presentation.sequence > telemetry.last_sequence + 1) {
+      telemetry.skipped_presentations +=
+          presentation.sequence - telemetry.last_sequence - 1;
+    }
+    telemetry.last_sequence = presentation.sequence;
+    ++telemetry.unique_presentations;
+  }
+  if (telemetry.last_log ==
+      std::chrono::steady_clock::time_point{}) {
+    telemetry.last_log = now;
+    return;
+  }
+  if (now - telemetry.last_log < std::chrono::seconds(5)) {
+    return;
+  }
+
+  const double seconds =
+      std::chrono::duration<double>(
+          now - telemetry.last_log)
+          .count();
+  REXLOG_INFO(
+      "multiplayer-render-handoff: calls={} unique={} repeated={} "
+      "skipped={} rates={:.1f}/{:.1f}Hz",
+      telemetry.render_calls,
+      telemetry.unique_presentations,
+      telemetry.repeated_presentations,
+      telemetry.skipped_presentations,
+      static_cast<double>(telemetry.render_calls) / seconds,
+      static_cast<double>(telemetry.unique_presentations) / seconds);
+  for (auto& [role, remote] : g_remote_render_motion) {
+    const multiplayer::motion::Snapshot motion =
+        remote.motion.ReadAndReset();
+    REXLOG_INFO(
+        "multiplayer-render-motion: role={} session={} "
+        "n={} dt={:.2f}/{:.2f}/{:.2f}ms "
+        "speed={:.3f} speed_change={:.3f}/{:.3f}",
+        role, remote.session, motion.samples,
+        motion.average_interval_ms,
+        motion.minimum_interval_ms,
+        motion.maximum_interval_ms,
+        motion.average_speed,
+        motion.average_speed_change,
+        motion.maximum_speed_change);
+  }
+  telemetry.render_calls = 0;
+  telemetry.unique_presentations = 0;
+  telemetry.repeated_presentations = 0;
+  telemetry.skipped_presentations = 0;
+  telemetry.last_log = now;
+}
+
+void RecordRemoteRenderMotion(
+    uint32_t role, uint32_t session,
+    const multiplayer::AnimationPose& animation) {
+  if (animation.sender_time_us == 0) {
+    return;
+  }
+  RemoteRenderMotionTelemetry& remote =
+      g_remote_render_motion[role];
+  if (remote.session != session) {
+    remote = {};
+    remote.session = session;
+  }
+  remote.motion.Record(
+      animation.sender_time_us, animation.root_position);
+}
+
 void ReleaseRemoteAppearanceResources(
     const NativeGuestOutputRenderContext& context,
     uint32_t role,
@@ -10933,7 +11026,8 @@ void ObserveRemoteAppearanceSession(
     ReleaseRemoteAppearanceResources(
         context, role, installed->second, "session changed");
     g_remote_appearances.erase(installed);
-    g_remote_visual_telemetry.erase(role);
+  g_remote_visual_telemetry.erase(role);
+  g_remote_render_motion.erase(role);
     LogRemoteAppearanceResourceAudit(
         "session-release", role);
   }
@@ -10967,6 +11061,7 @@ void ReleaseRetiredRemoteAppearance(
       "peer retired");
   g_remote_appearances.erase(installed);
   g_remote_visual_telemetry.erase(retirement.role);
+  g_remote_render_motion.erase(retirement.role);
   LogRemoteAppearanceResourceAudit(
       "peer-retire", retirement.role);
 }
@@ -13782,6 +13877,7 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
               ? &local_appearance
               : nullptr,
           remote_presentation);
+  RecordRemotePresentationHandoff(remote_presentation);
   g_pw_mp_tick.Add(PerfNsSince(multiplayer_tick_t0));
   const auto multiplayer_remote_t0 = PerfClock::now();
   uint64_t multiplayer_install_ns = 0;
@@ -13796,6 +13892,9 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
     const multiplayer::RemotePose& remote_pose = remote_player.pose;
     const multiplayer::AnimationPose& remote_animation =
         remote_player.animation;
+    RecordRemoteRenderMotion(
+        remote_player.role, remote_player.session,
+        remote_animation);
     const std::size_t remote_item_start =
         multiplayer_remote_items == nullptr
             ? 0

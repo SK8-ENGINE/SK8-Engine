@@ -2,6 +2,7 @@
 
 #include "skate3_multiplayer_interpolation.h"
 #include "skate3_multiplayer_lifecycle.h"
+#include "skate3_multiplayer_motion_trace.h"
 #include "skate3_multiplayer_outbound_scheduler.h"
 #include "skate3_multiplayer_playback_clock.h"
 #include "skate3_multiplayer_pose_curve.h"
@@ -457,6 +458,8 @@ struct RemotePeerState {
   AnimationAssembly animation_assembly;
   QuantizedAnimationFrame animation_keyframe;
   PeerTimingTelemetry timing;
+  motion::Window received_motion;
+  motion::Window presented_motion;
   AppearanceAssembly appearance_assembly;
   AppearanceBlob appearance;
 };
@@ -2533,6 +2536,31 @@ class Runtime {
           timing.maximum_held_latest_run,
           timing.animation_sequence_gaps,
           timing.superseded_animation_assemblies);
+      const motion::Snapshot received_motion =
+          peer.received_motion.ReadAndReset();
+      const motion::Snapshot presented_motion =
+          peer.presented_motion.ReadAndReset();
+      REXLOG_INFO(
+          "multiplayer-peer-motion: receiver={} sender={} "
+          "source=n{} dt={:.2f}/{:.2f}/{:.2f}ms "
+          "speed={:.3f} speed_change={:.3f}/{:.3f} "
+          "present=n{} dt={:.2f}/{:.2f}/{:.2f}ms "
+          "speed={:.3f} speed_change={:.3f}/{:.3f}",
+          bound_role_, remote_role,
+          received_motion.samples,
+          received_motion.average_interval_ms,
+          received_motion.minimum_interval_ms,
+          received_motion.maximum_interval_ms,
+          received_motion.average_speed,
+          received_motion.average_speed_change,
+          received_motion.maximum_speed_change,
+          presented_motion.samples,
+          presented_motion.average_interval_ms,
+          presented_motion.minimum_interval_ms,
+          presented_motion.maximum_interval_ms,
+          presented_motion.average_speed,
+          presented_motion.average_speed_change,
+          presented_motion.maximum_speed_change);
       timing.ResetInterval();
     }
     last_rate_log_ = now;
@@ -3515,6 +3543,9 @@ class Runtime {
         arrival_time_us;
     peer.last_animation_sequence =
         complete.pose.sequence;
+    peer.received_motion.Record(
+        complete.pose.sender_time_us,
+        complete.pose.root_position);
     peer.animation_samples.push_back(std::move(complete));
     while (peer.animation_samples.size() >
            kMaximumBufferedAnimationSamples) {
@@ -4666,7 +4697,9 @@ class Runtime {
         REXCVAR_GET(
             skate3_multiplayer_animation_interpolation_mode),
         0, 3);
-    out.sender_time_us = second->sender_time_us;
+    out.sender_time_us =
+        static_cast<std::uint64_t>(
+            std::max<std::int64_t>(target_sender_time_us, 0));
     out.sequence = second->sequence;
     out.root_bone = second->root_bone;
     for (std::size_t component = 0; component < 3; ++component) {
@@ -4775,6 +4808,8 @@ class Runtime {
       }
       out.tracks.push_back(std::move(output));
     }
+    peer.presented_motion.Record(
+        out.sender_time_us, out.root_position);
     return true;
   }
 

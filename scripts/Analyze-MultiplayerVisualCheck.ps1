@@ -131,6 +131,18 @@ foreach ($client in $clientDirectories) {
         $lines | Select-String -Pattern 'multiplayer-peer-timing:' |
             ForEach-Object { $_.Line }
     )
+    $peerMotionLines = @(
+        $lines | Select-String -Pattern 'multiplayer-peer-motion:' |
+            ForEach-Object { $_.Line }
+    )
+    $renderHandoffLines = @(
+        $lines | Select-String -Pattern 'multiplayer-render-handoff:' |
+            ForEach-Object { $_.Line }
+    )
+    $renderMotionLines = @(
+        $lines | Select-String -Pattern 'multiplayer-render-motion:' |
+            ForEach-Object { $_.Line }
+    )
     $perfLines = @(
         $lines | Select-String -Pattern 'multiplayer-perf:' |
             ForEach-Object { $_.Line }
@@ -241,6 +253,7 @@ foreach ($client in $clientDirectories) {
     $summary.Add("latest_log=$($logs[-1].FullName)")
     $summary.Add("rate_samples=$($rateLines.Count)")
     $summary.Add("peer_timing_samples=$($peerTimingLines.Count)")
+    $summary.Add("peer_motion_samples=$($peerMotionLines.Count)")
     foreach ($sender in 1..5) {
         $senderTimingLines = @(
             $peerTimingLines |
@@ -268,12 +281,33 @@ foreach ($client in $clientDirectories) {
                 $activeSenderTimingLines[-1]
             )
         }
+        $senderMotionLines = @(
+            $peerMotionLines |
+                Select-String -Pattern (
+                    " sender=$sender(?:\s|$)"
+                ) |
+                ForEach-Object { $_.Line }
+        )
+        if ($senderMotionLines.Count -gt 0) {
+            $summary.Add(
+                "last_peer_motion_sender_$sender=" +
+                $senderMotionLines[-1]
+            )
+        }
     }
     $summary.Add("multiplayer_perf_samples=$($perfLines.Count)")
     $summary.Add("multiplayer_worker_samples=$($workerLines.Count)")
     $summary.Add(
         "multiplayer_render_cache_samples=" +
         $renderCacheRuntimeLines.Count
+    )
+    $summary.Add(
+        "multiplayer_render_handoff_samples=" +
+        $renderHandoffLines.Count
+    )
+    $summary.Add(
+        "multiplayer_render_motion_samples=" +
+        $renderMotionLines.Count
     )
     $summary.Add(
         "appearance_prepare_events=" +
@@ -623,6 +657,29 @@ foreach ($client in $clientDirectories) {
             'missing'
         })
     )
+    $summary.Add(
+        'last_multiplayer_render_handoff=' +
+        $(if ($renderHandoffLines.Count -gt 0) {
+            $renderHandoffLines[-1]
+        } else {
+            'missing'
+        })
+    )
+    foreach ($sender in 1..5) {
+        $senderRenderMotionLines = @(
+            $renderMotionLines |
+                Select-String -Pattern (
+                    " role=$sender(?:\s|$)"
+                ) |
+                ForEach-Object { $_.Line }
+        )
+        if ($senderRenderMotionLines.Count -gt 0) {
+            $summary.Add(
+                "last_render_motion_sender_$sender=" +
+                $senderRenderMotionLines[-1]
+            )
+        }
+    }
     $summary.Add(
         'last_appearance_prepare=' +
         $(if ($appearancePrepareLines.Count -gt 0) {

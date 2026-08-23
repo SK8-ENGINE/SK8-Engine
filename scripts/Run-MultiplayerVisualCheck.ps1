@@ -641,9 +641,9 @@ $runRoot
 Clients: 5
 Transport: localhost UDP
 Quality: Balanced, 60 Hz root, 60 Hz animation, 50 ms minimum interpolation
-Change under test: bounded four-sample final-pose interpolation
-Diagnostics: interpolation mode 3 plus timing, cursor error, and cursor slew
-are reported separately for every receiver/sender pair
+Diagnostic under test: sender-to-render motion-path trace
+Diagnostics: source cadence, smoothed motion, renderer handoff cadence, timing,
+cursor error, and cursor slew are reported for every receiver/sender pair
 
 Visual scenario:
 1. Wait until all five clients have loaded the same map, every client sees
@@ -884,7 +884,7 @@ separately, then ask the agent to analyze this run directory.
             '--skate3_multiplayer_local_send_rate=60',
             '--skate3_multiplayer_local_animation_rate=60',
             '--skate3_multiplayer_local_interpolation_ms=50',
-            '--skate3_multiplayer_animation_interpolation_mode=3',
+            '--skate3_multiplayer_animation_interpolation_mode=2',
             '--skate3_multiplayer_replication_worker=true',
             '--skate3_multiplayer_async_appearance_prepare=true',
             '--skate3_multiplayer_incremental_appearance_install=true',
