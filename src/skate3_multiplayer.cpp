@@ -4,6 +4,7 @@
 #include "skate3_multiplayer_lifecycle.h"
 #include "skate3_multiplayer_outbound_scheduler.h"
 #include "skate3_multiplayer_playback_clock.h"
+#include "skate3_multiplayer_pose_curve.h"
 #include "skate3_multiplayer_protocol.h"
 #include "skate3_multiplayer_send_schedule.h"
 #include "skate3_multiplayer_worker.h"
@@ -128,8 +129,9 @@ REXCVAR_DEFINE_INT32(
     skate3_multiplayer_animation_interpolation_mode, 2, "Skate 3",
     "Remote skeletal interpolation diagnostic: 0 holds the latest complete "
     "animation frame, 1 interpolates affine rotation/scale with linear "
-    "translation, and 2 uses pivot-preserving rigid interpolation.")
-    .range(0, 2)
+    "translation, 2 uses pivot-preserving rigid interpolation, and 3 uses "
+    "bounded four-sample interpolation for continuous pose velocity.")
+    .range(0, 3)
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 REXCVAR_DEFINE_DOUBLE(
     skate3_multiplayer_relevance_radius, 80.0, "Skate 3",
@@ -1569,42 +1571,10 @@ float InterpolateHermite(
     std::uint64_t previous_time, std::uint64_t first_time,
     std::uint64_t second_time, std::uint64_t next_time,
     float amount) {
-  const double segment =
-      static_cast<double>(second_time - first_time);
-  if (!(segment > 0.0)) {
-    return second;
-  }
-  const double first_span =
-      static_cast<double>(second_time - previous_time);
-  const double second_span =
-      static_cast<double>(next_time - first_time);
-  const double first_tangent =
-      first_span > 0.0
-          ? (static_cast<double>(second) -
-             static_cast<double>(previous)) *
-                segment / first_span
-          : static_cast<double>(second) -
-                static_cast<double>(first);
-  const double second_tangent =
-      second_span > 0.0
-          ? (static_cast<double>(next) -
-             static_cast<double>(first)) *
-                segment / second_span
-          : static_cast<double>(second) -
-                static_cast<double>(first);
-  const double t = std::clamp(
-      static_cast<double>(amount), 0.0, 1.0);
-  const double t2 = t * t;
-  const double t3 = t2 * t;
-  const double h00 = 2.0 * t3 - 3.0 * t2 + 1.0;
-  const double h10 = t3 - 2.0 * t2 + t;
-  const double h01 = -2.0 * t3 + 3.0 * t2;
-  const double h11 = t3 - t2;
-  return static_cast<float>(
-      h00 * static_cast<double>(first) +
-      h10 * first_tangent +
-      h01 * static_cast<double>(second) +
-      h11 * second_tangent);
+  return pose_curve::InterpolateHermite(
+      previous, first, second, next,
+      previous_time, first_time, second_time, next_time,
+      amount);
 }
 
 void InterpolateAffineHermite(
@@ -1613,12 +1583,103 @@ void InterpolateAffineHermite(
     std::uint64_t previous_time, std::uint64_t first_time,
     std::uint64_t second_time, std::uint64_t next_time,
     float amount, float out[12]) {
-  for (std::size_t component = 0; component < 12; ++component) {
-    out[component] = InterpolateHermite(
+  const auto bounded_hermite =
+      [previous_time, first_time, second_time, next_time,
+       amount](float previous_value, float first_value,
+               float second_value, float next_value) {
+        return pose_curve::InterpolateBoundedHermite(
+            previous_value, first_value, second_value, next_value,
+            previous_time, first_time, second_time, next_time,
+            amount);
+      };
+
+  Quaternion previous_rotation;
+  Quaternion first_rotation;
+  Quaternion second_rotation;
+  Quaternion next_rotation;
+  float previous_scale[3];
+  float first_scale[3];
+  float second_scale[3];
+  float next_scale[3];
+  if (!DecomposeAffineRotationScale(
+          previous, previous_rotation, previous_scale) ||
+      !DecomposeAffineRotationScale(
+          first, first_rotation, first_scale) ||
+      !DecomposeAffineRotationScale(
+          second, second_rotation, second_scale) ||
+      !DecomposeAffineRotationScale(
+          next, next_rotation, next_scale)) {
+    for (std::size_t component = 0; component < 12; ++component) {
+      out[component] = bounded_hermite(
+          previous[component], first[component],
+          second[component], next[component]);
+    }
+    return;
+  }
+
+  const auto align_to =
+      [](const Quaternion& reference, Quaternion value) {
+        const float dot =
+            reference.x * value.x +
+            reference.y * value.y +
+            reference.z * value.z +
+            reference.w * value.w;
+        if (dot < 0.0f) {
+          value.x = -value.x;
+          value.y = -value.y;
+          value.z = -value.z;
+          value.w = -value.w;
+        }
+        return value;
+      };
+  previous_rotation =
+      align_to(first_rotation, previous_rotation);
+  second_rotation =
+      align_to(first_rotation, second_rotation);
+  next_rotation =
+      align_to(second_rotation, next_rotation);
+  Quaternion rotation{
+      InterpolateHermite(
+          previous_rotation.x, first_rotation.x,
+          second_rotation.x, next_rotation.x,
+          previous_time, first_time, second_time, next_time,
+          amount),
+      InterpolateHermite(
+          previous_rotation.y, first_rotation.y,
+          second_rotation.y, next_rotation.y,
+          previous_time, first_time, second_time, next_time,
+          amount),
+      InterpolateHermite(
+          previous_rotation.z, first_rotation.z,
+          second_rotation.z, next_rotation.z,
+          previous_time, first_time, second_time, next_time,
+          amount),
+      InterpolateHermite(
+          previous_rotation.w, first_rotation.w,
+          second_rotation.w, next_rotation.w,
+          previous_time, first_time, second_time, next_time,
+          amount)};
+  if (!NormalizeQuaternion(rotation)) {
+    rotation =
+        NlerpQuaternion(
+            first_rotation, second_rotation, amount);
+  }
+  float rotation_matrix[9];
+  RotationFromQuaternion(rotation, rotation_matrix);
+  for (std::size_t column = 0; column < 3; ++column) {
+    const float scale = bounded_hermite(
+        previous_scale[column], first_scale[column],
+        second_scale[column], next_scale[column]);
+    for (std::size_t row = 0; row < 3; ++row) {
+      out[row * 4 + column] =
+          rotation_matrix[row * 3 + column] * scale;
+    }
+  }
+  for (std::size_t row = 0; row < 3; ++row) {
+    const std::size_t component = row * 4 + 3;
+    out[component] = bounded_hermite(
         previous[component], first[component],
-        second[component], next[component],
-        previous_time, first_time, second_time, next_time,
-        amount);
+        second[component], next[component]);
   }
 }
 
@@ -4601,16 +4662,32 @@ class Runtime {
     if (second->tracks.empty()) {
       return false;
     }
+    const std::int32_t interpolation_mode = std::clamp(
+        REXCVAR_GET(
+            skate3_multiplayer_animation_interpolation_mode),
+        0, 3);
     out.sender_time_us = second->sender_time_us;
     out.sequence = second->sequence;
     out.root_bone = second->root_bone;
     for (std::size_t component = 0; component < 3; ++component) {
-      out.root_position[component] =
+      float root_value =
           first->root_position[component] +
           (second->root_position[component] -
            first->root_position[component]) *
-              amount +
-          map_origin[component];
+              amount;
+      if (interpolation_mode == 3) {
+        root_value = pose_curve::InterpolateBoundedHermite(
+            previous->root_position[component],
+            first->root_position[component],
+            second->root_position[component],
+            next->root_position[component],
+            previous->sender_time_us,
+            first->sender_time_us,
+            second->sender_time_us,
+            next->sender_time_us, amount);
+      }
+      out.root_position[component] =
+          root_value + map_origin[component];
     }
     out.tracks.clear();
     out.tracks.reserve(second->tracks.size());
@@ -4663,16 +4740,24 @@ class Runtime {
               second_track.bone_rows.data() + bone * 12;
           float* output_bone =
               output.bone_rows.data() + bone * 12;
-          const std::int32_t interpolation_mode = std::clamp(
-              REXCVAR_GET(
-                  skate3_multiplayer_animation_interpolation_mode),
-              0, 2);
           if (interpolation_mode == 0) {
             std::copy_n(second_bone, 12, output_bone);
           } else if (interpolation_mode == 1) {
             InterpolateAffine(
                 first_bone, second_bone, amount, output_bone);
           } else {
+            const float* previous_bone =
+                previous_track->bone_rows.data() + bone * 12;
+            const float* next_bone =
+                next_track->bone_rows.data() + bone * 12;
+            if (interpolation_mode == 3) {
+              InterpolateAffineHermite(
+                  previous_bone, first_bone, second_bone,
+                  next_bone, previous->sender_time_us,
+                  first->sender_time_us, second->sender_time_us,
+                  next->sender_time_us, amount, output_bone);
+              continue;
+            }
             // Every transmitted row is a model-to-world skinning affine,
             // not an independently positioned joint. Its translation
             // includes inverse-bind pivot compensation (p - R*p), so this

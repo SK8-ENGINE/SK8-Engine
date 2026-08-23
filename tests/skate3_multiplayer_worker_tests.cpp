@@ -2,9 +2,11 @@
 #include "skate3_multiplayer_worker.h"
 #include "skate3_multiplayer_latest_request.h"
 #include "skate3_multiplayer_playback_clock.h"
+#include "skate3_multiplayer_pose_curve.h"
 #include "skate3_multiplayer_send_schedule.h"
 
 #include <atomic>
+#include <cmath>
 #include <cstdint>
 #include <iostream>
 #include <memory>
@@ -474,6 +476,54 @@ void TestPresentationClockConvergesWithoutRewinding() {
          "presentation clock did not converge on reduced delay");
 }
 
+void TestBoundedPoseCurvePreservesSamplesAndLimits() {
+  using skate3::multiplayer::pose_curve::
+      InterpolateBoundedHermite;
+
+  constexpr std::uint64_t kStep = 16667;
+  Expect(
+      InterpolateBoundedHermite(
+          0.0f, 1.0f, 2.0f, 3.0f,
+          0, kStep, kStep * 2, kStep * 3, 0.0f) == 1.0f,
+      "pose curve did not preserve its first sample");
+  Expect(
+      InterpolateBoundedHermite(
+          0.0f, 1.0f, 2.0f, 3.0f,
+          0, kStep, kStep * 2, kStep * 3, 1.0f) == 2.0f,
+      "pose curve did not preserve its second sample");
+
+  for (int step = 0; step <= 100; ++step) {
+    const float value = InterpolateBoundedHermite(
+        -100.0f, 0.0f, 1.0f, 100.0f,
+        0, kStep, kStep * 2, kStep * 3,
+        static_cast<float>(step) / 100.0f);
+    Expect(value >= -100.0f && value <= 100.0f,
+           "bounded pose curve escaped its four-sample envelope");
+  }
+}
+
+void TestPoseCurveHasContinuousSegmentVelocity() {
+  using skate3::multiplayer::pose_curve::InterpolateHermite;
+
+  constexpr std::uint64_t kStep = 16667;
+  constexpr float kEpsilon = 0.001f;
+  const float before_boundary = InterpolateHermite(
+      0.0f, 1.0f, 4.0f, 9.0f,
+      0, kStep, kStep * 2, kStep * 3,
+      1.0f - kEpsilon);
+  const float at_boundary = 4.0f;
+  const float after_boundary = InterpolateHermite(
+      1.0f, 4.0f, 9.0f, 16.0f,
+      kStep, kStep * 2, kStep * 3, kStep * 4,
+      kEpsilon);
+  const float velocity_before =
+      (at_boundary - before_boundary) / kEpsilon;
+  const float velocity_after =
+      (after_boundary - at_boundary) / kEpsilon;
+  Expect(std::fabs(velocity_before - velocity_after) < 0.02f,
+         "adjacent pose-curve segments changed velocity at a sample");
+}
+
 }  // namespace
 
 int main() {
@@ -489,6 +539,8 @@ int main() {
   TestAdaptiveInterpolationDelayCoversMeasuredStalls();
   TestPresentationClockRejectsCursorJumps();
   TestPresentationClockConvergesWithoutRewinding();
+  TestBoundedPoseCurvePreservesSamplesAndLimits();
+  TestPoseCurveHasContinuousSegmentVelocity();
 
   if (g_failures != 0) {
     std::cerr << g_failures << " multiplayer worker test(s) failed\n";
