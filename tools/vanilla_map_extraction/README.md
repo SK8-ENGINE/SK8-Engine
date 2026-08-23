@@ -158,10 +158,17 @@ python .\tools\vanilla_map_extraction\tools\inspect_university_point.py `
   --point 255.25 74.34 -625.60 --radius 4
 ```
 
-The game-side `native-collision-contact` telemetry records the exact decoded
-triangle hit by native line or box queries within four metres of the player.
-This is read-only instrumentation: it does not filter triangles or alter
-contacts.
+The game-side `native-collision-line-hit` telemetry records decoded triangles
+hit by native line or box queries within four metres of the player. Those
+queries are useful for support/raycast diagnosis but are not evidence that a
+triangle physically stopped the skater.
+
+`native-collision-physical-contact` separately brackets RenderWare
+`PrimitivePairIntersect` and records only successful triangle-volume
+intersections within four metres of the player. It reports the exact triangle,
+contact frequency, the other primitive's flags/radius, and player distance.
+Both paths are read-only instrumentation: neither filters triangles nor alters
+contact results.
 
 ## User-run University visual check
 

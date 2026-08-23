@@ -29,6 +29,17 @@ void ObserveNativeTriangleResult(std::uint32_t hit,
                                  std::uint32_t decoded_triangle,
                                  std::uint8_t* base) noexcept;
 
+// Brackets rw::collision::PrimitivePairIntersect so telemetry can distinguish
+// physical volume contacts from the line/box query hits above.
+void BeginNativePrimitivePair(std::uint32_t result,
+                              std::uint32_t volume_a,
+                              std::uint32_t transform_a,
+                              std::uint32_t volume_b,
+                              std::uint32_t transform_b,
+                              std::uint8_t* base) noexcept;
+void EndNativePrimitivePair(std::uint32_t hit,
+                            std::uint8_t* base) noexcept;
+
 // Emits bounded, position-aware collision telemetry from the verified local
 // board seam. It compares the player against the package collision world and
 // records native query activity without changing the player or contact data.

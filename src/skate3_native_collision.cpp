@@ -6,13 +6,16 @@
 #include "skate3_mechanics_sandbox_map.h"
 #include "skate3_trick_pipeline.h"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <bit>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <cstring>
 #include <exception>
+#include <limits>
 #include <map>
 #include <mutex>
 #include <ostream>
@@ -162,6 +165,9 @@ std::array<std::atomic<std::uint32_t>, 3>
 std::atomic<std::uint32_t> g_native_near_triangle_distance_bits{
     std::bit_cast<std::uint32_t>(
         std::numeric_limits<float>::infinity())};
+std::atomic<std::uint64_t> g_native_primitive_pair_tests{0};
+std::atomic<std::uint64_t> g_native_primitive_pair_hits{0};
+std::atomic<std::uint64_t> g_native_near_primitive_pair_hits{0};
 std::atomic<KinematicState> g_kinematic_state{
     KinematicState::Disabled};
 std::atomic<std::uint32_t> g_kinematic_mesh_address{0};
@@ -248,6 +254,32 @@ thread_local bool g_querying_kinematic_mesh = false;
 thread_local std::int32_t g_querying_door_index = -1;
 thread_local std::uint32_t g_querying_mesh = 0;
 
+struct PendingPrimitivePair {
+  bool active = false;
+  std::uint32_t result = 0;
+  std::uint32_t triangle_volume = 0;
+  std::uint32_t other_volume = 0;
+  std::uint32_t triangle_flags = 0;
+  std::uint32_t other_flags = 0;
+  float other_radius = 0.0f;
+  float player_distance = 0.0f;
+  std::array<skate::world::Vec3, 3> vertices{};
+};
+
+struct PrimitivePairContact {
+  std::uint64_t count = 0;
+  std::uint32_t triangle_flags = 0;
+  std::uint32_t other_flags = 0;
+  float other_radius = 0.0f;
+  float player_distance = 0.0f;
+  std::array<skate::world::Vec3, 3> vertices{};
+};
+
+constexpr std::size_t kMaximumPrimitivePairContacts = 64;
+thread_local PendingPrimitivePair g_pending_primitive_pair;
+std::mutex g_primitive_pair_contact_mutex;
+std::vector<PrimitivePairContact> g_primitive_pair_contacts;
+
 bool IsGuestDataAddress(std::uint32_t address) {
   return address >= 0x00010000u && address < 0x80000000u;
 }
@@ -314,6 +346,28 @@ skate::world::Vec3 LoadVec3(std::uint8_t* base,
   };
 }
 
+skate::world::Vec3 TransformPoint(std::uint8_t* base,
+                                  std::uint32_t matrix,
+                                  skate::world::Vec3 point) {
+  if (matrix == 0) {
+    return point;
+  }
+  if (!IsGuestDataAddress(matrix) ||
+      !IsGuestDataAddress(matrix + 56)) {
+    return {
+        std::numeric_limits<float>::quiet_NaN(),
+        std::numeric_limits<float>::quiet_NaN(),
+        std::numeric_limits<float>::quiet_NaN(),
+    };
+  }
+  const skate::world::Vec3 x_axis = LoadVec3(base, matrix);
+  const skate::world::Vec3 y_axis = LoadVec3(base, matrix + 16);
+  const skate::world::Vec3 z_axis = LoadVec3(base, matrix + 32);
+  const skate::world::Vec3 translation = LoadVec3(base, matrix + 48);
+  return translation + x_axis * point.x + y_axis * point.y +
+         z_axis * point.z;
+}
+
 bool IsFiniteVec3(skate::world::Vec3 value) {
   return std::isfinite(value.x) && std::isfinite(value.y) &&
          std::isfinite(value.z);
@@ -372,6 +426,29 @@ float PointTriangleDistanceSquared(skate::world::Vec3 point,
   const float w = vc * inverse;
   return skate::world::LengthSquared(
       point - (a + ab * v + ac * w));
+}
+
+bool IsTriangleVolumeFlags(std::uint32_t flags) {
+  // TriangleVolume initializes flags to 0x1E1 and then enables bit 1.
+  // Ignore that mutable bit while retaining every type/behavior bit.
+  return (flags & ~2u) == 0x1E1u;
+}
+
+bool SameContactTriangle(
+    const std::array<skate::world::Vec3, 3>& left,
+    const std::array<skate::world::Vec3, 3>& right) {
+  constexpr float kComponentTolerance = 0.0005f;
+  for (std::size_t vertex = 0; vertex < left.size(); ++vertex) {
+    if (std::abs(left[vertex].x - right[vertex].x) >
+            kComponentTolerance ||
+        std::abs(left[vertex].y - right[vertex].y) >
+            kComponentTolerance ||
+        std::abs(left[vertex].z - right[vertex].z) >
+            kComponentTolerance) {
+      return false;
+    }
+  }
+  return true;
 }
 
 const char* StateName(State state) {
@@ -1379,6 +1456,129 @@ void ObserveNativeTriangleResult(std::uint32_t hit,
   }
 }
 
+void BeginNativePrimitivePair(std::uint32_t result,
+                              std::uint32_t volume_a,
+                              std::uint32_t transform_a,
+                              std::uint32_t volume_b,
+                              std::uint32_t transform_b,
+                              std::uint8_t* base) noexcept {
+  g_pending_primitive_pair = {};
+  g_native_primitive_pair_tests.fetch_add(1,
+                                          std::memory_order_relaxed);
+  if (!base ||
+      !g_native_player_position_valid.load(
+          std::memory_order_acquire) ||
+      !IsGuestDataAddress(volume_a) ||
+      !IsGuestDataAddress(volume_a + 92) ||
+      !IsGuestDataAddress(volume_b) ||
+      !IsGuestDataAddress(volume_b + 92)) {
+    return;
+  }
+
+  const std::uint32_t flags_a = LoadU32(base, volume_a + 92);
+  const std::uint32_t flags_b = LoadU32(base, volume_b + 92);
+  const bool triangle_a = IsTriangleVolumeFlags(flags_a);
+  const bool triangle_b = IsTriangleVolumeFlags(flags_b);
+  if (triangle_a == triangle_b) {
+    return;
+  }
+
+  const std::uint32_t triangle_volume =
+      triangle_a ? volume_a : volume_b;
+  const std::uint32_t triangle_transform =
+      triangle_a ? transform_a : transform_b;
+  const std::uint32_t other_volume =
+      triangle_a ? volume_b : volume_a;
+  const std::uint32_t triangle_flags =
+      triangle_a ? flags_a : flags_b;
+  const std::uint32_t other_flags =
+      triangle_a ? flags_b : flags_a;
+  const std::array<skate::world::Vec3, 3> vertices{
+      TransformPoint(base, triangle_transform,
+                     LoadVec3(base, triangle_volume)),
+      TransformPoint(base, triangle_transform,
+                     LoadVec3(base, triangle_volume + 16)),
+      TransformPoint(base, triangle_transform,
+                     LoadVec3(base, triangle_volume + 32)),
+  };
+  const skate::world::Vec3 player{
+      std::bit_cast<float>(
+          g_native_player_position_bits[0].load(
+              std::memory_order_relaxed)),
+      std::bit_cast<float>(
+          g_native_player_position_bits[1].load(
+              std::memory_order_relaxed)),
+      std::bit_cast<float>(
+          g_native_player_position_bits[2].load(
+              std::memory_order_relaxed)),
+  };
+  if (!IsFiniteVec3(vertices[0]) || !IsFiniteVec3(vertices[1]) ||
+      !IsFiniteVec3(vertices[2]) || !IsFiniteVec3(player)) {
+    return;
+  }
+  const float distance_squared = PointTriangleDistanceSquared(
+      player, vertices[0], vertices[1], vertices[2]);
+  constexpr float kNearPlayerDistance = 4.0f;
+  if (!std::isfinite(distance_squared) ||
+      distance_squared >
+          kNearPlayerDistance * kNearPlayerDistance) {
+    return;
+  }
+
+  g_pending_primitive_pair.active = true;
+  g_pending_primitive_pair.result = result;
+  g_pending_primitive_pair.triangle_volume = triangle_volume;
+  g_pending_primitive_pair.other_volume = other_volume;
+  g_pending_primitive_pair.triangle_flags = triangle_flags;
+  g_pending_primitive_pair.other_flags = other_flags;
+  g_pending_primitive_pair.other_radius =
+      LoadF32(base, other_volume + 80);
+  g_pending_primitive_pair.player_distance =
+      std::sqrt(distance_squared);
+  g_pending_primitive_pair.vertices = vertices;
+}
+
+void EndNativePrimitivePair(std::uint32_t hit,
+                            std::uint8_t* base) noexcept {
+  (void)base;
+  PendingPrimitivePair pending = g_pending_primitive_pair;
+  g_pending_primitive_pair = {};
+  if (hit == 0) {
+    return;
+  }
+  g_native_primitive_pair_hits.fetch_add(1,
+                                         std::memory_order_relaxed);
+  if (!pending.active) {
+    return;
+  }
+  g_native_near_primitive_pair_hits.fetch_add(
+      1, std::memory_order_relaxed);
+
+  std::scoped_lock lock(g_primitive_pair_contact_mutex);
+  for (PrimitivePairContact& contact :
+       g_primitive_pair_contacts) {
+    if (contact.other_flags == pending.other_flags &&
+        SameContactTriangle(contact.vertices, pending.vertices)) {
+      ++contact.count;
+      contact.player_distance = std::min(
+          contact.player_distance, pending.player_distance);
+      return;
+    }
+  }
+  if (g_primitive_pair_contacts.size() >=
+      kMaximumPrimitivePairContacts) {
+    return;
+  }
+  g_primitive_pair_contacts.push_back({
+      .count = 1,
+      .triangle_flags = pending.triangle_flags,
+      .other_flags = pending.other_flags,
+      .other_radius = pending.other_radius,
+      .player_distance = pending.player_distance,
+      .vertices = pending.vertices,
+  });
+}
+
 bool MapWorldOrigin(float out_origin[3]) noexcept {
   if (out_origin == nullptr ||
       !g_world_origin_valid.load(std::memory_order_acquire)) {
@@ -1591,6 +1791,8 @@ void ObservePlayerCollisionTelemetry(const float world_position[3],
 
   thread_local std::uint64_t previous_frame = 0;
   thread_local std::uint64_t previous_hits = 0;
+  thread_local std::uint64_t previous_pair_tests = 0;
+  thread_local std::uint64_t previous_pair_hits = 0;
   thread_local float previous_position[3] = {};
   thread_local bool previous_valid = false;
   if (previous_frame != 0 && frame > previous_frame &&
@@ -1600,6 +1802,12 @@ void ObservePlayerCollisionTelemetry(const float world_position[3],
 
   const std::uint64_t hits =
       g_native_triangle_hits.load(std::memory_order_relaxed);
+  const std::uint64_t pair_tests =
+      g_native_primitive_pair_tests.load(
+          std::memory_order_relaxed);
+  const std::uint64_t pair_hits =
+      g_native_primitive_pair_hits.load(
+          std::memory_order_relaxed);
   const float displacement =
       previous_valid
           ? std::sqrt(
@@ -1653,6 +1861,20 @@ void ObservePlayerCollisionTelemetry(const float world_position[3],
       std::bit_cast<float>(
           g_native_near_triangle_distance_bits.load(
               std::memory_order_acquire));
+  std::vector<PrimitivePairContact> physical_contacts;
+  {
+    std::scoped_lock lock(g_primitive_pair_contact_mutex);
+    physical_contacts.swap(g_primitive_pair_contacts);
+  }
+  std::sort(
+      physical_contacts.begin(), physical_contacts.end(),
+      [](const PrimitivePairContact& left,
+         const PrimitivePairContact& right) {
+        if (left.count != right.count) {
+          return left.count > right.count;
+        }
+        return left.player_distance < right.player_distance;
+      });
   for (std::size_t vertex = 0; vertex < 3; ++vertex) {
     near_vertices[vertex * 3] -= translation[0];
     near_vertices[vertex * 3 + 1] -= translation[1];
@@ -1663,19 +1885,25 @@ void ObservePlayerCollisionTelemetry(const float world_position[3],
       "move={:.3f} package_support={} support_y={:.3f} "
       "support_delta={:.3f} "
       "normal_y={:.3f} legacy_cell=({}, {}) seam_distance={:.3f} "
-      "native_hits_delta={} last_hit_mesh=0x{:08X} collection_count={} "
+      "native_line_hits_delta={} last_line_hit_mesh=0x{:08X} "
+      "primitive_tests_delta={} primitive_hits_delta={} "
+      "near_physical_hits={} collection_count={} "
       "retail_suppressed={} retail_reconciled={}",
       frame, local[0], local[1], local[2], displacement,
       ground_hit ? 1 : 0, ground_hit ? ground.point[1] : 0.0f,
       ground_delta, ground_hit ? ground.normal[1] : 0.0f,
       cell_x, cell_z, seam_distance, hits - previous_hits,
       g_native_last_hit_mesh.load(std::memory_order_relaxed),
+      pair_tests - previous_pair_tests,
+      pair_hits - previous_pair_hits,
+      g_native_near_primitive_pair_hits.exchange(
+          0, std::memory_order_relaxed),
       g_live_collection_count.load(std::memory_order_acquire),
       g_suppressed_retail_volumes.load(std::memory_order_relaxed),
       g_reintroduced_retail_removed.load(std::memory_order_relaxed));
   if (near_hits != 0) {
     REXLOG_INFO(
-        "native-collision-contact: frame={} near_hits={} "
+        "native-collision-line-hit: frame={} near_hits={} "
         "distance={:.4f} normal=({:.4f},{:.4f},{:.4f}) "
         "local_triangle=(({:.4f},{:.4f},{:.4f}),"
         "({:.4f},{:.4f},{:.4f}),({:.4f},{:.4f},{:.4f}))",
@@ -1685,9 +1913,46 @@ void ObservePlayerCollisionTelemetry(const float world_position[3],
         near_vertices[3], near_vertices[4], near_vertices[5],
         near_vertices[6], near_vertices[7], near_vertices[8]);
   }
+  constexpr std::size_t kMaximumLoggedPhysicalContacts = 12;
+  const std::size_t logged_contact_count = std::min(
+      physical_contacts.size(), kMaximumLoggedPhysicalContacts);
+  for (std::size_t index = 0; index < logged_contact_count;
+       ++index) {
+    const PrimitivePairContact& contact =
+        physical_contacts[index];
+    const skate::world::Vec3 normal = skate::world::Normalize(
+        skate::world::Cross(
+            contact.vertices[1] - contact.vertices[0],
+            contact.vertices[2] - contact.vertices[0]));
+    std::array<skate::world::Vec3, 3> local_vertices =
+        contact.vertices;
+    for (skate::world::Vec3& vertex : local_vertices) {
+      vertex.x -= translation[0];
+      vertex.y -= translation[1];
+      vertex.z -= translation[2];
+    }
+    REXLOG_INFO(
+        "native-collision-physical-contact: frame={} rank={} "
+        "count={} player_distance={:.4f} triangle_flags=0x{:08X} "
+        "other_flags=0x{:08X} other_radius={:.4f} "
+        "normal=({:.4f},{:.4f},{:.4f}) "
+        "local_triangle=(({:.4f},{:.4f},{:.4f}),"
+        "({:.4f},{:.4f},{:.4f}),({:.4f},{:.4f},{:.4f}))",
+        frame, index + 1, contact.count,
+        contact.player_distance, contact.triangle_flags,
+        contact.other_flags, contact.other_radius,
+        normal.x, normal.y, normal.z,
+        local_vertices[0].x, local_vertices[0].y,
+        local_vertices[0].z, local_vertices[1].x,
+        local_vertices[1].y, local_vertices[1].z,
+        local_vertices[2].x, local_vertices[2].y,
+        local_vertices[2].z);
+  }
 
   previous_frame = frame;
   previous_hits = hits;
+  previous_pair_tests = pair_tests;
+  previous_pair_hits = pair_hits;
   std::copy(std::begin(local), std::end(local), previous_position);
   previous_valid = true;
 }

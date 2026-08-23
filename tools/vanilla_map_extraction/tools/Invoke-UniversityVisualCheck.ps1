@@ -477,6 +477,12 @@ try {
         "-DCMAKE_C_COMPILER=$clang",
         "-DCMAKE_CXX_COMPILER=$clangCxx"
     ) -Description 'Configure dedicated University game build'
+    $cmakeSourceRoot = $repoRoot.Replace('\', '/')
+    Invoke-Checked -FilePath 'cmake' -Arguments @(
+        "-DSKATE3_SOURCE_DIR=$cmakeSourceRoot",
+        '-P',
+        (Join-Path $repoRoot 'cmake\ApplySkate3CodegenPatches.cmake')
+    ) -Description 'Apply generated native instrumentation patches'
     Invoke-Checked -FilePath 'cmake' -Arguments @(
         '--build',
         '--preset',

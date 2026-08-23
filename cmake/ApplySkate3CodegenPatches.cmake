@@ -486,6 +486,84 @@ if(NOT _native_collision_query_observer_patched)
     "Failed to apply owned native-collision query observers")
 endif()
 
+set(_native_collision_primitive_pair_observer_patched FALSE)
+foreach(_file IN LISTS _skate3_recomp_files)
+  file(READ "${_file}" _contents)
+  if(_contents MATCHES "BeginNativePrimitivePair" AND
+      _contents MATCHES "EndNativePrimitivePair")
+    set(_native_collision_primitive_pair_observer_patched TRUE)
+    break()
+  endif()
+  if(_contents MATCHES "BeginNativePrimitivePair" OR
+      _contents MATCHES "EndNativePrimitivePair")
+    message(FATAL_ERROR
+      "Found a partial native primitive-pair observer patch")
+  endif()
+  if(NOT _contents MATCHES "DEFINE_REX_FUNC\\(sub_82AD3CD8\\)")
+    continue()
+  endif()
+
+  set(_primitive_pair_entry_site
+"DEFINE_REX_FUNC(sub_82AD3CD8) {
+	REX_FUNC_PROLOGUE();
+	PPCRegister temp{};
+	uint32_t ea{};")
+  set(_primitive_pair_entry_patch
+"DEFINE_REX_FUNC(sub_82AD3CD8) {
+	REX_FUNC_PROLOGUE();
+	PPCRegister temp{};
+	uint32_t ea{};
+	skate3::native_collision::BeginNativePrimitivePair(
+		ctx.r3.u32, ctx.r4.u32, ctx.r5.u32,
+		ctx.r6.u32, ctx.r7.u32, base);")
+  string(REPLACE "${_primitive_pair_entry_site}"
+    "${_primitive_pair_entry_patch}" _patched "${_contents}")
+  if(_patched STREQUAL _contents)
+    message(FATAL_ERROR
+      "Failed to patch native primitive-pair observer entry")
+  endif()
+  set(_contents "${_patched}")
+
+  set(_primitive_pair_exit_site
+"loc_82AD3E38:
+	skate3::function_coverage::MaybeRecordAddress(0x82AD3E38);
+	// addi r1,r1,2528")
+  set(_primitive_pair_exit_patch
+"loc_82AD3E38:
+	skate3::function_coverage::MaybeRecordAddress(0x82AD3E38);
+	skate3::native_collision::EndNativePrimitivePair(ctx.r3.u32, base);
+	// addi r1,r1,2528")
+  string(REPLACE "${_primitive_pair_exit_site}"
+    "${_primitive_pair_exit_patch}" _patched "${_contents}")
+  if(_patched STREQUAL _contents)
+    set(_primitive_pair_fresh_exit_site
+"loc_82AD3E38:
+	// addi r1,r1,2528")
+    set(_primitive_pair_fresh_exit_patch
+"loc_82AD3E38:
+	skate3::native_collision::EndNativePrimitivePair(ctx.r3.u32, base);
+	// addi r1,r1,2528")
+    string(REPLACE "${_primitive_pair_fresh_exit_site}"
+      "${_primitive_pair_fresh_exit_patch}" _patched "${_contents}")
+  endif()
+  if(_patched STREQUAL _contents)
+    message(FATAL_ERROR
+      "Failed to patch native primitive-pair observer exit")
+  endif()
+  set(_contents "${_patched}")
+
+  _skate3_add_include(_contents "skate3_native_collision.h")
+  file(WRITE "${_file}" "${_contents}")
+  set(_native_collision_primitive_pair_observer_patched TRUE)
+  message(STATUS
+    "Applied native primitive-pair contact observer in ${_file}")
+  break()
+endforeach()
+if(NOT _native_collision_primitive_pair_observer_patched)
+  message(FATAL_ERROR
+    "Failed to apply native primitive-pair contact observer")
+endif()
+
 function(_skate3_patch_native_collision_entry
          _symbol _statement _marker)
   set(_patched FALSE)
