@@ -10808,18 +10808,9 @@ struct RemoteRenderMotionTelemetry {
   uint32_t session = 0;
   multiplayer::motion::Window motion;
   multiplayer::motion::Window visible_motion;
-  multiplayer::motion::Window submitted_screen_motion;
   uint32_t visible_mesh = 0;
   multiplayer::pose_cadence::Window interpolated_pose;
   multiplayer::pose_cadence::Window applied_palette;
-  multiplayer::pose_cadence::Window submitted_palette;
-  double submitted_distance_sum = 0.0;
-  double submitted_distance_min =
-      std::numeric_limits<double>::max();
-  double submitted_distance_max = 0.0;
-  std::uint64_t submitted_distance_samples = 0;
-  std::uint64_t submitted_upload_failures = 0;
-  std::uint64_t submitted_projection_failures = 0;
 };
 
 std::unordered_map<uint32_t, RemoteRenderMotionTelemetry>
@@ -10829,15 +10820,7 @@ multiplayer::pose_cadence::Window g_local_capture_cadence;
 
 struct LocalVisibleMotionTelemetry {
   multiplayer::motion::Window motion;
-  multiplayer::motion::Window submitted_screen_motion;
   uint32_t mesh = 0;
-  double submitted_distance_sum = 0.0;
-  double submitted_distance_min =
-      std::numeric_limits<double>::max();
-  double submitted_distance_max = 0.0;
-  std::uint64_t submitted_distance_samples = 0;
-  std::uint64_t submitted_upload_failures = 0;
-  std::uint64_t submitted_projection_failures = 0;
 };
 
 LocalVisibleMotionTelemetry g_local_visible_motion;
@@ -11011,52 +10994,6 @@ bool SampleSkinnedVisiblePoint(
   return true;
 }
 
-bool ProjectVisiblePointToViewport(
-    const float world_position[3], const FrameScene& scene,
-    uint32_t viewport_width, uint32_t viewport_height,
-    float viewport_position[3], double* camera_distance) {
-  if (world_position == nullptr || viewport_position == nullptr ||
-      viewport_width == 0 || viewport_height == 0) {
-    return false;
-  }
-  float clip[4] = {};
-  for (std::size_t column = 0; column < 4; ++column) {
-    clip[column] =
-        world_position[0] * scene.view_proj[column] +
-        world_position[1] * scene.view_proj[4 + column] +
-        world_position[2] * scene.view_proj[8 + column] +
-        scene.view_proj[12 + column];
-  }
-  if (!std::isfinite(clip[0]) || !std::isfinite(clip[1]) ||
-      !std::isfinite(clip[3]) || std::fabs(clip[3]) <= 0.00001f) {
-    return false;
-  }
-  const float inverse_w = 1.0f / clip[3];
-  const float ndc_x = clip[0] * inverse_w;
-  const float ndc_y = clip[1] * inverse_w;
-  viewport_position[0] =
-      (ndc_x * 0.5f + 0.5f) *
-      static_cast<float>(viewport_width);
-  viewport_position[1] =
-      (0.5f - ndc_y * 0.5f) *
-      static_cast<float>(viewport_height);
-  viewport_position[2] = 0.0f;
-  if (!std::isfinite(viewport_position[0]) ||
-      !std::isfinite(viewport_position[1])) {
-    return false;
-  }
-  if (camera_distance != nullptr) {
-    const double dx =
-        static_cast<double>(world_position[0]) - scene.cam_pos[0];
-    const double dy =
-        static_cast<double>(world_position[1]) - scene.cam_pos[1];
-    const double dz =
-        static_cast<double>(world_position[2]) - scene.cam_pos[2];
-    *camera_distance = std::sqrt(dx * dx + dy * dy + dz * dz);
-  }
-  return true;
-}
-
 void RecordLocalVisibleMotion(
     const std::vector<const DrawItem*>& local_player_items) {
   const DrawItem* selected = nullptr;
@@ -11107,85 +11044,6 @@ void RecordRemoteVisibleMotion(
   }
   remote.visible_motion.Record(
       PoseCadenceNowMicroseconds(), position);
-}
-
-void RecordSubmittedVisibleMotion(
-    const DrawItem& item, const FrameScene& scene,
-    uint32_t viewport_width, uint32_t viewport_height,
-    uint32_t frame_sequence, bool bones_bound,
-    const void* uploaded_palette, std::size_t uploaded_palette_bytes) {
-  const bool local =
-      item.multiplayer_role == 0 &&
-      g_local_visible_motion.mesh != 0 &&
-      item.mesh == g_local_visible_motion.mesh;
-  RemoteRenderMotionTelemetry* remote = nullptr;
-  if (item.multiplayer_role != 0) {
-    const auto found =
-        g_remote_render_motion.find(item.multiplayer_role);
-    if (found == g_remote_render_motion.end() ||
-        found->second.session != item.multiplayer_session ||
-        found->second.visible_mesh != item.mesh) {
-      return;
-    }
-    remote = &found->second;
-  } else if (!local) {
-    return;
-  }
-
-  if (!bones_bound || uploaded_palette == nullptr ||
-      uploaded_palette_bytes == 0) {
-    if (remote != nullptr) {
-      ++remote->submitted_upload_failures;
-    } else {
-      ++g_local_visible_motion.submitted_upload_failures;
-    }
-    return;
-  }
-
-  float world_position[3] = {};
-  float viewport_position[3] = {};
-  double camera_distance = 0.0;
-  if (!SampleSkinnedVisiblePoint(item, world_position) ||
-      !ProjectVisiblePointToViewport(
-          world_position, scene, viewport_width, viewport_height,
-          viewport_position, &camera_distance)) {
-    if (remote != nullptr) {
-      ++remote->submitted_projection_failures;
-    } else {
-      ++g_local_visible_motion.submitted_projection_failures;
-    }
-    return;
-  }
-
-  const std::uint64_t now_us = PoseCadenceNowMicroseconds();
-  if (remote != nullptr) {
-    remote->submitted_screen_motion.Record(
-        now_us, viewport_position);
-    remote->submitted_distance_sum += camera_distance;
-    remote->submitted_distance_min =
-        std::min(remote->submitted_distance_min, camera_distance);
-    remote->submitted_distance_max =
-        std::max(remote->submitted_distance_max, camera_distance);
-    ++remote->submitted_distance_samples;
-    remote->submitted_palette.Record(
-        now_us, frame_sequence,
-        AppearanceHashBytes(
-            1469598103934665603ull, uploaded_palette,
-            uploaded_palette_bytes));
-  } else {
-    g_local_visible_motion.submitted_screen_motion.Record(
-        now_us, viewport_position);
-    g_local_visible_motion.submitted_distance_sum += camera_distance;
-    g_local_visible_motion.submitted_distance_min =
-        std::min(
-            g_local_visible_motion.submitted_distance_min,
-            camera_distance);
-    g_local_visible_motion.submitted_distance_max =
-        std::max(
-            g_local_visible_motion.submitted_distance_max,
-            camera_distance);
-    ++g_local_visible_motion.submitted_distance_samples;
-  }
 }
 
 std::uint64_t HashAnimationPose(
@@ -11320,40 +11178,6 @@ void RecordRemotePresentationHandoff(
       local_visible.average_speed,
       local_visible.average_speed_change,
       local_visible.maximum_speed_change);
-  const multiplayer::motion::Snapshot local_screen =
-      g_local_visible_motion.submitted_screen_motion.ReadAndReset();
-  const double local_distance_average =
-      g_local_visible_motion.submitted_distance_samples == 0
-          ? 0.0
-          : g_local_visible_motion.submitted_distance_sum /
-                static_cast<double>(
-                    g_local_visible_motion.submitted_distance_samples);
-  REXLOG_INFO(
-      "multiplayer-screen-motion: stage=submitted role=local "
-      "mesh={:08X} n={} dt={:.2f}/{:.2f}/{:.2f}ms "
-      "speed={:.1f}px/s speed_change={:.1f}/{:.1f}px/s "
-      "distance={:.2f}/{:.2f}/{:.2f} upload_fail={} project_fail={}",
-      g_local_visible_motion.mesh, local_screen.samples,
-      local_screen.average_interval_ms,
-      local_screen.minimum_interval_ms,
-      local_screen.maximum_interval_ms,
-      local_screen.average_speed,
-      local_screen.average_speed_change,
-      local_screen.maximum_speed_change,
-      local_distance_average,
-      g_local_visible_motion.submitted_distance_samples == 0
-          ? 0.0
-          : g_local_visible_motion.submitted_distance_min,
-      g_local_visible_motion.submitted_distance_max,
-      g_local_visible_motion.submitted_upload_failures,
-      g_local_visible_motion.submitted_projection_failures);
-  g_local_visible_motion.submitted_distance_sum = 0.0;
-  g_local_visible_motion.submitted_distance_min =
-      std::numeric_limits<double>::max();
-  g_local_visible_motion.submitted_distance_max = 0.0;
-  g_local_visible_motion.submitted_distance_samples = 0;
-  g_local_visible_motion.submitted_upload_failures = 0;
-  g_local_visible_motion.submitted_projection_failures = 0;
   for (auto& [role, remote] : g_remote_render_motion) {
     const multiplayer::motion::Snapshot motion =
         remote.motion.ReadAndReset();
@@ -11383,42 +11207,6 @@ void RecordRemotePresentationHandoff(
         visible_motion.average_speed,
         visible_motion.average_speed_change,
         visible_motion.maximum_speed_change);
-    const multiplayer::motion::Snapshot submitted_screen =
-        remote.submitted_screen_motion.ReadAndReset();
-    const double submitted_distance_average =
-        remote.submitted_distance_samples == 0
-            ? 0.0
-            : remote.submitted_distance_sum /
-                  static_cast<double>(
-                      remote.submitted_distance_samples);
-    REXLOG_INFO(
-        "multiplayer-screen-motion: stage=submitted role={} "
-        "session={} mesh={:08X} n={} "
-        "dt={:.2f}/{:.2f}/{:.2f}ms "
-        "speed={:.1f}px/s speed_change={:.1f}/{:.1f}px/s "
-        "distance={:.2f}/{:.2f}/{:.2f} upload_fail={} project_fail={}",
-        role, remote.session, remote.visible_mesh,
-        submitted_screen.samples,
-        submitted_screen.average_interval_ms,
-        submitted_screen.minimum_interval_ms,
-        submitted_screen.maximum_interval_ms,
-        submitted_screen.average_speed,
-        submitted_screen.average_speed_change,
-        submitted_screen.maximum_speed_change,
-        submitted_distance_average,
-        remote.submitted_distance_samples == 0
-            ? 0.0
-            : remote.submitted_distance_min,
-        remote.submitted_distance_max,
-        remote.submitted_upload_failures,
-        remote.submitted_projection_failures);
-    remote.submitted_distance_sum = 0.0;
-    remote.submitted_distance_min =
-        std::numeric_limits<double>::max();
-    remote.submitted_distance_max = 0.0;
-    remote.submitted_distance_samples = 0;
-    remote.submitted_upload_failures = 0;
-    remote.submitted_projection_failures = 0;
     const multiplayer::pose_cadence::Snapshot interpolated =
         remote.interpolated_pose.ReadAndReset();
     REXLOG_INFO(
@@ -11444,18 +11232,6 @@ void RecordRemotePresentationHandoff(
         applied.sequence_changes, applied.alternations,
         applied.maximum_repeat_run,
         applied.maximum_hold_ms);
-    const multiplayer::pose_cadence::Snapshot submitted =
-        remote.submitted_palette.ReadAndReset();
-    REXLOG_INFO(
-        "multiplayer-pose-cadence: stage=submitted "
-        "role={} session={} samples={} changes={} repeats={} "
-        "seq_changes={} alternations={} max_repeat={} "
-        "hold={:.1f}ms",
-        role, remote.session, submitted.samples,
-        submitted.changes, submitted.repeats,
-        submitted.sequence_changes, submitted.alternations,
-        submitted.maximum_repeat_run,
-        submitted.maximum_hold_ms);
   }
   telemetry.render_calls = 0;
   telemetry.unique_presentations = 0;
@@ -14810,8 +14586,6 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
           clone.retained = false;
           clone.pending = false;
           clone.lw_alpha = -1.0f;
-          clone.multiplayer_role = remote_player.role;
-          clone.multiplayer_session = remote_player.session;
           bool remapped = false;
           bool unresolved_active_row = false;
           bool skateboard_piece = false;
@@ -17211,8 +16985,6 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
     }
     // Bone palette upload for skinned items; tint.g flags skinning.
     bool bones_bound = false;
-    const void* uploaded_palette = nullptr;
-    std::size_t uploaded_palette_bytes = 0;
     if (item.skinned && !item.bones.empty()) {
       const uint32_t bytes = uint32_t(item.bones.size() * sizeof(float));
       const uint32_t offset = (g_r.bone_ring_offset + 255u) & ~255u;
@@ -17221,8 +16993,6 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
         g_r.bone_ring_offset = offset + bytes;
         cmd->SetBufferSrv(3, g_r.bone_ring, bone_region + offset);
         bones_bound = true;
-        uploaded_palette = g_r.bone_ring_cpu + bone_region + offset;
-        uploaded_palette_bytes = bytes;
       }
     }
     if (!bones_bound) {
@@ -17233,11 +17003,6 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
       }
       cmd->SetBufferSrv(3, g_r.bone_ring, 0);
     }
-    RecordSubmittedVisibleMotion(
-        item, scene, context.guest_output_width,
-        context.guest_output_height,
-        static_cast<uint32_t>(frame_number), bones_bound,
-        uploaded_palette, uploaded_palette_bytes);
 
     if (debug_mode >= 2) {
       // Stable per-object colors: hash the mesh address, not the (sort-order

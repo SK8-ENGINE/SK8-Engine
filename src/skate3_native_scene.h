@@ -289,12 +289,6 @@ struct DrawItem {
   // appearance meshes use a process-local synthetic `mesh` cache key, while
   // exact animation tracks retain the sender's piece key on the wire.
   uint32_t multiplayer_track_key = 0;
-  // Render-only ownership stamped on remote appearance clones. Local guest
-  // items leave both fields zero. Keeping this explicit lets final draw
-  // telemetry attribute the exact palette/world/camera submission without
-  // decoding the synthetic process-local mesh key.
-  uint32_t multiplayer_role = 0;
-  uint32_t multiplayer_session = 0;
   // Sender-captured palette remap for a streamed remote clothing mesh.
   // Local guest items leave this empty and resolve through native_palette.
   std::vector<uint16_t> multiplayer_palette_to_canonical;
