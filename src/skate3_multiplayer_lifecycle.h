@@ -15,6 +15,25 @@ inline constexpr auto kAppearanceAssemblyIdleTimeout = std::chrono::seconds(10);
 inline constexpr auto kAppearanceResendRequestMinimumInterval =
     std::chrono::seconds(2);
 
+// Renderer texture entries are mutable GPU resources. Scope their content
+// identity by role so two players wearing the same recipe cannot replace or
+// retire each other's texture-store entry.
+[[nodiscard]] constexpr std::uint64_t RemoteAppearanceTextureStoreKey(
+    std::uint32_t role, std::uint64_t content_key) {
+  if (role < 1 || role > 100 || content_key == 0) {
+    return 0;
+  }
+  constexpr std::uint64_t kFnvPrime = 1099511628211ull;
+  std::uint64_t scoped_key = content_key;
+  for (std::size_t byte = 0; byte < sizeof(role); ++byte) {
+    scoped_key =
+        (scoped_key ^
+         ((static_cast<std::uint64_t>(role) >> (byte * 8)) & 0xFFu)) *
+        kFnvPrime;
+  }
+  return scoped_key;
+}
+
 [[nodiscard]] constexpr bool
 CanBeginAppearanceAssembly(std::size_t other_incomplete_bytes,
                            std::size_t requested_bytes) {

@@ -10607,9 +10607,12 @@ bool InstallRemoteRecipeAppearance(
         source.height == 0 || source.row_pitch == 0) {
       continue;
     }
-    uint64_t store_key = AppearanceHashBytes(
+    const uint64_t content_key = AppearanceHashBytes(
         appearance.identity, &texture_id,
         sizeof(texture_id));
+    const uint64_t store_key =
+        multiplayer::lifecycle::RemoteAppearanceTextureStoreKey(
+            role, content_key);
     const uint32_t object_key =
         0xF1000000u |
         ((role & 0xFFu) << 16) |
@@ -10955,10 +10958,13 @@ bool InstallRemoteAppearance(
         texture.mips[0].height == 0) {
       return false;
     }
-    const uint64_t store_key =
+    const uint64_t content_key =
         appearance.identity ^
         (0x9E3779B97F4A7C15ull *
          (texture_index + 1));
+    const uint64_t store_key =
+        multiplayer::lifecycle::RemoteAppearanceTextureStoreKey(
+            role, content_key);
     const uint32_t object_key =
         0xF0000000u |
         ((role & 0xFFu) << 16) |

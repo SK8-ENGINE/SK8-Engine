@@ -13,6 +13,7 @@ using skate3::multiplayer::lifecycle::CompleteAppearancePieceCount;
 using skate3::multiplayer::lifecycle::kMaximumIncompleteAppearanceBytes;
 using skate3::multiplayer::lifecycle::OutboundAppearanceState;
 using skate3::multiplayer::lifecycle::PeerGenerationTracker;
+using skate3::multiplayer::lifecycle::RemoteAppearanceTextureStoreKey;
 using skate3::multiplayer::protocol::AppearanceDeliveryState;
 using skate3::multiplayer::protocol::kMaximumAppearanceBytes;
 
@@ -87,6 +88,31 @@ void TestInvalidIdentityDoesNotCreateState() {
          "zero process session must be rejected");
   Expect(tracker.size() == 0,
          "invalid observations must not allocate generation state");
+}
+
+void TestRemoteAppearanceTextureOwnership() {
+  constexpr std::uint64_t content_key = 0x12345678ABCDEF01ull;
+  constexpr std::uint64_t role_two_key =
+      RemoteAppearanceTextureStoreKey(2, content_key);
+  constexpr std::uint64_t role_three_key =
+      RemoteAppearanceTextureStoreKey(3, content_key);
+
+  Expect(role_two_key != 0,
+         "valid remote texture key must not be empty");
+  Expect(role_two_key ==
+             RemoteAppearanceTextureStoreKey(2, content_key),
+         "remote texture key must be deterministic");
+  Expect(role_two_key != role_three_key,
+         "two roles wearing one appearance must own separate textures");
+  Expect(role_two_key !=
+             RemoteAppearanceTextureStoreKey(2, content_key + 1),
+         "one role's distinct texture content must use a distinct key");
+  Expect(RemoteAppearanceTextureStoreKey(0, content_key) == 0,
+         "role zero must not own a remote texture");
+  Expect(RemoteAppearanceTextureStoreKey(101, content_key) == 0,
+         "roles above 100 must not own a remote texture");
+  Expect(RemoteAppearanceTextureStoreKey(2, 0) == 0,
+         "empty content identity must not own a remote texture");
 }
 
 void TestAppearanceAssemblyBudget() {
@@ -182,6 +208,7 @@ int main() {
   TestTransportReplacementInvalidatesProcessSession();
   TestDepartureAndRoleReuse();
   TestInvalidIdentityDoesNotCreateState();
+  TestRemoteAppearanceTextureOwnership();
   TestAppearanceAssemblyBudget();
   TestAppearanceAssemblyTimeout();
   TestCompleteAppearancePieceCount();
