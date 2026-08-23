@@ -286,7 +286,9 @@ struct PendingNativeTriangleTest {
 struct NativeLineContact {
   std::uint64_t count = 0;
   std::uint64_t accepted_count = 0;
+  std::uint64_t selected_count = 0;
   std::uint32_t accepted_worker = 0;
+  std::uint32_t selected_worker = 0;
   std::uint16_t surface = 0;
   float player_distance = 0.0f;
   float hit_fraction = 0.0f;
@@ -1601,6 +1603,55 @@ void ObserveNativeTriangleAccepted(std::uint32_t decoded_triangle,
   }
 }
 
+void ObserveNativeTriangleSelected(std::uint32_t decoded_triangle,
+                                   std::uint32_t result,
+                                   std::uint32_t candidate,
+                                   std::uint32_t worker,
+                                   std::uint8_t* base) noexcept {
+  if (!g_querying_owned_mesh || base == nullptr ||
+      decoded_triangle < 136 ||
+      !IsGuestDataAddress(decoded_triangle - 136) ||
+      !IsGuestDataAddress(result) ||
+      !IsGuestDataAddress(candidate)) {
+    return;
+  }
+
+  // sub_8276D510 copies these exact result fields only when the candidate
+  // becomes the collector's closest hit. Worker 2 reaches this observer only
+  // from its equivalent closer-hit update branch, where result == candidate.
+  constexpr std::array<std::uint32_t, 11> kComparedOffsets{
+      0, 4, 8, 12, 32, 36, 40, 44, 96, 100, 104};
+  for (const std::uint32_t offset : kComparedOffsets) {
+    if (!IsGuestDataAddress(result + offset) ||
+        !IsGuestDataAddress(candidate + offset) ||
+        LoadU32(base, result + offset) !=
+            LoadU32(base, candidate + offset)) {
+      return;
+    }
+  }
+
+  const std::array<skate::world::Vec3, 3> vertices{
+      LoadVec3(base, decoded_triangle - 104),
+      LoadVec3(base, decoded_triangle - 88),
+      LoadVec3(base, decoded_triangle - 136),
+  };
+  if (!IsFiniteVec3(vertices[0]) ||
+      !IsFiniteVec3(vertices[1]) ||
+      !IsFiniteVec3(vertices[2])) {
+    return;
+  }
+
+  std::scoped_lock lock(g_native_line_contact_mutex);
+  for (NativeLineContact& contact : g_native_line_contacts) {
+    if (!SameContactTriangle(contact.vertices, vertices)) {
+      continue;
+    }
+    ++contact.selected_count;
+    contact.selected_worker = worker;
+    return;
+  }
+}
+
 void BeginNativePrimitivePair(std::uint32_t result,
                               std::uint32_t volume_a,
                               std::uint32_t transform_a,
@@ -2033,6 +2084,9 @@ void ObservePlayerCollisionTelemetry(const float world_position[3],
       line_contacts.begin(), line_contacts.end(),
       [](const NativeLineContact& left,
          const NativeLineContact& right) {
+        if (left.selected_count != right.selected_count) {
+          return left.selected_count > right.selected_count;
+        }
         if (left.accepted_count != right.accepted_count) {
           return left.accepted_count > right.accepted_count;
         }
@@ -2114,7 +2168,8 @@ void ObservePlayerCollisionTelemetry(const float world_position[3],
     local_hit_position.z -= translation[2];
     REXLOG_INFO(
         "native-collision-line-contact: frame={} rank={} count={} "
-        "accepted={} worker={} surface=0x{:04X} "
+        "accepted={} worker={} selected={} selected_worker={} "
+        "surface=0x{:04X} "
         "player_distance={:.4f} delta_length={:.4f} "
         "hit_fraction={:.6f} delta=({:.4f},{:.4f},{:.4f}) "
         "direction=({:.4f},{:.4f},{:.4f}) "
@@ -2126,6 +2181,7 @@ void ObservePlayerCollisionTelemetry(const float world_position[3],
         "({:.4f},{:.4f},{:.4f}),({:.4f},{:.4f},{:.4f}))",
         frame, index + 1, contact.count,
         contact.accepted_count, contact.accepted_worker,
+        contact.selected_count, contact.selected_worker,
         contact.surface,
         contact.player_distance, segment_length,
         contact.hit_fraction,

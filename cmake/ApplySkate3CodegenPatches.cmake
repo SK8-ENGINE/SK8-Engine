@@ -592,6 +592,72 @@ if(NOT _native_collision_triangle_acceptance_patched)
     "Failed to apply native triangle-acceptance observers")
 endif()
 
+set(_native_collision_triangle_selection_patched FALSE)
+foreach(_file IN LISTS _skate3_recomp_files)
+  file(READ "${_file}" _contents)
+  if(_contents MATCHES "ObserveNativeTriangleSelected")
+    if(_contents MATCHES
+        "ctx\\.r31\\.u32, ctx\\.r14\\.u32, ctx\\.r1\\.u32 \\+ 144u, 1u, base" AND
+       _contents MATCHES
+        "ctx\\.r31\\.u32, ctx\\.r30\\.u32, ctx\\.r30\\.u32, 2u, base")
+      set(_native_collision_triangle_selection_patched TRUE)
+      break()
+    endif()
+    message(FATAL_ERROR
+      "Found a partial native triangle-selection observer patch")
+  endif()
+  if(NOT _contents MATCHES "DEFINE_REX_FUNC\\(sub_827719B8\\)")
+    continue()
+  endif()
+
+  set(_selected_one_site
+"	ctx.lr = 0x82771C4C;
+	sub_8276D510(ctx, base);
+	// clrlwi r7,r3,24")
+  set(_selected_one_patch
+"	ctx.lr = 0x82771C4C;
+	sub_8276D510(ctx, base);
+	skate3::native_collision::ObserveNativeTriangleSelected(
+		ctx.r31.u32, ctx.r14.u32, ctx.r1.u32 + 144u, 1u, base);
+	// clrlwi r7,r3,24")
+  string(REPLACE "${_selected_one_site}" "${_selected_one_patch}"
+    _patched "${_contents}")
+  if(_patched STREQUAL _contents)
+    message(FATAL_ERROR
+      "Failed to patch first native triangle-selection observer")
+  endif()
+  set(_contents "${_patched}")
+
+  set(_selected_two_site
+"	// stw r9,104(r30)
+	REX_STORE_U32(ctx.r30.u32 + 104, ctx.r9.u32);
+loc_82771F88:")
+  set(_selected_two_patch
+"	// stw r9,104(r30)
+	REX_STORE_U32(ctx.r30.u32 + 104, ctx.r9.u32);
+	skate3::native_collision::ObserveNativeTriangleSelected(
+		ctx.r31.u32, ctx.r30.u32, ctx.r30.u32, 2u, base);
+loc_82771F88:")
+  string(REPLACE "${_selected_two_site}" "${_selected_two_patch}"
+    _patched "${_contents}")
+  if(_patched STREQUAL _contents)
+    message(FATAL_ERROR
+      "Failed to patch second native triangle-selection observer")
+  endif()
+  set(_contents "${_patched}")
+
+  _skate3_add_include(_contents "skate3_native_collision.h")
+  file(WRITE "${_file}" "${_contents}")
+  set(_native_collision_triangle_selection_patched TRUE)
+  message(STATUS
+    "Applied native triangle-selection observers in ${_file}")
+  break()
+endforeach()
+if(NOT _native_collision_triangle_selection_patched)
+  message(FATAL_ERROR
+    "Failed to apply native triangle-selection observers")
+endif()
+
 set(_native_collision_primitive_pair_observer_patched FALSE)
 foreach(_file IN LISTS _skate3_recomp_files)
   file(READ "${_file}" _contents)

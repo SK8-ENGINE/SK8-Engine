@@ -173,8 +173,11 @@ happened to run last.
 
 The `accepted` count is recorded later, after Skate applies the native
 audio/physics/pattern masks for the enclosing query. A geometric triangle hit
-with `accepted=0` was rejected before it could influence that query; this
-post-filter count is the relevant signal when diagnosing a blocking contact.
+with `accepted=0` was rejected before it could influence that query.
+`selected` is stricter: it increments only when the accepted candidate
+replaces the native result collector's current closest contact. Blocking
+diagnosis must use `selected`, because an accepted triangle can still lose to
+a closer candidate.
 
 `native-collision-physical-contact` separately brackets RenderWare
 `PrimitivePairIntersect` and records only successful triangle-volume

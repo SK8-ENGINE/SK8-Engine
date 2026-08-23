@@ -38,6 +38,15 @@ void ObserveNativeTriangleResult(std::uint32_t hit,
 void ObserveNativeTriangleAccepted(std::uint32_t decoded_triangle,
                                    std::uint32_t worker,
                                    std::uint8_t* base) noexcept;
+// Called after the native result collector has had an opportunity to commit
+// an accepted candidate. For worker 1, result and candidate are compared
+// byte-for-byte across the fields copied by the collector. Worker 2 calls
+// this only from its closer-hit update branch.
+void ObserveNativeTriangleSelected(std::uint32_t decoded_triangle,
+                                   std::uint32_t result,
+                                   std::uint32_t candidate,
+                                   std::uint32_t worker,
+                                   std::uint8_t* base) noexcept;
 
 // Brackets rw::collision::PrimitivePairIntersect so telemetry can distinguish
 // physical volume contacts from the line/box query hits above.
