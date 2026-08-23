@@ -272,9 +272,31 @@ Current checkpoint:
 - Golden-byte, round-trip, malformed-packet, payload-boundary, feature
   negotiation, acknowledgement-window, and sequence-rollover tests pass.
   Protocol-v11 golden tests remain unchanged.
-- The next isolated slice is a tested receive-history/baseline state machine.
-  Runtime capability advertisements remain v11-only until that state can
-  safely reject stale generations and request a fresh baseline.
+- Commit `0577e10` adds the offline-only receive-history and baseline-recovery
+  state machine. It tracks a newest packet plus a 32-packet reorder window,
+  handles sequence and baseline-ID rollover, rejects duplicates and obsolete
+  packets, and resets all decode state when an authenticated transport
+  generation changes.
+- Capability activation now requires a caller-owned monotonic transport
+  generation as well as matching map, build, and content hashes. Arbitrary
+  realtime packets cannot activate or roll back a peer session.
+- Grouped baselines are exposed as receiver-confirmed only after every
+  required group has decoded. Packet acknowledgement alone never authorizes
+  delta generation. Missing or incomplete baselines latch one bounded
+  recovery request, with explicit timeout-driven retries rather than a
+  request for every rejected delta.
+- Offline tests cover packet loss, reordering, duplicates, 32-packet history
+  boundaries, sequence and baseline rollover, incomplete and superseded
+  grouped baselines, stale sessions, incompatible content, bounded recovery,
+  and sender use of decoded-baseline reports. All six multiplayer suites pass,
+  including unchanged protocol-v11 golden tests.
+- The live runtime remains byte-for-byte protocol v11, so this checkpoint
+  does not require an in-game visual pass.
+- The next isolated slice is the v12 control and grouped-pose payload wire
+  format: decoded-baseline reports, reliable baseline requests, group
+  identities, and bounded baseline/delta payload headers. Runtime capability
+  advertisements remain v11-only until those messages have golden-byte and
+  malformed-input coverage.
 
 Completion:
 
