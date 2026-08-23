@@ -365,6 +365,27 @@ Current checkpoint:
   on Steam. Telemetry and a user-run visual gate must confirm continuous pose,
   outfit, and board behavior before any v12 capability advertisement is
   enabled.
+- Commit `0bb6843` applies that first live scheduling policy without changing
+  protocol-v11 packet bytes, capture, quantization, fragmentation, host
+  routing, receive assembly, interpolation, appearance recipes, or rendering.
+  Root and skeletal animation now use Steam's unreliable auto-restart send
+  mode; control and appearance continue to use reliable auto-restart.
+  Localhost remains UDP, now carrying the same explicit traffic classes.
+- Every successful send records reliable/unreliable packet and byte totals.
+  Animation-unreliable, appearance-reliable, and control-reliable counters
+  prove each packet class used its intended policy, while a policy-error
+  counter catches any call-site mismatch. Five-second rate logs report both
+  class bandwidth and reliable/unreliable bandwidth.
+- The telemetry analyzer reports the policy marker, cumulative class-policy
+  counters, and policy errors per client. The dedicated
+  `RUN_MULTIPLAYER_REALTIME_PRIORITY_CHECK.bat` incrementally builds the exact
+  worktree revision, runs all nine offline suites, stages five isolated
+  persistent-profile clients, enables existing performance diagnostics, and
+  writes a timestamped run with a policy-specific three-minute visual script.
+- Full Release compilation and all nine offline multiplayer suites pass. The
+  live checkpoint is pending the user's visual verdict plus telemetry review;
+  logs alone will not be treated as proof of animation, outfit, board, or
+  input correctness.
 
 Completion:
 
