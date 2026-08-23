@@ -115,6 +115,12 @@ AppID and follow Valve's setup and redistributable requirements.
   Steam and configured localhost meshes send these advertisements directly;
   dynamic localhost discovery may use a directed host relay. Peers that do
   not advertise a feature retain the existing protocol-v11 behavior.
+- Peers that advertise protocol-v12 support exchange a reliable 76-byte v12
+  capability datagram over direct Steam or localhost connections. It uses
+  explicit little-endian serialization and validates the current
+  authenticated role/session plus map, build-contract, and content-contract
+  identities before activating. Root, skeletal animation, appearances, and
+  rendering still use protocol v11 at this checkpoint.
 - A stale remote player disappears after 1.5 seconds.
 - The sender captures Skate 3's final rendered bone palettes after its
   animation graph, IK, tricks, and bails have evaluated.

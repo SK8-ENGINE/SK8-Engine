@@ -467,6 +467,20 @@ Current checkpoint:
   visibility, nearby-player, far-presence, attachment, and population-based
   downgrade paths are removed. Adaptive fidelity is deferred unless future
   measured limits justify a new explicit decision.
+- In run `20260823-195635-7da2d97a`, the user reported correct full-fidelity
+  behavior with only a very small residual micro-stutter, which is deferred
+  for later polish. Telemetry independently showed all 20 sender/receiver
+  paths completing at 60 Hz, zero held-latest playback, sequence gaps,
+  superseded assemblies, relevance drops, relayed realtime packets, socket
+  failures, delivery-policy errors, renderer-resource faults, or unsafe GPU
+  upload reuse. This telemetry does not establish the user's visual result.
+- Commit `0ee80c9` enables the first live protocol-v12 migration gate without
+  changing gameplay traffic. A peer must first advertise v12 support through
+  the authenticated v11 control path, then pass the explicit-endian v12
+  capability envelope and map/build/content compatibility checks for its
+  current role, process session, and monotonic transport generation. Stale or
+  incompatible generations cannot activate. Root, pose, appearance, board,
+  and rendering traffic remain protocol v11.
 
 Completion:
 
@@ -477,8 +491,8 @@ Completion:
 
 ## Phase 5: reduce bandwidth without fidelity loss
 
-Purpose: make exact animation for every player affordable without changing its visible
-result.
+Purpose: make exact animation for every player affordable without changing
+its visible result.
 
 Order:
 
