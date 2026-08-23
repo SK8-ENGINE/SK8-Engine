@@ -75,6 +75,7 @@
 REXCVAR_DECLARE(bool, async_shader_compilation);
 REXCVAR_DECLARE(bool, native_render_suppress_emulated_draws);
 REXCVAR_DECLARE(bool, readback_resolve_half_pixel_offset);
+REXCVAR_DECLARE(bool, skate3_multiplayer_async_appearance_prepare);
 REXCVAR_DECLARE(bool, skate3_native_render_scene_2d);
 REXCVAR_DECLARE(bool, skate3_native_render_scene_backface_cull);
 REXCVAR_DECLARE(bool, skate3_native_render_scene_bloom);
@@ -10627,6 +10628,11 @@ void ObserveRemoteAppearanceSession(
   }
   if (multiplayer::lifecycle::RemoteAppearanceSessionChanged(
           installed->second.session, session)) {
+    if (REXCVAR_GET(
+            skate3_multiplayer_async_appearance_prepare)) {
+      multiplayer_assets::ForgetRecipeAppearanceResolve(
+          role, installed->second.session);
+    }
     ReleaseRemoteAppearanceResources(
         context, role, installed->second, "session changed");
     g_remote_appearances.erase(installed);
@@ -10637,6 +10643,11 @@ void ObserveRemoteAppearanceSession(
 void ReleaseRetiredRemoteAppearance(
     const NativeGuestOutputRenderContext& context,
     const multiplayer::RemotePeerRetirement& retirement) {
+  if (REXCVAR_GET(
+          skate3_multiplayer_async_appearance_prepare)) {
+    multiplayer_assets::ForgetRecipeAppearanceResolve(
+        retirement.role, retirement.session);
+  }
   const auto installed =
       g_remote_appearances.find(retirement.role);
   if (installed == g_remote_appearances.end() ||
@@ -10673,6 +10684,25 @@ bool InstallRemoteRecipeAppearance(
       return true;
     }
   }
+  const bool async_prepare =
+      REXCVAR_GET(skate3_multiplayer_async_appearance_prepare);
+  const multiplayer_assets::RecipeResolveKey resolve_key = {
+      role, session, appearance.identity};
+  std::shared_ptr<const multiplayer_assets::RecipeAppearance>
+      prepared;
+  multiplayer_assets::RecipeResolveStatus resolve_status =
+      multiplayer_assets::RecipeResolveStatus::kUnknown;
+  if (async_prepare) {
+    resolve_status =
+        multiplayer_assets::PollRecipeAppearanceResolve(
+            resolve_key, prepared);
+    if (resolve_status ==
+            multiplayer_assets::RecipeResolveStatus::kPending ||
+        resolve_status ==
+            multiplayer_assets::RecipeResolveStatus::kFailed) {
+      return false;
+    }
+  }
   const std::vector<uint8_t>& bytes =
       *appearance.bytes;
   size_t cursor = 0;
@@ -10687,9 +10717,22 @@ bool InstallRemoteRecipeAppearance(
       cursor + header.recipe_bytes > bytes.size()) {
     return false;
   }
-  std::vector<uint8_t> recipe(
-      bytes.begin() + cursor,
-      bytes.begin() + cursor + header.recipe_bytes);
+  if (async_prepare &&
+      resolve_status ==
+          multiplayer_assets::RecipeResolveStatus::kUnknown) {
+    std::vector<uint8_t> recipe(
+        bytes.begin() + cursor,
+        bytes.begin() + cursor + header.recipe_bytes);
+    multiplayer_assets::QueueRecipeAppearanceResolve(
+        resolve_key, std::move(recipe));
+    return false;
+  }
+  std::vector<uint8_t> recipe;
+  if (!async_prepare) {
+    recipe.assign(
+        bytes.begin() + cursor,
+        bytes.begin() + cursor + header.recipe_bytes);
+  }
   cursor += header.recipe_bytes;
   struct ParsedBinding {
     NetworkRecipeAppearanceBinding wire;
@@ -10723,22 +10766,31 @@ bool InstallRemoteRecipeAppearance(
     return false;
   }
 
-  multiplayer_assets::RecipeAppearance resolved;
-  if (!multiplayer_assets::ResolveRecipeAppearance(
-          recipe, true, resolved)) {
+  multiplayer_assets::RecipeAppearance synchronous_resolved;
+  const multiplayer_assets::RecipeAppearance* resolved =
+      prepared.get();
+  if (!async_prepare) {
+    if (!multiplayer_assets::ResolveRecipeAppearance(
+            recipe, true, synchronous_resolved)) {
+      return false;
+    }
+    resolved = &synchronous_resolved;
+  }
+  if (resolved == nullptr) {
     return false;
   }
+  const auto install_start = std::chrono::steady_clock::now();
   if (!multiplayer::lifecycle::CompleteAppearancePieceCount(
-          header.binding_count, resolved.pieces.size())) {
+          header.binding_count, resolved->pieces.size())) {
     REXLOG_WARN(
         "multiplayer: recipe appearance incomplete role={} "
         "id={:016X} expected_pieces={} resolved_pieces={}",
         role, appearance.identity, header.binding_count,
-        resolved.pieces.size());
+        resolved->pieces.size());
     return false;
   }
   for (const multiplayer_assets::RecipePiece& source :
-       resolved.pieces) {
+       resolved->pieces) {
     if (!bindings.contains(source.model_id) ||
         source.mesh.vertices.empty() ||
         source.mesh.indices.empty()) {
@@ -10754,15 +10806,15 @@ bool InstallRemoteRecipeAppearance(
       header.root_x_axis, 3, installed.root_x_axis);
   std::copy_n(
       header.root_z_axis, 3, installed.root_z_axis);
-  installed.items.reserve(resolved.pieces.size());
+  installed.items.reserve(resolved->pieces.size());
   installed.texture_store_keys.reserve(
-      resolved.textures.size());
+      resolved->textures.size());
 
   std::unordered_map<uint64_t, uint32_t> texture_objects;
-  texture_objects.reserve(resolved.textures.size());
+  texture_objects.reserve(resolved->textures.size());
   uint32_t texture_index = 0;
   for (const auto& [texture_id, source] :
-       resolved.textures) {
+       resolved->textures) {
     if (source.bytes.empty() || source.width == 0 ||
         source.height == 0 || source.row_pitch == 0) {
       continue;
@@ -10865,7 +10917,7 @@ bool InstallRemoteRecipeAppearance(
       };
   size_t piece_index = 0;
   for (const multiplayer_assets::RecipePiece& source :
-       resolved.pieces) {
+       resolved->pieces) {
     const auto binding = bindings.find(source.model_id);
     if (binding == bindings.end() ||
         source.mesh.vertices.empty() ||
@@ -11039,6 +11091,22 @@ bool InstallRemoteRecipeAppearance(
   }
   BuildRemoteAppearanceRenderCaches(role, installed);
   state = std::move(installed);
+  if (async_prepare) {
+    // Leave the table as the final owner so its asset worker, rather than
+    // this render thread, releases the large CPU-side decode result.
+    prepared.reset();
+    multiplayer_assets::ForgetRecipeAppearanceResolve(
+        role, session);
+  }
+  const double install_ms =
+      std::chrono::duration<double, std::milli>(
+          std::chrono::steady_clock::now() - install_start)
+          .count();
+  REXLOG_INFO(
+      "multiplayer-appearance-install: role={} session={} "
+      "appearance={:016X} upload={:.3f}ms pieces={} textures={}",
+      role, session, appearance.identity, install_ms,
+      state.items.size(), texture_objects.size());
   REXLOG_INFO(
       "multiplayer: installed recipe appearance role={} "
       "id={:016X} pieces={} textures={} wire_bytes={}",

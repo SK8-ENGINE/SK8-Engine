@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <memory>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -59,6 +60,21 @@ struct RecipeAppearance {
   std::unordered_map<std::uint64_t, RecipeTexture> textures;
 };
 
+struct RecipeResolveKey {
+  std::uint32_t role = 0;
+  std::uint32_t session = 0;
+  std::uint64_t appearance_id = 0;
+
+  bool operator==(const RecipeResolveKey&) const = default;
+};
+
+enum class RecipeResolveStatus : std::uint8_t {
+  kUnknown,
+  kPending,
+  kReady,
+  kFailed,
+};
+
 // Strictly validates a live `cas_db` recipe and resolves its high-detail
 // model/texture IDs against the receiver's own extracted retail catalogue.
 // The recipe is network-safe metadata only; this routine never accepts paths
@@ -67,6 +83,23 @@ bool ResolveRecipeAppearance(
     const std::vector<std::uint8_t>& recipe,
     bool load_textures,
     RecipeAppearance& output);
+
+// Queues heavy receiver-side recipe model/texture resolution on one
+// background asset worker. Requests are latest-wins per role and results are
+// published only when the complete role/session/appearance key still
+// matches, preventing a slow old wardrobe decode from replacing a newer one.
+void QueueRecipeAppearanceResolve(
+    const RecipeResolveKey& key,
+    std::vector<std::uint8_t> recipe);
+
+RecipeResolveStatus PollRecipeAppearanceResolve(
+    const RecipeResolveKey& key,
+    std::shared_ptr<const RecipeAppearance>& output);
+
+// Removes pending/prepared state only when the supplied peer generation
+// matches. An in-flight stale result is discarded when it completes.
+void ForgetRecipeAppearanceResolve(
+    std::uint32_t role, std::uint32_t session);
 
 // Polls the configured local SKATER.P profile and replaces `recipe` only
 // when its validated cas_db payload changes. The save container itself is

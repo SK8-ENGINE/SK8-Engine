@@ -1,11 +1,14 @@
 #include "skate3_multiplayer_assets.h"
+#include "skate3_multiplayer_latest_request.h"
 
 #include <algorithm>
 #include <array>
 #include <bit>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstring>
+#include <deque>
 #include <fstream>
 #include <iomanip>
 #include <limits>
@@ -14,6 +17,7 @@
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <unordered_map>
 #include <utility>
 
@@ -30,6 +34,11 @@ REXCVAR_DEFINE_STRING(
     "Optional path to the local SKATER.P save whose validated cas_db recipe "
     "is used for live wardrobe appearance changes. Only the compact recipe "
     "is read; no other save data enters multiplayer.");
+REXCVAR_DEFINE_BOOL(
+    skate3_multiplayer_async_appearance_prepare, false,
+    "Skate 3/Multiplayer",
+    "Resolve remote Create-a-Skater models and textures on a background "
+    "asset worker before the renderer uploads them.");
 
 namespace skate3::multiplayer_assets {
 namespace {
@@ -1271,6 +1280,189 @@ bool ResolveRecipeAppearance(
       resolved.gender);
   output = std::move(resolved);
   return true;
+}
+
+namespace {
+
+struct RecipeResolveTask {
+  RecipeResolveKey key;
+  std::vector<std::uint8_t> recipe;
+};
+
+class RecipeResolveWorker {
+ public:
+  RecipeResolveWorker()
+      : thread_([this] { ThreadMain(); }) {}
+
+  ~RecipeResolveWorker() {
+    {
+      std::lock_guard lock(mutex_);
+      stopping_ = true;
+    }
+    ready_.notify_one();
+    if (thread_.joinable()) {
+      thread_.join();
+    }
+  }
+
+  void Queue(
+      const RecipeResolveKey& key,
+      std::vector<std::uint8_t> recipe) {
+    {
+      std::lock_guard lock(mutex_);
+      std::shared_ptr<const RecipeAppearance> displaced;
+      if (!results_.Begin(key.role, key, &displaced)) {
+        return;
+      }
+      if (displaced != nullptr) {
+        retired_results_.push_back(std::move(displaced));
+      }
+      std::erase_if(
+          tasks_, [&key](const RecipeResolveTask& task) {
+            return task.key.role == key.role;
+          });
+      tasks_.push_back({key, std::move(recipe)});
+    }
+    REXLOG_INFO(
+        "multiplayer-appearance-prepare: role={} session={} "
+        "appearance={:016X} state=queued",
+        key.role, key.session, key.appearance_id);
+    ready_.notify_one();
+  }
+
+  RecipeResolveStatus Poll(
+      const RecipeResolveKey& key,
+      std::shared_ptr<const RecipeAppearance>& output) {
+    switch (results_.Poll(key.role, key, output)) {
+      case multiplayer::worker::LatestResultStatus::kPending:
+        return RecipeResolveStatus::kPending;
+      case multiplayer::worker::LatestResultStatus::kReady:
+        return RecipeResolveStatus::kReady;
+      case multiplayer::worker::LatestResultStatus::kFailed:
+        return RecipeResolveStatus::kFailed;
+      default:
+        return RecipeResolveStatus::kUnknown;
+    }
+  }
+
+  void Forget(std::uint32_t role, std::uint32_t session) {
+    bool wake = false;
+    {
+      std::lock_guard lock(mutex_);
+      std::shared_ptr<const RecipeAppearance> retired =
+          results_.TakeIf(
+              role, [session](const RecipeResolveKey& key) {
+                return key.session == session;
+              });
+      if (retired != nullptr) {
+        retired_results_.push_back(std::move(retired));
+        wake = true;
+      }
+      std::erase_if(
+          tasks_, [role, session](
+                      const RecipeResolveTask& task) {
+            return task.key.role == role &&
+                   task.key.session == session;
+          });
+    }
+    if (wake) {
+      ready_.notify_one();
+    }
+  }
+
+ private:
+  void ThreadMain() {
+    for (;;) {
+      RecipeResolveTask task;
+      std::shared_ptr<const RecipeAppearance> retired;
+      {
+        std::unique_lock lock(mutex_);
+        ready_.wait(lock, [this] {
+          return stopping_ || !retired_results_.empty() ||
+                 !tasks_.empty();
+        });
+        if (stopping_) {
+          return;
+        }
+        if (!retired_results_.empty()) {
+          retired = std::move(retired_results_.front());
+          retired_results_.pop_front();
+        }
+        if (retired != nullptr) {
+          continue;
+        }
+        task = std::move(tasks_.front());
+        tasks_.pop_front();
+        if (!results_.IsCurrent(task.key.role, task.key)) {
+          continue;
+        }
+      }
+
+      const auto start = std::chrono::steady_clock::now();
+      auto resolved = std::make_shared<RecipeAppearance>();
+      const bool succeeded = ResolveRecipeAppearance(
+          task.recipe, true, *resolved);
+      const double elapsed_ms =
+          std::chrono::duration<double, std::milli>(
+              std::chrono::steady_clock::now() - start)
+              .count();
+      const std::size_t piece_count =
+          succeeded ? resolved->pieces.size() : 0;
+      const std::size_t texture_count =
+          succeeded ? resolved->textures.size() : 0;
+      std::shared_ptr<const RecipeAppearance> result;
+      if (succeeded) {
+        result = std::move(resolved);
+      }
+      const bool published = results_.Publish(
+          task.key.role, task.key, std::move(result));
+      REXLOG_INFO(
+          "multiplayer-appearance-prepare: role={} session={} "
+          "appearance={:016X} state={} prepare={:.3f}ms "
+          "pieces={} textures={}",
+          task.key.role, task.key.session,
+          task.key.appearance_id,
+          published
+              ? (succeeded ? "ready" : "failed")
+              : "stale",
+          elapsed_ms, piece_count, texture_count);
+    }
+  }
+
+  std::mutex mutex_;
+  std::condition_variable ready_;
+  std::deque<RecipeResolveTask> tasks_;
+  std::deque<std::shared_ptr<const RecipeAppearance>>
+      retired_results_;
+  multiplayer::worker::LatestResultTable<
+      std::uint32_t, RecipeResolveKey, RecipeAppearance>
+      results_;
+  std::thread thread_;
+  bool stopping_ = false;
+};
+
+RecipeResolveWorker& GetRecipeResolveWorker() {
+  static RecipeResolveWorker worker;
+  return worker;
+}
+
+}  // namespace
+
+void QueueRecipeAppearanceResolve(
+    const RecipeResolveKey& key,
+    std::vector<std::uint8_t> recipe) {
+  GetRecipeResolveWorker().Queue(key, std::move(recipe));
+}
+
+RecipeResolveStatus PollRecipeAppearanceResolve(
+    const RecipeResolveKey& key,
+    std::shared_ptr<const RecipeAppearance>& output) {
+  return GetRecipeResolveWorker().Poll(key, output);
+}
+
+void ForgetRecipeAppearanceResolve(
+    std::uint32_t role, std::uint32_t session) {
+  GetRecipeResolveWorker().Forget(role, session);
 }
 
 bool PollLocalProfileRecipe(

@@ -539,6 +539,7 @@ try {
         animation_rate_hz = 60
         interpolation_ms = 50
         replication_worker = $true
+        async_appearance_prepare = $true
         appearance_recovery_check = [bool]$AppearanceRecoveryCheck
         appearance_recovery_receiver = if ($AppearanceRecoveryCheck) {
             3
@@ -613,9 +614,12 @@ Clients: $Clients
 Transport: localhost UDP
 Quality: Balanced, 60 Hz root, 60 Hz animation, 50 ms interpolation
 Profiles: persistent per role across visual-check runs
+Appearance preparation: background CPU worker enabled
 
 Visual scenario:
-1. Wait until every client has loaded the same map and all remote skaters appear.
+1. Watch initial map entry closely. Remote players may briefly use the teal
+   proxy while their outfit is prepared, but each should change once to its
+   complete outfit. Note any obvious freeze when that change occurs.
 2. On each client, inspect every other player: body, top, trousers, shoes,
    hair/hat, accessories, board deck, trucks, and wheels. Existing distinct
    saved outfits are enough; do not change wardrobes for this check.
@@ -630,6 +634,8 @@ Visual scenario:
 
 Success:
 - Existing outfits and boards stay complete and correct.
+- Each remote outfit replaces its temporary proxy promptly, without an
+  obvious client-FPS freeze at the installation moment.
 - Nearby remote animation remains smooth through the bail and detached board.
 - No teal fallback, disappearing player, attachment drift, or obvious new
   client stall occurs.
@@ -714,6 +720,7 @@ separately, then ask the agent to analyze this run directory.
             '--skate3_multiplayer_local_animation_rate=60',
             '--skate3_multiplayer_local_interpolation_ms=50',
             '--skate3_multiplayer_replication_worker=true',
+            '--skate3_multiplayer_async_appearance_prepare=true',
             '--skate3_native_render_scene_perf_log=true',
             '--skate3_native_render_scene_perf_interval=300',
             (

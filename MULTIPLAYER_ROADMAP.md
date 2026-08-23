@@ -163,7 +163,7 @@ Work:
 - Resolve row-vector versus column-vector canonical layout selection.
 - Validate runtime-composed shoe, skin, board, and wheel textures.
 
-Current checkpoint (pending a user visual/performance pass):
+Current checkpoint:
 
 - Per-appearance renderer caches now retain weighted palette rows, canonical
   remaps, board-piece classification, and validated exact/canonical track
@@ -177,6 +177,14 @@ Current checkpoint (pending a user visual/performance pass):
 - Automated cache tests cover packed weight discovery, malformed tracks,
   stable-index hits, and changed track layouts. Runtime telemetry reports any
   unexpected per-frame weighted-row fallback or rig retry.
+- A three-client visual pass at `f895626` found healthy outfits, boards, and
+  animation correct. Cache telemetry reported no weighted-row fallback, rig
+  retry, socket failure, or multiplayer error.
+- That pass measured one-time recipe installation spikes of 221-257 ms on the
+  render thread. A guarded background asset worker now prepares recipe models
+  and textures with latest-outfit/session rejection before the renderer sees
+  them. The wire protocol is unchanged, and the visual/performance pass for
+  this worker is the next acceptance gate.
 
 Completion:
 

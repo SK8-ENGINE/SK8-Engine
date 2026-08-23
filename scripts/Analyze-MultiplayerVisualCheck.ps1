@@ -27,6 +27,7 @@ if (-not (Test-Path -LiteralPath $clientsRoot -PathType Container)) {
 function Match-Count {
     param(
         [Parameter(Mandatory)]
+        [AllowEmptyCollection()]
         [AllowEmptyString()]
         [string[]]$Lines,
         [Parameter(Mandatory)][string]$Pattern
@@ -38,6 +39,7 @@ function Match-Count {
 function Maximum-IntegerField {
     param(
         [Parameter(Mandatory)]
+        [AllowEmptyCollection()]
         [AllowEmptyString()]
         [string[]]$Lines,
         [Parameter(Mandatory)][string]$Name
@@ -58,6 +60,37 @@ function Maximum-IntegerField {
         return 'n/a'
     }
     return [string]$maximum
+}
+
+function Maximum-DecimalField {
+    param(
+        [Parameter(Mandatory)]
+        [AllowEmptyCollection()]
+        [AllowEmptyString()]
+        [string[]]$Lines,
+        [Parameter(Mandatory)][string]$Name
+    )
+
+    $maximum = $null
+    $pattern = [regex]::Escape($Name) + '=([0-9]+(?:\.[0-9]+)?)'
+    foreach ($line in $Lines) {
+        $match = [regex]::Match($line, $pattern)
+        if ($match.Success) {
+            $value = [double]::Parse(
+                $match.Groups[1].Value,
+                [Globalization.CultureInfo]::InvariantCulture
+            )
+            if ($null -eq $maximum -or $value -gt $maximum) {
+                $maximum = $value
+            }
+        }
+    }
+    if ($null -eq $maximum) {
+        return 'n/a'
+    }
+    return $maximum.ToString(
+        '0.###', [Globalization.CultureInfo]::InvariantCulture
+    )
 }
 
 $summary = New-Object System.Collections.Generic.List[string]
@@ -109,6 +142,25 @@ foreach ($client in $clientDirectories) {
             ) |
             ForEach-Object { $_.Line }
     )
+    $appearancePrepareLines = @(
+        $lines |
+            Select-String -Pattern (
+                'multiplayer-appearance-prepare:'
+            ) |
+            ForEach-Object { $_.Line }
+    )
+    $appearanceReadyLines = @(
+        $appearancePrepareLines |
+            Select-String -Pattern 'state=ready' |
+            ForEach-Object { $_.Line }
+    )
+    $appearanceInstallLines = @(
+        $lines |
+            Select-String -Pattern (
+                'multiplayer-appearance-install:'
+            ) |
+            ForEach-Object { $_.Line }
+    )
     $lastRate = if ($rateLines.Count -gt 0) {
         $rateLines[-1]
     } else {
@@ -123,6 +175,34 @@ foreach ($client in $clientDirectories) {
     $summary.Add(
         "multiplayer_render_cache_samples=" +
         $renderCacheRuntimeLines.Count
+    )
+    $summary.Add(
+        "appearance_prepare_events=" +
+        $appearancePrepareLines.Count
+    )
+    $summary.Add(
+        "appearance_prepare_ready=" +
+        $appearanceReadyLines.Count
+    )
+    $summary.Add(
+        'appearance_prepare_failed=' +
+        (Match-Count $appearancePrepareLines 'state=failed')
+    )
+    $summary.Add(
+        'appearance_prepare_stale=' +
+        (Match-Count $appearancePrepareLines 'state=stale')
+    )
+    $summary.Add(
+        'max_appearance_prepare_ms=' +
+        (Maximum-DecimalField $appearanceReadyLines 'prepare')
+    )
+    $summary.Add(
+        "appearance_gpu_install_events=" +
+        $appearanceInstallLines.Count
+    )
+    $summary.Add(
+        'max_appearance_gpu_install_ms=' +
+        (Maximum-DecimalField $appearanceInstallLines 'upload')
     )
     $summary.Add(
         'max_socket_failures=' +
@@ -316,6 +396,22 @@ foreach ($client in $clientDirectories) {
         'last_multiplayer_render_cache=' +
         $(if ($renderCacheRuntimeLines.Count -gt 0) {
             $renderCacheRuntimeLines[-1]
+        } else {
+            'missing'
+        })
+    )
+    $summary.Add(
+        'last_appearance_prepare=' +
+        $(if ($appearancePrepareLines.Count -gt 0) {
+            $appearancePrepareLines[-1]
+        } else {
+            'missing'
+        })
+    )
+    $summary.Add(
+        'last_appearance_gpu_install=' +
+        $(if ($appearanceInstallLines.Count -gt 0) {
+            $appearanceInstallLines[-1]
         } else {
             'missing'
         })

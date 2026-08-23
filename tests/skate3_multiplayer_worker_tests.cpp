@@ -1,4 +1,5 @@
 #include "skate3_multiplayer_worker.h"
+#include "skate3_multiplayer_latest_request.h"
 
 #include <atomic>
 #include <cstdint>
@@ -25,6 +26,21 @@ struct TestRetirement {
 using Mailbox =
     skate3::multiplayer::worker::LatestFrameMailbox<
         TestInput, TestPlayer, TestRetirement>;
+
+struct TestRequestKey {
+  std::uint32_t session = 0;
+  std::uint64_t appearance = 0;
+
+  bool operator==(const TestRequestKey&) const = default;
+};
+
+struct TestRequestResult {
+  std::uint64_t appearance = 0;
+};
+
+using ResultTable =
+    skate3::multiplayer::worker::LatestResultTable<
+        std::uint32_t, TestRequestKey, TestRequestResult>;
 
 int g_failures = 0;
 
@@ -200,6 +216,115 @@ void TestConcurrentHandoff() {
          "concurrent retirement payloads were corrupted");
 }
 
+void TestLatestRequestRejectsStalePublication() {
+  using Status =
+      skate3::multiplayer::worker::LatestResultStatus;
+  ResultTable table;
+  const TestRequestKey old_key{7, 100};
+  const TestRequestKey new_key{7, 200};
+
+  Expect(table.Begin(2, old_key),
+         "first keyed request was not accepted");
+  Expect(!table.Begin(2, old_key),
+         "duplicate keyed request restarted pending work");
+  Expect(table.Begin(2, new_key),
+         "new appearance did not supersede old work");
+  Expect(!table.Publish(
+             2, old_key,
+             std::make_shared<const TestRequestResult>(
+                 TestRequestResult{100})),
+         "stale appearance result was published");
+
+  std::shared_ptr<const TestRequestResult> result;
+  Expect(table.Poll(2, old_key, result) == Status::kUnknown,
+         "superseded key remained externally visible");
+  Expect(table.Poll(2, new_key, result) == Status::kPending,
+         "newest appearance did not remain pending");
+  Expect(table.Publish(
+             2, new_key,
+             std::make_shared<const TestRequestResult>(
+                 TestRequestResult{200})),
+         "current appearance result was rejected");
+  Expect(table.Poll(2, new_key, result) == Status::kReady &&
+             result != nullptr && result->appearance == 200,
+         "current appearance result was not returned");
+}
+
+void TestLatestRequestFailureAndGenerationForget() {
+  using Status =
+      skate3::multiplayer::worker::LatestResultStatus;
+  ResultTable table;
+  const TestRequestKey first_session{11, 300};
+  const TestRequestKey next_session{12, 300};
+
+  Expect(table.Begin(3, first_session),
+         "first session request was not accepted");
+  Expect(table.Publish(3, first_session, nullptr),
+         "current failed result was rejected");
+  std::shared_ptr<const TestRequestResult> result;
+  Expect(
+      table.Poll(3, first_session, result) == Status::kFailed &&
+          result == nullptr,
+      "failed result did not remain terminal for its key");
+  Expect(
+      !table.ForgetIf(
+          3, [](const TestRequestKey& key) {
+            return key.session == 99;
+          }),
+      "mismatched retirement erased current generation");
+  Expect(
+      table.Poll(3, first_session, result) == Status::kFailed,
+      "mismatched retirement changed current generation");
+  Expect(
+      table.ForgetIf(
+          3, [](const TestRequestKey& key) {
+            return key.session == 11;
+          }),
+      "matching retirement did not erase current generation");
+  Expect(
+      table.Poll(3, first_session, result) == Status::kUnknown,
+      "retired generation remained visible");
+  Expect(table.Begin(3, next_session),
+         "reconnected generation was not accepted");
+}
+
+void TestLatestRequestTransfersResultOwnership() {
+  using Status =
+      skate3::multiplayer::worker::LatestResultStatus;
+  ResultTable table;
+  const TestRequestKey old_key{20, 400};
+  const TestRequestKey new_key{20, 500};
+  Expect(table.Begin(4, old_key),
+         "ownership test request was not accepted");
+  Expect(table.Publish(
+             4, old_key,
+             std::make_shared<const TestRequestResult>(
+                 TestRequestResult{400})),
+         "ownership test result was not published");
+
+  std::shared_ptr<const TestRequestResult> displaced;
+  Expect(table.Begin(4, new_key, &displaced) &&
+             displaced != nullptr &&
+             displaced->appearance == 400,
+         "superseded result ownership was not transferred");
+  std::shared_ptr<const TestRequestResult> result;
+  Expect(table.Poll(4, new_key, result) == Status::kPending,
+         "replacement request was not pending after displacement");
+  Expect(table.Publish(
+             4, new_key,
+             std::make_shared<const TestRequestResult>(
+                 TestRequestResult{500})),
+         "replacement result was not published");
+  const auto taken = table.TakeIf(
+      4, [](const TestRequestKey& key) {
+        return key.session == 20;
+      });
+  Expect(taken != nullptr && taken->appearance == 500,
+         "matching result ownership was not extracted");
+  Expect(table.Poll(4, new_key, result) == Status::kUnknown,
+         "extracted result remained visible");
+}
+
 }  // namespace
 
 int main() {
@@ -207,6 +332,9 @@ int main() {
   TestImmutablePresentationAndSequences();
   TestEmptyPresentationAndClear();
   TestConcurrentHandoff();
+  TestLatestRequestRejectsStalePublication();
+  TestLatestRequestFailureAndGenerationForget();
+  TestLatestRequestTransfersResultOwnership();
 
   if (g_failures != 0) {
     std::cerr << g_failures << " multiplayer worker test(s) failed\n";

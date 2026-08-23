@@ -88,6 +88,13 @@ AppID and follow Valve's setup and redistributable requirements.
   vertex influences or builds a second temporary canonical-remap vector for
   binding discovery each frame. Older compatibility appearances can still
   retry a missing live rig lookup.
+- The visual-check path prepares remote recipe meshes and textures on one
+  background asset worker. Requests are latest-wins per role and keyed by
+  process session plus appearance identity, so a slow old decode cannot
+  replace a newer wardrobe or reconnect generation. The render thread still
+  validates the compact wire bindings and performs GPU resource creation.
+  This path is disabled by default outside controlled validation while its
+  visual and stall telemetry gate is completed.
 - Localhost development still uses role 1 as a small relay because all test
   processes share one machine. Internet Steam sessions use direct peer fan-out.
 - Every receiver keeps an independent interpolation/reassembly timeline for
@@ -267,7 +274,12 @@ captures, render consumptions, output sequence, and local-input age. The
 renderer also emits `multiplayer-render-cache` lines for one-time cache
 preparation, validated track-index hits/scans, and any unexpected runtime
 weight or rig fallback. The visual-check analyzer includes the latest timing
-and cache lines.
+and cache lines. Background recipe work emits
+`multiplayer-appearance-prepare` state and CPU timing, while the remaining
+render-thread upload emits `multiplayer-appearance-install` timing. The
+three-client `f895626` baseline measured 221-257 ms one-time synchronous
+installation maxima; the background-preparation check should reduce those
+render-thread maxima without changing the installed outfit.
 
 Steam sessions now use direct peer fan-out. With ten players all mutually
 nearby, each player uploads one detailed stream to nine peers and receives
@@ -282,6 +294,18 @@ Higher population work still needs stronger skeleton LOD, lower-rate distant
 players, interest-area partitioning, and eventually dedicated authoritative
 servers or relays. The 99-bot root-presence result validates inexpensive
 presence packets only, not 100 fully animated skaters.
+
+## Known wardrobe validation limitation
+
+If Skate 3's own clothing screen fails to display a local piece and the
+native scene exposes no local skater items, multiplayer has no complete local
+pose or appearance to publish. Other clients then correctly remain on the
+teal proxy, and a receiver that also lacks its own live presentation root may
+show incoming peers as proxies. Telemetry from the `f895626` wardrobe run
+captured this as `multiplayer-local-capture: state=missing` with
+`skater_items=0`; it was separate from the remote render-cache behavior.
+Diagnosing why the retail clothing presentation itself lost the top remains a
+separate correctness task.
 
 ## Current non-goals
 
