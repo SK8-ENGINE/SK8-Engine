@@ -233,9 +233,12 @@ using protocol::SequenceNewer;
 using protocol::SequenceNewerOrEqual;
 
 struct NetworkTuning {
-  std::int32_t pose_rate = 60;
-  std::int32_t animation_rate = 60;
-  std::int32_t interpolation_ms = 50;
+  std::int32_t pose_rate =
+      bandwidth::kRootSnapshotRateHz;
+  std::int32_t animation_rate =
+      bandwidth::kAnimationSnapshotRateHz;
+  std::int32_t interpolation_ms =
+      bandwidth::kMinimumInterpolationDelayMs;
   bool full_fidelity = true;
 };
 

@@ -554,7 +554,7 @@ try {
     } elseif ($MinimumInterpolationCheck) {
         0
     } else {
-        100
+        0
     }
     $manifest = [ordered]@{
         schema = 1
@@ -642,7 +642,7 @@ $runRoot
 
 Clients: $Clients
 Transport: localhost UDP
-Quality: Complete pose, 60 Hz root, 20 Hz animation, 100 ms interpolation
+Quality: Complete pose, 60 Hz root, 20 Hz animation, $interpolationMs ms configured interpolation
 Fault: client 3 intentionally drops role 2's final appearance chunk until
 the bounded assembly timeout requests a resend.
 
@@ -683,7 +683,7 @@ $runRoot
 Clients: 5
 Transport: localhost UDP
 Quality: Complete pose, 60 Hz root, 20 Hz animation
-Interpolation: true 0 ms diagnostic bypass
+Interpolation: balanced 0 ms configured floor
 Change under test: the presentation buffer and its adaptive safety floor are
 disabled. Remote playback targets the newest available sender time. Rates,
 pose data, four-sample curve implementation, outfits, boards, and transport
@@ -698,11 +698,11 @@ Visual scenario:
    No role-by-role choreography is required.
 4. Close all clients when finished.
 
-Expected tradeoff:
+Expected behavior:
 - Remote movement should have the least intentional latency possible.
-- With no future snapshot buffered, animation may hold or look less smooth
-  when a complete 20 Hz pose has not arrived yet. This is intentional for the
-  diagnostic and is not the proposed final shipping value.
+- The presentation clock remains bounded to a completed animation interval,
+  so zero configured delay still retains natural pair look-behind rather than
+  rendering an incomplete pose.
 
 Report whether responsiveness improves and whether micro-stutter is better,
 unchanged, or worse. Logs cannot establish visual smoothness.
@@ -719,7 +719,7 @@ Transport: localhost UDP
 Quality: Complete pose, 60 Hz root, 20 Hz animation
 Interpolation: 250 ms minimum (maximum diagnostic preset)
 Change under test: remote presentation now stays at least a quarter-second
-behind the sender instead of the previous 100 ms minimum. This provides a
+behind the sender instead of the balanced 0 ms configured floor. This provides a
 much deeper completed-snapshot buffer while preserving the same pose data,
 rates, four-sample interpolation, outfits, boards, and transport behavior.
 
@@ -766,7 +766,7 @@ $runRoot
 
 Clients: 5
 Transport: localhost UDP
-Quality: Complete pose, 60 Hz root, 20 Hz animation, 100 ms minimum interpolation
+Quality: Complete pose, 60 Hz root, 20 Hz animation, $interpolationMs ms configured interpolation
 Change under test: the real root and animation rate settings now drive the
 periodic send deadlines. Root/board snapshots remain at 60 Hz while every
 complete final skeletal pose track is sampled at 20 Hz, then reconstructed at
@@ -849,7 +849,7 @@ $runRoot
 
 Clients: 5
 Transport: localhost UDP
-Quality: Complete pose, 60 Hz root, 20 Hz animation, 100 ms interpolation
+Quality: Complete pose, 60 Hz root, 20 Hz animation, $interpolationMs ms configured interpolation
 Wire format: v12 root and grouped animation after negotiation; v11 outfits
 Delivery policy: root/animation unreliable and latest-wins; control/outfits
 reliable
@@ -910,7 +910,7 @@ $runRoot
 
 Clients: $Clients
 Transport: localhost UDP
-Quality: Complete pose, 60 Hz root, 20 Hz animation, 100 ms interpolation
+Quality: Complete pose, 60 Hz root, 20 Hz animation, $interpolationMs ms configured interpolation
 Profiles: persistent per role across visual-check runs
 Appearance preparation: background CPU worker enabled
 Appearance installation: staged GPU upload, maximum 4 operations or 4 ms

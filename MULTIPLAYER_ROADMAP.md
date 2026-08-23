@@ -83,12 +83,15 @@ Latest internet-baseline checkpoint:
 - Every player still receives every track with unchanged 16-bit quantization;
   there are no distance, visibility, importance, or player-count tiers. This
   is temporal sampling, not reduced spatial precision.
-- The interpolation floor is 100 ms and the adaptive delay keeps two complete
-  source periods plus four measured jitter intervals, capped at 250 ms.
+- The balanced interpolation floor is 0 ms. The presentation cursor is still
+  bounded to a completed source interval; the five-client localhost run
+  measured about 74-76 ms of natural look-behind with zero held-latest frames
+  or sequence gaps. Positive floors up to 250 ms remain diagnostic options.
 - Acceptance is at most 112 KiB/s application traffic per peer, projecting to
   less than 8.3 Mibit/s upload for a ten-player direct mesh before Steam
-  framing. The final five-client run must independently pass both user visual
-  inspection and this analyzer-derived live bandwidth gate.
+  framing. The user accepted the zero-floor visual result; telemetry measured
+  103.7-111.3 KiB/s per peer and approximately 3.1-3.3 Mibit/s total upload
+  from each participant in the five-player direct mesh.
 
 ## Phase 0: freeze the protocol-v11 baseline
 

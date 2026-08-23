@@ -10,7 +10,10 @@ namespace skate3::multiplayer::bandwidth {
 // v12 datagram headers, but not Steam's outer transport framing.
 inline constexpr std::int32_t kRootSnapshotRateHz = 60;
 inline constexpr std::int32_t kAnimationSnapshotRateHz = 20;
-inline constexpr std::int32_t kMinimumInterpolationDelayMs = 100;
+// Zero removes the additional configured floor. Playback still remains
+// bounded to a completed animation interval, which measured about 75 ms of
+// natural look-behind in the five-client localhost acceptance run.
+inline constexpr std::int32_t kMinimumInterpolationDelayMs = 0;
 inline constexpr double kPerPeerApplicationBudgetBytesPerSecond =
     112.0 * 1024.0;
 

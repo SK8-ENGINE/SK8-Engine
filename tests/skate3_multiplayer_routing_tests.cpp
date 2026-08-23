@@ -89,7 +89,7 @@ void TestTopologyPolicyAndBudgets() {
       DirectMeshUploadBytesPerSecond(10);
   static_assert(kRootSnapshotRateHz == 60);
   static_assert(kAnimationSnapshotRateHz == 20);
-  static_assert(kMinimumInterpolationDelayMs == 100);
+  static_assert(kMinimumInterpolationDelayMs == 0);
   Expect(ten_player_upload == 1008.0 * 1024.0,
          "ten-player direct-mesh byte budget changed");
   Expect(BitsPerSecond(ten_player_upload) < 8.3 * 1024.0 * 1024.0,

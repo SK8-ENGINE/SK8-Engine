@@ -106,10 +106,11 @@ AppID and follow Valve's setup and redistributable requirements.
 - Positions use custom-map coordinates rather than the hidden retail world's
   absolute coordinates.
 - Received poses use their sender simulation timestamps rather than packet
-  arrival timing. The internet baseline has a 100 ms interpolation floor and
-  automatically retains two complete skeletal samples plus measured jitter,
-  so a render stall or batch of arriving fragments cannot introduce a
-  catch-up step.
+  arrival timing. The balanced baseline adds no configured interpolation
+  floor, but the monotonic presentation clock remains bounded to a completed
+  skeletal interval. The five-client localhost acceptance run consequently
+  retained about 74-76 ms of natural look-behind with zero held-latest
+  playback or sequence gaps.
 - Packets from a different map, protocol version, client slot, process
   session, or unexpected Steam identity are rejected.
 - Peers advertise optional control capabilities with a fixed-size packet.
@@ -190,6 +191,8 @@ are sent at 60 Hz and complete final skeletal poses at the configured 20 Hz
 internet baseline to every recipient. Remote reconstruction continues at
 render cadence. The interpolation floor remains configurable because buffering
 changes presentation latency and jitter tolerance, not spatial pose precision.
+The balanced default is zero additional floor; positive values remain
+available for explicitly impaired network conditions.
 
 Adaptive tiers are intentionally deferred. They may be reconsidered only if
 measured real-world full-fidelity sessions demonstrate a limit that cannot be
@@ -298,8 +301,9 @@ samples per second. The internet baseline therefore activates the existing
 animation-rate control at 20 Hz while retaining 60 Hz root snapshots. Its
 acceptance target is at most 112 KiB/s of application traffic per peer, or
 about 8 Mibit/s upload for a ten-player direct mesh. The analyzer calculates
-both values from every user-run visual check. This target is code-derived from
-the observed retail stream and must be confirmed by live telemetry.
+both values from every user-run visual check. The five-client zero-floor run
+confirmed 103.7-111.3 KiB/s per peer and 402-424 KiB/s total upload per client,
+or approximately 3.1-3.3 Mibit/s before outer transport framing.
 Visual-check builds also emit periodic `multiplayer-perf` windows for local
 final-pose capture, appearance capture/cache work, the replication tick,
 remote appearance installation, remote reconstruction, and their total
@@ -330,7 +334,9 @@ The baseline follows established engine practice rather than treating render
 rate as network rate: Valve documents typical 20-30 packet/s state updates and
 a 100 ms interpolation period, Epic describes smoothing 30 Hz network updates
 at much higher display rates, and Unity documents 30 Hz as its default network
-tick while recommending interpolation when lowering update frequency:
+tick while recommending interpolation when lowering update frequency. This
+project deliberately uses a lower configured floor after its completed-pair
+clock was validated in the five-client local run:
 
 - https://developer.valvesoftware.com/wiki/Source_Multiplayer_Networking
 - https://dev.epicgames.com/documentation/en-us/unreal-engine/understanding-networked-movement-in-the-character-movement-component-for-unreal-engine
