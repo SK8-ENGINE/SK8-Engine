@@ -256,6 +256,14 @@ struct ControlPacket {
          state == AppearanceDeliveryState::kInstalled;
 }
 
+[[nodiscard]] constexpr bool AppearanceStateProgresses(
+    AppearanceDeliveryState current,
+    AppearanceDeliveryState candidate) {
+  return current != candidate &&
+         !(current == AppearanceDeliveryState::kInstalled &&
+           candidate == AppearanceDeliveryState::kReceived);
+}
+
 // Sequence numbers use the standard half-range rule. Subtraction is
 // intentionally unsigned so rollover from UINT32_MAX to zero remains a
 // forward step; the signed interpretation is only used after that defined

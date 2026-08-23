@@ -129,6 +129,7 @@ using protocol::AppearanceDeliveryState;
 using protocol::AppearanceFragmentByteCount;
 using protocol::AppearanceFragmentShapeValid;
 using protocol::AppearanceFragmentPacket;
+using protocol::AppearanceStateProgresses;
 using protocol::AppearanceTransferReceived;
 using protocol::ControlMessageType;
 using protocol::ControlPacket;
@@ -359,7 +360,9 @@ struct PeerControlState {
   std::uint32_t capabilities = 0;
   Clock::time_point last_advertisement_sent{};
   Clock::time_point last_advertisement_received{};
-  std::uint64_t pending_received_appearance = 0;
+  std::uint64_t pending_appearance = 0;
+  AppearanceDeliveryState pending_appearance_state =
+      AppearanceDeliveryState::kUnknown;
   std::uint8_t appearance_state_send_attempts = 0;
   Clock::time_point last_appearance_state_sent{};
 };
@@ -449,6 +452,8 @@ struct TelemetrySnapshot {
   std::uint32_t capability_peers = 0;
   std::uint64_t appearance_receipts_sent = 0;
   std::uint64_t appearance_receipts_received = 0;
+  std::uint64_t appearance_installs_sent = 0;
+  std::uint64_t appearance_installs_received = 0;
   std::uint64_t duplicate_appearance_chunks = 0;
   std::uint64_t animation_present_interpolated = 0;
   std::uint64_t animation_present_held_latest = 0;
@@ -1950,6 +1955,7 @@ class Runtime {
       RemotePeerState& peer = remote_peers_.at(remote_role);
       RemotePlayer remote;
       remote.role = remote_role;
+      remote.session = peer.session;
       if (!SmoothRemote(remote_role, peer, now, remote.pose)) {
         continue;
       }
@@ -2065,6 +2071,10 @@ class Runtime {
         << telemetry_.appearance_receipts_sent
         << " multiplayer_appearance_receipts_received="
         << telemetry_.appearance_receipts_received
+        << " multiplayer_appearance_installs_sent="
+        << telemetry_.appearance_installs_sent
+        << " multiplayer_appearance_installs_received="
+        << telemetry_.appearance_installs_received
         << " multiplayer_duplicate_appearance_chunks="
         << telemetry_.duplicate_appearance_chunks
         << " multiplayer_animation_present_interpolated="
@@ -2085,6 +2095,21 @@ class Runtime {
         << std::bit_cast<std::uint32_t>(telemetry_.remote_position[1])
         << " multiplayer_remote_z_bits="
         << std::bit_cast<std::uint32_t>(telemetry_.remote_position[2]);
+  }
+
+  void ReportRemoteAppearanceInstalled(
+      std::uint32_t role, std::uint32_t session,
+      std::uint64_t appearance_id) {
+    std::scoped_lock lock(mutex_);
+    const auto peer = remote_peers_.find(role);
+    if (peer == remote_peers_.end() ||
+        peer->second.session != session ||
+        peer->second.appearance.identity != appearance_id) {
+      return;
+    }
+    QueueAppearanceState(
+        role, appearance_id,
+        AppearanceDeliveryState::kInstalled);
   }
 
  private:
@@ -2265,16 +2290,21 @@ class Runtime {
     return total;
   }
 
-  void QueueAppearanceReceipt(
-      std::uint32_t role, std::uint64_t appearance_id) {
-    if (appearance_id == 0) {
+  void QueueAppearanceState(
+      std::uint32_t role, std::uint64_t appearance_id,
+      AppearanceDeliveryState state) {
+    if (appearance_id == 0 ||
+        !AppearanceTransferReceived(state)) {
       return;
     }
     PeerControlState& control = peer_control_[role];
-    if (control.pending_received_appearance == appearance_id) {
+    if (control.pending_appearance == appearance_id &&
+        !AppearanceStateProgresses(
+            control.pending_appearance_state, state)) {
       return;
     }
-    control.pending_received_appearance = appearance_id;
+    control.pending_appearance = appearance_id;
+    control.pending_appearance_state = state;
     control.appearance_state_send_attempts = 0;
     control.last_appearance_state_sent = {};
   }
@@ -2695,13 +2725,18 @@ class Runtime {
           return true;
         }
         OutboundAppearanceState& state = outbound->second;
-        if (state.acknowledged_state !=
-            packet.appearance_state) {
+        if (AppearanceStateProgresses(
+                state.acknowledged_state,
+                packet.appearance_state)) {
           state.acknowledged_state =
               packet.appearance_state;
-          if (AppearanceTransferReceived(
-                  packet.appearance_state)) {
+          if (packet.appearance_state ==
+              AppearanceDeliveryState::kReceived) {
             ++telemetry_.appearance_receipts_received;
+          } else if (
+              packet.appearance_state ==
+              AppearanceDeliveryState::kInstalled) {
+            ++telemetry_.appearance_installs_received;
           }
           REXLOG_INFO(
               "multiplayer: peer role={} appearance id={:016X} "
@@ -3020,8 +3055,9 @@ class Runtime {
         peer.appearance.bytes != nullptr &&
         peer.appearance.bytes->size() == packet.total_bytes) {
       ++telemetry_.duplicate_appearance_chunks;
-      QueueAppearanceReceipt(
-          packet.sender_role, packet.appearance_id);
+      QueueAppearanceState(
+          packet.sender_role, packet.appearance_id,
+          AppearanceDeliveryState::kReceived);
       return true;
     }
     AppearanceAssembly& assembly =
@@ -3058,8 +3094,9 @@ class Runtime {
       peer.appearance.bytes =
           std::make_shared<const std::vector<std::uint8_t>>(
               std::move(assembly.bytes));
-      QueueAppearanceReceipt(
-          packet.sender_role, packet.appearance_id);
+      QueueAppearanceState(
+          packet.sender_role, packet.appearance_id,
+          AppearanceDeliveryState::kReceived);
       REXLOG_INFO(
           "multiplayer: received appearance role={} id={:016X} "
           "bytes={} chunks={}",
@@ -3473,7 +3510,7 @@ class Runtime {
     const std::uint8_t maximum_attempts =
         using_steam_ ? 1u : 3u;
     for (auto& [target_role, control] : peer_control_) {
-      if (control.pending_received_appearance == 0 ||
+      if (control.pending_appearance == 0 ||
           (control.capabilities &
            kCapabilityAppearanceState) == 0 ||
           control.appearance_state_send_attempts >=
@@ -3493,14 +3530,19 @@ class Runtime {
       packet.message_type =
           ControlMessageType::kAppearanceState;
       packet.appearance_state =
-          AppearanceDeliveryState::kReceived;
+          control.pending_appearance_state;
       packet.capabilities = kLocalControlCapabilities;
       packet.appearance_id =
-          control.pending_received_appearance;
+          control.pending_appearance;
       if (SendControlPacketToRole(
               packet, target_role, /*relayed=*/false)) {
         ++control.appearance_state_send_attempts;
-        ++telemetry_.appearance_receipts_sent;
+        if (packet.appearance_state ==
+            AppearanceDeliveryState::kInstalled) {
+          ++telemetry_.appearance_installs_sent;
+        } else {
+          ++telemetry_.appearance_receipts_sent;
+        }
       }
     }
 #else
@@ -4220,6 +4262,13 @@ bool TickLocalVisuals(const char* map_name,
 
 void AppendTelemetry(std::ostream& out) {
   ActiveRuntime().Append(out);
+}
+
+void ReportRemoteAppearanceInstalled(
+    std::uint32_t role, std::uint32_t session,
+    std::uint64_t appearance_id) {
+  ActiveRuntime().ReportRemoteAppearanceInstalled(
+      role, session, appearance_id);
 }
 
 }  // namespace skate3::multiplayer

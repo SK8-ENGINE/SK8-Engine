@@ -18,6 +18,7 @@ using skate3::multiplayer::protocol::AppearanceFragmentPacket;
 using skate3::multiplayer::protocol::AppearanceFragmentShapeValid;
 using skate3::multiplayer::protocol::AppearanceDeliveryState;
 using skate3::multiplayer::protocol::AppearanceTransferReceived;
+using skate3::multiplayer::protocol::AppearanceStateProgresses;
 using skate3::multiplayer::protocol::ControlMessageType;
 using skate3::multiplayer::protocol::ControlPacket;
 using skate3::multiplayer::protocol::ControlPacketShapeValid;
@@ -375,6 +376,16 @@ void TestControlPacketShapes() {
       !AppearanceTransferReceived(
           AppearanceDeliveryState::kFailed),
       "failed appearance state completed the transfer");
+  Expect(
+      AppearanceStateProgresses(
+          AppearanceDeliveryState::kReceived,
+          AppearanceDeliveryState::kInstalled),
+      "installed state did not advance received state");
+  Expect(
+      !AppearanceStateProgresses(
+          AppearanceDeliveryState::kInstalled,
+          AppearanceDeliveryState::kReceived),
+      "late received state regressed installed state");
 }
 
 void TestSequenceOrderingAcrossWrap() {

@@ -64,6 +64,7 @@
 #include "skate3_mechanics_sandbox_map.h"
 #include "skate3_multiplayer.h"
 #include "skate3_multiplayer_assets.h"
+#include "skate3_multiplayer_lifecycle.h"
 #include "skate3_native_collision.h"
 #include "skate3_native_raytraced_mirror.h"
 #include "skate3_trick_pipeline.h"
@@ -10462,6 +10463,8 @@ multiplayer::AppearanceBlob BuildLocalAppearanceBlob(
 
 struct RemoteAppearanceRenderState {
   uint64_t identity = 0;
+  bool installation_reported = false;
+  uint32_t installation_reported_session = 0;
   float root_position[3] = {};
   float root_x_axis[3] = {1.0f, 0.0f, 0.0f};
   float root_z_axis[3] = {0.0f, 0.0f, 1.0f};
@@ -10546,6 +10549,23 @@ bool InstallRemoteRecipeAppearance(
   if (!multiplayer_assets::ResolveRecipeAppearance(
           recipe, true, resolved)) {
     return false;
+  }
+  if (!multiplayer::lifecycle::CompleteAppearancePieceCount(
+          header.binding_count, resolved.pieces.size())) {
+    REXLOG_WARN(
+        "multiplayer: recipe appearance incomplete role={} "
+        "id={:016X} expected_pieces={} resolved_pieces={}",
+        role, appearance.identity, header.binding_count,
+        resolved.pieces.size());
+    return false;
+  }
+  for (const multiplayer_assets::RecipePiece& source :
+       resolved.pieces) {
+    if (!bindings.contains(source.model_id) ||
+        source.mesh.vertices.empty() ||
+        source.mesh.indices.empty()) {
+      return false;
+    }
   }
   RemoteAppearanceRenderState installed;
   installed.identity = appearance.identity;
@@ -10790,7 +10810,8 @@ bool InstallRemoteRecipeAppearance(
     g_r.meshes.emplace(item.mesh, std::move(buffers));
     installed.items.push_back(std::move(item));
   }
-  if (installed.items.empty()) {
+  if (!multiplayer::lifecycle::CompleteAppearancePieceCount(
+          header.binding_count, installed.items.size())) {
     return false;
   }
 
@@ -12549,13 +12570,26 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
     std::vector<const DrawItem*> appearance_items;
     const RemoteAppearanceRenderState*
         remote_appearance_state = nullptr;
-    if (InstallRemoteAppearance(
+    const bool appearance_installed =
+        InstallRemoteAppearance(
             context, remote_player.role,
-            remote_player.appearance)) {
+            remote_player.appearance);
+    if (appearance_installed) {
       const auto installed =
           g_remote_appearances.find(remote_player.role);
       if (installed != g_remote_appearances.end() &&
           !installed->second.items.empty()) {
+        if (!installed->second.installation_reported ||
+            installed->second.installation_reported_session !=
+                remote_player.session) {
+          multiplayer::ReportRemoteAppearanceInstalled(
+              remote_player.role,
+              remote_player.session,
+              remote_player.appearance.identity);
+          installed->second.installation_reported_session =
+              remote_player.session;
+          installed->second.installation_reported = true;
+        }
         remote_appearance_state =
             &installed->second;
         appearance_items.clear();

@@ -23,6 +23,12 @@ CanBeginAppearanceAssembly(std::size_t other_incomplete_bytes,
              kMaximumIncompleteAppearanceBytes - other_incomplete_bytes;
 }
 
+[[nodiscard]] constexpr bool
+CompleteAppearancePieceCount(std::size_t expected,
+                             std::size_t actual) {
+  return expected > 0 && actual == expected;
+}
+
 template <typename Clock>
 [[nodiscard]] bool
 AppearanceAssemblyExpired(typename Clock::time_point now,

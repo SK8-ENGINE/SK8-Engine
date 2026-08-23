@@ -57,6 +57,7 @@ struct AppearanceBlob {
 
 struct RemotePlayer {
   std::uint32_t role = 0;
+  std::uint32_t session = 0;
   RemotePose pose;
   AnimationPose animation;
   AppearanceBlob appearance;
@@ -73,5 +74,12 @@ bool TickLocalVisuals(const char* map_name,
                       std::vector<RemotePlayer>& out_remotes);
 
 void AppendTelemetry(std::ostream& out);
+
+// Reports that the renderer committed the complete sender-owned appearance
+// currently associated with this role, process session, and identity. Stale
+// reports are ignored by the replication runtime.
+void ReportRemoteAppearanceInstalled(std::uint32_t role,
+                                     std::uint32_t session,
+                                     std::uint64_t appearance_id);
 
 }  // namespace skate3::multiplayer

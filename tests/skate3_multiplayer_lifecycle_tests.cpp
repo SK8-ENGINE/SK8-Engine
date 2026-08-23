@@ -8,6 +8,7 @@ namespace {
 
 using skate3::multiplayer::lifecycle::AppearanceAssemblyExpired;
 using skate3::multiplayer::lifecycle::CanBeginAppearanceAssembly;
+using skate3::multiplayer::lifecycle::CompleteAppearancePieceCount;
 using skate3::multiplayer::lifecycle::kMaximumIncompleteAppearanceBytes;
 using skate3::multiplayer::lifecycle::PeerGenerationTracker;
 using skate3::multiplayer::protocol::kMaximumAppearanceBytes;
@@ -120,6 +121,15 @@ void TestAppearanceAssemblyTimeout() {
          "empty appearance assembly must not report a timeout");
 }
 
+void TestCompleteAppearancePieceCount() {
+  Expect(CompleteAppearancePieceCount(7, 7),
+         "complete appearance piece set was rejected");
+  Expect(!CompleteAppearancePieceCount(7, 6),
+         "partial appearance piece set was accepted");
+  Expect(!CompleteAppearancePieceCount(0, 0),
+         "empty appearance piece set was accepted");
+}
+
 } // namespace
 
 int main() {
@@ -130,6 +140,7 @@ int main() {
   TestInvalidIdentityDoesNotCreateState();
   TestAppearanceAssemblyBudget();
   TestAppearanceAssemblyTimeout();
+  TestCompleteAppearancePieceCount();
 
   if (g_failures != 0) {
     std::cerr << g_failures << " multiplayer lifecycle test(s) failed\n";

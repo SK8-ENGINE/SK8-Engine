@@ -114,9 +114,12 @@ AppID and follow Valve's setup and redistributable requirements.
   are limited to 16 MiB per peer and 64 MiB in total and expire after ten
   seconds without a valid chunk. Peers that negotiate appearance-state
   control messages acknowledge complete byte receipt separately from
-  renderer installation. Steam can associate that receipt with its direct
-  per-recipient stream; localhost preserves all three relay passes because a
-  host receipt alone does not prove every downstream UDP client is complete.
+  renderer installation. The renderer reports installation only after the
+  complete sender-declared recipe piece count resolves and commits, and the
+  report is matched against role, process session, and appearance identity.
+  Steam can associate byte receipt with its direct per-recipient stream;
+  localhost preserves all three relay passes because a host receipt alone
+  does not prove every downstream UDP client is complete.
 - Each client renders at most the nearest 12 remote players by default.
 - Each sender routes full skeletal animation only to nearby peers inside the
   selected relevance radius. Distant peers receive inexpensive root-presence
