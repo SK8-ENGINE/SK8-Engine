@@ -558,7 +558,7 @@ try {
         guest_fps_cap = 120
         replication_quality = 'full-fidelity'
         root_protocol = 'v12-after-negotiation'
-        animation_protocol = 'v12-grouped-with-baseline-recovery'
+        animation_protocol = 'v12-grouped-receiver-confirmed-deltas'
         appearance_protocol = 'v11'
         root_rate_hz = 60
         animation_rate_hz = 60
@@ -655,8 +655,11 @@ protocol-v12 envelopes. Animation uses one independently reassembled group
 while preserving the current quantization, keyframes/deltas, interpolation,
 attachments, and renderer path. Receivers now acknowledge each completely
 decoded keyframe and can immediately request a fresh keyframe when a delta's
-baseline is unavailable. Outfits remain on protocol v11. Full-fidelity direct
-peer fan-out and the 120 fps per-client test budget remain unchanged.
+baseline is unavailable. Each sender now constructs deltas only against the
+exact keyframe that the receiving peer confirmed decoding; it sends
+self-contained keyframes while confirmation is pending. Outfits remain on
+protocol v11. Full-fidelity direct peer fan-out and the 120 fps per-client test
+budget remain unchanged.
 Diagnostics: representative visible body vertices are sampled before send and
 after remote reconstruction, alongside skeleton, network, and GPU timing
 
@@ -694,6 +697,9 @@ Telemetry acceptance checked by the agent afterward:
 - Every client sends and receives decoded-baseline reports, with zero
   pose-control rejection. A healthy run may need no recovery requests; if one
   occurs, its sender must force a fresh keyframe.
+- Every client installs receiver-confirmed outbound baselines. Animation
+  deltas must flow afterward and never depend on an offered-but-unconfirmed
+  keyframe; the runtime fail-closed invariant must report no policy error.
 - Every active sender/receiver pair reports the full-fidelity contract,
   continuous pose/animation traffic, and zero relevance drops.
 - Playback cursor margins remain inside the animation buffer, with no

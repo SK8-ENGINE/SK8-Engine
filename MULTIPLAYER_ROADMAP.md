@@ -575,6 +575,18 @@ Current checkpoint:
   Offline tests cover delayed reports, reorder, bounded eviction, and
   generation reset before the live encoder begins selecting its delta base
   from this state.
+- The live encoder now keeps offered quantized keyframes separate per
+  recipient and does not install one as that recipient's delta base until its
+  decoded-baseline report arrives. While confirmation is pending, subsequent
+  frames remain self-contained keyframes. A valid report installs the exact
+  retained quantized frame, then removes obsolete retained offers; a recovery
+  request clears the confirmed base before forcing a fresh keyframe.
+- This changes dependency ownership, not pose data: quantization, word
+  encoding, fragmentation, send rate, interpolation, attachments, boards,
+  appearance, and rendering remain unchanged. Dedicated counters report
+  offered/unconfirmed keyframes and installed receiver-confirmed baselines.
+  A five-client user visual and telemetry gate is required before beginning
+  bandwidth packing.
 
 Completion:
 

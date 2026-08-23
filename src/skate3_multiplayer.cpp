@@ -404,6 +404,8 @@ struct PeerControlState {
   protocol_v12::PeerGenerationState v12_generation;
   protocol_v12::ReceiveHistory v12_control_receive_history;
   protocol_v12::SenderBaselineState v12_sender_baseline;
+  std::unordered_map<std::uint32_t, QuantizedAnimationFrame>
+      v12_offered_animation_keyframes;
   std::uint64_t v12_negotiated_features = 0;
   std::uint32_t last_v12_capability_sequence_sent = 0;
   std::uint32_t v12_animation_send_sequence = 0;
@@ -531,6 +533,9 @@ struct TelemetrySnapshot {
   std::uint64_t sent_v12_baseline_requests = 0;
   std::uint64_t received_v12_baseline_requests = 0;
   std::uint64_t forced_v12_animation_keyframes = 0;
+  std::uint64_t installed_v12_confirmed_baselines = 0;
+  std::uint64_t v12_unconfirmed_keyframes = 0;
+  std::uint64_t sent_v12_confirmed_deltas = 0;
   std::uint64_t animation_present_interpolated = 0;
   std::uint64_t animation_present_held_latest = 0;
   std::uint64_t animation_present_held_oldest = 0;
@@ -2221,6 +2226,12 @@ class Runtime {
         << telemetry_.received_v12_baseline_requests
         << " multiplayer_forced_v12_animation_keyframes="
         << telemetry_.forced_v12_animation_keyframes
+        << " multiplayer_installed_v12_confirmed_baselines="
+        << telemetry_.installed_v12_confirmed_baselines
+        << " multiplayer_v12_unconfirmed_keyframes="
+        << telemetry_.v12_unconfirmed_keyframes
+        << " multiplayer_tx_v12_confirmed_deltas="
+        << telemetry_.sent_v12_confirmed_deltas
         << " multiplayer_animation_present_interpolated="
         << telemetry_.animation_present_interpolated
         << " multiplayer_animation_present_held_latest="
@@ -2365,6 +2376,8 @@ class Runtime {
         "v12_pose_control_rejected={} v12_baseline_report_tx={} "
         "v12_baseline_report_rx={} v12_baseline_request_tx={} "
         "v12_baseline_request_rx={} v12_forced_keyframe={} "
+        "v12_confirmed_baseline={} v12_unconfirmed_keyframe={} "
+        "v12_confirmed_delta={} "
         "bones={} relay={:.1f}pps relevance_drop={:.1f}pps rejected={} "
         "failures={} peer_resets={} "
         "appearance={:.2f}MiB timeout={} budget_reject={} "
@@ -2406,6 +2419,9 @@ class Runtime {
         telemetry_.sent_v12_baseline_requests,
         telemetry_.received_v12_baseline_requests,
         telemetry_.forced_v12_animation_keyframes,
+        telemetry_.installed_v12_confirmed_baselines,
+        telemetry_.v12_unconfirmed_keyframes,
+        telemetry_.sent_v12_confirmed_deltas,
         telemetry_.remote_animation_bones, relay_pps, drop_pps,
         telemetry_.rejected_packets, telemetry_.socket_failures,
         telemetry_.outbound_peer_resets,
@@ -3437,8 +3453,48 @@ class Runtime {
               session_id_, pose_control.baseline_id)) {
         return reject();
       }
+      if (control.v12_sender_baseline.confirmed_baseline_id() ==
+          pose_control.baseline_id) {
+        const auto offered =
+            control.v12_offered_animation_keyframes.find(
+                pose_control.baseline_id);
+        if (offered ==
+            control.v12_offered_animation_keyframes.end()) {
+          const auto installed =
+              outbound_animation_keyframes_.find(
+                  envelope.sender_role);
+          if (installed ==
+                  outbound_animation_keyframes_.end() ||
+              installed->second.sequence !=
+                  pose_control.baseline_id) {
+            return reject();
+          }
+        } else {
+          outbound_animation_keyframes_[envelope.sender_role] =
+              offered->second;
+          for (auto iterator =
+                   control.v12_offered_animation_keyframes.begin();
+               iterator !=
+               control.v12_offered_animation_keyframes.end();) {
+            if (iterator->first ==
+                    pose_control.baseline_id ||
+                !protocol_v12::SequenceNewer(
+                    iterator->first, pose_control.baseline_id)) {
+              iterator =
+                  control.v12_offered_animation_keyframes.erase(
+                      iterator);
+            } else {
+              ++iterator;
+            }
+          }
+          ++telemetry_.installed_v12_confirmed_baselines;
+        }
+      }
       ++telemetry_.received_v12_baseline_reports;
     } else {
+      control.v12_sender_baseline.ActivateGeneration(session_id_);
+      control.v12_offered_animation_keyframes.clear();
+      outbound_animation_keyframes_.erase(envelope.sender_role);
       control.v12_force_animation_keyframe = true;
       ++telemetry_.received_v12_baseline_requests;
     }
@@ -3566,6 +3622,7 @@ class Runtime {
       peer_iterator->second.v12_pose_receiver.ActivateGeneration(
           envelope.sender_role, envelope.sender_session);
       control.v12_sender_baseline.ActivateGeneration(session_id_);
+      control.v12_offered_animation_keyframes.clear();
       control.v12_force_animation_keyframe = false;
     }
     control.v12_negotiated_features = negotiated;
@@ -4548,6 +4605,17 @@ class Runtime {
     const std::uint32_t embedded_baseline =
         static_cast<std::uint32_t>(words[2]) |
         (static_cast<std::uint32_t>(words[3]) << 16);
+    if (!keyframe) {
+      const auto installed =
+          outbound_animation_keyframes_.find(target_role);
+      if (control.v12_sender_baseline.confirmed_baseline_id() !=
+              embedded_baseline ||
+          installed == outbound_animation_keyframes_.end() ||
+          installed->second.sequence != embedded_baseline) {
+        ++telemetry_.delivery_policy_errors;
+        return false;
+      }
+    }
     protocol_v12::PoseGroupPacketizeRequest request;
     request.envelope.kind =
         keyframe
@@ -4610,6 +4678,9 @@ class Runtime {
             descriptors[fragment_count - 1].envelope.sequence)) {
       ++telemetry_.delivery_policy_errors;
       return false;
+    }
+    if (complete && !keyframe) {
+      ++telemetry_.sent_v12_confirmed_deltas;
     }
     return complete;
   }
@@ -5182,14 +5253,38 @@ class Runtime {
         }
       }
       if (target_complete) {
-        outbound_animation_keyframes_[target_role] =
-            prepared->proposed_keyframe;
         if (target_control != nullptr) {
+          const bool sent_keyframe =
+              (prepared->words[0] & 1u) != 0;
+          if (sent_keyframe) {
+            auto& offered =
+                target_control->v12_offered_animation_keyframes;
+            constexpr std::size_t kMaximumRetainedKeyframes =
+                protocol_v12::SenderBaselineState::
+                    kMaximumRetainedOffers;
+            if (offered.size() >= kMaximumRetainedKeyframes) {
+              const auto oldest = std::max_element(
+                  offered.begin(), offered.end(),
+                  [sequence](const auto& left,
+                             const auto& right) {
+                    return sequence - left.first <
+                           sequence - right.first;
+                  });
+              if (oldest != offered.end()) {
+                offered.erase(oldest);
+              }
+            }
+            offered[sequence] = prepared->proposed_keyframe;
+            ++telemetry_.v12_unconfirmed_keyframes;
+          }
           target_control->v12_animation_started = true;
           if (target_control->v12_force_animation_keyframe) {
             target_control->v12_force_animation_keyframe = false;
             ++telemetry_.forced_v12_animation_keyframes;
           }
+        } else {
+          outbound_animation_keyframes_[target_role] =
+              prepared->proposed_keyframe;
         }
       }
       complete &= target_complete;

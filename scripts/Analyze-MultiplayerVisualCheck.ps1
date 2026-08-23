@@ -612,6 +612,18 @@ foreach ($client in $clientDirectories) {
         (Maximum-IntegerField $rateLines 'v12_forced_keyframe')
     )
     $summary.Add(
+        'max_v12_confirmed_baselines_installed=' +
+        (Maximum-IntegerField $rateLines 'v12_confirmed_baseline')
+    )
+    $summary.Add(
+        'max_v12_unconfirmed_keyframes_sent=' +
+        (Maximum-IntegerField $rateLines 'v12_unconfirmed_keyframe')
+    )
+    $summary.Add(
+        'max_v12_confirmed_deltas_sent=' +
+        (Maximum-IntegerField $rateLines 'v12_confirmed_delta')
+    )
+    $summary.Add(
         'appearance_byte_receipts=' +
         (Match-Count $lines 'multiplayer: peer role=.*appearance .*state=1')
     )
