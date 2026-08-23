@@ -8,13 +8,43 @@ import json
 import bpy
 
 
-EXPECTED_MODE_COUNTS = {0: 6380, 1: 2127, 2: 39}
+EXPECTED_MODE_COUNTS = {0: 6389, 1: 2118, 2: 39}
 REGRESSION_BINDINGS = {
-    ("0xF6CC7BFCC2C45F8C", 40): ("", 0),
-    ("0xF6CC7BFCC2C45F8C", 41): ("0x2c70170a001d0088", 0),
-    ("0xF6CC7BFCC2C45F8C", 42): ("0x2c70170a00053a88", 1),
-    ("0x759E349006948F63", 2): ("", 0),
-    ("0x759E349006948F63", 3): ("0x2c70170a00053a88", 1),
+    ("0xF6CC7BFCC2C45F8C", 40): (
+        "0x861894DE4209CE82",
+        "0x00800078",
+        24,
+        "0x2c70170a001d00aa",
+        0,
+    ),
+    ("0xF6CC7BFCC2C45F8C", 41): (
+        "0xFA839F99082D42ED",
+        "0x0080007B",
+        38,
+        "0x2c70170a0004000e",
+        0,
+    ),
+    ("0xF6CC7BFCC2C45F8C", 42): (
+        "0x96879C786774C31D",
+        "0x0080007E",
+        12,
+        "0x00008d6a03e3870a",
+        0,
+    ),
+    ("0x759E349006948F63", 2): (
+        "0x861894DE4209CE82",
+        "0x00800006",
+        0,
+        "0x2c70170a001d00aa",
+        0,
+    ),
+    ("0x759E349006948F63", 3): (
+        "0xA0683D15728B6787",
+        "0x00800009",
+        3,
+        "0x2c70170a00053a88",
+        1,
+    ),
 }
 
 
@@ -73,6 +103,9 @@ def main() -> int:
         if obj is None:
             raise RuntimeError(f"regression mesh {key!r} is missing")
         actual = (
+            str(obj.get("skate3_retail_material_guid", "")),
+            str(obj.get("skate3_retail_material_handle", "")),
+            int(obj.get("skate3_retail_material_group_index", -1)),
             str(obj.get("skate3_texture_id", "")),
             int(obj.get("skate3_alpha_mode", 0)),
         )

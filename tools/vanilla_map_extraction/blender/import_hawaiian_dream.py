@@ -209,6 +209,17 @@ def build_scene(manifest_path: Path) -> dict[str, int]:
                 obj["skate3_stream_file"] = model_entry["stream_file"]
                 obj["skate3_mesh_index"] = mesh_index
                 obj["skate3_material_name"] = mesh_entry["material_name"] or ""
+                obj["skate3_retail_material_guid"] = mesh_entry.get(
+                    "retail_material_guid",
+                    "",
+                )
+                obj["skate3_retail_material_handle"] = mesh_entry.get(
+                    "retail_material_handle",
+                    "",
+                )
+                obj["skate3_retail_material_group_index"] = int(
+                    mesh_entry.get("retail_material_group_index", -1)
+                )
                 obj["skate3_texture_id"] = texture_id or ""
                 obj["skate3_shader_name"] = mesh_entry.get("shader_name") or ""
                 obj["skate3_texture_channel"] = (

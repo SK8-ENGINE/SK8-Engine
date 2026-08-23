@@ -7,6 +7,7 @@ import hashlib
 import json
 from pathlib import Path
 import re
+import struct
 import sys
 
 import numpy
@@ -26,6 +27,11 @@ ALPHA_BLEND_SHADERS = {
     "environment.reflective_trans",
     "environment.transparent",
 }
+RX2_TOC_RECORD_SIZE = 24
+RX2_TYPE_MATERIAL = 0x00EB0005
+RX2_TYPE_EXTERNAL_REFERENCES = 0x00EB000B
+RX2_TYPE_MESH_DESCRIPTOR = 0x00EB0023
+RX2_TYPE_MATERIAL_IMPORT = 0x00EB0066
 
 
 def _default_workspace() -> Path:
@@ -96,6 +102,137 @@ def _first_parameter(
 ) -> str | None:
     values = group.get(name, [])
     return values[0] if values and values[0] else None
+
+
+def _bind_material_groups_by_guid(
+    data: bytes,
+    groups: list[dict[str, list[str]]],
+    mesh_count: int,
+) -> tuple[list[dict[str, list[str]]], list[dict[str, int]]]:
+    """Resolve every mesh to its retail material through RX2 GUID handles.
+
+    Material records are not stored in render-mesh order. Each ``Name``
+    parameter carries a 64-bit GUID, the external-reference table associates
+    that GUID with a local handle, and each ``0x00EB0023`` mesh descriptor
+    stores the handle it draws with. Following that chain is authoritative
+    and also disambiguates repeated materials with different lightmaps.
+    """
+
+    if len(data) < 0x34:
+        raise ValueError("RX2 is too small to contain a section table")
+    file_count = struct.unpack_from(">I", data, 0x20)[0]
+    file_table = struct.unpack_from(">I", data, 0x30)[0]
+    if file_table + file_count * RX2_TOC_RECORD_SIZE > len(data):
+        raise ValueError("RX2 section table extends beyond the file")
+
+    records: list[tuple[int, int, int]] = []
+    for record_index in range(file_count):
+        record_offset = file_table + record_index * RX2_TOC_RECORD_SIZE
+        section_offset, _, section_size, _, _ = struct.unpack_from(
+            ">5I",
+            data,
+            record_offset,
+        )
+        section_type = struct.unpack_from(">I", data, record_offset + 20)[0]
+        records.append((section_type, section_offset, section_size))
+
+    material_guids: list[int] = []
+    for section_type, section_offset, _ in records:
+        if section_type != RX2_TYPE_MATERIAL:
+            continue
+        header = struct.unpack_from(">8I", data, section_offset)
+        parameter_count = header[1]
+        header_size = header[3]
+        parameters_size = header[4]
+        if parameter_count == 0:
+            continue
+        payload_size = parameters_size - header_size
+        if payload_size < 0 or payload_size % parameter_count:
+            raise ValueError("RX2 material parameter table has invalid sizes")
+        block_size = payload_size // parameter_count
+        if block_size != 32:
+            raise ValueError(
+                f"RX2 material GUID binding requires 32-byte records, got {block_size}"
+            )
+        for parameter_index in range(parameter_count):
+            parameter_offset = (
+                section_offset + header_size + parameter_index * block_size
+            )
+            values = struct.unpack_from(">8I", data, parameter_offset)
+            kind_offset = section_offset + values[0]
+            kind_end = data.index(b"\0", kind_offset)
+            if data[kind_offset:kind_end] == b"Name":
+                material_guids.append((values[4] << 32) | values[5])
+
+    if len(material_guids) != len(groups):
+        raise ValueError(
+            "RX2 material GUID count does not match parsed material groups: "
+            f"{len(material_guids)} versus {len(groups)}"
+        )
+
+    imports: list[tuple[int, int]] = []
+    for section_type, section_offset, _ in records:
+        if section_type != RX2_TYPE_EXTERNAL_REFERENCES:
+            continue
+        import_count, import_offset = struct.unpack_from(
+            ">2I",
+            data,
+            section_offset,
+        )
+        for import_index in range(import_count):
+            entry_offset = section_offset + import_offset + import_index * 24
+            _, _, guid_high, guid_low, import_type, handle = struct.unpack_from(
+                ">6I",
+                data,
+                entry_offset,
+            )
+            if import_type == RX2_TYPE_MATERIAL_IMPORT:
+                imports.append(((guid_high << 32) | guid_low, handle))
+
+    handle_groups: dict[int, tuple[int, int]] = {}
+    import_cursor = 0
+    for group_index, material_guid in enumerate(material_guids):
+        while (
+            import_cursor < len(imports)
+            and imports[import_cursor][0] != material_guid
+        ):
+            import_cursor += 1
+        if import_cursor >= len(imports):
+            raise ValueError(
+                "RX2 material GUID is missing from the external-reference table: "
+                f"0x{material_guid:016X}"
+            )
+        _, handle = imports[import_cursor]
+        handle_groups[handle] = (group_index, material_guid)
+        import_cursor += 1
+
+    bound_groups: list[dict[str, list[str]]] = []
+    bindings: list[dict[str, int]] = []
+    for section_type, section_offset, _ in records:
+        if section_type != RX2_TYPE_MESH_DESCRIPTOR:
+            continue
+        handle = struct.unpack_from(">I", data, section_offset + 0x24)[0]
+        if handle not in handle_groups:
+            raise ValueError(
+                "RX2 mesh material handle is unresolved: "
+                f"0x{handle:08X}"
+            )
+        group_index, material_guid = handle_groups[handle]
+        bound_groups.append(groups[group_index])
+        bindings.append(
+            {
+                "group_index": group_index,
+                "material_guid": material_guid,
+                "material_handle": handle,
+            }
+        )
+
+    if len(bound_groups) != mesh_count:
+        raise ValueError(
+            "RX2 mesh descriptor count does not match parsed render meshes: "
+            f"{len(bound_groups)} versus {mesh_count}"
+        )
+    return bound_groups, bindings
 
 
 def _material_metadata(
@@ -269,9 +406,22 @@ def prepare(
             npz_path.parent.mkdir(parents=True, exist_ok=True)
             arrays: dict[str, numpy.ndarray] = {}
             mesh_entries: list[dict[str, object]] = []
-            material_groups = _group_material_parameters(parsed.materials)
+            source_material_groups = _group_material_parameters(parsed.materials)
+            material_groups, material_bindings = (
+                _bind_material_groups_by_guid(
+                    asset.data,
+                    source_material_groups,
+                    len(parsed.meshes),
+                )
+            )
             for mesh_index, mesh in enumerate(parsed.meshes):
                 material = _material_metadata(material_groups, mesh_index)
+                material_group = (
+                    material_groups[mesh_index]
+                    if mesh_index < len(material_groups)
+                    else {}
+                )
+                material_binding = material_bindings[mesh_index]
                 arrays[f"vertices_{mesh_index}"] = numpy.asarray(
                     mesh.vertices,
                     dtype=numpy.float32,
@@ -294,7 +444,19 @@ def prepare(
                 mesh_entries.append(
                     {
                         "index": mesh_index,
-                        "name": mesh.name,
+                        "name": (
+                            _first_parameter(material_group, "Name")
+                            or mesh.name
+                        ),
+                        "retail_material_guid": (
+                            f"0x{material_binding['material_guid']:016X}"
+                        ),
+                        "retail_material_handle": (
+                            f"0x{material_binding['material_handle']:08X}"
+                        ),
+                        "retail_material_group_index": material_binding[
+                            "group_index"
+                        ],
                         **material,
                         "vertex_count": mesh.vertex_count,
                         "triangle_count": mesh.triangle_count,
@@ -332,6 +494,12 @@ def prepare(
                     "vertex_count": parsed.vertex_count,
                     "triangle_count": parsed.triangle_count,
                     "warnings": list(parsed.warnings),
+                    "material_binding": {
+                        "strategy": "external_reference_guid",
+                        "source_group_count": len(source_material_groups),
+                        "selected_group_count": len(material_groups),
+                        "mesh_count": len(parsed.meshes),
+                    },
                     "meshes": mesh_entries,
                 }
             )
@@ -378,6 +546,16 @@ def prepare(
         ),
         "decoded_textures": len(textures),
         "used_diffuse_textures": len(used_texture_ids),
+        "material_binding_strategies": {
+            strategy: sum(
+                model["material_binding"]["strategy"] == strategy  # type: ignore[index]
+                for model in models
+            )
+            for strategy in {
+                model["material_binding"]["strategy"]  # type: ignore[index]
+                for model in models
+            }
+        },
         "simulation_assets": len(simulation_assets),
         "unmatched_diffuse_textures": sorted(used_texture_ids - set(textures)),
     }

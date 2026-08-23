@@ -41,9 +41,9 @@ bytes:
 
 The generated extraction scene is `blender/DIST_University.blend`. The 2,046
 available images are packed into the `.blend`, and models are grouped by
-source stream cell. Twenty-three material IDs refer to shared textures that
-were not found as resources in the available base-game archives; these are
-clearly tagged white fallback materials.
+source stream cell. The current extraction resolves all 328 diffuse texture
+IDs used by the University presentation meshes; there are no fallback
+textures.
 
 To rebuild without making a preview render:
 
@@ -78,22 +78,35 @@ losslessly decodes to the counts and bounds above. The offline engine validator
 also compiles it into 515 render chunks and 44 collision chunks using the
 verified 256 metre collision-cell fallback.
 
-### Material binding and foliage-alpha correction
+### Exact retail material binding and foliage alpha
 
-The first in-game pass exposed two independent source-pipeline faults. The
-retail model parser flattened diffuse parameters across shader groups, so a
-group such as `ocean.default` with no diffuse slot shifted every following
-mesh onto the wrong texture. The parser now keeps parameters grouped per
-retail material and uses that group's diffuse or transparent channel.
+The first Blender and in-game passes exposed a source-extraction fault:
+material parameter records are not stored in render-mesh order. Positional
+matching therefore assigned fundamentally wrong textures to nearly every
+mesh; the Blender addon, SKATE exporter, engine loader, and renderer were all
+faithfully carrying those already-wrong assignments.
 
-The Blender-owned preparation script also overwrote every imported material
-as opaque. It now preserves the retail shader/channel classification through
-Blender and into SKATE as opaque, alpha-mask, or alpha-blend. An offline
-Blender validator checks all 8,546 mesh parts, expected alpha-mode counts, and
-known formerly shifted bindings. A package comparison proves that all
-1,645,617 position/normal/UV triangles and all 325 decoded texture payloads
-are unchanged as multisets; only intended material assignments and the
-resulting presentation-derived collision classification changed.
+The extractor now follows the authoritative RX2 reference chain. Each
+material `Name` record carries a 64-bit GUID, the `0x00EB000B` external
+reference table maps that GUID to a local `0x00EB0066` material handle, and
+each `0x00EB0023` mesh descriptor names the handle it draws with. This also
+preserves distinct local material instances that share a GUID. All 479 model
+resources and all 8,546 mesh parts resolve through this chain with no
+fallback.
+
+Foliage alpha is derived only after the exact material is known. The current
+scene contains 6,389 opaque, 2,118 alpha-mask, and 39 alpha-blended mesh
+parts. The Blender importer stores the retail GUID, local handle, source
+material-group index, texture ID, shader, and alpha mode on every object. The
+offline validator checks those fields and selected non-positional regression
+bindings.
+
+Visual review now happens in versioned packed Blender files under
+`blender/review/`. A candidate is not exported to SKATE or staged for an
+in-game run until the user accepts its Blender appearance. The current
+material implementation reproduces diffuse color and alpha classification;
+additional retail channels and shader behavior still need to be audited
+before claiming 1:1 visual parity.
 
 ## User-run University visual check
 
