@@ -31,10 +31,10 @@ NO_COLLISION_MARKERS = (
     "tree",
     "water",
 )
-# Observatory skatepath beside the large brass orbital sculpture.  The height
-# target prevents the ray cast from selecting terrain below the dam.
-SPAWN_RUNTIME_XZ = (-430.0, -880.0)
-SPAWN_TARGET_HEIGHT = 223.0
+# Flat wooden starting deck inside Super Ultra Mega Park.  The height target
+# prevents the ray cast from selecting terrain underneath the park structures.
+SPAWN_RUNTIME_XZ = (330.0, -710.0)
+SPAWN_TARGET_HEIGHT = 132.0
 SOLID_COLOR_TEXTURES = {
     # The retail resource is an intentional 16x16 opaque black swatch.
     # Store it as a material constant so the general exporter can continue
