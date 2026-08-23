@@ -31,7 +31,7 @@ struct CompatibilityIdentity {
 // realtime replication unsafe between peers.
 inline constexpr std::uint64_t kBuildCompatibilityHash =
     Fnv1a64(
-        "skate3-multiplayer-live-v12-semantic-exact-delta-1");
+        "skate3-multiplayer-live-v12-semantic-exact-delta-2");
 inline constexpr std::uint64_t kContentCompatibilityHash =
     Fnv1a64("skate3-cac-recipe-final-pose-contract-1");
 inline constexpr std::uint64_t kAdvertisedFeatureBits =

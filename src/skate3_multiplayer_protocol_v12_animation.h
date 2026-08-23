@@ -63,6 +63,13 @@ inline constexpr std::uint32_t kMaximumAnimationWordStreamBytes =
          embedded_baseline == header.baseline_id;
 }
 
+[[nodiscard]] constexpr bool AnimationPoseGroupEncodingAllowed(
+    PoseGroupEncoding encoding, bool keyframe) {
+  return PoseGroupEncodingValid(encoding) &&
+         (!keyframe ||
+          encoding != PoseGroupEncoding::kSemanticDeltaV1);
+}
+
 [[nodiscard]] inline bool EncodeAnimationWordStream(
     const float root_position[3], std::uint16_t root_bone,
     std::span<const std::uint16_t> words,

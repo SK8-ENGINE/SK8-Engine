@@ -686,6 +686,20 @@ Current checkpoint:
   versus delta fragment counts. These measurements will establish actual
   bandwidth, packet-count, and sender-CPU effects at the next five-client
   visual gate; they do not establish visual correctness.
+- Run `20260823-211546-d20f1868` failed its user visual gate: the user
+  reported substantially laggier remote skating. Telemetry independently
+  found approximately 4,500-10,000 delivery-policy errors per client, long
+  intervals with little or no outbound animation, and no successfully sent
+  semantic groups. There were no semantic decode rejections, socket failures,
+  or baseline-recovery storms.
+- Root cause was a duplicated sender-side encoding allowlist that still
+  accepted only raw and byte-run pose groups. Semantic deltas passed
+  preflight and packetization but were rejected immediately before send. The
+  sender now uses the central pose-encoding policy, which permits semantic
+  encoding only for deltas and rejects it for keyframes. Regression coverage
+  locks raw, byte-run, semantic-delta, semantic-keyframe, and unknown-encoding
+  decisions. The compatibility identity is advanced so the rejected build
+  cannot negotiate a live stream with the corrected contract.
 
 Completion:
 

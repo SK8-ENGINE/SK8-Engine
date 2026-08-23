@@ -4756,16 +4756,16 @@ class Runtime {
       std::span<const std::uint16_t> words,
       std::span<const std::uint8_t> group_bytes,
       protocol_v12::PoseGroupEncoding encoding) {
+    const bool keyframe =
+        !words.empty() && (words[0] & 1u) != 0;
     if (words.size() < 4 || group_bytes.empty() ||
+        !protocol_v12::AnimationPoseGroupEncodingAllowed(
+            encoding, keyframe) ||
         (encoding ==
              protocol_v12::PoseGroupEncoding::kV11WordStream &&
          group_bytes.size() !=
              protocol_v12::AnimationWordStreamByteCount(
-                 words.size())) ||
-        (encoding !=
-             protocol_v12::PoseGroupEncoding::kV11WordStream &&
-         encoding !=
-             protocol_v12::PoseGroupEncoding::kBitPackedV1)) {
+                 words.size()))) {
       ++telemetry_.delivery_policy_errors;
       return false;
     }
@@ -4775,7 +4775,6 @@ class Runtime {
       return false;
     }
     PeerControlState& control = control_iterator->second;
-    const bool keyframe = (words[0] & 1u) != 0;
     const std::uint32_t embedded_baseline =
         static_cast<std::uint32_t>(words[2]) |
         (static_cast<std::uint32_t>(words[3]) << 16);

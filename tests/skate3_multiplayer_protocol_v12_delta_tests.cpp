@@ -249,6 +249,26 @@ void TestInputValidation() {
   Expect(SemanticAnimationDeltaByteCount(
              words, fixture.views) == 0,
          "semantic delta encoder accepted truncated words");
+
+  Expect(AnimationPoseGroupEncodingAllowed(
+             PoseGroupEncoding::kSemanticDeltaV1,
+             /*keyframe=*/false),
+         "sender policy rejected semantic delta encoding");
+  Expect(!AnimationPoseGroupEncodingAllowed(
+             PoseGroupEncoding::kSemanticDeltaV1,
+             /*keyframe=*/true),
+         "sender policy accepted semantic keyframe encoding");
+  Expect(AnimationPoseGroupEncodingAllowed(
+             PoseGroupEncoding::kV11WordStream,
+             /*keyframe=*/true) &&
+             AnimationPoseGroupEncodingAllowed(
+                 PoseGroupEncoding::kBitPackedV1,
+                 /*keyframe=*/true),
+         "sender policy rejected validated keyframe encodings");
+  Expect(!AnimationPoseGroupEncodingAllowed(
+             static_cast<PoseGroupEncoding>(4),
+             /*keyframe=*/false),
+         "sender policy accepted unknown pose encoding");
 }
 
 void TestVarintCanonicalValidation() {
