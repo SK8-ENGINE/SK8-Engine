@@ -10,6 +10,7 @@
 #include <cmath>
 #include <cstdint>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <string_view>
 #include <thread>
@@ -433,6 +434,24 @@ void TestPresentationClockRejectsCursorJumps() {
          "presentation clock reported the wrong ideal-cursor error");
 }
 
+void TestSceneTimeExtrapolationUsesCaptureClock() {
+  using skate3::multiplayer::playback::
+      ExtrapolateSceneTime;
+
+  Expect(ExtrapolateSceneTime(900000, 4000) == 904000,
+         "scene clock did not advance from its captured sample");
+  Expect(ExtrapolateSceneTime(900000, -4000) == 900000,
+         "scene clock rewound for a negative wall-time delta");
+  Expect(ExtrapolateSceneTime(0, 4000) == 0,
+         "missing scene time was converted into a valid clock");
+  Expect(
+      ExtrapolateSceneTime(
+          std::numeric_limits<std::uint64_t>::max() - 10,
+          20) ==
+          std::numeric_limits<std::uint64_t>::max(),
+      "scene clock extrapolation overflowed");
+}
+
 void TestPresentationClockConvergesWithoutRewinding() {
   using skate3::multiplayer::playback::PresentationClock;
 
@@ -575,6 +594,7 @@ int main() {
   TestPeriodicDeadlineDoesNotBurstAfterStall();
   TestAdaptiveInterpolationDelayCoversMeasuredStalls();
   TestPresentationClockRejectsCursorJumps();
+  TestSceneTimeExtrapolationUsesCaptureClock();
   TestPresentationClockConvergesWithoutRewinding();
   TestBoundedPoseCurvePreservesSamplesAndLimits();
   TestPoseCurveHasContinuousSegmentVelocity();

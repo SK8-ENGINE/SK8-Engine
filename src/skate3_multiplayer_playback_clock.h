@@ -6,6 +6,21 @@
 
 namespace skate3::multiplayer::playback {
 
+inline std::uint64_t ExtrapolateSceneTime(
+    std::uint64_t sample_time_us,
+    std::int64_t elapsed_wall_time_us) {
+  if (sample_time_us == 0 || elapsed_wall_time_us <= 0) {
+    return sample_time_us;
+  }
+  const std::uint64_t elapsed_us =
+      static_cast<std::uint64_t>(elapsed_wall_time_us);
+  if (sample_time_us >
+      std::numeric_limits<std::uint64_t>::max() - elapsed_us) {
+    return std::numeric_limits<std::uint64_t>::max();
+  }
+  return sample_time_us + elapsed_us;
+}
+
 // Converts a noisy ideal sender-time cursor into a monotonic presentation
 // cursor. Network jitter estimates and clock-offset refinement are allowed to
 // change the desired buffering delay, but those changes must not directly

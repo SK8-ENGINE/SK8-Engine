@@ -1976,6 +1976,7 @@ class Runtime {
   bool Tick(const char* map_name, const float map_origin[3],
             const AnimationPose* local_animation,
             const AppearanceBlob* local_appearance,
+            std::uint64_t local_presentation_time_us,
             std::vector<RemotePlayer>& out_remotes,
             std::vector<RemotePeerRetirement>& out_retirements) {
     out_retirements.clear();
@@ -2023,6 +2024,26 @@ class Runtime {
     }
 
     const auto now = Clock::now();
+    if (local_presentation_time_us != 0) {
+      current_presentation_time_us_ =
+          local_presentation_time_us;
+      last_presentation_sample_time_us_ =
+          local_presentation_time_us;
+      last_presentation_sample_at_ = now;
+      presentation_clock_valid_ = true;
+    } else if (
+        presentation_clock_valid_ &&
+        last_presentation_sample_at_ != Clock::time_point{}) {
+      current_presentation_time_us_ =
+          playback::ExtrapolateSceneTime(
+              last_presentation_sample_time_us_,
+              std::chrono::duration_cast<
+                  std::chrono::microseconds>(
+                  now - last_presentation_sample_at_)
+                  .count());
+    } else {
+      current_presentation_time_us_ = NowMicroseconds();
+    }
     const std::uint32_t map_hash = HashMapName(map_name);
     std::size_t participant_count = remote_peers_.size() + 1;
 #if defined(_WIN32)
@@ -2415,6 +2436,7 @@ class Runtime {
         last_rate_snapshot_.animation_present_held_oldest);
     REXLOG_INFO(
         "multiplayer-net: role={} peers={} visible={} quality={} interp={} "
+        "clock=scene "
         "rates={}/{}Hz tx={:.1f}KiB/s "
         "rx={:.1f}KiB/s tx={:.1f}pps rx={:.1f}pps anim={:.1f}/{:.1f}fps "
         "classes=tx({:.1f}r/{:.1f}a/{:.1f}p/{:.1f}c)KiB/s "
@@ -3328,29 +3350,36 @@ class Runtime {
       return false;
     }
     peer.last_packet_at = now;
-    const std::uint64_t receive_time_us = NowMicroseconds();
-    const std::int64_t observed_clock_offset =
-        static_cast<std::int64_t>(receive_time_us) -
-        static_cast<std::int64_t>(packet.sender_time_us);
-    if (!peer.clock_offset_valid) {
-      peer.clock_offset_us = observed_clock_offset;
-      peer.minimum_clock_offset_us = observed_clock_offset;
-      peer.clock_offset_valid = true;
-    } else {
-      // One-way queueing only increases the observed offset. Retain the
-      // session minimum instead of slowly following delayed packets upward
-      // and then snapping down on the next clean arrival. Slew toward a new
-      // minimum so even startup path improvements cannot jump the playhead.
-      peer.minimum_clock_offset_us =
-          std::min(
-              peer.minimum_clock_offset_us,
-              observed_clock_offset);
-      const std::int64_t correction =
-          peer.minimum_clock_offset_us -
-          peer.clock_offset_us;
-      peer.clock_offset_us +=
-          std::clamp<std::int64_t>(
-              correction, -250, 250);
+    // Sender animation timestamps represent its final native-scene playback
+    // time, not raw wall time. Measure clock offset in the receiver's same
+    // scene-time domain so remote motion remains phase-aligned with the
+    // retimed camera and local dynamic world.
+    const std::uint64_t receive_time_us =
+        current_presentation_time_us_;
+    if (presentation_clock_valid_) {
+      const std::int64_t observed_clock_offset =
+          static_cast<std::int64_t>(receive_time_us) -
+          static_cast<std::int64_t>(packet.sender_time_us);
+      if (!peer.clock_offset_valid) {
+        peer.clock_offset_us = observed_clock_offset;
+        peer.minimum_clock_offset_us = observed_clock_offset;
+        peer.clock_offset_valid = true;
+      } else {
+        // One-way queueing only increases the observed offset. Retain the
+        // session minimum instead of slowly following delayed packets upward
+        // and then snapping down on the next clean arrival. Slew toward a new
+        // minimum so even startup path improvements cannot jump the playhead.
+        peer.minimum_clock_offset_us =
+            std::min(
+                peer.minimum_clock_offset_us,
+                observed_clock_offset);
+        const std::int64_t correction =
+            peer.minimum_clock_offset_us -
+            peer.clock_offset_us;
+        peer.clock_offset_us +=
+            std::clamp<std::int64_t>(
+                correction, -250, 250);
+      }
     }
     peer.samples.push_back(
         {now, packet.sender_time_us, pose, packet.sequence});
@@ -4487,7 +4516,8 @@ class Runtime {
       return false;
     }
     const std::int64_t local_now_us =
-        static_cast<std::int64_t>(NowMicroseconds());
+        static_cast<std::int64_t>(
+            current_presentation_time_us_);
     if (peer.clock_offset_valid &&
         peer.animation_samples.size() >= 2 &&
         peer.minimum_clock_offset_us !=
@@ -4853,6 +4883,10 @@ class Runtime {
     std::fill_n(local_position_, 3, 0.0f);
     local_position_valid_ = false;
     local_appearance_identity_ = 0;
+    current_presentation_time_us_ = 0;
+    presentation_clock_valid_ = false;
+    last_presentation_sample_time_us_ = 0;
+    last_presentation_sample_at_ = {};
     pose_send_deadline_.Reset();
     last_pose_sample_time_us_ = 0;
     animation_send_deadline_.Reset();
@@ -4912,6 +4946,10 @@ class Runtime {
   bool local_position_valid_ = false;
   std::uint64_t local_appearance_identity_ = 0;
   NetworkTuning network_tuning_;
+  std::uint64_t current_presentation_time_us_ = 0;
+  bool presentation_clock_valid_ = false;
+  std::uint64_t last_presentation_sample_time_us_ = 0;
+  Clock::time_point last_presentation_sample_at_{};
   TelemetrySnapshot telemetry_;
   TelemetrySnapshot last_rate_snapshot_;
 };
@@ -5088,6 +5126,21 @@ class ReplicationWorker {
                   current_input->local_appearance.bytes != nullptr
               ? &current_input->local_appearance
               : nullptr,
+          [&current_input] {
+            if (!current_input->local_animation.has_value() ||
+                current_input->local_animation->sender_time_us == 0) {
+              return std::uint64_t{0};
+            }
+            const auto elapsed_us =
+                std::chrono::duration_cast<
+                    std::chrono::microseconds>(
+                    Clock::now() -
+                    current_input->published_at)
+                    .count();
+            return playback::ExtrapolateSceneTime(
+                current_input->local_animation->sender_time_us,
+                elapsed_us);
+          }(),
           remote_players, retirements);
       const std::uint64_t elapsed_ns =
           static_cast<std::uint64_t>(
@@ -5183,7 +5236,11 @@ bool TickLocalVisuals(const char* map_name,
   std::vector<RemotePeerRetirement> retirements;
   const bool have_remote_players = ActiveRuntime().Tick(
       map_name, map_render_origin, local_animation,
-      local_appearance, remote_players, retirements);
+      local_appearance,
+      local_animation != nullptr
+          ? local_animation->sender_time_us
+          : std::uint64_t{0},
+      remote_players, retirements);
   static std::uint64_t synchronous_sequence = 0;
   out_presentation.sequence = ++synchronous_sequence;
   out_presentation.players =

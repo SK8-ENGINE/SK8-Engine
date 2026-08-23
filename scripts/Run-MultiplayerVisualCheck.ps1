@@ -641,9 +641,9 @@ $runRoot
 Clients: 5
 Transport: localhost UDP
 Quality: Balanced, 60 Hz root, 60 Hz animation, 50 ms minimum interpolation
-Diagnostic under test: sender-to-render motion-path trace
-Diagnostics: source cadence, smoothed motion, renderer handoff cadence, timing,
-cursor error, and cursor slew are reported for every receiver/sender pair
+Change under test: remote playback aligned to the native scene/camera clock
+Diagnostics: scene-clock marker, source cadence, smoothed motion, renderer
+handoff cadence, timing, cursor error, and cursor slew are reported
 
 Visual scenario:
 1. Wait until all five clients have loaded the same map, every client sees
