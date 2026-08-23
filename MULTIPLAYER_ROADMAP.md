@@ -207,9 +207,25 @@ Current checkpoint:
   below 2.98 ms except one 6.99 ms texture upload. This is a soft-budget
   outlier to retain in performance regression checks, not evidence of visual
   failure.
-- Before protocol v12, the remaining Phase 3 gate is explicit resource
-  accounting plus repeated join, departure, role-reuse, and wardrobe-churn
-  coverage. A five-client visual completion pass also remains outstanding.
+- Commit `d7b7021` added explicit installed/pending mesh and texture ownership
+  audits, balanced-release telemetry, and an offline 128-change staging churn
+  test. The five-client runs reported zero missing, duplicate, orphaned, or
+  unbalanced renderer resources.
+- The first five-client pass exposed a localhost late-join gap: client 4 knew
+  about all four peers but received only role 1's appearance. Commit `2e06e16`
+  restarts each non-host sender's role-1 fanout stream once when it discovers a
+  new downstream peer.
+- In the follow-up five-client run, the user reported normal play looking good.
+  Telemetry independently showed all five clients installing all four remote
+  appearances, clients 2-5 exercising the new fanout restart, and no socket,
+  appearance, recipe, rig-cache, or resource-lifetime fault. The explicit
+  close/rejoin stress step was not performed and remains in the regression
+  matrix rather than blocking the next protocol phase.
+- Five simultaneous local GPU clients increased individual texture operations
+  to occasional 10-24 ms outliers even though the final atomic commits stayed
+  near zero and steady multiplayer frame work remained low. The current budget
+  is soft per resource; true sub-resource upload slicing remains a performance
+  follow-up if real multi-machine testing reproduces visible stalls.
 
 Completion:
 
