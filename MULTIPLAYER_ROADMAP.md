@@ -342,11 +342,29 @@ Current checkpoint:
 - All eight multiplayer suites pass, including unchanged protocol-v11 golden
   tests. The live runtime remains byte-for-byte protocol v11, so this
   checkpoint does not require an in-game visual pass.
-- The next isolated slice is a transport-neutral outbound scheduler with
-  separate reliable control, expirable pose, and rate-limited appearance
-  budgets. Synthetic overload tests must prove that appearance bulk cannot
-  head-of-line block a fresh pose or recovery control before any v12
-  capability advertisement is enabled in live sessions.
+- Commit `153ef23` adds a transport-neutral outbound scheduler with isolated
+  queue and byte limits for reliable control, expirable realtime data, and
+  reliable appearance bulk. The scheduler owns datagram bytes independently
+  of localhost, Steam, or a future server transport.
+- Control drains before realtime, and realtime drains before appearance.
+  Appearance has an independent per-drain budget and cannot consume control
+  or realtime queue capacity. A high-priority message that does not fit the
+  current transport budget is never bypassed by lower-priority traffic.
+- Realtime queues are latest-wins per target and stream, reject stale or
+  conflicting duplicates with rollover-safe sequence comparisons, expire
+  before transmission, and evict their oldest realtime data under their own
+  class pressure. Reliable control and appearance remain FIFO and are never
+  silently converted into expirable traffic.
+- Synthetic overload tests cover appearance saturation, independent priority
+  admission, strict drain order, realtime replacement and sequence rollover,
+  expiry, class limits, queue accounting, and rejected replacements retaining
+  the last valid realtime message. All nine multiplayer suites pass.
+- The next live slice keeps every protocol-v11 packet byte unchanged while
+  assigning explicit transport reliability: control and appearance remain
+  reliable, while root and skeletal animation become latest-wins/unreliable
+  on Steam. Telemetry and a user-run visual gate must confirm continuous pose,
+  outfit, and board behavior before any v12 capability advertisement is
+  enabled.
 
 Completion:
 
