@@ -46,6 +46,30 @@ server must share packet schemas, scheduling, recipient routing, and
 interpolation. A dedicated server is not an immediate implementation
 milestone.
 
+## Roadmap closure status
+
+The client-side architecture work in Phases 0-8 is implemented and covered by
+the automated protocol, lifecycle, renderer-cache, worker, interpolation,
+codec, transport, routing, impairment, and scale suites. The implementation
+keeps every active player at full final-pose fidelity; it does not introduce
+distance, visibility, importance, or player-count throttling.
+
+Three gates intentionally remain outside this implementation batch:
+
+- The user must perform the final five-client in-game visual pass. Automated
+  telemetry can verify timing, traffic, state transitions, failures, and
+  resource counters, but cannot establish visual correctness.
+- Real 6-, 20-, 50-, and 100-client GPU/CPU capacity requires those client
+  counts or representative retail render fixtures. Synthetic fan-out proves
+  codec and routing behavior, not retail rendering capacity.
+- A deployed dedicated relay/server remains a future product milestone. The
+  transport adapter, packet envelope, authenticated routing core, and topology
+  policy are ready for it without replacing client replication.
+
+Future work discovered by those gates should be driven by measurements. It is
+not permission to silently reduce fidelity or to move local input/rendering
+onto the multiplayer path.
+
 ## Phase 0: freeze the protocol-v11 baseline
 
 Purpose: establish tests and measurements before changing architecture.
@@ -845,8 +869,9 @@ Current checkpoint:
   joining.
 - Live telemetry reports predictive attempts, selections, logical/wire bytes,
   average and maximum encode time, and resulting fragment totals. A five-client
-  user visual run is still required before accepting the live checkpoint;
-  telemetry cannot prove visual correctness.
+  user visual run at `f4c5649` was reported visually good after the ingress
+  policy fix; telemetry independently found no rejected v12 fragments or
+  socket/policy failures.
 - The offline smallest-three rotation study now includes 256,000 synthetic
   skinned vertices with one to four bone influences and 300,000 board/contact
   probes. Maximum measured displacement was 0.0374 mm for the synthetic skin
@@ -854,6 +879,22 @@ Current checkpoint:
   identically. This strengthens the mathematical case but does not activate a
   lossy wire format. Retail-mesh deformation, rapid-trick, attachment, and user
   visual gates remain required.
+- A bounded Snappy v1 outer encoding now losslessly compresses whichever
+  already-validated exact representation wins. It records the inner encoding
+  and decoded byte count, rejects nesting, unknown encodings, malformed
+  headers, corrupt streams, trailing data, and output above 64 KiB, and
+  changes the compatibility identity so older peers cannot decode it.
+- On the same 600-frame synthetic corpus, the Snappy-wrapped typical stream
+  projects to about 42.7 KiB/s including datagram headers (down from 114.2),
+  gentle to 41.5 KiB/s, and stress to 33.2 KiB/s. Typical compression added
+  about 1.1 microseconds per frame on the development machine. All decoded
+  animation words remain byte-for-byte identical.
+- Smallest-three remains rejected for the live wire path: its mathematical
+  deformation bounds are good, but it would add approximation while exact
+  lossless compression already exceeds the original 90 KB/s target.
+  Per-chain translation omission is likewise rejected until runtime skeleton
+  hierarchy proves a translation reconstructable; affine, pivot, board, and
+  attachment exceptions remain exact.
 
 ## Phase 6: full-fidelity scale validation
 
@@ -877,6 +918,26 @@ Adaptive fidelity remains a deferred contingency, not an implementation
 milestone. Reintroducing it requires measured evidence from real full-fidelity
 tests, a written fidelity impact, and an explicit roadmap decision.
 
+Current checkpoint:
+
+- Live fan-out reuses quantization, word-stream construction, and compression
+  for recipients sharing tracks and a receiver-confirmed baseline. Telemetry
+  reports preparation passes, recipient targets, and exact serialization
+  reuse rather than inferring it from aggregate bandwidth.
+- A deterministic datagram simulator covers the complete RTT, random-loss,
+  burst-loss, jitter, reordering, duplication, and 1/5/10 Mbit/s uplink
+  matrix. The normal 80 ms RTT, 10 ms jitter, 1% loss envelope retains at
+  least 99.9 percent interpolatable pose coverage in the changing-pose test.
+- Synthetic immutable fan-out runs exact-pose-sized traffic for 2, 5, 20, 50,
+  and 100 roles. A 100-player sender serializes each source fragment once and
+  routes it to 99 recipients without creating 99 codec copies. This proves
+  protocol/routing accounting and bounded metadata work, not GPU capacity or
+  visual correctness for 100 rendered retail skaters.
+- The repeatable non-game soak runner completed 66 consecutive iterations of
+  the protocol state, transport, lossless codecs, exact deltas, scheduler,
+  lifecycle, worker, routing, impairment, 100-player scale, and Snappy suites
+  in 60.076 seconds with no failures and no game process launched.
+
 ## Phase 7: Steam Networking Sockets transport
 
 Purpose: gain explicit connections, batching, connection statistics, queue
@@ -891,6 +952,22 @@ Keep one replication core behind transport adapters for:
 
 Separate realtime, critical control, and bulk appearance traffic into
 independent ordering and scheduling classes.
+
+Current checkpoint:
+
+- `TransportAdapter` defines one batch send/receive and queue-diagnostics
+  boundary for localhost UDP, current Steam Messages, explicit Steam Sockets,
+  and a dedicated connection. The replication envelope contains no platform
+  address.
+- Current Steam Messages is retained as the live Steam adapter because Valve
+  documents that it already runs on Steam Networking Sockets internally and
+  provides the UDP-style symmetric P2P behavior used here. Its official
+  session status now exposes ping, local/remote quality, rates, send capacity,
+  pending class bytes, queue time, unacknowledged reliable bytes, and jitter.
+- Explicit connection/listen/poll-group Sockets remains an adapter deployment
+  choice for a dedicated endpoint, not a protocol migration. Control,
+  realtime, and appearance classes already have separate reliability,
+  expiry, priority, and queue limits.
 
 ## Phase 8: larger sessions and future dedicated relay
 
@@ -911,6 +988,21 @@ For 20-100 players, prefer a dedicated full-fidelity relay:
 The first dedicated component may be a visual relay. Future authoritative
 root, events, scoring, or simulation can use the same protocol envelope
 without replacing appearance and final-pose replication.
+
+Current checkpoint:
+
+- The authenticated visual relay core registers connection/role/session
+  generations, rejects unknown connections, role spoofing, stale sessions,
+  invalid targets, and role-reuse leakage, and forwards original immutable
+  v12 bytes without retail content.
+- Routing policy retains direct P2P for 2-20 players, prefers a dedicated
+  relay above 20 when available, and preserves an explicit P2P fallback
+  without reducing fidelity.
+- At the code-derived typical 42.7 KiB/s stream, direct-mesh upload is about
+  0.04, 0.17, 0.79, 2.04, and 4.13 MiB/s per sender for 2, 5, 20, 50, and
+  100 players. A dedicated relay keeps each client's upload near 0.04 MiB/s
+  while its egress scales to all recipients. These omit transport framing and
+  appearance bursts and must be replaced with deployment measurements.
 
 ## Five-player acceptance contract
 

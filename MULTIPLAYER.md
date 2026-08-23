@@ -119,8 +119,18 @@ AppID and follow Valve's setup and redistributable requirements.
   capability datagram over direct Steam or localhost connections. It uses
   explicit little-endian serialization and validates the current
   authenticated role/session plus map, build-contract, and content-contract
-  identities before activating. Root, skeletal animation, appearances, and
-  rendering still use protocol v11 at this checkpoint.
+  identities before activating. Negotiated peers send root snapshots and
+  continuous skeletal animation through the v12 envelope. Animation deltas
+  reference only receiver-confirmed complete keyframes, split at the
+  1,200-byte datagram boundary, expire instead of becoming reliable backlog,
+  and request bounded keyframe recovery after an unavailable baseline.
+  Protocol v11 remains the compatibility fallback.
+- The v12 sender quantizes and serializes once for recipients with the same
+  confirmed baseline, chooses the smallest exact raw, semantic, block, or
+  predictive representation, then optionally Snappy-compresses those exact
+  bytes. The receiver decompresses before the unchanged validated pose
+  decoder. Snappy is a lossless outer wrapper; it does not change quaternion,
+  translation, affine, board, wheel, or attachment precision.
 - A stale remote player disappears after 1.5 seconds.
 - The sender captures Skate 3's final rendered bone palettes after its
   animation graph, IK, tricks, and bails have evaluated.
@@ -269,6 +279,14 @@ delivered about 54-56 complete animation frames per second and settled around
 274-280 KiB/s and 326-335 packets/s in each direction for one fully replicated
 skater. Both processes reported zero socket failures. Appearance transfer is
 a separate one-time burst when a player first joins or changes outfit.
+The exact v12 predictive checkpoint measured roughly 114 KiB/s per synthetic
+typical stream including datagram headers. The lossless Snappy outer wrapper
+reduces the same code-derived typical corpus to about 42.7 KiB/s and 1.05
+datagrams per frame, with about 1.1 microseconds of additional compression
+work per frame on the development machine. Gentle and stress corpora project
+to about 41.5 and 33.2 KiB/s respectively. These are deterministic codec
+benchmarks, not live network measurements or proof of visual correctness; the
+combined five-client visual/telemetry gate remains required.
 Visual-check builds also emit periodic `multiplayer-perf` windows for local
 final-pose capture, appearance capture/cache work, the replication tick,
 remote appearance installation, remote reconstruction, and their total
@@ -288,13 +306,12 @@ installation maxima; the background-preparation check should reduce those
 render-thread maxima without changing the installed outfit.
 
 Steam sessions now use direct peer fan-out. With ten players all mutually
-present, each player uploads one complete stream to nine peers and receives
-nine streams: using the measured full-fidelity localhost payload as a planning
-estimate, about 2.5 MiB/s (roughly 20 Mbit/s) in each direction before Steam
-transport overhead and appearance bootstrap traffic. No lobby owner carries
-the other players' streams. This is a far healthier ten-player topology, but
-it still grows approximately with the square of the player count
-across the whole session and is not a 100-player full-detail solution.
+present, each player uploads one exact stream to nine peers and receives nine
+streams. Using the code-derived typical Snappy v12 projection, this is about
+0.38 MiB/s of application datagrams in each direction before Steam framing
+and appearance bootstrap traffic. No lobby owner carries the other players'
+streams. Aggregate direct-mesh traffic still grows approximately with the
+square of player count.
 
 Higher population work must first pursue compression, packet batching, shared
 serialization, parallel reconstruction, and full-fidelity relays or servers.
@@ -326,15 +343,44 @@ separate correctness task.
   distribution requires a project-owned Steam AppID.
 - Passwords are currently a convenience lobby filter, not production-grade
   authentication. Do not reuse an important password.
-- A production 100-player session still needs authoritative server
-  simulation, transport-level reliability, admission and identity, abuse
-  limits, efficient full-fidelity relay fan-out, and measured internet-scale
-  animation tests. Direct P2P is the current small-session transport; larger
-  sessions should change topology rather than silently reduce player detail.
+- A production 100-player session still needs deployed relay capacity,
+  admission and identity, abuse limits, and measured internet-scale animation
+  tests. Authoritative gameplay simulation can follow without replacing the
+  visual replication envelope. Direct P2P is the current small/medium-session
+  transport; larger sessions should change topology rather than silently
+  reduce player detail.
 
 ## Transport boundary
 
 The replicated root pose and per-mesh animation tracks, packet versioning,
-map-space convention, interpolation, staleness rules, and renderer-facing
-pose types are shared by Steam and localhost. Gameplay code and rendering do
-not depend directly on either transport.
+map-space convention, class scheduling, interpolation, staleness rules, and
+renderer-facing pose types are shared by Steam and localhost. A common
+transport-adapter contract represents localhost UDP, Steam Networking
+Messages, explicit Steam Networking Sockets, and a future dedicated
+connection without placing platform addresses in replication packets.
+
+The current Steam Messages backend runs on Steam Networking Sockets
+internally and now queries its official session real-time status for ping,
+quality, data rates, send capacity, pending reliable/unreliable bytes, queue
+time, and maximum jitter. An explicit connection-oriented Sockets adapter can
+therefore be introduced behind the same contract when dedicated/listen
+connections are deployed; changing packet schemas or interpolation is not
+required.
+
+The future visual relay router is also transport-neutral. It authenticates a
+connection's role and process session from envelope metadata and forwards the
+original immutable datagram to every other role (or one directed control
+target). It never reads retail meshes, textures, skeletons, or pose values.
+Synthetic tests exercise this fan-out at 2, 5, 20, 50, and 100 players and
+reject unknown connections, role spoofing, stale sessions, invalid targets,
+and role-reuse leakage.
+
+Run the non-game protocol, impairment, lifecycle, worker, routing, and
+full-pose scale suites repeatedly with:
+
+```powershell
+.\scripts\Run-MultiplayerSyntheticSoak.ps1 -Minutes 10
+```
+
+It never launches Skate 3. Each run writes a timestamped summary and complete
+CTest output under `out\synthetic-soaks`.
