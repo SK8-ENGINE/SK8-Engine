@@ -540,6 +540,9 @@ try {
         interpolation_ms = 50
         replication_worker = $true
         async_appearance_prepare = $true
+        incremental_appearance_install = $true
+        appearance_install_ops_per_frame = 4
+        appearance_install_budget_ms = 4.0
         appearance_recovery_check = [bool]$AppearanceRecoveryCheck
         appearance_recovery_receiver = if ($AppearanceRecoveryCheck) {
             3
@@ -615,11 +618,14 @@ Transport: localhost UDP
 Quality: Balanced, 60 Hz root, 60 Hz animation, 50 ms interpolation
 Profiles: persistent per role across visual-check runs
 Appearance preparation: background CPU worker enabled
+Appearance installation: staged GPU upload, maximum 4 operations or 4 ms
+per render frame
 
 Visual scenario:
 1. Watch initial map entry closely. Remote players may briefly use the teal
-   proxy while their outfit is prepared, but each should change once to its
-   complete outfit. Note any obvious freeze when that change occurs.
+   proxy while their outfit is prepared and installed. Each must change once,
+   atomically, to its complete outfit: never a partly installed body, clothing,
+   hair, or board. Note any obvious freeze when that change occurs.
 2. Focus on the female skater with medium-length hair. On her own client,
    rotate in place, skate in circles, push, ollie, and bail. Her hair should
    stay attached to her head throughout; it must not float, lag behind,
@@ -646,14 +652,16 @@ Success:
   transparency limited to the authored strand cutout.
 - The male T-shirt remains present and body-shaped locally and remotely.
 - Each remote outfit replaces its temporary proxy promptly, without an
-  obvious client-FPS freeze at the installation moment.
+  intermediate partial outfit or obvious client-FPS freeze at the installation
+  moment.
 - Nearby remote animation remains smooth through the bail and detached board.
 - No teal fallback, disappearing player, attachment drift, or obvious new
   client stall occurs.
 
 Failure:
 - Any nearby player becomes teal, disappears, freezes, mixes outfit pieces,
-  loses its board/attachments, or causes a noticeable new frame stall.
+  shows a partial outfit, loses its board/attachments, or causes a noticeable
+  new frame stall.
 - The female hair remains broadly see-through, or the male T-shirt disappears,
   stretches, trails away, or reaches toward the session marker.
 
@@ -734,6 +742,9 @@ separately, then ask the agent to analyze this run directory.
             '--skate3_multiplayer_local_interpolation_ms=50',
             '--skate3_multiplayer_replication_worker=true',
             '--skate3_multiplayer_async_appearance_prepare=true',
+            '--skate3_multiplayer_incremental_appearance_install=true',
+            '--skate3_multiplayer_appearance_install_ops_per_frame=4',
+            '--skate3_multiplayer_appearance_install_budget_ms=4',
             '--skate3_native_render_scene_perf_log=true',
             '--skate3_native_render_scene_perf_interval=300',
             (

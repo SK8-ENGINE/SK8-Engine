@@ -161,6 +161,20 @@ foreach ($client in $clientDirectories) {
             ) |
             ForEach-Object { $_.Line }
     )
+    $appearanceInstallStepLines = @(
+        $lines |
+            Select-String -Pattern (
+                'multiplayer-appearance-install-step:'
+            ) |
+            ForEach-Object { $_.Line }
+    )
+    $appearanceInstallCancelLines = @(
+        $lines |
+            Select-String -Pattern (
+                'multiplayer-appearance-install-cancel:'
+            ) |
+            ForEach-Object { $_.Line }
+    )
     $hairRouteLines = @(
         $lines |
             Select-String -Pattern (
@@ -231,6 +245,34 @@ foreach ($client in $clientDirectories) {
     $summary.Add(
         'max_appearance_gpu_install_ms=' +
         (Maximum-DecimalField $appearanceInstallLines 'upload')
+    )
+    $summary.Add(
+        'appearance_gpu_install_steps=' +
+        $appearanceInstallStepLines.Count
+    )
+    $summary.Add(
+        'appearance_gpu_install_cancels=' +
+        $appearanceInstallCancelLines.Count
+    )
+    $summary.Add(
+        'max_appearance_gpu_step_ms=' +
+        (Maximum-DecimalField $appearanceInstallStepLines 'upload')
+    )
+    $summary.Add(
+        'max_appearance_gpu_total_ms=' +
+        (Maximum-DecimalField $appearanceInstallLines 'total')
+    )
+    $summary.Add(
+        'max_appearance_gpu_wall_ms=' +
+        (Maximum-DecimalField $appearanceInstallLines 'wall')
+    )
+    $summary.Add(
+        'max_appearance_gpu_install_frames=' +
+        (Maximum-IntegerField $appearanceInstallLines 'frames')
+    )
+    $summary.Add(
+        'max_appearance_gpu_install_operations=' +
+        (Maximum-IntegerField $appearanceInstallLines 'operations')
     )
     $summary.Add(
         'remote_hair_route_events=' +
@@ -468,6 +510,22 @@ foreach ($client in $clientDirectories) {
         'last_appearance_gpu_install=' +
         $(if ($appearanceInstallLines.Count -gt 0) {
             $appearanceInstallLines[-1]
+        } else {
+            'missing'
+        })
+    )
+    $summary.Add(
+        'last_appearance_gpu_install_step=' +
+        $(if ($appearanceInstallStepLines.Count -gt 0) {
+            $appearanceInstallStepLines[-1]
+        } else {
+            'missing'
+        })
+    )
+    $summary.Add(
+        'last_appearance_gpu_install_cancel=' +
+        $(if ($appearanceInstallCancelLines.Count -gt 0) {
+            $appearanceInstallCancelLines[-1]
         } else {
             'missing'
         })

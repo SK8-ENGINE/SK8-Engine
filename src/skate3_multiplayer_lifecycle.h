@@ -34,6 +34,41 @@ inline constexpr auto kAppearanceResendRequestMinimumInterval =
   return scoped_key;
 }
 
+// Incremental installs alternate between two renderer-owned namespaces. This
+// lets a complete appearance stay live while its replacement is staged.
+[[nodiscard]] constexpr std::uint8_t NextRemoteAppearanceResourceSlot(
+    bool has_installed_items, std::uint32_t first_installed_mesh) {
+  if (!has_installed_items) {
+    return 0;
+  }
+  return (first_installed_mesh & 0xFF000000u) == 0xE1000000u ? 1 : 0;
+}
+
+[[nodiscard]] constexpr std::uint32_t RemoteAppearanceMeshKey(
+    std::uint8_t slot, std::uint32_t role, std::size_t piece_index) {
+  if (slot > 1 || role < 1 || role > 100 ||
+      piece_index > 0xFFFFu) {
+    return 0;
+  }
+  const std::uint32_t base =
+      slot == 0 ? 0xE1000000u : 0xE2000000u;
+  return base | (role << 16) |
+         static_cast<std::uint32_t>(piece_index);
+}
+
+[[nodiscard]] constexpr std::uint32_t
+RemoteAppearanceTextureObjectKey(std::uint8_t slot, std::uint32_t role,
+                                 std::size_t texture_index) {
+  if (slot > 1 || role < 1 || role > 100 ||
+      texture_index > 0xFFFFu) {
+    return 0;
+  }
+  const std::uint32_t base =
+      slot == 0 ? 0xF1000000u : 0xF2000000u;
+  return base | (role << 16) |
+         static_cast<std::uint32_t>(texture_index);
+}
+
 [[nodiscard]] constexpr bool RemoteAppearanceSessionChanged(
     std::uint32_t installed_session, std::uint32_t observed_session) {
   return installed_session != 0 && observed_session != 0 &&

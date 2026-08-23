@@ -57,6 +57,27 @@ REXCVAR_DEFINE_BOOL(
     "background replication worker. Local capture and prepared remote "
     "presentation remain renderer-owned.")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
+REXCVAR_DEFINE_BOOL(
+    skate3_multiplayer_incremental_appearance_install, false,
+    "Skate 3/Multiplayer",
+    "Install prepared remote appearance textures and meshes transactionally "
+    "over multiple render frames. The proxy remains visible until every "
+    "resource and renderer cache is ready.")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+REXCVAR_DEFINE_INT32(
+    skate3_multiplayer_appearance_install_ops_per_frame, 4,
+    "Skate 3/Multiplayer",
+    "Maximum remote appearance texture, mesh, or commit operations issued "
+    "by the renderer in one frame.")
+    .range(1, 16)
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+REXCVAR_DEFINE_DOUBLE(
+    skate3_multiplayer_appearance_install_budget_ms, 4.0,
+    "Skate 3/Multiplayer",
+    "Soft per-frame CPU budget for incremental remote appearance GPU "
+    "installation. One already-started resource operation may exceed it.")
+    .range(0.25, 16.0)
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
 REXCVAR_DEFINE_INT32(
     skate3_multiplayer_local_client, 0, "Skate 3",
     "Local multiplayer client slot: 0 disables networking, 1 binds the first "

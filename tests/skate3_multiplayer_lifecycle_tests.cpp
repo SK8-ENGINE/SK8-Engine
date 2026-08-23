@@ -15,6 +15,9 @@ using skate3::multiplayer::lifecycle::kMaximumIncompleteAppearanceBytes;
 using skate3::multiplayer::lifecycle::OutboundAppearanceState;
 using skate3::multiplayer::lifecycle::PeerGenerationTracker;
 using skate3::multiplayer::lifecycle::RemoteAppearanceRetirementMatches;
+using skate3::multiplayer::lifecycle::RemoteAppearanceMeshKey;
+using skate3::multiplayer::lifecycle::RemoteAppearanceTextureObjectKey;
+using skate3::multiplayer::lifecycle::NextRemoteAppearanceResourceSlot;
 using skate3::multiplayer::lifecycle::RemoteAppearanceSessionChanged;
 using skate3::multiplayer::lifecycle::RemoteAppearanceTextureStoreKey;
 using skate3::multiplayer::capture::LocalPresentationPieceOwned;
@@ -117,6 +120,37 @@ void TestRemoteAppearanceTextureOwnership() {
          "roles above 100 must not own a remote texture");
   Expect(RemoteAppearanceTextureStoreKey(2, 0) == 0,
          "empty content identity must not own a remote texture");
+}
+
+void TestRemoteAppearanceStagingNamespaces() {
+  Expect(NextRemoteAppearanceResourceSlot(false, 0) == 0,
+         "first staged appearance must use slot zero");
+  Expect(NextRemoteAppearanceResourceSlot(true, 0xE1000000u) == 1,
+         "slot-zero appearance must stage its replacement in slot one");
+  Expect(NextRemoteAppearanceResourceSlot(true, 0xE2000000u) == 0,
+         "slot-one appearance must stage its replacement in slot zero");
+
+  const std::uint32_t mesh_a = RemoteAppearanceMeshKey(0, 2, 3);
+  const std::uint32_t mesh_b = RemoteAppearanceMeshKey(1, 2, 3);
+  const std::uint32_t mesh_other_role =
+      RemoteAppearanceMeshKey(0, 3, 3);
+  Expect(mesh_a != 0 && mesh_b != 0,
+         "valid staged mesh keys must not be empty");
+  Expect(mesh_a != mesh_b,
+         "two transactional slots must not share a mesh key");
+  Expect(mesh_a != mesh_other_role,
+         "two roles must not share a staged mesh key");
+
+  const std::uint32_t texture_a =
+      RemoteAppearanceTextureObjectKey(0, 2, 3);
+  const std::uint32_t texture_b =
+      RemoteAppearanceTextureObjectKey(1, 2, 3);
+  Expect(texture_a != 0 && texture_a != texture_b,
+         "two transactional slots must not share a texture object key");
+  Expect(RemoteAppearanceMeshKey(2, 2, 3) == 0 &&
+             RemoteAppearanceMeshKey(0, 0, 3) == 0 &&
+             RemoteAppearanceTextureObjectKey(0, 101, 3) == 0,
+         "invalid staging coordinates must not create renderer keys");
 }
 
 void TestRemoteAppearanceGenerationRetirement() {
@@ -256,6 +290,7 @@ int main() {
   TestDepartureAndRoleReuse();
   TestInvalidIdentityDoesNotCreateState();
   TestRemoteAppearanceTextureOwnership();
+  TestRemoteAppearanceStagingNamespaces();
   TestRemoteAppearanceGenerationRetirement();
   TestLocalPresentationCaptureOwnership();
   TestAppearanceAssemblyBudget();
