@@ -385,6 +385,8 @@ struct RemotePeerState {
   std::deque<ReceivedAnimationSample> animation_samples;
   AnimationAssembly animation_assembly;
   protocol_v12::PoseGroupReassembler v12_animation_reassembler{};
+  protocol_v12::PoseReceiverState v12_pose_receiver{
+      1u << kV12AnimationGroupId};
   QuantizedAnimationFrame animation_keyframe;
   PeerTimingTelemetry timing;
   motion::Window received_motion;
@@ -401,11 +403,13 @@ struct PeerControlState {
   Clock::time_point last_v12_advertisement_received{};
   protocol_v12::PeerGenerationState v12_generation;
   protocol_v12::ReceiveHistory v12_control_receive_history;
+  protocol_v12::SenderBaselineState v12_sender_baseline;
   std::uint64_t v12_negotiated_features = 0;
   std::uint32_t last_v12_capability_sequence_sent = 0;
   std::uint32_t v12_animation_send_sequence = 0;
   bool v12_capability_acknowledged = false;
   bool v12_animation_started = false;
+  bool v12_force_animation_keyframe = false;
   std::uint64_t pending_appearance = 0;
   AppearanceDeliveryState pending_appearance_state =
       AppearanceDeliveryState::kUnknown;
@@ -519,6 +523,14 @@ struct TelemetrySnapshot {
   std::uint64_t received_v12_animation_fragments = 0;
   std::uint64_t rejected_v12_animation_fragments = 0;
   std::uint64_t completed_v12_animation_groups = 0;
+  std::uint64_t sent_v12_pose_controls = 0;
+  std::uint64_t received_v12_pose_controls = 0;
+  std::uint64_t rejected_v12_pose_controls = 0;
+  std::uint64_t sent_v12_baseline_reports = 0;
+  std::uint64_t received_v12_baseline_reports = 0;
+  std::uint64_t sent_v12_baseline_requests = 0;
+  std::uint64_t received_v12_baseline_requests = 0;
+  std::uint64_t forced_v12_animation_keyframes = 0;
   std::uint64_t animation_present_interpolated = 0;
   std::uint64_t animation_present_held_latest = 0;
   std::uint64_t animation_present_held_oldest = 0;
@@ -2193,6 +2205,22 @@ class Runtime {
         << telemetry_.rejected_v12_animation_fragments
         << " multiplayer_completed_v12_animation_groups="
         << telemetry_.completed_v12_animation_groups
+        << " multiplayer_tx_v12_pose_controls="
+        << telemetry_.sent_v12_pose_controls
+        << " multiplayer_rx_v12_pose_controls="
+        << telemetry_.received_v12_pose_controls
+        << " multiplayer_rejected_v12_pose_controls="
+        << telemetry_.rejected_v12_pose_controls
+        << " multiplayer_tx_v12_baseline_reports="
+        << telemetry_.sent_v12_baseline_reports
+        << " multiplayer_rx_v12_baseline_reports="
+        << telemetry_.received_v12_baseline_reports
+        << " multiplayer_tx_v12_baseline_requests="
+        << telemetry_.sent_v12_baseline_requests
+        << " multiplayer_rx_v12_baseline_requests="
+        << telemetry_.received_v12_baseline_requests
+        << " multiplayer_forced_v12_animation_keyframes="
+        << telemetry_.forced_v12_animation_keyframes
         << " multiplayer_animation_present_interpolated="
         << telemetry_.animation_present_interpolated
         << " multiplayer_animation_present_held_latest="
@@ -2333,6 +2361,10 @@ class Runtime {
         "v12_incompatible={} v12_root_tx={} v12_root_rx={} "
         "v12_root_rejected={} v12_anim_tx={} v12_anim_rx={} "
         "v12_anim_rejected={} v12_anim_complete={} "
+        "v12_pose_control_tx={} v12_pose_control_rx={} "
+        "v12_pose_control_rejected={} v12_baseline_report_tx={} "
+        "v12_baseline_report_rx={} v12_baseline_request_tx={} "
+        "v12_baseline_request_rx={} v12_forced_keyframe={} "
         "bones={} relay={:.1f}pps relevance_drop={:.1f}pps rejected={} "
         "failures={} peer_resets={} "
         "appearance={:.2f}MiB timeout={} budget_reject={} "
@@ -2366,6 +2398,14 @@ class Runtime {
         telemetry_.received_v12_animation_fragments,
         telemetry_.rejected_v12_animation_fragments,
         telemetry_.completed_v12_animation_groups,
+        telemetry_.sent_v12_pose_controls,
+        telemetry_.received_v12_pose_controls,
+        telemetry_.rejected_v12_pose_controls,
+        telemetry_.sent_v12_baseline_reports,
+        telemetry_.received_v12_baseline_reports,
+        telemetry_.sent_v12_baseline_requests,
+        telemetry_.received_v12_baseline_requests,
+        telemetry_.forced_v12_animation_keyframes,
         telemetry_.remote_animation_bones, relay_pps, drop_pps,
         telemetry_.rejected_packets, telemetry_.socket_failures,
         telemetry_.outbound_peer_resets,
@@ -3004,6 +3044,15 @@ class Runtime {
               envelope.sender_role, envelope.sender_session,
               sender, now, nullptr);
         }
+      } else if (
+          envelope.kind ==
+          protocol_v12::MessageKind::kPoseControl) {
+        if (ReceiveV12PoseControl(
+                now, bytes, received, sender)) {
+          RegisterPeer(
+              envelope.sender_role, envelope.sender_session,
+              sender, now, nullptr);
+        }
       } else {
         (void)ReceiveV12CapabilityPacket(
             now, v12_compatibility, bytes, received, sender);
@@ -3206,6 +3255,20 @@ class Runtime {
     }
 
     RemotePeerState& peer = peer_iterator->second;
+    const protocol_v12::PoseReceiveResult fragment_result =
+        peer.v12_pose_receiver.ReceivePoseFragment(
+            envelope.sender_role, envelope.sender_session,
+            envelope.sequence);
+    if (fragment_result ==
+            protocol_v12::PoseReceiveResult::kDuplicatePacket ||
+        fragment_result ==
+            protocol_v12::PoseReceiveResult::kPacketTooOld) {
+      return true;
+    }
+    if (fragment_result !=
+        protocol_v12::PoseReceiveResult::kFragmentAccepted) {
+      return reject();
+    }
     ++telemetry_.received_packets;
     ++telemetry_.received_animation_fragments;
     telemetry_.received_animation_bytes += packet.size();
@@ -3216,6 +3279,15 @@ class Runtime {
             envelope, header, fragment, NowMicroseconds());
     peer.timing.superseded_animation_assemblies +=
         result.evicted_slots;
+    if (result.baseline_recovery_mask != 0) {
+      peer.v12_pose_receiver.NotifyBaselineUnavailable();
+      if (peer.v12_pose_receiver.ConsumeBaselineRequest()) {
+        (void)SendV12PoseControl(
+            envelope.sender_role, sender,
+            protocol_v12::PoseControlType::kRequestBaseline,
+            0, result.baseline_recovery_mask);
+      }
+    }
     switch (result.disposition) {
       case protocol_v12::ReassemblyDisposition::kFragmentStored:
       case protocol_v12::ReassemblyDisposition::kDuplicateFragment:
@@ -3243,13 +3315,138 @@ class Runtime {
             completed.kind, header, words)) {
       return reject();
     }
+    const std::uint32_t group_mask =
+        1u << completed.group_id;
+    if (completed.kind ==
+        protocol_v12::MessageKind::kPoseDelta) {
+      const protocol_v12::PoseReceiveResult delta_result =
+          peer.v12_pose_receiver.CompleteDelta(
+              envelope.sender_role, envelope.sender_session,
+              completed.baseline_id, group_mask);
+      if (delta_result ==
+          protocol_v12::PoseReceiveResult::kMissingBaseline) {
+        if (peer.v12_pose_receiver.ConsumeBaselineRequest()) {
+          (void)SendV12PoseControl(
+              envelope.sender_role, sender,
+              protocol_v12::PoseControlType::kRequestBaseline,
+              0, group_mask);
+        }
+        return true;
+      }
+      if (delta_result !=
+          protocol_v12::PoseReceiveResult::kDeltaAccepted) {
+        return reject();
+      }
+    }
     if (!CommitAnimationFrame(
             now, peer, completed.pose_id,
             envelope.sender_time_us, root_bone,
             root_position, words)) {
       return reject();
     }
+    if (completed.kind ==
+        protocol_v12::MessageKind::kPoseBaseline) {
+      const protocol_v12::PoseReceiveResult baseline_result =
+          peer.v12_pose_receiver.CompleteBaselineGroup(
+              envelope.sender_role, envelope.sender_session,
+              envelope.sequence, completed.pose_id, group_mask);
+      if (baseline_result !=
+              protocol_v12::PoseReceiveResult::kBaselineCompleted &&
+          baseline_result !=
+              protocol_v12::PoseReceiveResult::
+                  kBaselineGroupAccepted) {
+        return reject();
+      }
+      if (baseline_result ==
+          protocol_v12::PoseReceiveResult::kBaselineCompleted) {
+        (void)SendV12PoseControl(
+            envelope.sender_role, sender,
+            protocol_v12::PoseControlType::kDecodedBaseline,
+            completed.pose_id, group_mask);
+      }
+    }
     ++telemetry_.completed_v12_animation_groups;
+    return true;
+  }
+
+  bool ReceiveV12PoseControl(
+      Clock::time_point now, const std::byte* bytes,
+      int received_bytes, const PacketEndpoint& sender) {
+    const auto reject = [this]() {
+      ++telemetry_.rejected_v12_pose_controls;
+      ++telemetry_.rejected_packets;
+      return false;
+    };
+    if (bytes == nullptr || received_bytes <= 0 ||
+        (!using_steam_ &&
+         !topology::DirectLocalMeshEnabled(
+             ConfiguredLocalPeerCount()))) {
+      return reject();
+    }
+    const auto packet = std::span<const std::uint8_t>(
+        reinterpret_cast<const std::uint8_t*>(bytes),
+        static_cast<std::size_t>(received_bytes));
+    protocol_v12::Envelope envelope;
+    protocol_v12::PoseControl pose_control;
+    if (!protocol_v12::DecodeEnvelope(packet, envelope) ||
+        !protocol_v12::DecodePoseControl(
+            packet.subspan(protocol_v12::kEnvelopeBytes),
+            pose_control) ||
+        !protocol_v12::PoseControlEnvelopeShapeValid(
+            envelope, pose_control) ||
+        envelope.stream_id != kV12AnimationStreamId ||
+        pose_control.target_role !=
+            static_cast<std::uint16_t>(bound_role_) ||
+        pose_control.target_stream_id !=
+            kV12AnimationStreamId ||
+        pose_control.target_session != session_id_ ||
+        pose_control.group_mask !=
+            (1u << kV12AnimationGroupId) ||
+        !SteamSenderValid(envelope.sender_role, sender) ||
+        envelope.sender_role ==
+            static_cast<std::uint16_t>(bound_role_) ||
+        envelope.sender_session == session_id_) {
+      return reject();
+    }
+    const auto control_iterator =
+        peer_control_.find(envelope.sender_role);
+    const auto peer_iterator =
+        remote_peers_.find(envelope.sender_role);
+    if (control_iterator == peer_control_.end() ||
+        peer_iterator == remote_peers_.end() ||
+        peer_iterator->second.session != envelope.sender_session ||
+        !control_iterator->second.v12_generation.Matches(
+            envelope.sender_role, envelope.sender_session) ||
+        (control_iterator->second.v12_negotiated_features &
+         protocol_v12::kFeaturePoseAcknowledgements) == 0) {
+      return reject();
+    }
+    PeerControlState& control = control_iterator->second;
+    const protocol_v12::ReceiveDisposition disposition =
+        control.v12_control_receive_history.Observe(
+            envelope.sequence);
+    if (disposition ==
+            protocol_v12::ReceiveDisposition::kDuplicate ||
+        disposition ==
+            protocol_v12::ReceiveDisposition::kTooOld) {
+      return true;
+    }
+    if (pose_control.type ==
+        protocol_v12::PoseControlType::kDecodedBaseline) {
+      if (!control.v12_sender_baseline.ConfirmDecodedBaseline(
+              session_id_, pose_control.baseline_id)) {
+        return reject();
+      }
+      ++telemetry_.received_v12_baseline_reports;
+    } else {
+      control.v12_force_animation_keyframe = true;
+      ++telemetry_.received_v12_baseline_requests;
+    }
+    peer_iterator->second.last_packet_at = now;
+    ++telemetry_.received_packets;
+    RecordReceivedPacketClass(
+        protocol_v12::kEnvelopeMagic, packet.size());
+    ++telemetry_.received_v12_pose_controls;
     return true;
   }
 
@@ -3362,6 +3559,15 @@ class Runtime {
             protocol_v12::GenerationActivation::kFirst ||
         activation ==
             protocol_v12::GenerationActivation::kReplaced;
+    if (activation ==
+            protocol_v12::GenerationActivation::kFirst ||
+        activation ==
+            protocol_v12::GenerationActivation::kReplaced) {
+      peer_iterator->second.v12_pose_receiver.ActivateGeneration(
+          envelope.sender_role, envelope.sender_session);
+      control.v12_sender_baseline.ActivateGeneration(session_id_);
+      control.v12_force_animation_keyframe = false;
+    }
     control.v12_negotiated_features = negotiated;
     control.last_v12_advertisement_received = now;
     peer_iterator->second.last_packet_at = now;
@@ -3569,6 +3775,8 @@ class Runtime {
     AdvancePeerTransportGeneration(role);
     peer = RemotePeerState{};
     peer.session = sender_session;
+    peer.v12_pose_receiver.ActivateGeneration(
+        static_cast<std::uint16_t>(role), sender_session);
   }
 
   bool ReceivePosePacket(Clock::time_point now, std::uint32_t map_hash,
@@ -4032,6 +4240,14 @@ class Runtime {
         ++telemetry_.sent_control_reliable_packets;
         ++telemetry_.sent_v12_capabilities;
       } else if (
+          protocol_v12::DecodeEnvelope(packet, envelope) &&
+          envelope.kind ==
+              protocol_v12::MessageKind::kPoseControl &&
+          traffic_class == OutboundTrafficClass::kControl) {
+        ++telemetry_.sent_control_packets;
+        telemetry_.sent_control_bytes += packet_bytes;
+        ++telemetry_.sent_control_reliable_packets;
+      } else if (
           protocol_v12::RootSnapshotEnvelopeShapeValid(envelope) &&
           traffic_class == OutboundTrafficClass::kRealtime) {
         ++telemetry_.sent_root_packets;
@@ -4388,7 +4604,79 @@ class Runtime {
               target, OutboundTrafficClass::kRealtime,
               /*relayed=*/false);
     }
+    if (complete && keyframe &&
+        !control.v12_sender_baseline.OfferBaseline(
+            session_id_, pose_id,
+            descriptors[fragment_count - 1].envelope.sequence)) {
+      ++telemetry_.delivery_policy_errors;
+      return false;
+    }
     return complete;
+  }
+
+  bool SendV12PoseControl(
+      std::uint32_t target_role, const PacketEndpoint& target,
+      protocol_v12::PoseControlType type,
+      std::uint32_t baseline_id, std::uint32_t group_mask) {
+    const auto control_iterator = peer_control_.find(target_role);
+    const auto peer_iterator = remote_peers_.find(target_role);
+    if (control_iterator == peer_control_.end() ||
+        peer_iterator == remote_peers_.end() ||
+        (control_iterator->second.v12_negotiated_features &
+         protocol_v12::kFeaturePoseAcknowledgements) == 0) {
+      return false;
+    }
+    PeerControlState& control = control_iterator->second;
+    std::array<std::uint8_t,
+               protocol_v12::kEnvelopeBytes +
+                   protocol_v12::kPoseControlPayloadBytes>
+        packet{};
+    protocol_v12::Envelope envelope;
+    envelope.kind = protocol_v12::MessageKind::kPoseControl;
+    envelope.flags = protocol_v12::kFlagReliable;
+    envelope.payload_bytes =
+        protocol_v12::kPoseControlPayloadBytes;
+    envelope.sender_role =
+        static_cast<std::uint16_t>(bound_role_);
+    envelope.stream_id = kV12AnimationStreamId;
+    envelope.sender_session = session_id_;
+    envelope.sequence = ++v12_control_sequence_;
+    if (control.v12_control_receive_history.initialized()) {
+      envelope.acknowledged_sequence =
+          control.v12_control_receive_history.latest();
+      envelope.receive_history =
+          control.v12_control_receive_history.history();
+    }
+    envelope.sender_time_us = NowMicroseconds();
+    protocol_v12::PoseControl pose_control;
+    pose_control.type = type;
+    pose_control.target_role =
+        static_cast<std::uint16_t>(target_role);
+    pose_control.target_stream_id = kV12AnimationStreamId;
+    pose_control.target_session = peer_iterator->second.session;
+    pose_control.baseline_id = baseline_id;
+    pose_control.group_mask = group_mask;
+    if (!protocol_v12::EncodeEnvelope(envelope, packet) ||
+        !protocol_v12::EncodePoseControl(
+            pose_control,
+            std::span<std::uint8_t>(packet).subspan(
+                protocol_v12::kEnvelopeBytes))) {
+      ++telemetry_.delivery_policy_errors;
+      return false;
+    }
+    const bool sent = SendBytes(
+        packet.data(), static_cast<int>(packet.size()), target,
+        OutboundTrafficClass::kControl, /*relayed=*/false);
+    if (sent) {
+      ++telemetry_.sent_v12_pose_controls;
+      if (type ==
+          protocol_v12::PoseControlType::kDecodedBaseline) {
+        ++telemetry_.sent_v12_baseline_reports;
+      } else {
+        ++telemetry_.sent_v12_baseline_requests;
+      }
+    }
+    return sent;
   }
 
   bool SendV12CapabilityToRole(
@@ -4796,7 +5084,8 @@ class Runtime {
       PeerControlState* target_control = nullptr;
       if (use_v12_animation) {
         target_control = &peer_control_.at(target_role);
-        if (!target_control->v12_animation_started) {
+        if (!target_control->v12_animation_started ||
+            target_control->v12_force_animation_keyframe) {
           // The first packet in the negotiated stream must be independently
           // decodable; it cannot assume a v11 keyframe happened to arrive
           // before the capability handshake completed.
@@ -4897,6 +5186,10 @@ class Runtime {
             prepared->proposed_keyframe;
         if (target_control != nullptr) {
           target_control->v12_animation_started = true;
+          if (target_control->v12_force_animation_keyframe) {
+            target_control->v12_force_animation_keyframe = false;
+            ++telemetry_.forced_v12_animation_keyframes;
+          }
         }
       }
       complete &= target_complete;

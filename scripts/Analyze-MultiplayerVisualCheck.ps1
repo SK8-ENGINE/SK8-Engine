@@ -580,6 +580,38 @@ foreach ($client in $clientDirectories) {
         (Maximum-IntegerField $rateLines 'v12_anim_complete')
     )
     $summary.Add(
+        'max_v12_pose_controls_sent=' +
+        (Maximum-IntegerField $rateLines 'v12_pose_control_tx')
+    )
+    $summary.Add(
+        'max_v12_pose_controls_received=' +
+        (Maximum-IntegerField $rateLines 'v12_pose_control_rx')
+    )
+    $summary.Add(
+        'max_v12_pose_control_rejections=' +
+        (Maximum-IntegerField $rateLines 'v12_pose_control_rejected')
+    )
+    $summary.Add(
+        'max_v12_baseline_reports_sent=' +
+        (Maximum-IntegerField $rateLines 'v12_baseline_report_tx')
+    )
+    $summary.Add(
+        'max_v12_baseline_reports_received=' +
+        (Maximum-IntegerField $rateLines 'v12_baseline_report_rx')
+    )
+    $summary.Add(
+        'max_v12_baseline_requests_sent=' +
+        (Maximum-IntegerField $rateLines 'v12_baseline_request_tx')
+    )
+    $summary.Add(
+        'max_v12_baseline_requests_received=' +
+        (Maximum-IntegerField $rateLines 'v12_baseline_request_rx')
+    )
+    $summary.Add(
+        'max_v12_forced_animation_keyframes=' +
+        (Maximum-IntegerField $rateLines 'v12_forced_keyframe')
+    )
+    $summary.Add(
         'appearance_byte_receipts=' +
         (Match-Count $lines 'multiplayer: peer role=.*appearance .*state=1')
     )

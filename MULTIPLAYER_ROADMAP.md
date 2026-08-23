@@ -521,6 +521,38 @@ Current checkpoint:
   distinguish v12 animation fragments, completed groups, and rejections; a
   five-client user visual and telemetry gate is required before baseline
   acknowledgement and recovery controls are enabled.
+- In run `20260823-202317-59443ab0`, the user reported that the five-client
+  v12 skeletal stream looked good. All clients completed approximately
+  28,000-29,000 v12 animation groups with zero v12 animation-fragment
+  rejections, and all 20 sender/receiver paths recovered to approximately
+  60 Hz with zero held-latest playback, completed-frame gaps, or superseded
+  assemblies in the final telemetry windows. The clients ended at
+  116.6-120.0 render handoffs per second with four known and four visible
+  peers and no socket, delivery-policy, appearance-resource, or GPU-resource
+  faults. This telemetry does not establish the user's visual result.
+- The same run contained a temporary all-client render/capture slowdown:
+  worst render-handoff windows fell to 11.7-18.2 per second and maximum local
+  capture gaps reached 390-498 ms before recovering. The user identified the
+  associated unfocused-window behavior as a likely transient Windows issue
+  and confirmed normal visuals after it cleared. No v12 animation rejection
+  or sustained network-path fault accompanied it. Retain this as a test-host
+  observation and require reproduction before changing interpolation or the
+  live protocol in response.
+- The next live recovery slice advertises the existing v12 pose-
+  acknowledgement feature under a new build-compatibility identity. A
+  receiver reports a baseline only after the complete animation group has
+  reassembled, decoded, and entered the existing animation path. Missing,
+  superseded, conflicted, or resource-evicted baseline data latches one
+  reliable request; the sender answers by forcing the next animation frame
+  to be a self-contained keyframe rather than waiting for the normal
+  20-frame interval.
+- Pose controls are generation-, role-, target-session-, stream-, and
+  group-bound, use the shared v12 control receive history for duplicate and
+  stale rejection, and remain separate from unreliable realtime fragments.
+  Dedicated telemetry records reports, requests, forced keyframes, and
+  rejected controls. This slice deliberately preserves the validated v11
+  keyframe/delta encoder; using only receiver-confirmed baselines for delta
+  construction remains the next independently testable step.
 
 Completion:
 

@@ -216,7 +216,8 @@ void TestLiveCapabilityContract() {
       live::MakeCapabilities(identity);
   static_assert(
       capabilities.feature_bits ==
-      (kFeatureExplicitLittleEndian | kFeaturePoseGroups));
+      (kFeatureExplicitLittleEndian |
+       kFeaturePoseAcknowledgements | kFeaturePoseGroups));
   static_assert(capabilities.map_hash == identity.map_hash);
   static_assert(
       capabilities.build_hash == identity.build_hash);

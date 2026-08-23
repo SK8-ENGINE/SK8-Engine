@@ -558,7 +558,7 @@ try {
         guest_fps_cap = 120
         replication_quality = 'full-fidelity'
         root_protocol = 'v12-after-negotiation'
-        animation_protocol = 'v12-grouped-after-negotiation'
+        animation_protocol = 'v12-grouped-with-baseline-recovery'
         appearance_protocol = 'v11'
         root_rate_hz = 60
         animation_rate_hz = 60
@@ -653,8 +653,10 @@ Change under test: directly negotiated peers now exchange their 60 Hz
 root/board snapshot and exact skeletal animation words through explicit-endian
 protocol-v12 envelopes. Animation uses one independently reassembled group
 while preserving the current quantization, keyframes/deltas, interpolation,
-attachments, and renderer path. Outfits remain on protocol v11. Full-fidelity
-direct peer fan-out and the 120 fps per-client test budget remain unchanged.
+attachments, and renderer path. Receivers now acknowledge each completely
+decoded keyframe and can immediately request a fresh keyframe when a delta's
+baseline is unavailable. Outfits remain on protocol v11. Full-fidelity direct
+peer fan-out and the 120 fps per-client test budget remain unchanged.
 Diagnostics: representative visible body vertices are sampled before send and
 after remote reconstruction, alongside skeleton, network, and GPU timing
 
@@ -689,6 +691,9 @@ Telemetry acceptance checked by the agent afterward:
 - Every client negotiates v12 with all four peers, sends and receives v12
   root snapshots and grouped animation continuously, and reports zero v12
   compatibility, sustained root-stream, or animation-group rejection.
+- Every client sends and receives decoded-baseline reports, with zero
+  pose-control rejection. A healthy run may need no recovery requests; if one
+  occurs, its sender must force a fresh keyframe.
 - Every active sender/receiver pair reports the full-fidelity contract,
   continuous pose/animation traffic, and zero relevance drops.
 - Playback cursor margins remain inside the animation buffer, with no
