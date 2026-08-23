@@ -1,5 +1,7 @@
 #include "skate3_multiplayer_protocol_v12_lossless.h"
+#include "skate3_multiplayer_protocol_v12_transport.h"
 
+#include <array>
 #include <cstdint>
 #include <iostream>
 #include <string_view>
@@ -92,11 +94,72 @@ void TestSelectionPolicy() {
          "non-saving encoding was selected");
 }
 
+void TestPacketizerReassemblyRoundTrip() {
+  std::vector<std::uint8_t> source(16000, 0);
+  for (std::size_t index = 0; index < source.size(); index += 97) {
+    source[index] = static_cast<std::uint8_t>(index);
+  }
+  std::vector<std::uint8_t> packed;
+  Expect(EncodeLosslessBytes(source, packed),
+         "fragment test did not pack");
+  Expect(LosslessPackingWorthwhile(
+             source.size(), packed.size(),
+             kMaximumPoseFragmentBytes),
+         "fragment test payload was not worthwhile");
+
+  PoseGroupPacketizeRequest request;
+  request.envelope.kind = MessageKind::kPoseBaseline;
+  request.envelope.sender_role = 2;
+  request.envelope.stream_id = 2;
+  request.envelope.sender_session = 100;
+  request.envelope.sequence = 500;
+  request.envelope.sender_time_us = 1000000;
+  request.pose_id = 40;
+  request.element_count = 12;
+  request.group_id = 0;
+  request.encoding = PoseGroupEncoding::kBitPackedV1;
+  request.group_bytes = packed;
+  std::array<PoseGroupDatagram, 58> descriptors{};
+  const std::size_t count =
+      BuildPoseGroupDatagrams(request, descriptors);
+  Expect(count > 0, "packed group did not packetize");
+
+  PoseGroupReassembler reassembler;
+  std::vector<std::uint8_t> reconstructed;
+  for (std::size_t reverse = count; reverse-- > 0;) {
+    const PoseGroupDatagram& descriptor = descriptors[reverse];
+    std::vector<std::uint8_t> datagram(
+        kEnvelopeBytes + descriptor.envelope.payload_bytes);
+    Expect(EncodePoseGroupDatagram(
+               descriptor, packed, datagram),
+           "packed fragment did not encode");
+    Envelope envelope;
+    PoseGroupHeader header;
+    std::span<const std::uint8_t> fragment;
+    Expect(DecodePoseGroupDatagram(
+               datagram, envelope, header, fragment),
+           "packed fragment did not decode");
+    const ReassemblyPushResult result =
+        reassembler.Push(envelope, header, fragment, 2000 + reverse);
+    if (result.completed.has_value()) {
+      Expect(result.completed->encoding ==
+                 PoseGroupEncoding::kBitPackedV1,
+             "reassembly changed packed encoding");
+      Expect(DecodeLosslessBytes(
+                 result.completed->bytes, reconstructed),
+             "reassembled packed group did not decompress");
+    }
+  }
+  Expect(reconstructed == source,
+         "reverse fragment reassembly changed source bytes");
+}
+
 }  // namespace
 
 int main() {
   TestRoundTrips();
   TestMalformed();
   TestSelectionPolicy();
+  TestPacketizerReassemblyRoundTrip();
   return failures == 0 ? 0 : 1;
 }
