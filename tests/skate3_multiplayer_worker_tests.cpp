@@ -1,5 +1,6 @@
 #include "skate3_multiplayer_worker.h"
 #include "skate3_multiplayer_latest_request.h"
+#include "skate3_multiplayer_send_schedule.h"
 
 #include <atomic>
 #include <cstdint>
@@ -325,6 +326,51 @@ void TestLatestRequestTransfersResultOwnership() {
          "extracted result remained visible");
 }
 
+void TestPeriodicDeadlineRetainsTargetRate() {
+  using Deadline =
+      skate3::multiplayer::schedule::PeriodicDeadline;
+  using namespace std::chrono_literals;
+
+  Deadline deadline;
+  const auto start = Deadline::TimePoint{};
+  std::uint32_t sends = 0;
+  for (auto elapsed = 0ms; elapsed <= 1000ms; elapsed += 4ms) {
+    const auto now = start + elapsed;
+    if (deadline.Due(now)) {
+      ++sends;
+      deadline.Commit(now, 16666us);
+    }
+  }
+  Expect(sends >= 60 && sends <= 61,
+         "4 ms worker ticks collapsed a 60 Hz deadline to 50 Hz");
+}
+
+void TestPeriodicDeadlineDoesNotBurstAfterStall() {
+  using Deadline =
+      skate3::multiplayer::schedule::PeriodicDeadline;
+  using namespace std::chrono_literals;
+
+  Deadline deadline;
+  const auto start = Deadline::TimePoint{};
+  Expect(deadline.Due(start),
+         "fresh periodic deadline was not immediately due");
+  deadline.Commit(start, 16666us);
+
+  const auto stalled = start + 500ms;
+  Expect(deadline.Due(stalled),
+         "stalled periodic deadline did not become due");
+  deadline.Commit(stalled, 16666us);
+  Expect(!deadline.Due(stalled),
+         "stalled periodic deadline requested a catch-up burst");
+  Expect(deadline.next() > stalled &&
+             deadline.next() <= stalled + 16666us,
+         "stalled periodic deadline did not advance to the next phase");
+
+  deadline.Reset();
+  Expect(deadline.Due(stalled),
+         "reset periodic deadline was not immediately due");
+}
+
 }  // namespace
 
 int main() {
@@ -335,6 +381,8 @@ int main() {
   TestLatestRequestRejectsStalePublication();
   TestLatestRequestFailureAndGenerationForget();
   TestLatestRequestTransfersResultOwnership();
+  TestPeriodicDeadlineRetainsTargetRate();
+  TestPeriodicDeadlineDoesNotBurstAfterStall();
 
   if (g_failures != 0) {
     std::cerr << g_failures << " multiplayer worker test(s) failed\n";

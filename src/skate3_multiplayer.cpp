@@ -3,6 +3,7 @@
 #include "skate3_multiplayer_lifecycle.h"
 #include "skate3_multiplayer_outbound_scheduler.h"
 #include "skate3_multiplayer_protocol.h"
+#include "skate3_multiplayer_send_schedule.h"
 #include "skate3_multiplayer_worker.h"
 #include "skate3_steam_backend.h"
 #include "skate3_trick_pipeline.h"
@@ -1997,8 +1998,7 @@ class Runtime {
     const std::int32_t send_rate = network_tuning_.pose_rate;
     const auto send_interval = std::chrono::microseconds(
         1000000 / std::max(send_rate, 1));
-    if (last_send_ == Clock::time_point{} ||
-        now - last_send_ >= send_interval) {
+    if (pose_send_deadline_.Due(now)) {
       PosePacket packet;
       if (SampleLocalPose(
               map_origin, role, local_animation, packet) &&
@@ -2014,7 +2014,7 @@ class Runtime {
         }
         SendPacket(packet, role, base_port);
         last_pose_sample_time_us_ = packet.sender_time_us;
-        last_send_ = now;
+        pose_send_deadline_.Commit(now, send_interval);
       }
     }
     const std::int32_t animation_rate =
@@ -2026,13 +2026,13 @@ class Runtime {
         (local_animation->sender_time_us == 0 ||
          local_animation->sender_time_us !=
              last_animation_sample_time_us_) &&
-        (last_animation_send_ == Clock::time_point{} ||
-         now - last_animation_send_ >= animation_interval)) {
+        animation_send_deadline_.Due(now)) {
       SendAnimation(
           *local_animation, map_origin, map_hash, role, base_port);
       last_animation_sample_time_us_ =
           local_animation->sender_time_us;
-      last_animation_send_ = now;
+      animation_send_deadline_.Commit(
+          now, animation_interval);
     }
     if (local_appearance != nullptr &&
         local_appearance->identity != 0 &&
@@ -4729,9 +4729,9 @@ class Runtime {
     std::fill_n(local_position_, 3, 0.0f);
     local_position_valid_ = false;
     local_appearance_identity_ = 0;
-    last_send_ = {};
+    pose_send_deadline_.Reset();
     last_pose_sample_time_us_ = 0;
-    last_animation_send_ = {};
+    animation_send_deadline_.Reset();
     last_animation_sample_time_us_ = 0;
     last_appearance_send_ = {};
     last_rate_log_ = {};
@@ -4768,9 +4768,9 @@ class Runtime {
   std::unordered_map<std::uint32_t, PeerControlState>
       peer_control_;
   lifecycle::PeerGenerationTracker peer_generations_;
-  Clock::time_point last_send_{};
+  schedule::PeriodicDeadline pose_send_deadline_;
   std::uint64_t last_pose_sample_time_us_ = 0;
-  Clock::time_point last_animation_send_{};
+  schedule::PeriodicDeadline animation_send_deadline_;
   std::uint64_t last_animation_sample_time_us_ = 0;
   Clock::time_point last_appearance_send_{};
   Clock::time_point last_rate_log_{};
