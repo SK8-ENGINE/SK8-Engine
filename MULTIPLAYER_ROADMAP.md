@@ -717,6 +717,37 @@ Current checkpoint:
   root, final pose, board, and attachments on one sender timeline. It adds no
   local input latency, does not reduce fidelity or send rate, and leaves
   explicit teleport/respawn samples intact.
+- Exact semantic-delta inspection now reports, without allocating, the
+  validated stream's fixed headers, per-track metadata, change masks, changed
+  bones, one/two/three-byte value histogram, and rigid-rotation, affine-basis,
+  and translation word/byte totals. The production preflight and diagnostics
+  share this parser so reported composition must equal the encoder's exact
+  destination size.
+- A deterministic synthetic full-avatar corpus keeps test frames in the same
+  roughly 4-5 KiB size class as measured live groups and compares raw words,
+  current semantic deltas, byte-run packing, Snappy, and new exact candidates.
+  It prints encode cost, fragment framing, 60 Hz stream rates, direct-mesh
+  sender upload, and star-relay host egress for 2, 5, 20, 50, and 100 players.
+  These are synthetic planning figures, not substitutes for live telemetry.
+- Snappy is already vendored and measured at roughly 1-5 microseconds per
+  synthetic frame, but it removed only about seven percent from the typical
+  semantic-delta corpus and effectively nothing from typical raw word
+  streams. It remains a measured offline comparison rather than a new live
+  dependency or wire encoding.
+- An offline exact block-delta candidate packs 32 baseline-difference words at
+  a time using the minimum required bit width. It remains self-contained
+  against the existing receiver-confirmed baseline and introduces no chained
+  delta dependency or precision loss. Dedicated tests cover all four
+  transform layouts, both signed-difference extremes, every truncated prefix,
+  canonical padding, baseline mismatch, transactional failure, and 3,000
+  deterministic randomized exact round trips.
+- On the synthetic typical corpus, block packing reduced the current semantic
+  representation by about 21 percent (approximately 4,480 to 3,546 bytes) at
+  about 55-65 microseconds for preflight plus encode on this development
+  machine. This is promising enough for later live-corpus evaluation but is
+  not yet negotiated or sent by the game. It also shows that exact bit packing
+  alone will not reach the 90 KB/s target; translation/rotation representation
+  work and final skinned-vertex validation remain necessary.
 
 Completion:
 
