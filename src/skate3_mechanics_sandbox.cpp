@@ -514,6 +514,21 @@ uint32_t LocalPresentationCandidate() {
   return g_presentation_candidate.load(std::memory_order_acquire);
 }
 
+void ObservePresentationCandidateRemoved(uint32_t entity) {
+  if (!Active() || entity == 0) {
+    return;
+  }
+  uint32_t candidate = entity;
+  if (!g_presentation_candidate.compare_exchange_strong(
+          candidate, 0, std::memory_order_acq_rel)) {
+    return;
+  }
+  REXLOG_INFO(
+      "mechanics-sandbox: local presentation candidate removed "
+      "entity=0x{:08X}; awaiting replacement",
+      entity);
+}
+
 bool VisualMapEnabled() {
   return Active() && REXCVAR_GET(skate3_mechanics_sandbox_visual_map);
 }

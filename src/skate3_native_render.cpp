@@ -5,6 +5,7 @@
 #include "native/skate3_native_guest_read.h"
 #include "native/skate3_native_lw.h"
 #include "native/skate3_native_palette.h"
+#include "skate3_mechanics_sandbox.h"
 #include "skate3_native_scene.h"
 
 #include "generated/skate3_init.h"
@@ -548,6 +549,8 @@ extern "C" REX_FUNC(sub_827A6C50) {
 extern "C" REX_FUNC(sub_827A6CE8) {
   const uint32_t entity = ctx.r4.u32;
   if (skate3::native_render::Enabled()) {
+    skate3::mechanics_sandbox::ObservePresentationCandidateRemoved(
+        entity);
     skate3::native_entity::OnEntityViewRemove(entity);
   }
   __imp__sub_827A6CE8(ctx, base);

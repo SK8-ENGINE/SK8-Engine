@@ -63,6 +63,10 @@ uint32_t LocalPresentationEntity();
 // (the verified PhysOut), this value is directly comparable with
 // native_entity::CtxInfo::entity.
 uint32_t LocalPresentationCandidate();
+// Wardrobe changes replace the local PresentationEntity. The renderer's
+// verified view-removal seam clears only the exact current candidate so the
+// next rendered skater entity can become the new local capture owner.
+void ObservePresentationCandidateRemoved(uint32_t entity);
 
 bool VisualMapEnabled();
 bool NativeCollisionObserverEnabled();

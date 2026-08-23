@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <bit>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <fstream>
@@ -24,6 +25,11 @@ REXCVAR_DEFINE_STRING(
     "Path to a complete, locally extracted "
     "createacharacter/model/cas_db directory. Incomplete fixed-size memory "
     "snapshots are rejected because they omit clothing texture data.");
+REXCVAR_DEFINE_STRING(
+    skate3_multiplayer_local_profile_recipe, "", "Skate 3/Multiplayer",
+    "Optional path to the local SKATER.P save whose validated cas_db recipe "
+    "is used for live wardrobe appearance changes. Only the compact recipe "
+    "is read; no other save data enters multiplayer.");
 
 namespace skate3::multiplayer_assets {
 namespace {
@@ -101,6 +107,16 @@ CategoryIndex g_hair;
 std::unordered_map<Signature, BindMesh, SignatureHash> g_loaded;
 std::unordered_map<std::uint64_t, BindMesh> g_recipe_meshes;
 std::unordered_map<std::uint64_t, RecipeTexture> g_recipe_textures;
+
+struct ProfileRecipePollState {
+  std::filesystem::path path;
+  std::filesystem::file_time_type accepted_write_time{};
+  std::uintmax_t accepted_file_size = 0;
+  std::chrono::steady_clock::time_point last_poll{};
+  bool accepted = false;
+};
+
+ProfileRecipePollState g_profile_recipe_poll;
 
 bool RangeValid(
     const std::vector<std::uint8_t>& bytes, std::size_t offset,
@@ -827,6 +843,40 @@ bool ParseRecipe(
   return true;
 }
 
+bool ExtractProfileRecipe(
+    const std::vector<std::uint8_t>& profile_prefix,
+    std::vector<std::uint8_t>& recipe) {
+  static constexpr std::array<std::uint8_t, 26> kHeader = {
+      0x00, 0x00, 0x00, 0x07, 0x00, 0x00, 0x00, 0x06,
+      'c',  'a',  's',  '_',  'd',  'b',  0x00, 0x00,
+      0x00, 0x03, 0x00, 0x00, 0x00, 0x19, 0x00, 0x00,
+      0x00, 0x02};
+  auto search = profile_prefix.begin();
+  while (search != profile_prefix.end()) {
+    const auto found = std::search(
+        search, profile_prefix.end(),
+        kHeader.begin(), kHeader.end());
+    if (found == profile_prefix.end()) {
+      return false;
+    }
+    std::vector<std::uint8_t> candidate(
+        found, profile_prefix.end());
+    std::vector<ParsedRecipePiece> parsed_pieces;
+    std::size_t structural_bytes = 0;
+    std::uint8_t gender = 0;
+    if (ParseRecipe(
+            candidate, parsed_pieces, structural_bytes, gender) &&
+        structural_bytes >= kHeader.size() &&
+        structural_bytes <= candidate.size()) {
+      candidate.resize(structural_bytes);
+      recipe = std::move(candidate);
+      return true;
+    }
+    search = std::next(found);
+  }
+  return false;
+}
+
 std::string AssetFileName(std::uint64_t id) {
   std::ostringstream stream;
   stream << "0x" << std::hex << std::nouppercase
@@ -1220,6 +1270,98 @@ bool ResolveRecipeAppearance(
       resolved.textures.size(), resolved.structural_bytes,
       resolved.gender);
   output = std::move(resolved);
+  return true;
+}
+
+bool PollLocalProfileRecipe(
+    std::vector<std::uint8_t>& recipe) {
+  constexpr auto kPollInterval =
+      std::chrono::milliseconds(500);
+  constexpr std::uintmax_t kMaximumProfileBytes =
+      8u * 1024u * 1024u;
+  constexpr std::size_t kProfilePrefixBytes =
+      64u * 1024u;
+
+  const auto now = std::chrono::steady_clock::now();
+  if (g_profile_recipe_poll.last_poll !=
+          std::chrono::steady_clock::time_point{} &&
+      now - g_profile_recipe_poll.last_poll < kPollInterval) {
+    return false;
+  }
+  g_profile_recipe_poll.last_poll = now;
+
+  const std::filesystem::path configured =
+      REXCVAR_GET(skate3_multiplayer_local_profile_recipe);
+  if (configured.empty()) {
+    return false;
+  }
+  if (g_profile_recipe_poll.path != configured) {
+    g_profile_recipe_poll = {};
+    g_profile_recipe_poll.path = configured;
+    g_profile_recipe_poll.last_poll = now;
+  }
+
+  std::error_code error;
+  const std::uintmax_t file_size =
+      std::filesystem::file_size(configured, error);
+  if (error || file_size == 0 ||
+      file_size > kMaximumProfileBytes) {
+    return false;
+  }
+  const std::filesystem::file_time_type write_time =
+      std::filesystem::last_write_time(configured, error);
+  if (error) {
+    return false;
+  }
+  if (g_profile_recipe_poll.accepted &&
+      g_profile_recipe_poll.accepted_write_time == write_time &&
+      g_profile_recipe_poll.accepted_file_size == file_size) {
+    return false;
+  }
+
+  const auto read_started =
+      std::chrono::steady_clock::now();
+  std::ifstream stream(configured, std::ios::binary);
+  if (!stream) {
+    return false;
+  }
+  std::vector<std::uint8_t> profile_prefix(
+      static_cast<std::size_t>(
+          std::min<std::uintmax_t>(
+              file_size, kProfilePrefixBytes)));
+  if (!stream.read(
+          reinterpret_cast<char*>(
+              profile_prefix.data()),
+          static_cast<std::streamsize>(
+              profile_prefix.size()))) {
+    return false;
+  }
+
+  std::vector<std::uint8_t> updated_recipe;
+  if (!ExtractProfileRecipe(
+          profile_prefix, updated_recipe)) {
+    REXLOG_WARN(
+        "multiplayer-assets: local profile changed but no complete "
+        "cas_db recipe was available; retaining previous appearance");
+    return false;
+  }
+
+  g_profile_recipe_poll.accepted = true;
+  g_profile_recipe_poll.accepted_write_time = write_time;
+  g_profile_recipe_poll.accepted_file_size = file_size;
+  if (updated_recipe == recipe) {
+    return false;
+  }
+  recipe = std::move(updated_recipe);
+  const double elapsed_ms =
+      std::chrono::duration<double, std::milli>(
+          std::chrono::steady_clock::now() -
+          read_started)
+          .count();
+  REXLOG_INFO(
+      "multiplayer-assets: adopted local profile recipe "
+      "bytes={} read_ms={:.3f}",
+      recipe.size(), elapsed_ms);
   return true;
 }
 

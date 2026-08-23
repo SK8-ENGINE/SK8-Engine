@@ -9507,6 +9507,7 @@ multiplayer::AppearanceBlob BuildLocalRecipeAppearanceBlob(
   constexpr size_t kRecipeReadBytes = 6500;
   static uint64_t cached_recipe_identity = 0;
   static std::vector<uint8_t> cached_recipe_bytes;
+  static std::vector<uint8_t> profile_recipe_bytes;
   static multiplayer_assets::RecipeAppearance cached_recipe;
   static multiplayer::AppearanceBlob cached_blob;
   uint8_t* base =
@@ -9515,27 +9516,36 @@ multiplayer::AppearanceBlob BuildLocalRecipeAppearanceBlob(
       !animation.presentation_root_valid) {
     return {};
   }
+  multiplayer_assets::PollLocalProfileRecipe(
+      profile_recipe_bytes);
   std::array<uint8_t, kRecipeReadBytes> recipe_buffer{};
-  if (!GuestTryCopy(
-          recipe_buffer.data(), base + kRecipeGuestAddress,
-          recipe_buffer.size())) {
-    return {};
+  const uint8_t* recipe_data = nullptr;
+  size_t recipe_size = 0;
+  if (!profile_recipe_bytes.empty()) {
+    recipe_data = profile_recipe_bytes.data();
+    recipe_size = profile_recipe_bytes.size();
+  } else {
+    if (!GuestTryCopy(
+            recipe_buffer.data(), base + kRecipeGuestAddress,
+            recipe_buffer.size())) {
+      return {};
+    }
+    recipe_size = recipe_buffer.size();
+    while (recipe_size != 0 &&
+           recipe_buffer[recipe_size - 1] == 0) {
+      --recipe_size;
+    }
+    recipe_data = recipe_buffer.data();
   }
-  size_t recipe_size = recipe_buffer.size();
-  while (recipe_size != 0 &&
-         recipe_buffer[recipe_size - 1] == 0) {
-    --recipe_size;
-  }
-  if (recipe_size < 64) {
+  if (recipe_data == nullptr || recipe_size < 64) {
     return {};
   }
   const uint64_t recipe_identity = AppearanceHashBytes(
       1469598103934665603ull,
-      recipe_buffer.data(), recipe_size);
+      recipe_data, recipe_size);
   if (recipe_identity != cached_recipe_identity) {
     std::vector<uint8_t> recipe(
-        recipe_buffer.begin(),
-        recipe_buffer.begin() + recipe_size);
+        recipe_data, recipe_data + recipe_size);
     multiplayer_assets::RecipeAppearance resolved;
     if (!multiplayer_assets::ResolveRecipeAppearance(
             recipe, false, resolved)) {
@@ -10474,6 +10484,15 @@ struct RemoteAppearanceRenderState {
 
 std::unordered_map<uint32_t, RemoteAppearanceRenderState>
     g_remote_appearances;
+
+struct RemoteVisualTelemetryState {
+  uint32_t session = 0;
+  bool real_skater = false;
+  bool initialized = false;
+};
+
+std::unordered_map<uint32_t, RemoteVisualTelemetryState>
+    g_remote_visual_telemetry;
 
 bool InstallRemoteRecipeAppearance(
     const NativeGuestOutputRenderContext& context,
@@ -13179,6 +13198,25 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
         replicated_real_skater =
             multiplayer_remote_items->size() > remote_item_start;
       }
+    }
+
+    RemoteVisualTelemetryState& visual_state =
+        g_remote_visual_telemetry[remote_player.role];
+    if (!visual_state.initialized ||
+        visual_state.session != remote_player.session ||
+        visual_state.real_skater != replicated_real_skater) {
+      visual_state.session = remote_player.session;
+      visual_state.real_skater = replicated_real_skater;
+      visual_state.initialized = true;
+      REXLOG_INFO(
+          "multiplayer-visual-state: role={} session={} mode={} "
+          "appearance={:016X} animation_tracks={}",
+          remote_player.role, remote_player.session,
+          replicated_real_skater ? "appearance" : "proxy",
+          remote_appearance_state == nullptr
+              ? std::uint64_t{0}
+              : remote_appearance_state->identity,
+          remote_animation.tracks.size());
     }
 
     // Keep the simple proxy as a startup/packet-loss fallback. It disappears

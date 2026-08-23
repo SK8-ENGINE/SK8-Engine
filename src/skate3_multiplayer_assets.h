@@ -68,6 +68,13 @@ bool ResolveRecipeAppearance(
     bool load_textures,
     RecipeAppearance& output);
 
+// Polls the configured local SKATER.P profile and replaces `recipe` only
+// when its validated cas_db payload changes. The save container itself is
+// never exposed to the network layer. Calls are internally rate-limited so
+// the render-thread capture path does not perform filesystem work per frame.
+bool PollLocalProfileRecipe(
+    std::vector<std::uint8_t>& recipe);
+
 // Resolves a live ROPA mesh by immutable topology. ROPA rewrites positions
 // every simulation frame, but its vertex/index layout remains the layout of
 // the vanilla RX2 bind mesh. Character family 2 maps to OuterTorso and family
