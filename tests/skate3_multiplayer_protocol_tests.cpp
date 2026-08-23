@@ -33,6 +33,7 @@ using skate3::multiplayer::protocol::kAppearancePacketMagic;
 using skate3::multiplayer::protocol::kCapabilityAppearanceRequest;
 using skate3::multiplayer::protocol::kCapabilityAppearanceState;
 using skate3::multiplayer::protocol::kCapabilityControlV1;
+using skate3::multiplayer::protocol::kCapabilityProtocolV12;
 using skate3::multiplayer::protocol::kControlPacketMagic;
 using skate3::multiplayer::protocol::kMaximumAnimationFragments;
 using skate3::multiplayer::protocol::kMaximumAnimationFrameWords;
@@ -332,6 +333,9 @@ void TestControlPacketShapes() {
   packet.capabilities = kCapabilityControlV1;
   Expect(ControlPacketShapeValid(packet),
          "valid capability advertisement was rejected");
+  packet.capabilities |= kCapabilityProtocolV12;
+  Expect(ControlPacketShapeValid(packet),
+         "protocol-v12 capability bit broke v11 negotiation");
 
   packet.target_role = packet.sender_role;
   Expect(!ControlPacketShapeValid(packet),

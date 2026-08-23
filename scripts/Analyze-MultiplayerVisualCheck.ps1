@@ -528,6 +528,30 @@ foreach ($client in $clientDirectories) {
         (Match-Count $lines 'multiplayer: peer role=.*capabilities=')
     )
     $summary.Add(
+        'v12_capability_events=' +
+        (Match-Count $lines 'multiplayer-v12: peer role=')
+    )
+    $summary.Add(
+        'max_v12_capabilities_sent=' +
+        (Maximum-IntegerField $rateLines 'v12_tx')
+    )
+    $summary.Add(
+        'max_v12_capabilities_received=' +
+        (Maximum-IntegerField $rateLines 'v12_rx')
+    )
+    $summary.Add(
+        'max_v12_capability_peers=' +
+        (Maximum-IntegerField $rateLines 'v12_peers')
+    )
+    $summary.Add(
+        'max_v12_capability_rejections=' +
+        (Maximum-IntegerField $rateLines 'v12_rejected')
+    )
+    $summary.Add(
+        'max_v12_capability_incompatibilities=' +
+        (Maximum-IntegerField $rateLines 'v12_incompatible')
+    )
+    $summary.Add(
         'appearance_byte_receipts=' +
         (Match-Count $lines 'multiplayer: peer role=.*appearance .*state=1')
     )

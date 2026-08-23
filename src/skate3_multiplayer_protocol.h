@@ -56,6 +56,7 @@ enum class AppearanceDeliveryState : std::uint16_t {
 inline constexpr std::uint32_t kCapabilityControlV1 = 1u << 0;
 inline constexpr std::uint32_t kCapabilityAppearanceState = 1u << 1;
 inline constexpr std::uint32_t kCapabilityAppearanceRequest = 1u << 2;
+inline constexpr std::uint32_t kCapabilityProtocolV12 = 1u << 3;
 
 #pragma pack(push, 1)
 struct PosePacket {

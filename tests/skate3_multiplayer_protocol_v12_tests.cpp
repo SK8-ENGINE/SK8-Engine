@@ -1,4 +1,5 @@
 #include "skate3_multiplayer_protocol_v12.h"
+#include "skate3_multiplayer_protocol_v12_live.h"
 
 #include <array>
 #include <cstdint>
@@ -9,6 +10,7 @@
 namespace {
 
 using skate3::multiplayer::protocol_v12::Capabilities;
+using skate3::multiplayer::protocol_v12::CapabilitiesShapeValid;
 using skate3::multiplayer::protocol_v12::DecodeCapabilities;
 using skate3::multiplayer::protocol_v12::DecodeEnvelope;
 using skate3::multiplayer::protocol_v12::EncodeCapabilities;
@@ -23,6 +25,7 @@ using skate3::multiplayer::protocol_v12::kEnvelopeBytes;
 using skate3::multiplayer::protocol_v12::kEnvelopeMagic;
 using skate3::multiplayer::protocol_v12::kFlagExpires;
 using skate3::multiplayer::protocol_v12::kFlagKeyframe;
+using skate3::multiplayer::protocol_v12::kFlagReliable;
 using skate3::multiplayer::protocol_v12::
     kFeatureAppearanceRecipes;
 using skate3::multiplayer::protocol_v12::
@@ -33,6 +36,8 @@ using skate3::multiplayer::protocol_v12::kFeaturePoseGroups;
 using skate3::multiplayer::protocol_v12::kMaximumDatagramBytes;
 using skate3::multiplayer::protocol_v12::kMaximumPayloadBytes;
 using skate3::multiplayer::protocol_v12::kProtocolVersion;
+namespace live =
+    skate3::multiplayer::protocol_v12::live;
 
 int g_failures = 0;
 
@@ -195,6 +200,46 @@ void TestCapabilitiesGoldenBytesAndRoundTrip() {
          "truncated v12 capabilities were accepted");
 }
 
+void TestLiveCapabilityContract() {
+  constexpr live::CompatibilityIdentity identity =
+      live::MakeCompatibilityIdentity("test-map");
+  constexpr live::CompatibilityIdentity same =
+      live::MakeCompatibilityIdentity("test-map");
+  constexpr live::CompatibilityIdentity other =
+      live::MakeCompatibilityIdentity("other-map");
+  static_assert(identity == same);
+  static_assert(identity.map_hash != other.map_hash);
+  static_assert(identity.build_hash != 0);
+  static_assert(identity.content_hash != 0);
+
+  constexpr Capabilities capabilities =
+      live::MakeCapabilities(identity);
+  static_assert(
+      capabilities.feature_bits ==
+      kFeatureExplicitLittleEndian);
+  static_assert(capabilities.map_hash == identity.map_hash);
+  static_assert(
+      capabilities.build_hash == identity.build_hash);
+  static_assert(
+      capabilities.content_hash == identity.content_hash);
+  static_assert(CapabilitiesShapeValid(capabilities));
+
+  Envelope envelope;
+  envelope.flags = kFlagReliable;
+  envelope.payload_bytes = kCapabilitiesPayloadBytes;
+  envelope.sender_role = 1;
+  envelope.sender_session = 2;
+  Expect(live::CapabilityEnvelopeShapeValid(envelope),
+         "live capability envelope was rejected");
+  envelope.flags = 0;
+  Expect(!live::CapabilityEnvelopeShapeValid(envelope),
+         "unreliable live capability envelope was accepted");
+  envelope.flags = kFlagReliable;
+  envelope.stream_id = 1;
+  Expect(!live::CapabilityEnvelopeShapeValid(envelope),
+         "stream-scoped live capability envelope was accepted");
+}
+
 void TestMalformedEnvelopeRejection() {
   Envelope envelope = SampleEnvelope();
   std::array<std::uint8_t, kEnvelopeBytes> packet{};
@@ -293,6 +338,7 @@ int main() {
   TestEnvelopeGoldenBytes();
   TestEnvelopeRoundTripWithPayload();
   TestCapabilitiesGoldenBytesAndRoundTrip();
+  TestLiveCapabilityContract();
   TestMalformedEnvelopeRejection();
   TestAcknowledgementHistory();
 
