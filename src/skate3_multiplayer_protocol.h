@@ -100,6 +100,21 @@ struct AppearanceFragmentPacket {
   return offsetof(AppearanceFragmentPacket, bytes) + chunk_bytes;
 }
 
+// Sequence numbers use the standard half-range rule. Subtraction is
+// intentionally unsigned so rollover from UINT32_MAX to zero remains a
+// forward step; the signed interpretation is only used after that defined
+// modulo arithmetic.
+[[nodiscard]] constexpr bool SequenceNewer(std::uint32_t candidate,
+                                           std::uint32_t reference) {
+  return candidate != reference &&
+         static_cast<std::int32_t>(candidate - reference) > 0;
+}
+
+[[nodiscard]] constexpr bool SequenceOlder(std::uint32_t candidate,
+                                           std::uint32_t reference) {
+  return SequenceNewer(reference, candidate);
+}
+
 static_assert(sizeof(PosePacket) == 72);
 static_assert(offsetof(AnimationFragmentPacket, words) == 56);
 static_assert(sizeof(AnimationFragmentPacket) == 1096);

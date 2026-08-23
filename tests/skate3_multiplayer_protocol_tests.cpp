@@ -15,6 +15,8 @@ using skate3::multiplayer::protocol::AnimationFragmentPacket;
 using skate3::multiplayer::protocol::AppearanceFragmentByteCount;
 using skate3::multiplayer::protocol::AppearanceFragmentPacket;
 using skate3::multiplayer::protocol::PosePacket;
+using skate3::multiplayer::protocol::SequenceNewer;
+using skate3::multiplayer::protocol::SequenceOlder;
 using skate3::multiplayer::protocol::kAnimationFragmentWords;
 using skate3::multiplayer::protocol::kAnimationPacketMagic;
 using skate3::multiplayer::protocol::kAppearanceChunkBytes;
@@ -185,6 +187,23 @@ void TestVariablePacketSizes() {
          "full appearance fragment size changed");
 }
 
+void TestSequenceOrderingAcrossWrap() {
+  Expect(SequenceNewer(11, 10), "ordinary newer sequence was rejected");
+  Expect(SequenceOlder(10, 11), "ordinary older sequence was accepted");
+  Expect(!SequenceNewer(10, 10), "equal sequence must not be newer");
+  Expect(!SequenceOlder(10, 10), "equal sequence must not be older");
+  Expect(SequenceNewer(0, UINT32_MAX),
+         "zero must be newer immediately after uint32 rollover");
+  Expect(SequenceNewer(1, UINT32_MAX),
+         "post-rollover sequence was rejected");
+  Expect(SequenceOlder(UINT32_MAX, 0),
+         "pre-rollover sequence must be older than zero");
+  Expect(!SequenceNewer(0x80000000u, 0),
+         "ambiguous half-range sequence must not be newer");
+  Expect(!SequenceOlder(0x80000000u, 0),
+         "ambiguous half-range sequence must not be older");
+}
+
 }  // namespace
 
 int main() {
@@ -193,6 +212,7 @@ int main() {
   TestAnimationGoldenBytes();
   TestAppearanceGoldenBytes();
   TestVariablePacketSizes();
+  TestSequenceOrderingAcrossWrap();
 
   if (g_failures != 0) {
     std::cerr << g_failures << " multiplayer protocol test(s) failed\n";

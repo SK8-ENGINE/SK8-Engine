@@ -126,6 +126,7 @@ using protocol::AnimationTrackEncoding;
 using protocol::AppearanceFragmentByteCount;
 using protocol::AppearanceFragmentPacket;
 using protocol::PosePacket;
+using protocol::SequenceNewer;
 using protocol::kAnimationFragmentWords;
 using protocol::kAnimationKeyframeInterval;
 using protocol::kAnimationPacketMagic;
@@ -2577,7 +2578,8 @@ class Runtime {
     BeginRemoteSession(
         packet.sender_role, peer, packet.sender_session);
     if (!peer.samples.empty() &&
-        (packet.sequence <= peer.samples.back().sequence ||
+        (!SequenceNewer(
+             packet.sequence, peer.samples.back().sequence) ||
          packet.sender_time_us <=
              peer.samples.back().sender_time_us)) {
       ++telemetry_.rejected_packets;
@@ -2680,13 +2682,17 @@ class Runtime {
         kAnimationPacketMagic, expected_bytes);
     peer.last_packet_at = now;
     if (!peer.animation_samples.empty() &&
-        packet.sequence <=
-            peer.animation_samples.back().pose.sequence) {
+        !SequenceNewer(
+            packet.sequence,
+            peer.animation_samples.back().pose.sequence)) {
       return false;
     }
     if (peer.animation_assembly.session == packet.sender_session &&
         peer.animation_assembly.sequence != 0 &&
-        packet.sequence < peer.animation_assembly.sequence) {
+        packet.sequence != peer.animation_assembly.sequence &&
+        !SequenceNewer(
+            packet.sequence,
+            peer.animation_assembly.sequence)) {
       // Unreliable internet delivery can put a late fragment from an
       // abandoned frame behind fragments of the next frame. Never let that
       // stale fragment replace the newer in-progress assembly.
@@ -2768,8 +2774,9 @@ class Runtime {
         peer.last_animation_arrival_time_us != 0 &&
         complete.pose.sender_time_us >
             peer.last_animation_sender_time_us &&
-        complete.pose.sequence >
-            peer.last_animation_sequence) {
+        SequenceNewer(
+            complete.pose.sequence,
+            peer.last_animation_sequence)) {
       const std::uint64_t sender_delta =
           complete.pose.sender_time_us -
           peer.last_animation_sender_time_us;
