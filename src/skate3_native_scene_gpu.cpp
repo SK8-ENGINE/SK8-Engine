@@ -8495,6 +8495,23 @@ void LogFrameStats(const FrameScene& scene, uint64_t frames, uint32_t drawn,
         g_cam_changes.exchange(0, std::memory_order_relaxed),
         g_cam_repeats.exchange(0, std::memory_order_relaxed),
         g_cam_max_streak.exchange(0, std::memory_order_relaxed));
+    REXLOG_INFO(
+        "multiplayer-perf: samples={} "
+        "local_pose={:.3f}/{:.3f}ms "
+        "appearance={:.3f}/{:.3f}ms "
+        "tick={:.3f}/{:.3f}ms "
+        "install={:.3f}/{:.3f}ms "
+        "remote={:.3f}/{:.3f}ms "
+        "total={:.3f}/{:.3f}ms",
+        g_pw_mp_total.count.load(std::memory_order_relaxed),
+        g_pw_mp_local_pose.AvgMs(),
+        g_pw_mp_local_pose.MaxMs(),
+        g_pw_mp_local_appearance.AvgMs(),
+        g_pw_mp_local_appearance.MaxMs(),
+        g_pw_mp_tick.AvgMs(), g_pw_mp_tick.MaxMs(),
+        g_pw_mp_install.AvgMs(), g_pw_mp_install.MaxMs(),
+        g_pw_mp_remote.AvgMs(), g_pw_mp_remote.MaxMs(),
+        g_pw_mp_total.AvgMs(), g_pw_mp_total.MaxMs());
     // Deep per-item attribution (see the perf-items cvar): visibility-class
     // draw costs, completed-draw stage split, build-walk decomposition, and
     // the off-screen retention pass. Averages are per item (the windows Add
@@ -8541,6 +8558,9 @@ void LogFrameStats(const FrameScene& scene, uint64_t frames, uint32_t drawn,
                           &g_pw_render, &g_pw_items, &g_pw_shadow, &g_pw_pre,
                           &g_pw_settle, &g_pw_tail, &g_pw_2d, &g_pw_mesh_decode,
                           &g_pw_tex_decode, &g_pw_commit,
+                          &g_pw_mp_local_pose, &g_pw_mp_local_appearance,
+                          &g_pw_mp_tick, &g_pw_mp_install, &g_pw_mp_remote,
+                          &g_pw_mp_total,
                           &g_pw_di_in, &g_pw_di_occ, &g_pw_di_out,
                           &g_pw_di_mesh, &g_pw_di_tex, &g_pw_di_const,
                           &g_pw_di_submit, &g_pw_bi_core, &g_pw_bi_fp,
@@ -11925,6 +11945,7 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
   cmd->SetTextures(8, t8_default, 5);
   set_world_translation(origin[0], origin[1], origin[2]);
 
+  const auto multiplayer_perf_t0 = PerfClock::now();
   // Capture the local player's final rendered skeleton. This is downstream
   // of Skate 3's animation graph, IK and trick evaluation, so the network
   // layer replicates the pose the sender actually displayed instead of
@@ -12651,12 +12672,20 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
     }
   }
 
+  const auto local_appearance_t0 = PerfClock::now();
+  g_pw_mp_local_pose.Add(uint64_t(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(
+          local_appearance_t0 - multiplayer_perf_t0)
+          .count()));
   const multiplayer::AppearanceBlob local_appearance =
       BuildLocalAppearanceBlob(
           context, local_player_items, local_animation);
+  g_pw_mp_local_appearance.Add(
+      PerfNsSince(local_appearance_t0));
   std::vector<multiplayer::RemotePlayer> remote_players;
   std::vector<multiplayer::RemotePeerRetirement>
       remote_retirements;
+  const auto multiplayer_tick_t0 = PerfClock::now();
   const bool have_remote_players =
       multiplayer::TickLocalVisuals(
           mechanics_sandbox::map::ActiveMapName(), origin,
@@ -12669,6 +12698,9 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
               ? &local_appearance
               : nullptr,
           remote_players, remote_retirements);
+  g_pw_mp_tick.Add(PerfNsSince(multiplayer_tick_t0));
+  const auto multiplayer_remote_t0 = PerfClock::now();
+  uint64_t multiplayer_install_ns = 0;
   for (const multiplayer::RemotePeerRetirement& retirement :
        remote_retirements) {
     ReleaseRetiredRemoteAppearance(context, retirement);
@@ -12690,6 +12722,7 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
     std::vector<const DrawItem*> appearance_items;
     const RemoteAppearanceRenderState*
         remote_appearance_state = nullptr;
+    const auto multiplayer_install_t0 = PerfClock::now();
     ObserveRemoteAppearanceSession(
         context, remote_player.role, remote_player.session);
     const bool appearance_installed =
@@ -12697,6 +12730,8 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
             context, remote_player.role,
             remote_player.session,
             remote_player.appearance);
+    multiplayer_install_ns +=
+        PerfNsSince(multiplayer_install_t0);
     if (appearance_installed) {
       const auto installed =
           g_remote_appearances.find(remote_player.role);
@@ -13375,6 +13410,10 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
     }
   }
   }
+  g_pw_mp_install.Add(multiplayer_install_ns);
+  g_pw_mp_remote.Add(
+      PerfNsSince(multiplayer_remote_t0));
+  g_pw_mp_total.Add(PerfNsSince(multiplayer_perf_t0));
 
   // The same cached authored poses are consumed later by the DXR dynamic
   // scene. Rendering the emissive source meshes here makes their motion and

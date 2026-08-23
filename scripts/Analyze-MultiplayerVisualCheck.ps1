@@ -94,6 +94,10 @@ foreach ($client in $clientDirectories) {
         $lines | Select-String -Pattern 'multiplayer-net:' |
             ForEach-Object { $_.Line }
     )
+    $perfLines = @(
+        $lines | Select-String -Pattern 'multiplayer-perf:' |
+            ForEach-Object { $_.Line }
+    )
     $lastRate = if ($rateLines.Count -gt 0) {
         $rateLines[-1]
     } else {
@@ -103,6 +107,7 @@ foreach ($client in $clientDirectories) {
     $summary.Add("logs=$($logs.Count)")
     $summary.Add("latest_log=$($logs[-1].FullName)")
     $summary.Add("rate_samples=$($rateLines.Count)")
+    $summary.Add("multiplayer_perf_samples=$($perfLines.Count)")
     $summary.Add(
         'max_socket_failures=' +
         (Maximum-IntegerField $rateLines 'failures')
@@ -231,6 +236,14 @@ foreach ($client in $clientDirectories) {
         ))
     )
     $summary.Add("last_rate=$lastRate")
+    $summary.Add(
+        'last_multiplayer_perf=' +
+        $(if ($perfLines.Count -gt 0) {
+            $perfLines[-1]
+        } else {
+            'missing'
+        })
+    )
     $summary.Add('')
 }
 

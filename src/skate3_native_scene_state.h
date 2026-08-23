@@ -922,6 +922,14 @@ inline PerfWindow g_pw_shadow;       // dynamic-shadow atlas pass
 inline PerfWindow g_pw_mesh_decode;  // inline DecodeMesh calls (count = decodes)
 inline PerfWindow g_pw_tex_decode;   // inline texture-ish decodes (cubes, HUD words)
 inline PerfWindow g_pw_commit;       // PrewarmCommit batches (count = non-empty runs)
+// Multiplayer work still executed by DrawSandboxMap on the command processor
+// thread. These boundaries guide the protocol-v11-compatible worker migration.
+inline PerfWindow g_pw_mp_local_pose;
+inline PerfWindow g_pw_mp_local_appearance;
+inline PerfWindow g_pw_mp_tick;
+inline PerfWindow g_pw_mp_install;
+inline PerfWindow g_pw_mp_remote;
+inline PerfWindow g_pw_mp_total;
 // RenderScene phase attribution (the sustained "render=13ms, items=0.7ms"
 // Vulkan mystery): everything render= covers that items=/shadow=
 // do not. pre = EnsurePipeline..prewarm+evict+retire before the scene pass;

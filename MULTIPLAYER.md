@@ -237,6 +237,11 @@ delivered about 54-56 complete animation frames per second and settled around
 274-280 KiB/s and 326-335 packets/s in each direction for one nearby detailed
 skater. Both processes reported zero socket failures. Appearance transfer is
 a separate one-time burst when a player first joins or changes outfit.
+Visual-check builds also emit periodic `multiplayer-perf` windows for local
+final-pose capture, appearance capture/cache work, the replication tick,
+remote appearance installation, remote reconstruction, and their total
+command-processor-thread cost. Average and maximum times are reported
+separately so one-time appearance spikes do not hide inside steady-state cost.
 
 Steam sessions now use direct peer fan-out. With ten players all mutually
 nearby, each player uploads one detailed stream to nine peers and receives
