@@ -292,11 +292,34 @@ Current checkpoint:
   including unchanged protocol-v11 golden tests.
 - The live runtime remains byte-for-byte protocol v11, so this checkpoint
   does not require an in-game visual pass.
-- The next isolated slice is the v12 control and grouped-pose payload wire
-  format: decoded-baseline reports, reliable baseline requests, group
-  identities, and bounded baseline/delta payload headers. Runtime capability
-  advertisements remain v11-only until those messages have golden-byte and
-  malformed-input coverage.
+- Commit `9d9d15a` defines the offline-only v12 pose-control and grouped-pose
+  wire formats. A 20-byte reliable control payload carries decoded-baseline
+  reports and bounded baseline requests targeted to an exact role, stream,
+  and session. A fixed 24-byte pose-group header leaves 1,136 bytes for data
+  inside the 1,200-byte datagram ceiling.
+- Each pose group has an independent ID, encoding, element count, pose ID,
+  receiver-confirmed baseline reference, and bounded fragment range. One
+  group is capped at 64 KiB and 58 datagrams, preventing untrusted size and
+  fragment-count growth. The current v11 word stream has an explicit migration
+  encoding; later bit packing does not require a new envelope or fragmenter.
+- Baseline and delta chunks are explicitly unreliable and expirable.
+  Baselines carry the keyframe flag; recovery controls are reliable and never
+  expirable. Delta headers must reference an older receiver-confirmed
+  baseline under rollover-safe sequence ordering.
+- Packet acknowledgement is recorded for each valid fragment before
+  reassembly, while decoded-baseline acknowledgement remains withheld until
+  every required group reconstructs. This keeps loss telemetry accurate
+  without falsely authorizing deltas from partial data.
+- Golden-byte, round-trip, exact-datagram-budget, maximum-fragment,
+  malformed-header, truncation, trailing-data, flag-policy, and generation
+  separation tests pass. All seven multiplayer suites pass, including the
+  unchanged protocol-v11 golden tests.
+- The live runtime remains byte-for-byte protocol v11, so this second
+  checkpoint also does not require an in-game visual pass.
+- The next isolated slice is a bounded group fragment reassembler and sender
+  packetizer exercised by synthetic loss, reorder, duplication, expiry, and
+  baseline-recovery scenarios. Runtime capability advertisements remain
+  v11-only until that end-to-end offline path is deterministic.
 
 Completion:
 
