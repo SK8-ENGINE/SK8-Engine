@@ -557,6 +557,7 @@ try {
         root_rate_hz = 60
         animation_rate_hz = 60
         interpolation_ms = 50
+        animation_interpolation_mode = 3
         replication_worker = $replicationWorker
         async_appearance_prepare = $true
         incremental_appearance_install = $true
@@ -642,7 +643,9 @@ $runRoot
 Clients: 5
 Transport: localhost UDP
 Quality: Balanced, 60 Hz root, 60 Hz animation, 50 ms minimum interpolation
-Change under test: diagnostics only; normal replication worker is restored
+Change under test: fresh render inputs wake presentation immediately, and
+four-sample affine curves keep visible-vertex velocity continuous across
+60 Hz packet boundaries
 Diagnostics: representative visible body vertices are sampled before send and
 after remote reconstruction, alongside skeleton, network, and GPU timing
 
@@ -887,7 +890,7 @@ separately, then ask the agent to analyze this run directory.
             '--skate3_multiplayer_local_send_rate=60',
             '--skate3_multiplayer_local_animation_rate=60',
             '--skate3_multiplayer_local_interpolation_ms=50',
-            '--skate3_multiplayer_animation_interpolation_mode=2',
+            '--skate3_multiplayer_animation_interpolation_mode=3',
             (
                 '--skate3_multiplayer_replication_worker={0}' -f
                 $replicationWorker.ToString().ToLowerInvariant()

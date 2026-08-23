@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cstddef>
 #include <cstdint>
 
 namespace skate3::multiplayer::pose_curve {
@@ -60,6 +61,26 @@ inline float InterpolateBoundedHermite(
   const auto [minimum, maximum] =
       std::minmax({previous, first, second, next});
   return std::clamp(interpolated, minimum, maximum);
+}
+
+// Final skinning rows are affine coefficients, and a weighted vertex is a
+// linear combination of those coefficients. Interpolating every coefficient
+// with the same C1 four-sample curve therefore gives the visible skinned
+// vertex continuous velocity at packet boundaries. The component envelope
+// prevents a noisy neighbour from producing an unbounded matrix overshoot.
+inline void InterpolateBoundedAffine(
+    const float previous[12], const float first[12],
+    const float second[12], const float next[12],
+    std::uint64_t previous_time, std::uint64_t first_time,
+    std::uint64_t second_time, std::uint64_t next_time,
+    float amount, float out[12]) {
+  for (std::size_t component = 0; component < 12; ++component) {
+    out[component] = InterpolateBoundedHermite(
+        previous[component], first[component],
+        second[component], next[component],
+        previous_time, first_time, second_time, next_time,
+        amount);
+  }
 }
 
 }  // namespace skate3::multiplayer::pose_curve

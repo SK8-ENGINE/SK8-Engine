@@ -131,7 +131,8 @@ REXCVAR_DEFINE_INT32(
     "Remote skeletal interpolation diagnostic: 0 holds the latest complete "
     "animation frame, 1 interpolates affine rotation/scale with linear "
     "translation, 2 uses pivot-preserving rigid interpolation, and 3 uses "
-    "bounded four-sample interpolation for continuous pose velocity.")
+    "bounded four-sample affine coefficients for continuous visible-vertex "
+    "velocity.")
     .range(0, 3)
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 REXCVAR_DEFINE_DOUBLE(
@@ -1569,121 +1570,16 @@ void InterpolateAttachmentAffine(
   }
 }
 
-float InterpolateHermite(
-    float previous, float first, float second, float next,
-    std::uint64_t previous_time, std::uint64_t first_time,
-    std::uint64_t second_time, std::uint64_t next_time,
-    float amount) {
-  return pose_curve::InterpolateHermite(
-      previous, first, second, next,
-      previous_time, first_time, second_time, next_time,
-      amount);
-}
-
 void InterpolateAffineHermite(
     const float previous[12], const float first[12],
     const float second[12], const float next[12],
     std::uint64_t previous_time, std::uint64_t first_time,
     std::uint64_t second_time, std::uint64_t next_time,
     float amount, float out[12]) {
-  const auto bounded_hermite =
-      [previous_time, first_time, second_time, next_time,
-       amount](float previous_value, float first_value,
-               float second_value, float next_value) {
-        return pose_curve::InterpolateBoundedHermite(
-            previous_value, first_value, second_value, next_value,
-            previous_time, first_time, second_time, next_time,
-            amount);
-      };
-
-  Quaternion previous_rotation;
-  Quaternion first_rotation;
-  Quaternion second_rotation;
-  Quaternion next_rotation;
-  float previous_scale[3];
-  float first_scale[3];
-  float second_scale[3];
-  float next_scale[3];
-  if (!DecomposeAffineRotationScale(
-          previous, previous_rotation, previous_scale) ||
-      !DecomposeAffineRotationScale(
-          first, first_rotation, first_scale) ||
-      !DecomposeAffineRotationScale(
-          second, second_rotation, second_scale) ||
-      !DecomposeAffineRotationScale(
-          next, next_rotation, next_scale)) {
-    for (std::size_t component = 0; component < 12; ++component) {
-      out[component] = bounded_hermite(
-          previous[component], first[component],
-          second[component], next[component]);
-    }
-    return;
-  }
-
-  const auto align_to =
-      [](const Quaternion& reference, Quaternion value) {
-        const float dot =
-            reference.x * value.x +
-            reference.y * value.y +
-            reference.z * value.z +
-            reference.w * value.w;
-        if (dot < 0.0f) {
-          value.x = -value.x;
-          value.y = -value.y;
-          value.z = -value.z;
-          value.w = -value.w;
-        }
-        return value;
-      };
-  previous_rotation =
-      align_to(first_rotation, previous_rotation);
-  second_rotation =
-      align_to(first_rotation, second_rotation);
-  next_rotation =
-      align_to(second_rotation, next_rotation);
-  Quaternion rotation{
-      InterpolateHermite(
-          previous_rotation.x, first_rotation.x,
-          second_rotation.x, next_rotation.x,
-          previous_time, first_time, second_time, next_time,
-          amount),
-      InterpolateHermite(
-          previous_rotation.y, first_rotation.y,
-          second_rotation.y, next_rotation.y,
-          previous_time, first_time, second_time, next_time,
-          amount),
-      InterpolateHermite(
-          previous_rotation.z, first_rotation.z,
-          second_rotation.z, next_rotation.z,
-          previous_time, first_time, second_time, next_time,
-          amount),
-      InterpolateHermite(
-          previous_rotation.w, first_rotation.w,
-          second_rotation.w, next_rotation.w,
-          previous_time, first_time, second_time, next_time,
-          amount)};
-  if (!NormalizeQuaternion(rotation)) {
-    rotation =
-        NlerpQuaternion(
-            first_rotation, second_rotation, amount);
-  }
-  float rotation_matrix[9];
-  RotationFromQuaternion(rotation, rotation_matrix);
-  for (std::size_t column = 0; column < 3; ++column) {
-    const float scale = bounded_hermite(
-        previous_scale[column], first_scale[column],
-        second_scale[column], next_scale[column]);
-    for (std::size_t row = 0; row < 3; ++row) {
-      out[row * 4 + column] =
-          rotation_matrix[row * 3 + column] * scale;
-    }
-  }
-  for (std::size_t row = 0; row < 3; ++row) {
-    const std::size_t component = row * 4 + 3;
-    out[component] = bounded_hermite(
-        previous[component], first[component],
-        second[component], next[component]);
-  }
+  pose_curve::InterpolateBoundedAffine(
+      previous, first, second, next,
+      previous_time, first_time, second_time, next_time,
+      amount, out);
 }
 
 std::uint16_t FloatToHalf(float value) {
@@ -5088,7 +4984,7 @@ class ReplicationWorker {
           });
         } else {
           input_ready_.wait_for(lock, kWorkerInterval, [this] {
-            return stop_requested_;
+            return stop_requested_ || mailbox_.HasPendingInput();
           });
         }
         if (stop_requested_) {

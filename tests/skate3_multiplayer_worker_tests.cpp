@@ -7,6 +7,7 @@
 #include "skate3_multiplayer_pose_curve.h"
 #include "skate3_multiplayer_send_schedule.h"
 
+#include <array>
 #include <atomic>
 #include <cmath>
 #include <cstdint>
@@ -553,6 +554,49 @@ void TestPoseCurveHasContinuousSegmentVelocity() {
          "adjacent pose-curve segments changed velocity at a sample");
 }
 
+void TestAffineCurveHasContinuousVisibleVertexVelocity() {
+  using skate3::multiplayer::pose_curve::
+      InterpolateBoundedAffine;
+
+  constexpr std::uint64_t kStep = 16667;
+  constexpr float kEpsilon = 0.001f;
+  const auto affine = [](float translation) {
+    std::array<float, 12> value = {
+        1.0f, 0.0f, 0.0f, translation,
+        0.0f, 1.0f, 0.0f, 0.0f,
+        0.0f, 0.0f, 1.0f, 0.0f};
+    return value;
+  };
+  const auto previous = affine(0.0f);
+  const auto first = affine(1.0f);
+  const auto second = affine(4.0f);
+  const auto next = affine(9.0f);
+  const auto after = affine(16.0f);
+  float before_rows[12] = {};
+  float after_rows[12] = {};
+  InterpolateBoundedAffine(
+      previous.data(), first.data(), second.data(), next.data(),
+      0, kStep, kStep * 2, kStep * 3,
+      1.0f - kEpsilon, before_rows);
+  InterpolateBoundedAffine(
+      first.data(), second.data(), next.data(), after.data(),
+      kStep, kStep * 2, kStep * 3, kStep * 4,
+      kEpsilon, after_rows);
+
+  // A rigidly weighted vertex at the matrix origin is the affine
+  // translation itself. Matching derivatives here verifies the property
+  // that matters to the final rendered point, not just a scalar helper.
+  const float velocity_before =
+      (second[3] - before_rows[3]) / kEpsilon;
+  const float velocity_after =
+      (after_rows[3] - second[3]) / kEpsilon;
+  Expect(std::fabs(velocity_before - velocity_after) < 0.02f,
+         "affine curve changed visible-vertex velocity at a packet boundary");
+  Expect(before_rows[0] == 1.0f && after_rows[5] == 1.0f &&
+             before_rows[10] == 1.0f && after_rows[10] == 1.0f,
+         "affine curve disturbed constant basis coefficients");
+}
+
 void TestMotionTraceMeasuresCadenceAndKeepsContinuity() {
   using skate3::multiplayer::motion::Snapshot;
   using skate3::multiplayer::motion::Window;
@@ -639,6 +683,7 @@ int main() {
   TestPresentationClockSmoothsSteppedSceneAnchors();
   TestBoundedPoseCurvePreservesSamplesAndLimits();
   TestPoseCurveHasContinuousSegmentVelocity();
+  TestAffineCurveHasContinuousVisibleVertexVelocity();
   TestMotionTraceMeasuresCadenceAndKeepsContinuity();
   TestPoseCadenceMeasuresRepeatsAndAlternation();
 
