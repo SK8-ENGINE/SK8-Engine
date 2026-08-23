@@ -22,6 +22,7 @@ enum class MessageKind : std::uint8_t {
   kPoseDelta = 4,
   kAppearanceControl = 5,
   kAppearanceChunk = 6,
+  kPoseControl = 7,
 };
 
 enum EnvelopeFlag : std::uint8_t {
@@ -75,7 +76,7 @@ struct Capabilities {
 
 [[nodiscard]] constexpr bool MessageKindValid(MessageKind kind) {
   return kind >= MessageKind::kCapabilities &&
-         kind <= MessageKind::kAppearanceChunk;
+         kind <= MessageKind::kPoseControl;
 }
 
 [[nodiscard]] constexpr bool EnvelopeShapeValid(
@@ -107,6 +108,12 @@ struct Capabilities {
     std::uint64_t local_features,
     std::uint64_t remote_features) {
   return local_features & remote_features & kKnownFeatureBits;
+}
+
+[[nodiscard]] constexpr bool SequenceNewer(
+    std::uint32_t candidate, std::uint32_t reference) {
+  const std::uint32_t distance = candidate - reference;
+  return distance != 0 && distance < 0x80000000u;
 }
 
 namespace detail {

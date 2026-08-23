@@ -206,6 +206,52 @@ void TestPoseReorderGenerationAndValidation() {
          "old session survived generation replacement");
 }
 
+void TestFragmentReceiptIsSeparateFromGroupDecode() {
+  PoseReceiverState receiver(0b11u);
+  receiver.ActivateGeneration(5, 350);
+  Expect(receiver.ReceivePoseFragment(5, 350, 10) ==
+             PoseReceiveResult::kFragmentAccepted,
+         "first baseline fragment was rejected");
+  Expect(receiver.ReceivePoseFragment(5, 350, 12) ==
+             PoseReceiveResult::kFragmentAccepted,
+         "fragment after packet loss was rejected");
+  Expect(receiver.ReceivePoseFragment(5, 350, 11) ==
+             PoseReceiveResult::kFragmentAccepted,
+         "reordered missing fragment was rejected");
+  Expect(receiver.packet_history().latest() == 12 &&
+             SequenceAcknowledged(
+                 10,
+                 receiver.packet_history().latest(),
+                 receiver.packet_history().history()) &&
+             SequenceAcknowledged(
+                 11,
+                 receiver.packet_history().latest(),
+                 receiver.packet_history().history()),
+         "fragment packets were not represented in receive history");
+  Expect(receiver.decoded_baseline_id() == 0,
+         "fragment receipt prematurely confirmed a baseline");
+
+  Expect(receiver.CompleteBaselineGroup(
+             5, 350, 12, 70, 0b01) ==
+             PoseReceiveResult::kBaselineGroupAccepted,
+         "decoded first baseline group was rejected");
+  Expect(receiver.decoded_baseline_id() == 0,
+         "partial decoded group set confirmed a baseline");
+  Expect(receiver.ReceivePoseFragment(5, 350, 15) ==
+             PoseReceiveResult::kFragmentAccepted,
+         "final fragment for second baseline group was rejected");
+  Expect(receiver.CompleteBaselineGroup(
+             5, 350, 15, 70, 0b10) ==
+             PoseReceiveResult::kBaselineCompleted,
+         "decoded final baseline group did not confirm baseline");
+  Expect(receiver.decoded_baseline_id() == 70 &&
+             receiver.decoded_baseline_sequence() == 15,
+         "baseline completion did not use decode completion point");
+  Expect(receiver.CompleteDelta(5, 350, 70, 0b01) ==
+             PoseReceiveResult::kDeltaAccepted,
+         "decoded delta against confirmed baseline was rejected");
+}
+
 void TestBaselineReplacementAndRollover() {
   PoseReceiverState receiver(0b11u);
   receiver.ActivateGeneration(5, 400);
@@ -279,6 +325,7 @@ int main() {
   TestValidatedGenerationActivation();
   TestGroupedBaselineRecovery();
   TestPoseReorderGenerationAndValidation();
+  TestFragmentReceiptIsSeparateFromGroupDecode();
   TestBaselineReplacementAndRollover();
   TestSenderUsesOnlyDecodedBaselineReports();
 

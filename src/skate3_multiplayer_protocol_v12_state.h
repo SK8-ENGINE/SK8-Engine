@@ -1,14 +1,10 @@
 #pragma once
 
+#include "skate3_multiplayer_protocol_v12.h"
+
 #include <cstdint>
 
 namespace skate3::multiplayer::protocol_v12 {
-
-[[nodiscard]] constexpr bool SequenceNewer(
-    std::uint32_t candidate, std::uint32_t reference) {
-  const std::uint32_t distance = candidate - reference;
-  return distance != 0 && distance < 0x80000000u;
-}
 
 enum class ReceiveDisposition {
   kNewLatest,
@@ -162,6 +158,7 @@ class PeerGenerationState {
 };
 
 enum class PoseReceiveResult {
+  kFragmentAccepted,
   kBaselineGroupAccepted,
   kBaselineCompleted,
   kDeltaAccepted,
@@ -209,6 +206,25 @@ class PoseReceiverState {
       return PoseReceiveResult::kInvalidGroups;
     }
 
+    const PoseReceiveResult packet =
+        ReceivePoseFragment(role, session, packet_sequence);
+    if (packet != PoseReceiveResult::kFragmentAccepted) {
+      return packet;
+    }
+    return CompleteBaselineGroup(
+        role, session, packet_sequence, baseline_id, group_mask);
+  }
+
+  // Call this after each structurally valid datagram and before adding its
+  // bytes to a fragment reassembler. CompleteBaselineGroup or CompleteDelta
+  // is called separately only after the full group payload decodes.
+  [[nodiscard]] PoseReceiveResult ReceivePoseFragment(
+      std::uint16_t role,
+      std::uint32_t session,
+      std::uint32_t packet_sequence) {
+    if (!Matches(role, session)) {
+      return PoseReceiveResult::kStaleGeneration;
+    }
     const ReceiveDisposition packet =
         packet_history_.Observe(packet_sequence);
     if (packet == ReceiveDisposition::kDuplicate) {
@@ -217,7 +233,24 @@ class PoseReceiverState {
     if (packet == ReceiveDisposition::kTooOld) {
       return PoseReceiveResult::kPacketTooOld;
     }
+    return PoseReceiveResult::kFragmentAccepted;
+  }
 
+  [[nodiscard]] PoseReceiveResult CompleteBaselineGroup(
+      std::uint16_t role,
+      std::uint32_t session,
+      std::uint32_t completed_at_sequence,
+      std::uint32_t baseline_id,
+      std::uint32_t group_mask) {
+    if (!Matches(role, session)) {
+      return PoseReceiveResult::kStaleGeneration;
+    }
+    if (baseline_id == 0) {
+      return PoseReceiveResult::kInvalidBaseline;
+    }
+    if (!GroupsValid(group_mask)) {
+      return PoseReceiveResult::kInvalidGroups;
+    }
     if (baseline_id == decoded_baseline_id_ ||
         (decoded_baseline_id_ != 0 &&
          !SequenceNewer(baseline_id, decoded_baseline_id_))) {
@@ -238,7 +271,7 @@ class PoseReceiverState {
     }
 
     decoded_baseline_id_ = pending_baseline_id_;
-    decoded_baseline_sequence_ = packet_sequence;
+    decoded_baseline_sequence_ = completed_at_sequence;
     pending_baseline_id_ = 0;
     pending_group_mask_ = 0;
     request_pending_ = false;
@@ -262,13 +295,28 @@ class PoseReceiverState {
       return PoseReceiveResult::kInvalidGroups;
     }
 
-    const ReceiveDisposition packet =
-        packet_history_.Observe(packet_sequence);
-    if (packet == ReceiveDisposition::kDuplicate) {
-      return PoseReceiveResult::kDuplicatePacket;
+    const PoseReceiveResult packet =
+        ReceivePoseFragment(role, session, packet_sequence);
+    if (packet != PoseReceiveResult::kFragmentAccepted) {
+      return packet;
     }
-    if (packet == ReceiveDisposition::kTooOld) {
-      return PoseReceiveResult::kPacketTooOld;
+    return CompleteDelta(
+        role, session, referenced_baseline_id, group_mask);
+  }
+
+  [[nodiscard]] PoseReceiveResult CompleteDelta(
+      std::uint16_t role,
+      std::uint32_t session,
+      std::uint32_t referenced_baseline_id,
+      std::uint32_t group_mask) {
+    if (!Matches(role, session)) {
+      return PoseReceiveResult::kStaleGeneration;
+    }
+    if (referenced_baseline_id == 0) {
+      return PoseReceiveResult::kInvalidBaseline;
+    }
+    if (!GroupsValid(group_mask)) {
+      return PoseReceiveResult::kInvalidGroups;
     }
     if (referenced_baseline_id != decoded_baseline_id_) {
       RequestBaseline();
