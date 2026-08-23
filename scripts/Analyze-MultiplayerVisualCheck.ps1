@@ -132,6 +132,22 @@ foreach ($client in $clientDirectories) {
         (Match-Count $lines 'multiplayer: peer role=.*appearance .*state=2')
     )
     $summary.Add(
+        'appearance_requests_queued=' +
+        (Match-Count $lines 'multiplayer: queued appearance request role=')
+    )
+    $summary.Add(
+        'appearance_resends_started=' +
+        (Match-Count $lines (
+            'multiplayer: restarted appearance stream requester='
+        ))
+    )
+    $summary.Add(
+        'stale_appearance_requests=' +
+        (Match-Count $lines (
+            'multiplayer: ignored stale appearance request role='
+        ))
+    )
+    $summary.Add(
         'appearance_receive_events=' +
         (Match-Count $lines 'multiplayer: received appearance role=')
     )

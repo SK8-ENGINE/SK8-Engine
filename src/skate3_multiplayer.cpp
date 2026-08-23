@@ -120,6 +120,7 @@ namespace skate3::multiplayer {
 namespace {
 
 using Clock = std::chrono::steady_clock;
+using lifecycle::OutboundAppearanceState;
 using protocol::AnimationFragmentByteCount;
 using protocol::AnimationFragmentShapeValid;
 using protocol::AnimationFragmentPacket;
@@ -142,6 +143,7 @@ using protocol::kAnimationKeyframeInterval;
 using protocol::kAnimationPacketMagic;
 using protocol::kAppearanceChunkBytes;
 using protocol::kAppearancePacketMagic;
+using protocol::kCapabilityAppearanceRequest;
 using protocol::kCapabilityAppearanceState;
 using protocol::kCapabilityControlV1;
 using protocol::kControlPacketMagic;
@@ -268,7 +270,8 @@ constexpr auto kRemoteTimeout = std::chrono::milliseconds(1500);
 constexpr std::size_t kMaximumBufferedSamples = 16;
 constexpr std::size_t kMaximumBufferedAnimationSamples = 8;
 constexpr std::uint32_t kLocalControlCapabilities =
-    kCapabilityControlV1 | kCapabilityAppearanceState;
+    kCapabilityControlV1 | kCapabilityAppearanceState |
+    kCapabilityAppearanceRequest;
 // Animation matrices stay inside a compact character-relative range. Fixed
 // point gives substantially more stable per-frame values than half floats at
 // the same 16-bit wire size, avoiding pose-dependent mantissa precision.
@@ -347,15 +350,6 @@ struct RemotePeerState {
   AppearanceBlob appearance;
 };
 
-struct OutboundAppearanceState {
-  std::uint64_t identity = 0;
-  std::uint16_t next_chunk = 0;
-  std::uint8_t completed_passes = 0;
-  Clock::time_point retry_after{};
-  AppearanceDeliveryState acknowledged_state =
-      AppearanceDeliveryState::kUnknown;
-};
-
 struct PeerControlState {
   std::uint32_t capabilities = 0;
   Clock::time_point last_advertisement_sent{};
@@ -365,6 +359,11 @@ struct PeerControlState {
       AppearanceDeliveryState::kUnknown;
   std::uint8_t appearance_state_send_attempts = 0;
   Clock::time_point last_appearance_state_sent{};
+  std::uint64_t pending_appearance_request = 0;
+  std::uint8_t appearance_request_send_attempts = 0;
+  Clock::time_point last_appearance_request_sent{};
+  std::uint64_t last_appearance_request_received = 0;
+  Clock::time_point last_appearance_request_received_at{};
 };
 
 std::int64_t PresentationDelayMicroseconds(
@@ -454,6 +453,10 @@ struct TelemetrySnapshot {
   std::uint64_t appearance_receipts_received = 0;
   std::uint64_t appearance_installs_sent = 0;
   std::uint64_t appearance_installs_received = 0;
+  std::uint64_t appearance_requests_sent = 0;
+  std::uint64_t appearance_requests_received = 0;
+  std::uint64_t appearance_resends_started = 0;
+  std::uint64_t appearance_requests_ignored = 0;
   std::uint64_t duplicate_appearance_chunks = 0;
   std::uint64_t animation_present_interpolated = 0;
   std::uint64_t animation_present_held_latest = 0;
@@ -1859,11 +1862,18 @@ class Runtime {
 #endif
     network_tuning_ = ResolveNetworkTuning(participant_count);
     relevance_cache_.clear();
+    local_appearance_identity_ =
+        local_appearance != nullptr &&
+                local_appearance->identity != 0 &&
+                local_appearance->bytes != nullptr &&
+                !local_appearance->bytes->empty()
+            ? local_appearance->identity
+            : 0;
     ReceivePackets(now, map_hash);
     PrunePeers(now);
     SendCapabilityAdvertisements(
         now, map_hash, static_cast<std::uint32_t>(role));
-    SendPendingAppearanceStates(
+    SendPendingAppearanceControls(
         now, map_hash, static_cast<std::uint32_t>(role));
     const std::int32_t send_rate = network_tuning_.pose_rate;
     const auto send_interval = std::chrono::microseconds(
@@ -2075,6 +2085,14 @@ class Runtime {
         << telemetry_.appearance_installs_sent
         << " multiplayer_appearance_installs_received="
         << telemetry_.appearance_installs_received
+        << " multiplayer_appearance_requests_sent="
+        << telemetry_.appearance_requests_sent
+        << " multiplayer_appearance_requests_received="
+        << telemetry_.appearance_requests_received
+        << " multiplayer_appearance_resends_started="
+        << telemetry_.appearance_resends_started
+        << " multiplayer_appearance_requests_ignored="
+        << telemetry_.appearance_requests_ignored
         << " multiplayer_duplicate_appearance_chunks="
         << telemetry_.duplicate_appearance_chunks
         << " multiplayer_animation_present_interpolated="
@@ -2204,6 +2222,7 @@ class Runtime {
         "bones={} relay={:.1f}pps relevance_drop={:.1f}pps rejected={} "
         "failures={} peer_resets={} "
         "appearance={:.2f}MiB timeout={} budget_reject={} "
+        "requests={}/{}/{}/{} "
         "present={:.1f}i/{:.1f}new/{:.1f}old fps "
         "timing={:.1f}ms jitter={:.1f}ms buffered={}",
         bound_role_, telemetry_.known_peers,
@@ -2223,6 +2242,10 @@ class Runtime {
             (1024.0 * 1024.0),
         telemetry_.appearance_assembly_timeouts,
         telemetry_.appearance_budget_rejections,
+        telemetry_.appearance_requests_sent,
+        telemetry_.appearance_requests_received,
+        telemetry_.appearance_resends_started,
+        telemetry_.appearance_requests_ignored,
         animation_interpolated_fps, animation_held_latest_fps,
         animation_held_oldest_fps,
         static_cast<double>(telemetry_.animation_period_us) / 1000.0,
@@ -2309,6 +2332,36 @@ class Runtime {
     control.last_appearance_state_sent = {};
   }
 
+  void QueueAppearanceRequest(
+      std::uint32_t role, std::uint64_t appearance_id) {
+    if (appearance_id == 0) {
+      return;
+    }
+    PeerControlState& control = peer_control_[role];
+    if (control.pending_appearance_request == appearance_id &&
+        control.appearance_request_send_attempts == 0) {
+      return;
+    }
+    control.pending_appearance_request = appearance_id;
+    control.appearance_request_send_attempts = 0;
+    control.last_appearance_request_sent = {};
+    REXLOG_INFO(
+        "multiplayer: queued appearance request role={} id={:016X}",
+        role, appearance_id);
+  }
+
+  void CompleteAppearanceRequest(
+      std::uint32_t role, std::uint64_t appearance_id) {
+    const auto found = peer_control_.find(role);
+    if (found == peer_control_.end() ||
+        found->second.pending_appearance_request != appearance_id) {
+      return;
+    }
+    found->second.pending_appearance_request = 0;
+    found->second.appearance_request_send_attempts = 0;
+    found->second.last_appearance_request_sent = {};
+  }
+
   void PrunePeers(Clock::time_point now) {
     constexpr auto kForgetPeerAfter = std::chrono::seconds(5);
     for (auto iterator = remote_peers_.begin();
@@ -2317,8 +2370,11 @@ class Runtime {
       if (peer.appearance_assembly.identity != 0 &&
           lifecycle::AppearanceAssemblyExpired<Clock>(
               now, peer.appearance_assembly.last_update)) {
+        const std::uint64_t timed_out_identity =
+            peer.appearance_assembly.identity;
         peer.appearance_assembly = {};
         ++telemetry_.appearance_assembly_timeouts;
+        QueueAppearanceRequest(iterator->first, timed_out_identity);
       }
       if (peer.appearance_assembly.identity != 0) {
         ++iterator;
@@ -2748,9 +2804,54 @@ class Runtime {
         return true;
       }
       case ControlMessageType::kAppearanceRequest:
-        // Explicit requests are enabled in a later state-machine slice.
-        ++telemetry_.rejected_packets;
-        return false;
+        ++telemetry_.appearance_requests_received;
+        if (control.last_appearance_request_received ==
+                packet.appearance_id &&
+            control.last_appearance_request_received_at !=
+                Clock::time_point{} &&
+            now - control.last_appearance_request_received_at <
+                lifecycle::kAppearanceResendRequestMinimumInterval) {
+          ++telemetry_.appearance_requests_ignored;
+          return true;
+        }
+        control.last_appearance_request_received =
+            packet.appearance_id;
+        control.last_appearance_request_received_at = now;
+        {
+          bool steam_transport = false;
+#if defined(_WIN32)
+          steam_transport = using_steam_;
+#endif
+          const std::uint32_t resend_target =
+              lifecycle::AppearanceResendTargetRole(
+                  static_cast<std::uint32_t>(bound_role_),
+                  steam_transport, packet.sender_role);
+          if (resend_target == 0 ||
+              packet.appearance_id != local_appearance_identity_) {
+            ++telemetry_.appearance_requests_ignored;
+            REXLOG_INFO(
+                "multiplayer: ignored stale appearance request role={} "
+                "id={:016X} current={:016X}",
+                packet.sender_role, packet.appearance_id,
+                local_appearance_identity_);
+            return true;
+          }
+          lifecycle::OutboundAppearanceState& state =
+              outbound_appearance_[resend_target];
+          if (!state.RestartForRequest(
+                  packet.appearance_id,
+                  local_appearance_identity_)) {
+            ++telemetry_.appearance_requests_ignored;
+            return true;
+          }
+          ++telemetry_.appearance_resends_started;
+          REXLOG_INFO(
+              "multiplayer: restarted appearance stream requester={} "
+              "target={} id={:016X}",
+              packet.sender_role, resend_target,
+              packet.appearance_id);
+          return true;
+        }
     }
     ++telemetry_.rejected_packets;
     return false;
@@ -3051,6 +3152,8 @@ class Runtime {
     RecordReceivedPacketClass(
         kAppearancePacketMagic, expected_bytes);
     peer.last_packet_at = now;
+    CompleteAppearanceRequest(
+        packet.sender_role, packet.appearance_id);
     if (peer.appearance.identity == packet.appearance_id &&
         peer.appearance.bytes != nullptr &&
         peer.appearance.bytes->size() == packet.total_bytes) {
@@ -3501,7 +3604,7 @@ class Runtime {
 #endif
   }
 
-  void SendPendingAppearanceStates(
+  void SendPendingAppearanceControls(
       Clock::time_point now, std::uint32_t map_hash,
       std::uint32_t source_role) {
 #if defined(_WIN32)
@@ -3543,6 +3646,49 @@ class Runtime {
         } else {
           ++telemetry_.appearance_receipts_sent;
         }
+      }
+    }
+    for (auto& [target_role, control] : peer_control_) {
+      if (control.pending_appearance_request == 0 ||
+          (control.capabilities &
+           kCapabilityAppearanceRequest) == 0) {
+        continue;
+      }
+      if (control.appearance_request_send_attempts >=
+          maximum_attempts) {
+        if (control.last_appearance_request_sent ==
+                Clock::time_point{} ||
+            now - control.last_appearance_request_sent <
+                lifecycle::kAppearanceResendRequestMinimumInterval) {
+          continue;
+        }
+        // Keep a bounded recovery request alive until any matching
+        // appearance chunk arrives or the peer is forgotten. This costs at
+        // most one reliable Steam packet or three localhost datagrams per
+        // two-second round and survives a completely lost UDP request round.
+        control.appearance_request_send_attempts = 0;
+      }
+      if (control.last_appearance_request_sent !=
+              Clock::time_point{} &&
+          now - control.last_appearance_request_sent <
+              kRetryInterval) {
+        continue;
+      }
+      control.last_appearance_request_sent = now;
+      ControlPacket packet;
+      packet.sender_role = source_role;
+      packet.sender_session = session_id_;
+      packet.target_role = target_role;
+      packet.map_hash = map_hash;
+      packet.message_type =
+          ControlMessageType::kAppearanceRequest;
+      packet.capabilities = kLocalControlCapabilities;
+      packet.appearance_id =
+          control.pending_appearance_request;
+      if (SendControlPacketToRole(
+              packet, target_role, /*relayed=*/false)) {
+        ++control.appearance_request_send_attempts;
+        ++telemetry_.appearance_requests_sent;
       }
     }
 #else
@@ -3765,8 +3911,7 @@ class Runtime {
       OutboundAppearanceState& state =
           outbound_appearance_[target_role];
       if (state.identity != appearance.identity) {
-        state = {};
-        state.identity = appearance.identity;
+        state.Reset(appearance.identity);
       }
       // Steam sends one independent reliable appearance stream to each
       // final recipient, so that recipient's receipt completes its stream.
@@ -4185,6 +4330,7 @@ class Runtime {
     relevance_cache_.clear();
     std::fill_n(local_position_, 3, 0.0f);
     local_position_valid_ = false;
+    local_appearance_identity_ = 0;
     last_send_ = {};
     last_pose_sample_time_us_ = 0;
     last_animation_send_ = {};
@@ -4218,7 +4364,8 @@ class Runtime {
   std::uint32_t animation_send_sequence_ = 0;
   std::unordered_map<std::uint32_t, QuantizedAnimationFrame>
       outbound_animation_keyframes_;
-  std::unordered_map<std::uint32_t, OutboundAppearanceState>
+  std::unordered_map<std::uint32_t,
+                     lifecycle::OutboundAppearanceState>
       outbound_appearance_;
   std::unordered_map<std::uint32_t, PeerControlState>
       peer_control_;
@@ -4238,6 +4385,7 @@ class Runtime {
   std::unordered_map<std::uint64_t, bool> relevance_cache_;
   float local_position_[3] = {};
   bool local_position_valid_ = false;
+  std::uint64_t local_appearance_identity_ = 0;
   NetworkTuning network_tuning_;
   TelemetrySnapshot telemetry_;
   TelemetrySnapshot last_rate_snapshot_;

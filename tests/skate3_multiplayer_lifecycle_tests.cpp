@@ -7,10 +7,13 @@
 namespace {
 
 using skate3::multiplayer::lifecycle::AppearanceAssemblyExpired;
+using skate3::multiplayer::lifecycle::AppearanceResendTargetRole;
 using skate3::multiplayer::lifecycle::CanBeginAppearanceAssembly;
 using skate3::multiplayer::lifecycle::CompleteAppearancePieceCount;
 using skate3::multiplayer::lifecycle::kMaximumIncompleteAppearanceBytes;
+using skate3::multiplayer::lifecycle::OutboundAppearanceState;
 using skate3::multiplayer::lifecycle::PeerGenerationTracker;
+using skate3::multiplayer::protocol::AppearanceDeliveryState;
 using skate3::multiplayer::protocol::kMaximumAppearanceBytes;
 
 int g_failures = 0;
@@ -130,6 +133,47 @@ void TestCompleteAppearancePieceCount() {
          "empty appearance piece set was accepted");
 }
 
+void TestAppearanceResendRouting() {
+  Expect(AppearanceResendTargetRole(1, false, 3) == 3,
+         "localhost host must resend directly to the requester");
+  Expect(AppearanceResendTargetRole(2, false, 3) == 1,
+         "localhost client must resend through the host relay");
+  Expect(AppearanceResendTargetRole(2, true, 3) == 3,
+         "Steam must resend directly to the requester");
+  Expect(AppearanceResendTargetRole(2, false, 2) == 0,
+         "self-requested appearance resend must be rejected");
+  Expect(AppearanceResendTargetRole(0, false, 2) == 0,
+         "invalid local role must not produce a resend target");
+  Expect(AppearanceResendTargetRole(2, false, 101) == 0,
+         "invalid requester role must not produce a resend target");
+}
+
+void TestAppearanceResendRestart() {
+  using Clock = std::chrono::steady_clock;
+  constexpr std::uint64_t identity = 0x12345678ABCDEF01ull;
+  OutboundAppearanceState state;
+  state.identity = identity;
+  state.next_chunk = 7;
+  state.completed_passes = 3;
+  state.retry_after = Clock::now() + std::chrono::seconds(1);
+  state.acknowledged_state = AppearanceDeliveryState::kInstalled;
+
+  Expect(!state.RestartForRequest(identity + 1, identity),
+         "stale appearance request restarted the current transfer");
+  Expect(state.next_chunk == 7 && state.completed_passes == 3 &&
+             state.acknowledged_state ==
+                 AppearanceDeliveryState::kInstalled,
+         "stale appearance request changed transfer progress");
+  Expect(state.RestartForRequest(identity, identity),
+         "matching appearance request did not restart the transfer");
+  Expect(state.identity == identity && state.next_chunk == 0 &&
+             state.completed_passes == 0 &&
+             state.retry_after == Clock::time_point{} &&
+             state.acknowledged_state ==
+                 AppearanceDeliveryState::kUnknown,
+         "appearance resend did not clear prior completion state");
+}
+
 } // namespace
 
 int main() {
@@ -141,6 +185,8 @@ int main() {
   TestAppearanceAssemblyBudget();
   TestAppearanceAssemblyTimeout();
   TestCompleteAppearancePieceCount();
+  TestAppearanceResendRouting();
+  TestAppearanceResendRestart();
 
   if (g_failures != 0) {
     std::cerr << g_failures << " multiplayer lifecycle test(s) failed\n";
