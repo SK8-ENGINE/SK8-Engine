@@ -10807,6 +10807,8 @@ std::unordered_map<uint32_t, RemoteVisualTelemetryState>
 struct RemoteRenderMotionTelemetry {
   uint32_t session = 0;
   multiplayer::motion::Window motion;
+  multiplayer::motion::Window visible_motion;
+  uint32_t visible_mesh = 0;
   multiplayer::pose_cadence::Window interpolated_pose;
   multiplayer::pose_cadence::Window applied_palette;
 };
@@ -10816,11 +10818,232 @@ std::unordered_map<uint32_t, RemoteRenderMotionTelemetry>
 
 multiplayer::pose_cadence::Window g_local_capture_cadence;
 
+struct LocalVisibleMotionTelemetry {
+  multiplayer::motion::Window motion;
+  uint32_t mesh = 0;
+};
+
+LocalVisibleMotionTelemetry g_local_visible_motion;
+
+struct VisibleVertexInfluenceSample {
+  float position[3] = {};
+  uint32_t packed_weights = 0;
+  uint32_t packed_indices = 0;
+};
+
+struct VisibleVertexMeshSample {
+  uint64_t fingerprint = 0;
+  std::size_t vertex_count = 0;
+  std::array<VisibleVertexInfluenceSample, 3> vertices;
+  std::size_t count = 0;
+};
+
+std::unordered_map<uint32_t, VisibleVertexMeshSample>
+    g_visible_vertex_samples;
+
 std::uint64_t PoseCadenceNowMicroseconds() {
   return static_cast<std::uint64_t>(
       std::chrono::duration_cast<std::chrono::microseconds>(
           std::chrono::steady_clock::now().time_since_epoch())
           .count());
+}
+
+bool SampleSkinnedVisiblePoint(
+    const DrawItem& item, float output[3],
+    std::size_t* vertex_count = nullptr) {
+  if (!item.skinned || item.bones.empty() ||
+      item.bones.size() % 12 != 0 || output == nullptr) {
+    return false;
+  }
+  const auto mesh = g_r.meshes.find(item.mesh);
+  if (mesh == g_r.meshes.end()) {
+    return false;
+  }
+  const MeshBuffers& buffers = mesh->second;
+  const std::vector<float>& decoded =
+      item.ropa && !buffers.ropa_verts.empty()
+          ? buffers.ropa_verts
+          : buffers.raytracing_verts;
+  if (decoded.empty() || decoded.size() % 14 != 0) {
+    return false;
+  }
+
+  const std::size_t decoded_vertex_count = decoded.size() / 14;
+  if (vertex_count != nullptr) {
+    *vertex_count = decoded_vertex_count;
+  }
+  VisibleVertexMeshSample& cached =
+      g_visible_vertex_samples[item.mesh];
+  if (cached.fingerprint != buffers.fingerprint ||
+      cached.vertex_count != decoded_vertex_count) {
+    cached = {};
+    cached.fingerprint = buffers.fingerprint;
+    cached.vertex_count = decoded_vertex_count;
+    const std::array<std::size_t, 3> starts = {
+        decoded_vertex_count / 4,
+        decoded_vertex_count / 2,
+        decoded_vertex_count * 3 / 4};
+    for (std::size_t start : starts) {
+      for (std::size_t offset = 0;
+           offset < decoded_vertex_count; ++offset) {
+        const std::size_t index =
+            (start + offset) % decoded_vertex_count;
+        const float* source =
+            decoded.data() + index * 14;
+        uint32_t packed_weights = 0;
+        uint32_t packed_indices = 0;
+        std::memcpy(
+            &packed_weights, source + 7,
+            sizeof(packed_weights));
+        std::memcpy(
+            &packed_indices, source + 8,
+            sizeof(packed_indices));
+        bool usable = false;
+        for (std::size_t influence = 0;
+             influence < 4; ++influence) {
+          const uint32_t weight =
+              (packed_weights >> (influence * 8)) & 0xFFu;
+          const uint32_t bone =
+              (packed_indices >> (influence * 8)) & 0xFFu;
+          if (weight != 0 &&
+              (std::size_t(bone) + 1) * 12 <=
+                  item.bones.size()) {
+            usable = true;
+            break;
+          }
+        }
+        if (!usable) {
+          continue;
+        }
+        VisibleVertexInfluenceSample& sample =
+            cached.vertices[cached.count++];
+        std::copy_n(source, 3, sample.position);
+        sample.packed_weights = packed_weights;
+        sample.packed_indices = packed_indices;
+        break;
+      }
+    }
+  }
+  if (cached.count == 0) {
+    return false;
+  }
+
+  float accumulated[3] = {};
+  std::size_t accumulated_samples = 0;
+  for (std::size_t sample_index = 0;
+       sample_index < cached.count; ++sample_index) {
+    const VisibleVertexInfluenceSample& sample =
+        cached.vertices[sample_index];
+    float skinned[3] = {};
+    float weight_sum = 0.0f;
+    for (std::size_t influence = 0;
+         influence < 4; ++influence) {
+      const float weight =
+          static_cast<float>(
+              (sample.packed_weights >>
+               (influence * 8)) &
+              0xFFu) /
+          255.0f;
+      const uint32_t bone =
+          (sample.packed_indices >>
+           (influence * 8)) &
+          0xFFu;
+      const std::size_t row = std::size_t(bone) * 12;
+      if (weight <= 0.0f ||
+          row + 11 >= item.bones.size()) {
+        continue;
+      }
+      const float* matrix = item.bones.data() + row;
+      for (std::size_t axis = 0; axis < 3; ++axis) {
+        const float* matrix_row = matrix + axis * 4;
+        skinned[axis] +=
+            weight *
+            (sample.position[0] * matrix_row[0] +
+             sample.position[1] * matrix_row[1] +
+             sample.position[2] * matrix_row[2] +
+             matrix_row[3]);
+      }
+      weight_sum += weight;
+    }
+    if (weight_sum <= 0.001f) {
+      continue;
+    }
+    for (float& component : skinned) {
+      component /= weight_sum;
+    }
+    for (std::size_t axis = 0; axis < 3; ++axis) {
+      accumulated[axis] +=
+          skinned[0] * item.world[axis] +
+          skinned[1] * item.world[4 + axis] +
+          skinned[2] * item.world[8 + axis] +
+          item.world[12 + axis];
+    }
+    ++accumulated_samples;
+  }
+  if (accumulated_samples == 0) {
+    return false;
+  }
+  for (std::size_t axis = 0; axis < 3; ++axis) {
+    output[axis] =
+        accumulated[axis] /
+        static_cast<float>(accumulated_samples);
+    if (!std::isfinite(output[axis])) {
+      return false;
+    }
+  }
+  return true;
+}
+
+void RecordLocalVisibleMotion(
+    const std::vector<const DrawItem*>& local_player_items) {
+  const DrawItem* selected = nullptr;
+  std::size_t selected_vertex_count = 0;
+  float selected_position[3] = {};
+  for (const DrawItem* item : local_player_items) {
+    if (item == nullptr || item->hair || item->ropa) {
+      continue;
+    }
+    std::size_t candidate_vertex_count = 0;
+    float candidate_position[3] = {};
+    if (!SampleSkinnedVisiblePoint(
+            *item, candidate_position,
+            &candidate_vertex_count) ||
+        candidate_vertex_count <= selected_vertex_count) {
+      continue;
+    }
+    selected = item;
+    selected_vertex_count = candidate_vertex_count;
+    std::copy_n(candidate_position, 3, selected_position);
+  }
+  if (selected == nullptr) {
+    return;
+  }
+  if (g_local_visible_motion.mesh != selected->mesh) {
+    g_local_visible_motion = {};
+    g_local_visible_motion.mesh = selected->mesh;
+  }
+  g_local_visible_motion.motion.Record(
+      PoseCadenceNowMicroseconds(), selected_position);
+}
+
+void RecordRemoteVisibleMotion(
+    uint32_t role, uint32_t session, uint32_t mesh,
+    const float position[3]) {
+  if (mesh == 0 || position == nullptr) {
+    return;
+  }
+  RemoteRenderMotionTelemetry& remote =
+      g_remote_render_motion[role];
+  if (remote.session != session) {
+    remote = {};
+    remote.session = session;
+  }
+  if (remote.visible_mesh != mesh) {
+    remote.visible_motion = {};
+    remote.visible_mesh = mesh;
+  }
+  remote.visible_motion.Record(
+      PoseCadenceNowMicroseconds(), position);
 }
 
 std::uint64_t HashAnimationPose(
@@ -10942,6 +11165,19 @@ void RecordRemotePresentationHandoff(
       local_capture.alternations,
       local_capture.maximum_repeat_run,
       local_capture.maximum_hold_ms);
+  const multiplayer::motion::Snapshot local_visible =
+      g_local_visible_motion.motion.ReadAndReset();
+  REXLOG_INFO(
+      "multiplayer-visible-motion: stage=capture role=local "
+      "mesh={:08X} n={} dt={:.2f}/{:.2f}/{:.2f}ms "
+      "speed={:.3f} speed_change={:.3f}/{:.3f}",
+      g_local_visible_motion.mesh, local_visible.samples,
+      local_visible.average_interval_ms,
+      local_visible.minimum_interval_ms,
+      local_visible.maximum_interval_ms,
+      local_visible.average_speed,
+      local_visible.average_speed_change,
+      local_visible.maximum_speed_change);
   for (auto& [role, remote] : g_remote_render_motion) {
     const multiplayer::motion::Snapshot motion =
         remote.motion.ReadAndReset();
@@ -10956,6 +11192,21 @@ void RecordRemotePresentationHandoff(
         motion.average_speed,
         motion.average_speed_change,
         motion.maximum_speed_change);
+    const multiplayer::motion::Snapshot visible_motion =
+        remote.visible_motion.ReadAndReset();
+    REXLOG_INFO(
+        "multiplayer-visible-motion: stage=applied role={} "
+        "session={} mesh={:08X} n={} "
+        "dt={:.2f}/{:.2f}/{:.2f}ms "
+        "speed={:.3f} speed_change={:.3f}/{:.3f}",
+        role, remote.session, remote.visible_mesh,
+        visible_motion.samples,
+        visible_motion.average_interval_ms,
+        visible_motion.minimum_interval_ms,
+        visible_motion.maximum_interval_ms,
+        visible_motion.average_speed,
+        visible_motion.average_speed_change,
+        visible_motion.maximum_speed_change);
     const multiplayer::pose_cadence::Snapshot interpolated =
         remote.interpolated_pose.ReadAndReset();
     REXLOG_INFO(
@@ -13843,6 +14094,7 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
           std::move(exact_track));
     }
   }
+  RecordLocalVisibleMotion(local_player_items);
   RecordLocalCaptureCadence(local_animation);
 
   // One-shot audit of the rows the character meshes actually weight against
@@ -14313,6 +14565,9 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
         std::uint64_t applied_palette_hash =
             1469598103934665603ull;
         std::size_t applied_palette_bones = 0;
+        uint32_t visible_motion_mesh = 0;
+        std::size_t visible_motion_vertex_count = 0;
+        float visible_motion_position[3] = {};
         for (std::size_t appearance_piece_index = 0;
              appearance_piece_index < appearance_items->size();
              ++appearance_piece_index) {
@@ -14333,6 +14588,7 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
           clone.lw_alpha = -1.0f;
           bool remapped = false;
           bool unresolved_active_row = false;
+          bool skateboard_piece = false;
           if (clone.skinned && !clone.bones.empty()) {
             const std::size_t palette_bones =
                 clone.bones.size() / 12;
@@ -14418,7 +14674,7 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
                 canonical_track == nullptr
                     ? 0
                     : canonical_track->bone_rows.size() / 12;
-            const bool skateboard_piece =
+            skateboard_piece =
                 piece_cache != nullptr
                     ? piece_cache->skateboard_piece
                     : have_rig &&
@@ -14629,8 +14885,28 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
                 clone.bones.size() * sizeof(float));
             applied_palette_bones += bone_count;
           }
+          if (clone.skinned && !clone.hair && !clone.ropa &&
+              !skateboard_piece) {
+            std::size_t candidate_vertex_count = 0;
+            float candidate_position[3] = {};
+            if (SampleSkinnedVisiblePoint(
+                    clone, candidate_position,
+                    &candidate_vertex_count) &&
+                candidate_vertex_count >
+                    visible_motion_vertex_count) {
+              visible_motion_mesh = clone.mesh;
+              visible_motion_vertex_count =
+                  candidate_vertex_count;
+              std::copy_n(
+                  candidate_position, 3,
+                  visible_motion_position);
+            }
+          }
           multiplayer_remote_items->push_back(std::move(clone));
         }
+        RecordRemoteVisibleMotion(
+            remote_player.role, remote_player.session,
+            visible_motion_mesh, visible_motion_position);
         RecordRemoteAppliedPalette(
             remote_player.role, remote_player.session,
             remote_animation.sequence, applied_palette_hash,

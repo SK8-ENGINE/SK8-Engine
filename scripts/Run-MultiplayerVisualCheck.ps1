@@ -533,7 +533,7 @@ try {
             Join-Path $runRoot 'submodules.txt'
         ) -Encoding UTF8
 
-    $replicationWorker = -not $SmoothnessCheck
+    $replicationWorker = $true
     $manifest = [ordered]@{
         schema = 1
         created_local = (Get-Date).ToString('o')
@@ -642,9 +642,9 @@ $runRoot
 Clients: 5
 Transport: localhost UDP
 Quality: Balanced, 60 Hz root, 60 Hz animation, 50 ms minimum interpolation
-Change under test: render-clock presentation without asynchronous worker handoff
-Diagnostics: full skeleton cadence, render motion, network timing, GPU upload
-ownership, and synchronous presentation cost are reported
+Change under test: diagnostics only; normal replication worker is restored
+Diagnostics: representative visible body vertices are sampled before send and
+after remote reconstruction, alongside skeleton, network, and GPU timing
 
 Visual scenario:
 1. Wait until all five clients have loaded the same map, every client sees
@@ -670,7 +670,8 @@ Visual failure:
 Telemetry acceptance checked by the agent afterward:
 - Every client reports local skeleton capture cadence and each visible remote
   reports interpolated-pose and final applied-palette cadence.
-- Render motion no longer inherits irregular asynchronous worker publication.
+- Every client reports actual visible-body vertex motion for local capture and
+  final remote reconstruction, using the same skinning equation as rendering.
 - GPU upload-ring pressure remains healthy with zero unsafe region reuse.
 - Existing packet, timing, interpolation, sequence-gap, stall, and resource
   checks remain active.
