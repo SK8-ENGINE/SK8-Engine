@@ -8,11 +8,11 @@ struct PPCContext;
 
 namespace skate3::native_collision {
 
-// Observes the retail WorldStreamerView::AddVolume boundary. This is read-only
-// and captures the authoritative ClusteredMeshCollection used by Skate 3's
-// box, line, and trajectory collision batches.
-void ObserveWorldStreamerAddVolume(const PPCContext& ctx,
-                                   std::uint8_t* base) noexcept;
+// Observes the retail WorldStreamerView::AddVolume boundary and returns true
+// only when an installed exclusive owned world must reject that retail
+// streamer batch before it can enter a native physics query.
+bool ShouldSuppressWorldStreamerAddVolume(const PPCContext& ctx,
+                                          std::uint8_t* base) noexcept;
 
 // Read-only probes used by the generated native line/box query path. They
 // identify the first stage at which an owned mesh stops producing contacts.
@@ -26,6 +26,12 @@ void PrepareNativeBoxQueryBatch(std::uint32_t batch,
                                 std::uint8_t* base) noexcept;
 void ObserveNativeClusterDecode(std::uint32_t triangle_count) noexcept;
 void ObserveNativeTriangleResult(std::uint32_t hit) noexcept;
+
+// Emits bounded, position-aware collision telemetry from the verified local
+// board seam. It compares the player against the package collision world and
+// records native query activity without changing the player or contact data.
+void ObservePlayerCollisionTelemetry(const float world_position[3],
+                                     std::uint64_t frame) noexcept;
 
 bool Enabled();
 

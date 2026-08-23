@@ -590,6 +590,12 @@ void ApplyOwnedWorldCollisionAfterPhysOut(PPCContext& ctx, uint8_t* base,
   native_collision::UpdateKinematicObjects(ctx, base);
   native_collision::UpdateHingedDoors(ctx, base);
   native_grind::EnsureInstalled(ctx, base);
+  trick_pipeline::LiveSpatialSnapshot collision_snapshot;
+  if (trick_pipeline::CurrentLiveSpatialSnapshot(collision_snapshot) &&
+      collision_snapshot.phys_out == phys_out) {
+    native_collision::ObservePlayerCollisionTelemetry(
+        position, collision_snapshot.frame);
+  }
 
   if (!OwnedWorldCollisionEnabled()) {
     return;

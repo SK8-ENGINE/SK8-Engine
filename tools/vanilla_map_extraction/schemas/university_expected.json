@@ -74,9 +74,10 @@
     "grind_rails": 4201,
     "grind_segments": 27008,
     "grind_bytes": 4023600,
-    "collision_mode": "spatial",
-    "collision_cell_size": 256,
-    "collision_chunks": 44,
-    "collision_triangles": 1133642
+    "collision_mode": "continuous",
+    "collision_triangles": 1133642,
+    "collision_vertices": 654751,
+    "collision_clusters": 32768,
+    "collision_bytes": 31326256
   }
 }

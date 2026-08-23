@@ -531,14 +531,24 @@ try {
         ) -f $compiled.grind_rails,
             $compiled.grind_segments,
             $compiled.grind_bytes
-        (
+    )
+    if ($compiled.collision_mode -eq 'continuous') {
+        $requiredPatterns += (
+            'SKATE_COLLISION_WORLD_OK mode=continuous triangles={0} ' +
+            'vertices={1} clusters={2} bytes={3}'
+        ) -f $compiled.collision_triangles,
+            $compiled.collision_vertices,
+            $compiled.collision_clusters,
+            $compiled.collision_bytes
+    } else {
+        $requiredPatterns += (
             'SKATE_COLLISION_WORLD_OK mode={0} cell_size={1} chunks={2} ' +
             'triangles={3}'
         ) -f $compiled.collision_mode,
             $compiled.collision_cell_size,
             $compiled.collision_chunks,
             $compiled.collision_triangles
-    )
+    }
     foreach ($pattern in $requiredPatterns) {
         if (-not $validationText.Contains($pattern)) {
             throw "Compiled-world integrity line is missing: $pattern"

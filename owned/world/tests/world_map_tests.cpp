@@ -762,7 +762,7 @@ int main() {
         ReadBeU16(rw.mesh.bytes, cluster_offset + 2);
     const std::uint16_t vertex_count =
         ReadBeU16(rw.mesh.bytes, cluster_offset + 4);
-    Require(unit_count > 0 && unit_count <= 8 &&
+    Require(unit_count > 0 && unit_count <= 64 &&
                 unit_bytes == unit_count * 9 &&
                 vertex_count <= 255,
             "RenderWare cluster header is invalid");
@@ -802,7 +802,7 @@ int main() {
       } else {
         const std::uint32_t cluster = index >> 16u;
         const std::uint32_t unit_offset = index & 0xffffu;
-        Require(content > 0 && content <= 8 &&
+        Require(content > 0 && content <= 64 &&
                     cluster < cluster_count &&
                     unit_offset % 9 == 0 &&
                     unit_offset / 9 + content <= cluster_units[cluster],

@@ -118,6 +118,8 @@ std::atomic<std::uint64_t> g_exclusive_reconciliations{0};
 std::atomic<std::uint64_t> g_reintroduced_retail_removed{0};
 std::atomic<std::uint64_t> g_owned_static_readded{0};
 std::atomic<std::uint64_t> g_exclusive_reconcile_failures{0};
+std::atomic<std::uint64_t> g_suppressed_retail_batches{0};
+std::atomic<std::uint64_t> g_suppressed_retail_volumes{0};
 std::atomic<std::uint32_t> g_ground_x_bits{0};
 std::atomic<std::uint32_t> g_ground_y_bits{0};
 std::atomic<std::uint32_t> g_ground_z_bits{0};
@@ -148,6 +150,7 @@ std::atomic<std::uint64_t> g_native_cluster_decodes{0};
 std::atomic<std::uint64_t> g_native_decoded_triangles{0};
 std::atomic<std::uint64_t> g_native_triangle_tests{0};
 std::atomic<std::uint64_t> g_native_triangle_hits{0};
+std::atomic<std::uint32_t> g_native_last_hit_mesh{0};
 std::atomic<KinematicState> g_kinematic_state{
     KinematicState::Disabled};
 std::atomic<std::uint32_t> g_kinematic_mesh_address{0};
@@ -232,6 +235,7 @@ std::vector<std::uint32_t> g_original_volumes;
 thread_local bool g_querying_owned_mesh = false;
 thread_local bool g_querying_kinematic_mesh = false;
 thread_local std::int32_t g_querying_door_index = -1;
+thread_local std::uint32_t g_querying_mesh = 0;
 
 bool IsGuestDataAddress(std::uint32_t address) {
   return address >= 0x00010000u && address < 0x80000000u;
@@ -1072,6 +1076,7 @@ void ObserveNativeQueryMesh(std::uint32_t mesh) noexcept {
   g_querying_kinematic_mesh =
       kinematic_mesh != 0 && mesh == kinematic_mesh;
   g_querying_door_index = OwnedDoorIndex(mesh);
+  g_querying_mesh = mesh;
   g_querying_owned_mesh =
       IsOwnedStaticMesh(mesh) ||
       g_querying_kinematic_mesh ||
@@ -1206,6 +1211,8 @@ void ObserveNativeTriangleResult(std::uint32_t hit) noexcept {
   }
   if (hit != 0) {
     g_native_triangle_hits.fetch_add(1, std::memory_order_relaxed);
+    g_native_last_hit_mesh.store(g_querying_mesh,
+                                 std::memory_order_relaxed);
     if (g_querying_kinematic_mesh) {
       g_kinematic_triangle_hits.fetch_add(1,
                                           std::memory_order_relaxed);
@@ -1317,10 +1324,10 @@ bool HingedDoorPose(std::size_t index, float* out_angle_radians,
   return true;
 }
 
-void ObserveWorldStreamerAddVolume(const PPCContext& ctx,
-                                   std::uint8_t* base) noexcept {
+bool ShouldSuppressWorldStreamerAddVolume(const PPCContext& ctx,
+                                          std::uint8_t* base) noexcept {
   if (!base) {
-    return;
+    return false;
   }
   if (!Enabled()) {
     g_state.store(State::Disabled, std::memory_order_release);
@@ -1333,7 +1340,7 @@ void ObserveWorldStreamerAddVolume(const PPCContext& ctx,
   const std::uint32_t collection = LoadU32(base, view_state + 44);
   if (!IsGuestDataAddress(view) || !IsGuestDataAddress(view_state) ||
       !IsGuestDataAddress(collection)) {
-    return;
+    return false;
   }
 
   const std::uint32_t capacity = LoadU32(base, collection + 8);
@@ -1342,7 +1349,7 @@ void ObserveWorldStreamerAddVolume(const PPCContext& ctx,
   if (capacity == 0 || capacity > kMaximumReasonableCollectionCapacity ||
       !IsGuestDataAddress(read_entries) ||
       !IsGuestDataAddress(entries)) {
-    return;
+    return false;
   }
 
   g_world_streamer_view.store(view, std::memory_order_release);
@@ -1357,6 +1364,131 @@ void ObserveWorldStreamerAddVolume(const PPCContext& ctx,
           State::WaitingForCollection) {
     g_state.store(State::WaitingForPlacement, std::memory_order_release);
   }
+
+  if (!REXCVAR_GET(
+          skate3_mechanics_sandbox_native_collision_replace_retail) ||
+      g_state.load(std::memory_order_acquire) !=
+          State::InstalledExclusive) {
+    return false;
+  }
+
+  // WorldStreamerView publishes a batch one function call after this seam.
+  // Reconciliation from the later mechanics update was too late: a newly
+  // streamed retail volume could participate in one physics step while its
+  // matching retail visuals were hidden. Reject the whole retail batch before
+  // AddVolume mutates either collection buffer. Owned static/kinematic
+  // registration calls the collection function directly and never crosses
+  // this retail streamer boundary.
+  const std::uint32_t streamer_item = ctx.r4.u32;
+  if (!IsGuestDataAddress(streamer_item)) {
+    return false;
+  }
+  const std::uint32_t descriptor =
+      LoadU32(base, streamer_item + 132);
+  if (!IsGuestDataAddress(descriptor)) {
+    return false;
+  }
+  const std::uint32_t volume_count = LoadU32(base, descriptor + 4);
+  const std::uint32_t volume_entries = LoadU32(base, descriptor + 8);
+  if (volume_count == 0 ||
+      volume_count > kMaximumReasonableCollectionCapacity ||
+      !IsGuestDataAddress(volume_entries)) {
+    return false;
+  }
+
+  const std::uint64_t batch =
+      g_suppressed_retail_batches.fetch_add(
+          1, std::memory_order_relaxed) +
+      1;
+  g_suppressed_retail_volumes.fetch_add(
+      volume_count, std::memory_order_relaxed);
+  if (batch <= 16 || (batch & 255u) == 0) {
+    REXLOG_INFO(
+        "native-collision: suppressed retail streamer batch before publish "
+        "(batch={} volumes={} collection_count={})",
+        batch, volume_count, LoadU32(base, collection + 20));
+  }
+  return true;
+}
+
+void ObservePlayerCollisionTelemetry(const float world_position[3],
+                                     std::uint64_t frame) noexcept {
+  if (world_position == nullptr ||
+      g_state.load(std::memory_order_acquire) !=
+          State::InstalledExclusive) {
+    return;
+  }
+  float translation[3] = {};
+  if (!MapWorldOrigin(translation)) {
+    return;
+  }
+  const float local[3] = {
+      world_position[0] - translation[0],
+      world_position[1] - translation[1],
+      world_position[2] - translation[2],
+  };
+  if (!std::isfinite(local[0]) || !std::isfinite(local[1]) ||
+      !std::isfinite(local[2])) {
+    return;
+  }
+
+  thread_local std::uint64_t previous_frame = 0;
+  thread_local std::uint64_t previous_hits = 0;
+  thread_local float previous_position[3] = {};
+  thread_local bool previous_valid = false;
+  if (previous_frame != 0 && frame > previous_frame &&
+      frame - previous_frame < 60) {
+    return;
+  }
+
+  const std::uint64_t hits =
+      g_native_triangle_hits.load(std::memory_order_relaxed);
+  const float displacement =
+      previous_valid
+          ? std::sqrt(
+                (local[0] - previous_position[0]) *
+                    (local[0] - previous_position[0]) +
+                (local[1] - previous_position[1]) *
+                    (local[1] - previous_position[1]) +
+                (local[2] - previous_position[2]) *
+                    (local[2] - previous_position[2]))
+          : 0.0f;
+  const std::int32_t cell_x = static_cast<std::int32_t>(
+      std::floor(local[0] / kOwnedCollisionCellSize));
+  const std::int32_t cell_z = static_cast<std::int32_t>(
+      std::floor(local[2] / kOwnedCollisionCellSize));
+  const float within_x =
+      local[0] - static_cast<float>(cell_x) * kOwnedCollisionCellSize;
+  const float within_z =
+      local[2] - static_cast<float>(cell_z) * kOwnedCollisionCellSize;
+  const float seam_distance = std::min(
+      {within_x, kOwnedCollisionCellSize - within_x,
+       within_z, kOwnedCollisionCellSize - within_z});
+
+  mechanics_sandbox::map::GroundHit ground;
+  const bool ground_hit =
+      mechanics_sandbox::map::QueryGround(local, 64.0f, 192.0f, ground);
+  const float ground_delta =
+      ground_hit ? local[1] - ground.point[1] : 0.0f;
+  REXLOG_INFO(
+      "native-collision-telemetry: frame={} local=({:.3f},{:.3f},{:.3f}) "
+      "move={:.3f} package_ground={} ground_y={:.3f} ground_delta={:.3f} "
+      "normal_y={:.3f} legacy_cell=({}, {}) seam_distance={:.3f} "
+      "native_hits_delta={} last_hit_mesh=0x{:08X} collection_count={} "
+      "retail_suppressed={} retail_reconciled={}",
+      frame, local[0], local[1], local[2], displacement,
+      ground_hit ? 1 : 0, ground_hit ? ground.point[1] : 0.0f,
+      ground_delta, ground_hit ? ground.normal[1] : 0.0f,
+      cell_x, cell_z, seam_distance, hits - previous_hits,
+      g_native_last_hit_mesh.load(std::memory_order_relaxed),
+      g_live_collection_count.load(std::memory_order_acquire),
+      g_suppressed_retail_volumes.load(std::memory_order_relaxed),
+      g_reintroduced_retail_removed.load(std::memory_order_relaxed));
+
+  previous_frame = frame;
+  previous_hits = hits;
+  std::copy(std::begin(local), std::end(local), previous_position);
+  previous_valid = true;
 }
 
 void EnsureInstalled(PPCContext& ctx,
@@ -2524,6 +2656,10 @@ void AppendTelemetry(std::ostream& out) {
       << g_owned_static_readded.load(std::memory_order_relaxed)
       << " sandbox_native_collision_reconcile_failures="
       << g_exclusive_reconcile_failures.load(std::memory_order_relaxed)
+      << " sandbox_native_collision_suppressed_retail_batches="
+      << g_suppressed_retail_batches.load(std::memory_order_relaxed)
+      << " sandbox_native_collision_suppressed_retail_volumes="
+      << g_suppressed_retail_volumes.load(std::memory_order_relaxed)
       << " sandbox_native_collision_ground_y_bits="
       << g_ground_y_bits.load(std::memory_order_acquire)
       << " sandbox_native_collision_attempts="
@@ -2572,6 +2708,8 @@ void AppendTelemetry(std::ostream& out) {
       << g_native_triangle_tests.load(std::memory_order_relaxed)
       << " sandbox_native_triangle_hits="
       << g_native_triangle_hits.load(std::memory_order_relaxed)
+      << " sandbox_native_last_hit_mesh="
+      << g_native_last_hit_mesh.load(std::memory_order_relaxed)
       << " sandbox_kinematic_count="
       << mechanics_sandbox::map::ActiveKinematicObjectCount()
       << " sandbox_kinematic_state="

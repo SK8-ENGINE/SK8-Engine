@@ -147,7 +147,13 @@ struct KdNode {
   }
 };
 
-constexpr std::size_t kMaximumKdLeafTriangles = 8;
+// A ClusteredMesh cluster stores at most 255 vertices. Sixty-four arbitrary
+// triangles can use at most 192 vertices, so this remains valid even when no
+// vertices are shared. The previous eight-triangle leaves forced University
+// above the native 16-bit cluster-index limit (more than 65,536 leaves),
+// unnecessarily splitting one continuous collision world into 44 top-level
+// volumes and creating artificial adjacency seams.
+constexpr std::size_t kMaximumKdLeafTriangles = 64;
 
 Bounds TriangleBounds(const Triangle& triangle,
                       const std::vector<Vec3>& vertices) {

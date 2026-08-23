@@ -309,9 +309,25 @@ endif()
 set(_native_collision_streamer_observer_patched FALSE)
 foreach(_file IN LISTS _skate3_recomp_files)
   file(READ "${_file}" _contents)
-  if(_contents MATCHES "ObserveWorldStreamerAddVolume\\(ctx, base\\)")
+  if(_contents MATCHES
+      "ShouldSuppressWorldStreamerAddVolume\\(ctx, base\\)")
     set(_native_collision_streamer_observer_patched TRUE)
     break()
+  endif()
+  if(_contents MATCHES "ObserveWorldStreamerAddVolume\\(ctx, base\\)")
+    string(REPLACE
+      "skate3::native_collision::ObserveWorldStreamerAddVolume(ctx, base);"
+      "if (skate3::native_collision::ShouldSuppressWorldStreamerAddVolume(ctx, base)) {
+		return;
+	}"
+      _patched_contents "${_contents}")
+    if(NOT _patched_contents STREQUAL _contents)
+      file(WRITE "${_file}" "${_patched_contents}")
+      set(_native_collision_streamer_observer_patched TRUE)
+      message(STATUS
+        "Upgraded owned native-collision streamer observer in ${_file}")
+      break()
+    endif()
   endif()
   if(NOT _contents MATCHES "DEFINE_REX_FUNC\\(sub_82776B58\\)")
     continue()
@@ -322,7 +338,9 @@ foreach(_file IN LISTS _skate3_recomp_files)
   set(_native_collision_streamer_patch
 "DEFINE_REX_FUNC(sub_82776B58) {
 	REX_FUNC_PROLOGUE();
-	skate3::native_collision::ObserveWorldStreamerAddVolume(ctx, base);")
+	if (skate3::native_collision::ShouldSuppressWorldStreamerAddVolume(ctx, base)) {
+		return;
+	}")
   string(REPLACE "${_native_collision_streamer_site}"
     "${_native_collision_streamer_patch}" _patched_contents "${_contents}")
   if(_patched_contents STREQUAL _contents)
