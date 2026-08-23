@@ -354,7 +354,6 @@ function Test-SamePath {
 }
 
 $startedProcesses = New-Object System.Collections.Generic.List[object]
-$launchedClients = @()
 try {
     Write-Setup "Repository: $repoRoot"
     Write-Setup "Commit: $shortCommit"
@@ -642,44 +641,27 @@ $runRoot
 Clients: 5
 Transport: localhost UDP
 Quality: Balanced, 60 Hz root, 60 Hz animation, 50 ms minimum interpolation
-Change under test: deadline-paced root and animation sending
+Change under test: adaptive interpolation reserve with deeper pose history
 Diagnostics: timing is reported separately for every receiver/sender pair
-
-Client identity:
-- Each game window title is labelled MULTIPLAYER CLIENT 1 through 5.
-- The number is both that window's local role and its telemetry sender role.
 
 Visual scenario:
 1. Wait until all five clients have loaded the same map, every client sees
    four remote skaters, and every teal proxy has become its complete outfit.
-2. Keep all five skaters near the session marker. Use client 1 as the first
-   viewing client.
-3. Move client 2 continuously for 30 seconds: push, carve left and right,
-   skate in a circle, ollie repeatedly, perform a fast spin, and bail once.
-   Keep clients 3, 4, and 5 mostly still while watching client 2.
-4. Repeat that exact 30-second movement sequence separately with clients 3,
-   4, and 5. Note whether one numbered client is consistently smoother or
-   rougher than the others.
-5. Switch to client 2 as the viewing client. Move clients 3 and 4 for another
-   30 seconds each. This checks whether smoothness follows the sender rather
-   than the viewing client.
-6. Finally move all five skaters near each other for 60 seconds. Include
-   carving, spins, bails, and detached boards. Run the complete check for
-   approximately 4 minutes, then close all clients.
+2. Play normally for about 2 minutes. Move whichever clients are convenient;
+   there is no required order and no need to identify individual roles.
+3. Keep the skaters reasonably near each other so remote movement is visible.
+   Ordinary skating, turns, ollies, tricks, and bails are enough.
+4. Close all clients when finished.
 
 Visual success:
-- Remote motion is materially smoother than the previous run, without
-  repeated freeze-then-catch-up movement.
-- No numbered sender remains consistently much rougher than the others.
-- Tricks, spins, feet, boards, detached boards, hair, and clothing remain
-  coherent while motion is smoothed.
+- Remote skaters look smooth during normal play, without repeated
+  freeze-then-catch-up movement, pulsing, or snapping.
+- Tricks, feet, boards, hair, and clothing remain coherent.
 - Outfits remain complete, no player returns to teal or disappears, and local
   input response remains normal.
 
 Visual failure:
-- A remote skater repeatedly freezes and catches up, visibly pulses between
-  poses, snaps, or remains substantially rougher than the other senders.
-- Smoothness changes depending on the viewing client in a repeatable way.
+- Remote skaters still jitter, freeze and catch up, pulse, or snap.
 - Any pose, board, attachment, outfit, visibility, input, or frame-stall
   regression appears.
 
@@ -693,8 +675,8 @@ Telemetry acceptance checked by the agent afterward:
 - Appearance and resource counters remain healthy.
 
 Logs can identify timing behavior but cannot establish visual smoothness.
-Report which numbered clients looked smooth or rough, then ask the agent to
-analyze this run directory.
+Just report whether normal play looked smooth or still jittered, then ask the
+agent to analyze the run.
 "@
     } elseif ($RealtimePriorityCheck) {
         @"
@@ -970,52 +952,6 @@ separately, then ask the agent to analyze this run directory.
             -WorkingDirectory $client.Root `
             -ArgumentList $client.Arguments -PassThru
         $startedProcesses.Add($process)
-        $launchedClients += [pscustomobject]@{
-            Role = $client.Role
-            Process = $process
-        }
-    }
-    if ($SmoothnessCheck) {
-        Add-Type -TypeDefinition @'
-using System;
-using System.Runtime.InteropServices;
-public static class MultiplayerWindowTitle {
-    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
-    public static extern bool SetWindowText(
-        IntPtr windowHandle,
-        string title
-    );
-}
-'@
-        $titleDeadline = (Get-Date).AddSeconds(15)
-        foreach ($launched in $launchedClients) {
-            do {
-                $launched.Process.Refresh()
-                if ($launched.Process.MainWindowHandle -ne 0) {
-                    break
-                }
-                Start-Sleep -Milliseconds 100
-            } while ((Get-Date) -lt $titleDeadline)
-            if ($launched.Process.MainWindowHandle -ne 0) {
-                $title = (
-                    'SK8 ENGINE - MULTIPLAYER CLIENT {0}' -f
-                    $launched.Role
-                )
-                [void][MultiplayerWindowTitle]::SetWindowText(
-                    $launched.Process.MainWindowHandle,
-                    $title
-                )
-                Write-Setup (
-                    'Labelled process {0} as multiplayer client {1}' -f
-                    $launched.Process.Id, $launched.Role
-                )
-            } else {
-                Write-Setup (
-                    'WARNING: client {0} window title could not be labelled' -f
-                    $launched.Role
-                )
-            }
-        }
     }
     $startedProcesses | ForEach-Object {
         '{0} {1}' -f $_.Id, $_.Path

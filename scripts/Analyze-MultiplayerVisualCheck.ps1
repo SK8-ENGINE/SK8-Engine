@@ -255,6 +255,19 @@ foreach ($client in $clientDirectories) {
                 $senderTimingLines[-1]
             )
         }
+        $activeSenderTimingLines = @(
+            $senderTimingLines | Where-Object {
+                $match = [regex]::Match($_, ' rx=([0-9.]+)fps')
+                $match.Success -and
+                    [double]$match.Groups[1].Value -ge 50.0
+            }
+        )
+        if ($activeSenderTimingLines.Count -gt 0) {
+            $summary.Add(
+                "last_active_peer_timing_sender_$sender=" +
+                $activeSenderTimingLines[-1]
+            )
+        }
     }
     $summary.Add("multiplayer_perf_samples=$($perfLines.Count)")
     $summary.Add("multiplayer_worker_samples=$($workerLines.Count)")

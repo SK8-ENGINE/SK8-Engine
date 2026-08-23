@@ -428,9 +428,25 @@ Current checkpoint:
 - Deadline tests cover 60 Hz pacing on a 4 ms worker and a 500 ms stall with
   no burst. All nine offline multiplayer suites and a full Release build pass.
   `RUN_MULTIPLAYER_SMOOTHNESS_CHECK.bat` stages five persistent-profile
-  clients, labels their windows by sender role, and records the per-pair
-  diagnostics. The user's visual result and post-run telemetry review are
-  pending.
+  clients and records the per-pair diagnostics. Its first visual result is
+  recorded below.
+- The user ran `20260823-154251-e50cf311` and reported that all remote skaters
+  still jittered. The sender deadline change did raise complete animation
+  delivery from the previous approximately 48-50 fps to approximately
+  55-60 fps with zero completed-frame gaps or superseded assemblies, but it
+  did not solve presentation smoothness.
+- Per-pair telemetry identified buffer underrun as the remaining direct
+  failure: many paths held the newest complete pose for 45-63% of
+  presentation ticks, average cursor margin sat near or below zero, and
+  minimum margin reached -82 ms. The previous 50-66 ms adaptive delay was
+  shorter than the measured complete-frame delivery stalls.
+- The next correction retains 16 rather than eight complete animation
+  samples and chooses a per-peer delay of at least five measured frame periods
+  plus eight measured timing-variation units, capped at 250 ms and never below
+  the configured floor. This produces approximately 108-164 ms for the
+  measured five-client paths and preserves one root/skeleton sender timeline.
+  The smoothness launcher now asks only for two minutes of ordinary play; it
+  requires no per-role choreography or client identification.
 
 Completion:
 

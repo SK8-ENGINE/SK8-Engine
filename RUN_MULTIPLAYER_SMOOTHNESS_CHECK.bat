@@ -10,7 +10,7 @@ if not "%exit_code%"=="0" (
   echo Smoothness visual-check setup failed with exit code %exit_code%.
   echo Read the error above and the setup-error.txt file in the printed run folder.
 ) else (
-  echo Five labelled clients were launched for the smoothness visual check.
+  echo Five clients were launched for the simple smoothness visual check.
   echo Keep this window or note the printed run folder before closing it.
 )
 echo.
