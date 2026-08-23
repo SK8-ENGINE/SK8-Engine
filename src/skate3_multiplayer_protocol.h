@@ -1,0 +1,109 @@
+#pragma once
+
+#include <cstddef>
+#include <cstdint>
+
+namespace skate3::multiplayer::protocol {
+
+inline constexpr std::uint32_t kPacketMagic = 0x504D334Bu;  // "K3MP"
+inline constexpr std::uint32_t kAnimationPacketMagic =
+    0x414D334Bu;  // "K3MA"
+inline constexpr std::uint32_t kAppearancePacketMagic =
+    0x5041334Bu;  // "K3AP"
+inline constexpr std::uint16_t kProtocolVersion = 11;
+
+// Complete vanilla CAC/ABIN hierarchy (indices 0..130). Keeping this at 128
+// silently omitted hair/facial rows that are not referenced by the ordinary
+// body pieces used to discover the runtime canonical palette.
+inline constexpr std::uint16_t kMaximumAnimationBones = 131;
+inline constexpr std::uint16_t kMaximumAnimationTracks = 32;
+inline constexpr std::uint16_t kAnimationFragmentWords = 520;
+inline constexpr std::uint16_t kMaximumAnimationFrameWords = 8192;
+inline constexpr std::uint16_t kMaximumAnimationFragments =
+    (kMaximumAnimationFrameWords + kAnimationFragmentWords - 1) /
+    kAnimationFragmentWords;
+inline constexpr std::uint32_t kAnimationKeyframeInterval = 20;
+inline constexpr std::uint16_t kAppearanceChunkBytes = 1024;
+
+// Recipe appearances are normally only a few KiB. Keep the larger
+// compatibility cap while older peers can still send assembled vanilla
+// mesh/texture bundles.
+inline constexpr std::uint32_t kMaximumAppearanceBytes =
+    16 * 1024 * 1024;
+
+enum class AnimationTrackEncoding : std::uint16_t {
+  kAffineRows = 0,
+  kRigidQuaternion = 1,
+  kAffineRowsWideTranslation = 2,
+  kRigidQuaternionWideTranslation = 3,
+};
+
+#pragma pack(push, 1)
+struct PosePacket {
+  std::uint32_t magic = kPacketMagic;
+  std::uint16_t version = kProtocolVersion;
+  std::uint16_t byte_count = sizeof(PosePacket);
+  std::uint32_t sender_role = 0;
+  std::uint32_t sender_session = 0;
+  std::uint32_t sequence = 0;
+  std::uint32_t map_hash = 0;
+  std::uint64_t sender_time_us = 0;
+  float position[3] = {};
+  float x_axis[3] = {};
+  float z_axis[3] = {};
+  std::uint32_t board_state_flags = 0xFFFFFFFFu;
+};
+
+struct AnimationFragmentPacket {
+  std::uint32_t magic = kAnimationPacketMagic;
+  std::uint16_t version = kProtocolVersion;
+  std::uint16_t byte_count = 0;
+  std::uint32_t sender_role = 0;
+  std::uint32_t sender_session = 0;
+  std::uint32_t sequence = 0;
+  std::uint32_t map_hash = 0;
+  std::uint64_t sender_time_us = 0;
+  float root_position[3] = {};
+  std::uint16_t root_bone = 0xFFFFu;
+  std::uint16_t fragment_index = 0;
+  std::uint16_t fragment_count = 0;
+  std::uint16_t word_offset = 0;
+  std::uint16_t total_words = 0;
+  std::uint16_t word_count = 0;
+  std::uint16_t words[kAnimationFragmentWords] = {};
+};
+
+struct AppearanceFragmentPacket {
+  std::uint32_t magic = kAppearancePacketMagic;
+  std::uint16_t version = kProtocolVersion;
+  std::uint16_t byte_count = 0;
+  std::uint32_t sender_role = 0;
+  std::uint32_t sender_session = 0;
+  std::uint32_t map_hash = 0;
+  std::uint64_t appearance_id = 0;
+  std::uint32_t total_bytes = 0;
+  std::uint16_t chunk_index = 0;
+  std::uint16_t chunk_count = 0;
+  std::uint16_t chunk_bytes = 0;
+  std::uint8_t bytes[kAppearanceChunkBytes] = {};
+};
+#pragma pack(pop)
+
+[[nodiscard]] constexpr std::size_t AnimationFragmentByteCount(
+    std::uint16_t word_count) {
+  return offsetof(AnimationFragmentPacket, words) +
+         sizeof(std::uint16_t) * word_count;
+}
+
+[[nodiscard]] constexpr std::size_t AppearanceFragmentByteCount(
+    std::uint16_t chunk_bytes) {
+  return offsetof(AppearanceFragmentPacket, bytes) + chunk_bytes;
+}
+
+static_assert(sizeof(PosePacket) == 72);
+static_assert(offsetof(AnimationFragmentPacket, words) == 56);
+static_assert(sizeof(AnimationFragmentPacket) == 1096);
+static_assert(offsetof(AppearanceFragmentPacket, bytes) == 38);
+static_assert(sizeof(AppearanceFragmentPacket) == 1062);
+
+}  // namespace skate3::multiplayer::protocol

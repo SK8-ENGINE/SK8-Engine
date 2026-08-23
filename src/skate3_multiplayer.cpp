@@ -1,5 +1,6 @@
 #include "skate3_multiplayer.h"
 
+#include "skate3_multiplayer_protocol.h"
 #include "skate3_steam_backend.h"
 #include "skate3_trick_pipeline.h"
 
@@ -118,6 +119,24 @@ namespace skate3::multiplayer {
 namespace {
 
 using Clock = std::chrono::steady_clock;
+using protocol::AnimationFragmentByteCount;
+using protocol::AnimationFragmentPacket;
+using protocol::AnimationTrackEncoding;
+using protocol::AppearanceFragmentByteCount;
+using protocol::AppearanceFragmentPacket;
+using protocol::PosePacket;
+using protocol::kAnimationFragmentWords;
+using protocol::kAnimationKeyframeInterval;
+using protocol::kAnimationPacketMagic;
+using protocol::kAppearanceChunkBytes;
+using protocol::kAppearancePacketMagic;
+using protocol::kMaximumAnimationBones;
+using protocol::kMaximumAnimationFragments;
+using protocol::kMaximumAnimationFrameWords;
+using protocol::kMaximumAnimationTracks;
+using protocol::kMaximumAppearanceBytes;
+using protocol::kPacketMagic;
+using protocol::kProtocolVersion;
 
 enum class NetworkQualityPreset : std::int32_t {
   kAuto = 0,
@@ -231,99 +250,15 @@ const char* NetworkQualityName(const NetworkTuning& tuning) {
   }
 }
 
-constexpr std::uint32_t kPacketMagic = 0x504D334Bu;  // "K3MP"
-constexpr std::uint32_t kAnimationPacketMagic = 0x414D334Bu;  // "K3MA"
-constexpr std::uint32_t kAppearancePacketMagic = 0x5041334Bu;  // "K3AP"
-constexpr std::uint16_t kProtocolVersion = 11;
 constexpr auto kRemoteTimeout = std::chrono::milliseconds(1500);
 constexpr std::size_t kMaximumBufferedSamples = 16;
 constexpr std::size_t kMaximumBufferedAnimationSamples = 8;
-// Complete vanilla CAC/ABIN hierarchy (indices 0..130). Keeping this at 128
-// silently omitted hair/facial rows that are not referenced by the ordinary
-// body pieces used to discover the runtime canonical palette.
-constexpr std::uint16_t kMaximumAnimationBones = 131;
-constexpr std::uint16_t kMaximumAnimationTracks = 32;
-constexpr std::uint16_t kAnimationFragmentWords = 520;
-constexpr std::uint16_t kMaximumAnimationFrameWords = 8192;
-constexpr std::uint16_t kMaximumAnimationFragments =
-    (kMaximumAnimationFrameWords + kAnimationFragmentWords - 1) /
-    kAnimationFragmentWords;
-constexpr std::uint32_t kAnimationKeyframeInterval = 20;
-constexpr std::uint16_t kAppearanceChunkBytes = 1024;
-// Recipe appearances are only a few KiB. Keep the larger compatibility cap
-// while older peers can still send assembled vanilla mesh/texture bundles.
-constexpr std::uint32_t kMaximumAppearanceBytes = 16 * 1024 * 1024;
 // Animation matrices stay inside a compact character-relative range. Fixed
 // point gives substantially more stable per-frame values than half floats at
 // the same 16-bit wire size, avoiding pose-dependent mantissa precision.
 constexpr float kAnimationTranslationScale = 4096.0f;
 constexpr float kAnimationBasisScale = 8192.0f;
 constexpr float kAnimationQuaternionScale = 32767.0f;
-
-enum class AnimationTrackEncoding : std::uint16_t {
-  kAffineRows = 0,
-  kRigidQuaternion = 1,
-  kAffineRowsWideTranslation = 2,
-  kRigidQuaternionWideTranslation = 3,
-};
-
-#pragma pack(push, 1)
-struct PosePacket {
-  std::uint32_t magic = kPacketMagic;
-  std::uint16_t version = kProtocolVersion;
-  std::uint16_t byte_count = sizeof(PosePacket);
-  std::uint32_t sender_role = 0;
-  std::uint32_t sender_session = 0;
-  std::uint32_t sequence = 0;
-  std::uint32_t map_hash = 0;
-  std::uint64_t sender_time_us = 0;
-  float position[3] = {};
-  float x_axis[3] = {};
-  float z_axis[3] = {};
-  std::uint32_t board_state_flags = 0xFFFFFFFFu;
-};
-
-struct AnimationFragmentPacket {
-  std::uint32_t magic = kAnimationPacketMagic;
-  std::uint16_t version = kProtocolVersion;
-  std::uint16_t byte_count = 0;
-  std::uint32_t sender_role = 0;
-  std::uint32_t sender_session = 0;
-  std::uint32_t sequence = 0;
-  std::uint32_t map_hash = 0;
-  std::uint64_t sender_time_us = 0;
-  float root_position[3] = {};
-  std::uint16_t root_bone = 0xFFFFu;
-  std::uint16_t fragment_index = 0;
-  std::uint16_t fragment_count = 0;
-  std::uint16_t word_offset = 0;
-  std::uint16_t total_words = 0;
-  std::uint16_t word_count = 0;
-  std::uint16_t words[kAnimationFragmentWords] = {};
-};
-
-struct AppearanceFragmentPacket {
-  std::uint32_t magic = kAppearancePacketMagic;
-  std::uint16_t version = kProtocolVersion;
-  std::uint16_t byte_count = 0;
-  std::uint32_t sender_role = 0;
-  std::uint32_t sender_session = 0;
-  std::uint32_t map_hash = 0;
-  std::uint64_t appearance_id = 0;
-  std::uint32_t total_bytes = 0;
-  std::uint16_t chunk_index = 0;
-  std::uint16_t chunk_count = 0;
-  std::uint16_t chunk_bytes = 0;
-  std::uint8_t bytes[kAppearanceChunkBytes] = {};
-};
-#pragma pack(pop)
-
-static_assert(sizeof(PosePacket) == 72);
-static_assert(offsetof(AnimationFragmentPacket, words) == 56);
-static_assert(sizeof(AnimationFragmentPacket) == 1096);
-static_assert(
-    offsetof(AppearanceFragmentPacket, bytes) == 38);
-static_assert(sizeof(AppearanceFragmentPacket) == 1062);
 
 struct ReceivedSample {
   Clock::time_point received_at{};
@@ -451,6 +386,18 @@ struct TelemetrySnapshot {
   std::uint64_t received_packets = 0;
   std::uint64_t sent_bytes = 0;
   std::uint64_t received_bytes = 0;
+  std::uint64_t sent_root_packets = 0;
+  std::uint64_t sent_root_bytes = 0;
+  std::uint64_t sent_animation_fragments = 0;
+  std::uint64_t sent_animation_bytes = 0;
+  std::uint64_t sent_appearance_chunks = 0;
+  std::uint64_t sent_appearance_bytes = 0;
+  std::uint64_t received_root_packets = 0;
+  std::uint64_t received_root_bytes = 0;
+  std::uint64_t received_animation_fragments = 0;
+  std::uint64_t received_animation_bytes = 0;
+  std::uint64_t received_appearance_chunks = 0;
+  std::uint64_t received_appearance_bytes = 0;
   std::uint64_t rejected_packets = 0;
   std::uint64_t socket_failures = 0;
   std::uint64_t remote_age_ms = 0;
@@ -2009,6 +1956,30 @@ class Runtime {
         << " multiplayer_rx_packets=" << telemetry_.received_packets
         << " multiplayer_tx_bytes=" << telemetry_.sent_bytes
         << " multiplayer_rx_bytes=" << telemetry_.received_bytes
+        << " multiplayer_tx_root_packets="
+        << telemetry_.sent_root_packets
+        << " multiplayer_tx_root_bytes="
+        << telemetry_.sent_root_bytes
+        << " multiplayer_tx_animation_fragments="
+        << telemetry_.sent_animation_fragments
+        << " multiplayer_tx_animation_bytes="
+        << telemetry_.sent_animation_bytes
+        << " multiplayer_tx_appearance_chunks="
+        << telemetry_.sent_appearance_chunks
+        << " multiplayer_tx_appearance_bytes="
+        << telemetry_.sent_appearance_bytes
+        << " multiplayer_rx_root_packets="
+        << telemetry_.received_root_packets
+        << " multiplayer_rx_root_bytes="
+        << telemetry_.received_root_bytes
+        << " multiplayer_rx_animation_fragments="
+        << telemetry_.received_animation_fragments
+        << " multiplayer_rx_animation_bytes="
+        << telemetry_.received_animation_bytes
+        << " multiplayer_rx_appearance_chunks="
+        << telemetry_.received_appearance_chunks
+        << " multiplayer_rx_appearance_bytes="
+        << telemetry_.received_appearance_bytes
         << " multiplayer_rejected_packets="
         << telemetry_.rejected_packets
         << " multiplayer_socket_failures=" << telemetry_.socket_failures
@@ -2078,6 +2049,30 @@ class Runtime {
     const double rx_pps = per_second(
         telemetry_.received_packets,
         last_rate_snapshot_.received_packets);
+    const double tx_root_kib = per_second(
+        telemetry_.sent_root_bytes,
+        last_rate_snapshot_.sent_root_bytes) /
+        1024.0;
+    const double tx_animation_kib = per_second(
+        telemetry_.sent_animation_bytes,
+        last_rate_snapshot_.sent_animation_bytes) /
+        1024.0;
+    const double tx_appearance_kib = per_second(
+        telemetry_.sent_appearance_bytes,
+        last_rate_snapshot_.sent_appearance_bytes) /
+        1024.0;
+    const double rx_root_kib = per_second(
+        telemetry_.received_root_bytes,
+        last_rate_snapshot_.received_root_bytes) /
+        1024.0;
+    const double rx_animation_kib = per_second(
+        telemetry_.received_animation_bytes,
+        last_rate_snapshot_.received_animation_bytes) /
+        1024.0;
+    const double rx_appearance_kib = per_second(
+        telemetry_.received_appearance_bytes,
+        last_rate_snapshot_.received_appearance_bytes) /
+        1024.0;
     const double animation_tx_fps = per_second(
         telemetry_.sent_animation_frames,
         last_rate_snapshot_.sent_animation_frames);
@@ -2103,6 +2098,8 @@ class Runtime {
         "multiplayer-net: role={} peers={} visible={} quality={} interp={} "
         "rates={}/{}Hz tx={:.1f}KiB/s "
         "rx={:.1f}KiB/s tx={:.1f}pps rx={:.1f}pps anim={:.1f}/{:.1f}fps "
+        "classes=tx({:.1f}r/{:.1f}a/{:.1f}p)KiB/s "
+        "rx({:.1f}r/{:.1f}a/{:.1f}p)KiB/s "
         "bones={} relay={:.1f}pps relevance_drop={:.1f}pps rejected={} "
         "failures={} present={:.1f}i/{:.1f}new/{:.1f}old fps "
         "timing={:.1f}ms jitter={:.1f}ms buffered={}",
@@ -2112,6 +2109,8 @@ class Runtime {
         network_tuning_.pose_rate, network_tuning_.animation_rate,
         tx_kib, rx_kib, tx_pps, rx_pps,
         animation_tx_fps, animation_rx_fps,
+        tx_root_kib, tx_animation_kib, tx_appearance_kib,
+        rx_root_kib, rx_animation_kib, rx_appearance_kib,
         telemetry_.remote_animation_bones, relay_pps, drop_pps,
         telemetry_.rejected_packets, telemetry_.socket_failures,
         animation_interpolated_fps, animation_held_latest_fps,
@@ -2488,6 +2487,7 @@ class Runtime {
       peer.samples.pop_front();
     }
     ++telemetry_.received_packets;
+    RecordReceivedPacketClass(kPacketMagic, sizeof(packet));
     telemetry_.received_sequence = packet.sequence;
     if (!peer.announced) {
       peer.announced = true;
@@ -2504,9 +2504,7 @@ class Runtime {
       Clock::time_point now, std::uint32_t map_hash,
       const AnimationFragmentPacket& packet, int received_bytes) {
     const std::size_t expected_bytes =
-        offsetof(AnimationFragmentPacket, words) +
-        std::size_t(packet.word_count) *
-            sizeof(std::uint16_t);
+        AnimationFragmentByteCount(packet.word_count);
     if (!CommonPacketValid(
             packet.version, packet.sender_role, packet.sender_session,
             packet.map_hash, map_hash) ||
@@ -2538,11 +2536,15 @@ class Runtime {
       // The host can relay an already validated compact fragment without
       // allocating and decoding a skeleton it will not render locally.
       ++telemetry_.received_packets;
+      RecordReceivedPacketClass(
+          kAnimationPacketMagic, expected_bytes);
       return true;
     }
     RemotePeerState& peer = remote_peers_[packet.sender_role];
     BeginRemoteSession(peer, packet.sender_session);
     ++telemetry_.received_packets;
+    RecordReceivedPacketClass(
+        kAnimationPacketMagic, expected_bytes);
     if (!peer.animation_samples.empty() &&
         packet.sequence <=
             peer.animation_samples.back().pose.sequence) {
@@ -2686,8 +2688,7 @@ class Runtime {
       const AppearanceFragmentPacket& packet,
       int received_bytes) {
     const std::size_t expected_bytes =
-        offsetof(AppearanceFragmentPacket, bytes) +
-        packet.chunk_bytes;
+        AppearanceFragmentByteCount(packet.chunk_bytes);
     const std::size_t expected_chunks =
         (std::size_t(packet.total_bytes) +
              kAppearanceChunkBytes - 1) /
@@ -2721,6 +2722,8 @@ class Runtime {
         remote_peers_[packet.sender_role];
     BeginRemoteSession(peer, packet.sender_session);
     ++telemetry_.received_packets;
+    RecordReceivedPacketClass(
+        kAppearancePacketMagic, expected_bytes);
     AppearanceAssembly& assembly =
         peer.appearance_assembly;
     if (assembly.identity != packet.appearance_id ||
@@ -2902,6 +2905,41 @@ class Runtime {
     return true;
   }
 
+  void RecordSentPacketClass(const void* bytes, int byte_count) {
+    if (bytes == nullptr ||
+        byte_count < static_cast<int>(sizeof(std::uint32_t))) {
+      return;
+    }
+    std::uint32_t magic = 0;
+    std::memcpy(&magic, bytes, sizeof(magic));
+    const auto packet_bytes = static_cast<std::uint64_t>(byte_count);
+    if (magic == kPacketMagic) {
+      ++telemetry_.sent_root_packets;
+      telemetry_.sent_root_bytes += packet_bytes;
+    } else if (magic == kAnimationPacketMagic) {
+      ++telemetry_.sent_animation_fragments;
+      telemetry_.sent_animation_bytes += packet_bytes;
+    } else if (magic == kAppearancePacketMagic) {
+      ++telemetry_.sent_appearance_chunks;
+      telemetry_.sent_appearance_bytes += packet_bytes;
+    }
+  }
+
+  void RecordReceivedPacketClass(std::uint32_t magic,
+                                 std::size_t byte_count) {
+    const auto packet_bytes = static_cast<std::uint64_t>(byte_count);
+    if (magic == kPacketMagic) {
+      ++telemetry_.received_root_packets;
+      telemetry_.received_root_bytes += packet_bytes;
+    } else if (magic == kAnimationPacketMagic) {
+      ++telemetry_.received_animation_fragments;
+      telemetry_.received_animation_bytes += packet_bytes;
+    } else if (magic == kAppearancePacketMagic) {
+      ++telemetry_.received_appearance_chunks;
+      telemetry_.received_appearance_bytes += packet_bytes;
+    }
+  }
+
 #if defined(_WIN32)
   bool SendBytes(const void* bytes, int byte_count,
                  const PacketEndpoint& target, bool animation,
@@ -2924,6 +2962,7 @@ class Runtime {
     }
     ++telemetry_.sent_packets;
     telemetry_.sent_bytes += static_cast<std::uint64_t>(byte_count);
+    RecordSentPacketClass(bytes, byte_count);
     if (relayed) {
       ++telemetry_.relayed_packets;
     }
@@ -3162,9 +3201,7 @@ class Runtime {
             frame_words.begin() + offset,
             packet.word_count, packet.words);
         packet.byte_count = static_cast<std::uint16_t>(
-            offsetof(AnimationFragmentPacket, words) +
-            std::size_t(packet.word_count) *
-                sizeof(std::uint16_t));
+            AnimationFragmentByteCount(packet.word_count));
         target_complete &=
             SendBytes(&packet, packet.byte_count, target,
                       /*animation=*/true, /*relayed=*/false);
@@ -3260,8 +3297,7 @@ class Runtime {
             appearance.bytes->begin() + offset,
             packet.chunk_bytes, packet.bytes);
         packet.byte_count = static_cast<std::uint16_t>(
-            offsetof(AppearanceFragmentPacket, bytes) +
-            packet.chunk_bytes);
+            AppearanceFragmentByteCount(packet.chunk_bytes));
         if (!SendBytes(
                 &packet, packet.byte_count, target,
                 /*animation=*/true, /*relayed=*/false)) {

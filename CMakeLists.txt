@@ -495,3 +495,11 @@ if(MSVC)
 else()
     target_compile_options(skate3 PRIVATE -finput-charset=UTF-8 -fexec-charset=UTF-8)
 endif()
+
+option(SKATE3_MULTIPLAYER_BUILD_TESTS
+    "Build the standalone multiplayer protocol regression tests"
+    OFF)
+if(SKATE3_MULTIPLAYER_BUILD_TESTS)
+    enable_testing()
+    add_subdirectory(tests)
+endif()

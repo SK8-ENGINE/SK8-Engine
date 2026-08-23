@@ -171,10 +171,11 @@ client independent writable user data, and junctions the legally supplied
 Direct boot is enabled for this developer test; add `-NoDirectBoot` to use the
 normal frontend.
 
-## Historical localhost load check
+## Localhost root-presence load check
 
 With one real process running as role 1, synthetic root-pose peers can exercise
-the actual host socket and relay path:
+the actual host socket and relay path. The script emits the current
+protocol-v11 root packet:
 
 ```powershell
 .\scripts\Test-LocalMultiplayerLoad.ps1 `

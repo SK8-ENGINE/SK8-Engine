@@ -13,6 +13,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+$ProtocolVersion = [uint16]11
 
 function Get-Fnv1a32 {
     param([Parameter(Mandatory)][string]$Text)
@@ -40,7 +41,7 @@ function New-PosePacket {
     $writer = [IO.BinaryWriter]::new($stream)
     try {
         $writer.Write([uint32]0x504D334B)
-        $writer.Write([uint16]2)
+        $writer.Write($ProtocolVersion)
         $writer.Write([uint16]72)
         $writer.Write($Role)
         $writer.Write($Session)
