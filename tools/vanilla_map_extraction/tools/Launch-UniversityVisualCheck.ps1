@@ -13,6 +13,8 @@ $runTimestamp = Get-Date -Format 'yyyyMMdd_HHmmss'
 $logRoot = Join-Path $repoRoot (
     "out\university-visual-check\runs\$runTimestamp\logs"
 )
+$runExecutable = Join-Path $logRoot 'skate3.exe'
+$runRuntime = Join-Path $logRoot 'rexruntime.dll'
 
 function Assert-PreparedHash {
     param(
@@ -61,6 +63,16 @@ try {
     }
 
     New-Item -ItemType Directory -Path $logRoot -Force | Out-Null
+    # The application intentionally patches its own executable on first boot
+    # to install the title icon extracted from the user's retail game data.
+    # Run a disposable copy so that mutation cannot invalidate the immutable,
+    # offline-validated staged executable used by later checks.
+    Copy-Item -LiteralPath $executable -Destination $runExecutable -Force
+    Copy-Item -LiteralPath $runtime -Destination $runRuntime -Force
+    Assert-PreparedHash 'run executable copy' $runExecutable `
+        $manifest.executable_sha256
+    Assert-PreparedHash 'run runtime copy' $runRuntime `
+        $manifest.runtime_sha256
     $runtimeLog = Join-Path $logRoot 'skate3_university.log'
     $arguments = @(
         '--fullscreen=false',
@@ -100,7 +112,7 @@ try {
 
     Write-Host "Launching the offline-prepared University build."
     Write-Host "This run's logs: $logRoot"
-    $process = Start-Process -FilePath $executable `
+    $process = Start-Process -FilePath $runExecutable `
         -WorkingDirectory $preparedRoot `
         -ArgumentList $arguments `
         -PassThru `
@@ -113,4 +125,13 @@ try {
     Write-Error $_
     Write-Host "Intended log folder: $logRoot"
     exit 1
+} finally {
+    # Preserve logs and launch metadata, but discard the self-patched runtime
+    # copies. The immutable prepared artifacts remain hash-verifiable.
+    foreach ($temporary in @($runExecutable, $runRuntime)) {
+        if (Test-Path -LiteralPath $temporary -PathType Leaf) {
+            Remove-Item -LiteralPath $temporary -Force `
+                -ErrorAction SilentlyContinue
+        }
+    }
 }
