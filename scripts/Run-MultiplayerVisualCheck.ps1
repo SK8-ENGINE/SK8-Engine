@@ -9,7 +9,8 @@ param(
     [switch]$NoDirectBoot,
     [switch]$PrepareOnly,
     [switch]$AppearanceRecoveryCheck,
-    [switch]$RealtimePriorityCheck
+    [switch]$RealtimePriorityCheck,
+    [switch]$SmoothnessCheck
 )
 
 Set-StrictMode -Version Latest
@@ -44,7 +45,15 @@ if ($AppearanceRecoveryCheck -and $Clients -lt 3) {
 if ($RealtimePriorityCheck -and $Clients -ne 5) {
     throw 'The realtime-priority check requires exactly five clients.'
 }
-if ($AppearanceRecoveryCheck -and $RealtimePriorityCheck) {
+if ($SmoothnessCheck -and $Clients -ne 5) {
+    throw 'The smoothness check requires exactly five clients.'
+}
+$specializedChecks = @(
+    [bool]$AppearanceRecoveryCheck,
+    [bool]$RealtimePriorityCheck,
+    [bool]$SmoothnessCheck
+) | Where-Object { $_ }
+if ($specializedChecks.Count -gt 1) {
     throw 'Select only one specialized multiplayer visual check.'
 }
 
@@ -343,6 +352,7 @@ function Test-SamePath {
 }
 
 $startedProcesses = New-Object System.Collections.Generic.List[object]
+$launchedClients = @()
 try {
     Write-Setup "Repository: $repoRoot"
     Write-Setup "Commit: $shortCommit"
@@ -552,6 +562,7 @@ try {
         appearance_install_budget_ms = 4.0
         appearance_recovery_check = [bool]$AppearanceRecoveryCheck
         realtime_priority_check = [bool]$RealtimePriorityCheck
+        smoothness_check = [bool]$SmoothnessCheck
         appearance_recovery_receiver = if ($AppearanceRecoveryCheck) {
             3
         } else {
@@ -618,6 +629,70 @@ Failure:
 
 Do not treat logs as proof of visual correctness. Report the visual result
 separately, then ask the agent to analyze this run directory.
+"@
+    } elseif ($SmoothnessCheck) {
+        @"
+MULTIPLAYER SMOOTHNESS CHECK
+
+Run directory:
+$runRoot
+
+Clients: 5
+Transport: localhost UDP
+Quality: Balanced, 60 Hz root, 60 Hz animation, 50 ms minimum interpolation
+Change under test: deadline-paced root and animation sending
+Diagnostics: timing is reported separately for every receiver/sender pair
+
+Client identity:
+- Each game window title is labelled MULTIPLAYER CLIENT 1 through 5.
+- The number is both that window's local role and its telemetry sender role.
+
+Visual scenario:
+1. Wait until all five clients have loaded the same map, every client sees
+   four remote skaters, and every teal proxy has become its complete outfit.
+2. Keep all five skaters near the session marker. Use client 1 as the first
+   viewing client.
+3. Move client 2 continuously for 30 seconds: push, carve left and right,
+   skate in a circle, ollie repeatedly, perform a fast spin, and bail once.
+   Keep clients 3, 4, and 5 mostly still while watching client 2.
+4. Repeat that exact 30-second movement sequence separately with clients 3,
+   4, and 5. Note whether one numbered client is consistently smoother or
+   rougher than the others.
+5. Switch to client 2 as the viewing client. Move clients 3 and 4 for another
+   30 seconds each. This checks whether smoothness follows the sender rather
+   than the viewing client.
+6. Finally move all five skaters near each other for 60 seconds. Include
+   carving, spins, bails, and detached boards. Run the complete check for
+   approximately 4 minutes, then close all clients.
+
+Visual success:
+- Remote motion is materially smoother than the previous run, without
+  repeated freeze-then-catch-up movement.
+- No numbered sender remains consistently much rougher than the others.
+- Tricks, spins, feet, boards, detached boards, hair, and clothing remain
+  coherent while motion is smoothed.
+- Outfits remain complete, no player returns to teal or disappears, and local
+  input response remains normal.
+
+Visual failure:
+- A remote skater repeatedly freezes and catches up, visibly pulses between
+  poses, snaps, or remains substantially rougher than the other senders.
+- Smoothness changes depending on the viewing client in a repeatable way.
+- Any pose, board, attachment, outfit, visibility, input, or frame-stall
+  regression appears.
+
+Telemetry acceptance checked by the agent afterward:
+- Per-sender complete animation rates approach the configured 60 Hz whenever
+  that sender supplies fresh captures.
+- Each receiver/sender pair reports interpolation delay, cursor margin,
+  held-latest percentage and run length, sequence gaps, and superseded
+  incomplete frames.
+- Delivery-policy errors, socket failures, and multiplayer errors stay zero.
+- Appearance and resource counters remain healthy.
+
+Logs can identify timing behavior but cannot establish visual smoothness.
+Report which numbered clients looked smooth or rough, then ask the agent to
+analyze this run directory.
 "@
     } elseif ($RealtimePriorityCheck) {
         @"
@@ -893,6 +968,52 @@ separately, then ask the agent to analyze this run directory.
             -WorkingDirectory $client.Root `
             -ArgumentList $client.Arguments -PassThru
         $startedProcesses.Add($process)
+        $launchedClients += [pscustomobject]@{
+            Role = $client.Role
+            Process = $process
+        }
+    }
+    if ($SmoothnessCheck) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class MultiplayerWindowTitle {
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    public static extern bool SetWindowText(
+        IntPtr windowHandle,
+        string title
+    );
+}
+'@
+        $titleDeadline = (Get-Date).AddSeconds(15)
+        foreach ($launched in $launchedClients) {
+            do {
+                $launched.Process.Refresh()
+                if ($launched.Process.MainWindowHandle -ne 0) {
+                    break
+                }
+                Start-Sleep -Milliseconds 100
+            } while ((Get-Date) -lt $titleDeadline)
+            if ($launched.Process.MainWindowHandle -ne 0) {
+                $title = (
+                    'SK8 ENGINE - MULTIPLAYER CLIENT {0}' -f
+                    $launched.Role
+                )
+                [void][MultiplayerWindowTitle]::SetWindowText(
+                    $launched.Process.MainWindowHandle,
+                    $title
+                )
+                Write-Setup (
+                    'Labelled process {0} as multiplayer client {1}' -f
+                    $launched.Process.Id, $launched.Role
+                )
+            } else {
+                Write-Setup (
+                    'WARNING: client {0} window title could not be labelled' -f
+                    $launched.Role
+                )
+            }
+        }
     }
     $startedProcesses | ForEach-Object {
         '{0} {1}' -f $_.Id, $_.Path
@@ -908,6 +1029,8 @@ separately, then ask the agent to analyze this run directory.
     Write-Host ''
     if ($AppearanceRecoveryCheck) {
         Write-Host 'MULTIPLAYER APPEARANCE RECOVERY CHECK READY'
+    } elseif ($SmoothnessCheck) {
+        Write-Host 'MULTIPLAYER SMOOTHNESS CHECK READY'
     } elseif ($RealtimePriorityCheck) {
         Write-Host 'MULTIPLAYER REALTIME PRIORITY CHECK READY'
     } else {
@@ -917,7 +1040,8 @@ separately, then ask the agent to analyze this run directory.
     Write-Host "Instructions: $(Join-Path $runRoot 'VISUAL-CHECK.txt')"
     Write-Host ''
     if (-not $AppearanceRecoveryCheck -and
-        -not $RealtimePriorityCheck) {
+        -not $RealtimePriorityCheck -and
+        -not $SmoothnessCheck) {
         Write-Host (
             'After closing client 3, wait 7 seconds and run ' +
             'RELAUNCH_MULTIPLAYER_VISUAL_CLIENT_3.bat.'

@@ -410,6 +410,27 @@ Current checkpoint:
   roles reported by the user. Then make an independently gated adaptive
   playback-delay/cadence correction without changing pose bytes, appearance,
   board handling, or local rendering.
+- Commit `5f7cd9e` adds a deterministic five-second timing record for every
+  receiver/sender pair. It reports completed-frame rate, sender period,
+  arrival variation, chosen playback delay, average/minimum/maximum cursor
+  margin, retained sample count, interpolated/held-latest/held-oldest
+  presentation counts, maximum consecutive held-latest run, completed-frame
+  sequence gaps, and superseded incomplete assemblies. The analyzer retains
+  the latest record for each sender instead of collapsing all peers into one
+  aggregate.
+- Commit `cd4d2bc` replaces elapsed-since-last-send checks with phase-retaining
+  periodic deadlines for root and animation. At a 4 ms worker interval, the
+  old check could only send every fifth tick and therefore turned a requested
+  60 Hz stream into approximately 50 Hz. The new gate alternates worker ticks
+  around the 16.67 ms deadline to retain the requested average rate, sends
+  only the latest fresh capture, and advances past missed deadlines without a
+  catch-up burst after a stall.
+- Deadline tests cover 60 Hz pacing on a 4 ms worker and a 500 ms stall with
+  no burst. All nine offline multiplayer suites and a full Release build pass.
+  `RUN_MULTIPLAYER_SMOOTHNESS_CHECK.bat` stages five persistent-profile
+  clients, labels their windows by sender role, and records the per-pair
+  diagnostics. The user's visual result and post-run telemetry review are
+  pending.
 
 Completion:
 
