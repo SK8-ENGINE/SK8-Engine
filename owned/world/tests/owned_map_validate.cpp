@@ -3,6 +3,7 @@
 #include "skate/world/rw_collision_mesh.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <exception>
@@ -46,10 +47,23 @@ int main(int argc, char** argv) {
     for (const skate::world::ImageTexture& texture : map.textures) {
       texture_bytes += texture.rgba8.size();
     }
+    std::array<std::uint64_t, 3> alpha_modes{};
+    for (const skate::world::SurfaceMaterial& material : map.materials) {
+      const std::size_t alpha_mode =
+          static_cast<std::size_t>(material.alpha_mode);
+      if (alpha_mode >= alpha_modes.size()) {
+        std::cerr << "SKATE_PACKAGE_FAIL invalid material alpha mode\n";
+        return 1;
+      }
+      ++alpha_modes[alpha_mode];
+    }
     std::cout
         << "SKATE_PACKAGE_OK"
         << " name=" << map.name
         << " materials=" << map.materials.size()
+        << " alpha_opaque=" << alpha_modes[0]
+        << " alpha_mask=" << alpha_modes[1]
+        << " alpha_blend=" << alpha_modes[2]
         << " textures=" << map.textures.size()
         << " texture_rgba8_bytes=" << texture_bytes
         << " vertices=" << map.render_mesh.vertices.size()

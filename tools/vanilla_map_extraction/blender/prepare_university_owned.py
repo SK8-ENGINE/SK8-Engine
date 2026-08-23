@@ -82,8 +82,10 @@ def _configure_material(material: bpy.types.Material) -> None:
     material["ow_normal_image"] = ""
     material["ow_orm_image"] = ""
     material["ow_emissive_image"] = ""
-    material["ow_alpha_mode"] = 0
-    material["ow_alpha_cutoff"] = 0.5
+    material["ow_alpha_mode"] = int(material.get("skate3_alpha_mode", 0))
+    material["ow_alpha_cutoff"] = float(
+        material.get("skate3_alpha_cutoff", 0.5)
+    )
     material["ow_audio_surface"] = 3
     material["ow_physics_surface"] = 1
     material["ow_surface_pattern"] = 0

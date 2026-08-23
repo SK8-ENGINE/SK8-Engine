@@ -22,6 +22,10 @@ from skate3_streams import (
 DISTRICT_NAME = "DIST_DHS 32221"
 TEXTURE_NAME_PATTERN = re.compile(rb"(0x[0-9A-Fa-f]{16})\.Texture")
 MATERIAL_TEXTURE_PATTERN = re.compile(r"(0x[0-9A-Fa-f]{16})$")
+ALPHA_BLEND_SHADERS = {
+    "environment.reflective_trans",
+    "environment.transparent",
+}
 
 
 def _default_workspace() -> Path:
@@ -61,6 +65,73 @@ def _material_texture_id(material_name: str | None) -> str | None:
         return None
     match = MATERIAL_TEXTURE_PATTERN.search(material_name)
     return match.group(1).lower() if match else None
+
+
+def _group_material_parameters(
+    parameters: object,
+) -> list[dict[str, list[str]]]:
+    """Recover the per-mesh material groups flattened by mdl_parser.
+
+    A material starts at each ``Name`` parameter. Selecting the Nth value
+    from a global list of ``diffuse`` parameters is unsafe because materials
+    such as water have no diffuse channel; that shifts every later mesh onto
+    the wrong texture.
+    """
+    groups: list[dict[str, list[str]]] = []
+    current: dict[str, list[str]] | None = None
+    for parameter in parameters:
+        kind = str(parameter.kind)
+        value = str(parameter.value)
+        if kind == "Name":
+            current = {}
+            groups.append(current)
+        if current is not None:
+            current.setdefault(kind, []).append(value)
+    return groups
+
+
+def _first_parameter(
+    group: dict[str, list[str]],
+    name: str,
+) -> str | None:
+    values = group.get(name, [])
+    return values[0] if values and values[0] else None
+
+
+def _material_metadata(
+    groups: list[dict[str, list[str]]],
+    mesh_index: int,
+) -> dict[str, object]:
+    group = groups[mesh_index] if mesh_index < len(groups) else {}
+    diffuse = _first_parameter(group, "diffuse")
+    transparent = _first_parameter(group, "transparent")
+    shader_name = _first_parameter(group, "AttribulatorMaterialName")
+    material_name = diffuse or transparent
+    shader_key = (shader_name or "").lower()
+    if shader_key in ALPHA_BLEND_SHADERS:
+        alpha_mode = 2
+    elif (
+        transparent is not None
+        or "alphatest" in shader_key
+        or shader_key in {"animated.tree", "tree.default"}
+    ):
+        alpha_mode = 1
+    else:
+        alpha_mode = 0
+    return {
+        "material_name": material_name,
+        "texture_id": _material_texture_id(material_name),
+        "texture_channel": (
+            "diffuse"
+            if diffuse is not None
+            else "transparent"
+            if transparent is not None
+            else None
+        ),
+        "shader_name": shader_name,
+        "alpha_mode": alpha_mode,
+        "alpha_cutoff": 0.5,
+    }
 
 
 def prepare(
@@ -198,7 +269,9 @@ def prepare(
             npz_path.parent.mkdir(parents=True, exist_ok=True)
             arrays: dict[str, numpy.ndarray] = {}
             mesh_entries: list[dict[str, object]] = []
+            material_groups = _group_material_parameters(parsed.materials)
             for mesh_index, mesh in enumerate(parsed.meshes):
+                material = _material_metadata(material_groups, mesh_index)
                 arrays[f"vertices_{mesh_index}"] = numpy.asarray(
                     mesh.vertices,
                     dtype=numpy.float32,
@@ -222,8 +295,7 @@ def prepare(
                     {
                         "index": mesh_index,
                         "name": mesh.name,
-                        "material_name": mesh.material_name,
-                        "texture_id": _material_texture_id(mesh.material_name),
+                        **material,
                         "vertex_count": mesh.vertex_count,
                         "triangle_count": mesh.triangle_count,
                         "vertex_stride": mesh.vertex_stride,

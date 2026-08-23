@@ -9,14 +9,15 @@ The ignored local output
 
 | Property | Verified value |
 | --- | ---: |
-| Package bytes | 123,930,019 |
-| Materials | 350 |
+| Package bytes | 123,936,717 |
+| Materials | 353 |
+| Opaque / mask / blend materials | 296 / 52 / 5 |
 | Embedded textures | 325 |
 | Decoded RGBA8 texture bytes | 222,193,664 |
 | Indexed visual vertices | 2,081,271 |
 | Visual indices | 4,936,851 |
 | Render triangles | 1,645,617 |
-| Collision triangles | 1,329,037 |
+| Collision triangles | 1,329,399 |
 | Render chunks after clipping | 515 |
 | Render triangles after clipping | 1,777,954 |
 | Collision fallback cell size | 256 m |
@@ -45,6 +46,13 @@ The C++ validator is the actual engine loader linked against the same
 owned-world library as the game. A smaller file alone is never accepted as
 evidence of correctness.
 
+For the material-binding correction, the old and new package are additionally
+compared independent of vertex/index ordering and material IDs. The complete
+position/normal/UV triangle multiset and decoded texture payloads must remain
+identical. Material records and assignments are expected to differ because
+the old retail parser shifted meshes after material groups without a diffuse
+parameter and the old Blender preparation forced all alpha modes to opaque.
+
 ## Known fidelity limits
 
 - Retail simulation RX2 data is preserved but not decoded. Current collision
@@ -61,3 +69,14 @@ evidence of correctness.
 
 These limits must be judged in the user-run visual/collision pass and must not
 be hidden by successful telemetry.
+
+## Permanent visual-check workflow
+
+`Invoke-UniversityVisualCheck.ps1` is an offline preparation command for the
+map agent. It performs stale exports, package checks, game compilation,
+engine-side validation, and staging, and contains no game-launch path.
+
+`Run-University-Visual-Check.bat` is the user-facing launch-only command. It
+hash-checks the prepared executable/runtime/map, creates a timestamped runtime
+log directory, and launches the already staged build. Agents must not execute
+the BAT or `skate3.exe`; only the user decides visual correctness.

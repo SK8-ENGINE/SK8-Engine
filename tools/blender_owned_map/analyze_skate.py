@@ -116,9 +116,16 @@ def analyze_package(
     _section(sections, reader, "header_and_map_metadata", start)
 
     start = reader.offset
+    material_alpha_modes = {0: 0, 1: 0, 2: 0}
     for index in range(material_count):
         reader.string(f"material {index} name")
-        reader.skip(76, f"material {index} fields")
+        fields = reader.take(76, f"material {index} fields")
+        alpha_mode = struct.unpack_from("<I", fields, 56)[0]
+        if alpha_mode not in material_alpha_modes:
+            raise PackageError(
+                f"material {index} uses invalid alpha mode {alpha_mode}"
+            )
+        material_alpha_modes[alpha_mode] += 1
     material_bytes = reader.data[start : reader.offset]
     _section(sections, reader, "materials", start)
 
@@ -299,6 +306,11 @@ def analyze_package(
             "npc_routes": route_count,
         },
         "sections": sections,
+        "material_alpha_modes": {
+            "opaque": material_alpha_modes[0],
+            "mask": material_alpha_modes[1],
+            "blend": material_alpha_modes[2],
+        },
         "texture_decoded_bytes": texture_decoded_bytes,
         "texture_dimensions": texture_dimensions,
         "maximum_visual_index": maximum_index,

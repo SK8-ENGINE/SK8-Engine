@@ -2,8 +2,7 @@
 param(
     [string]$BlenderExe = '',
     [string]$GameRoot = '',
-    [switch]$ForceExport,
-    [switch]$PrepareOnly
+    [switch]$ForceExport
 )
 
 $ErrorActionPreference = 'Stop'
@@ -18,13 +17,14 @@ $validatorBuildRoot = Join-Path (
     $repoRoot
 ) 'out\university-map-validator'
 $runTimestamp = Get-Date -Format 'yyyyMMdd_HHmmss'
-$runRoot = Join-Path $repoRoot (
-    "out\university-visual-check\runs\$runTimestamp"
+$runRoot = Join-Path $repoRoot 'out\university-visual-check\prepared'
+$logRoot = Join-Path $repoRoot (
+    "out\university-visual-check\preparation-logs\$runTimestamp"
 )
-$logRoot = Join-Path $runRoot 'logs'
 $preparationLog = Join-Path $logRoot 'preparation.log'
 
 New-Item -ItemType Directory -Path $logRoot -Force | Out-Null
+New-Item -ItemType Directory -Path $runRoot -Force | Out-Null
 Start-Transcript -LiteralPath $preparationLog -Force | Out-Null
 
 function Invoke-Checked {
@@ -248,6 +248,9 @@ try {
     $prepareOwned = Join-Path (
         $workspace
     ) 'blender\prepare_university_owned.py'
+    $validateBlend = Join-Path (
+        $workspace
+    ) 'blender\validate_university_blend.py'
     $exporter = Join-Path (
         $repoRoot
     ) 'tools\blender_owned_map\export_skate.py'
@@ -260,7 +263,7 @@ try {
     $buildBase = Join-Path $PSScriptRoot 'Build-UniversityBlend.ps1'
 
     Write-Host "Dedicated worktree: $repoRoot"
-    Write-Host "Run output:         $runRoot"
+    Write-Host "Prepared output:    $runRoot"
     Write-Host "Preparation log:    $preparationLog"
     Write-Host "Validated TU3 data: $gameData"
     Write-Host "Blender:            $blender"
@@ -274,6 +277,13 @@ try {
             throw "University base blend rebuild failed: $LASTEXITCODE"
         }
     }
+
+    Invoke-Checked -FilePath $blender -Arguments @(
+        '--background',
+        $baseBlend,
+        '--python',
+        $validateBlend
+    ) -Description 'Validate University retail material bindings and alpha'
 
     $ownedInputs = @(
         (Get-Item -LiteralPath $baseBlend)
@@ -359,6 +369,11 @@ try {
         )) {
         Assert-Equal "count $name" $actual.counts.$name `
             $expected.counts.$name
+    }
+    foreach ($name in @('opaque', 'mask', 'blend')) {
+        Assert-Equal "material alpha mode $name" `
+            $actual.material_alpha_modes.$name `
+            $expected.material_alpha_modes.$name
     }
     foreach ($name in @(
             'semantic_metadata_sha256',
@@ -485,9 +500,29 @@ try {
         Join-Path $buildRoot 'rexruntime.dll'
     ) -Destination $stagedRuntime -Force
     Copy-Item -LiteralPath $package -Destination $stagedPackage -Force
-    New-Item -ItemType Junction -Path (
-        Join-Path $runRoot 'game'
-    ) -Target $gameData | Out-Null
+    $stagedGame = Join-Path $runRoot 'game'
+    if (Test-Path -LiteralPath $stagedGame) {
+        $existingGame = Get-Item -LiteralPath $stagedGame -Force
+        $existingTarget = [System.IO.Path]::GetFullPath(
+            [string]$existingGame.Target
+        )
+        if ($existingTarget -cne $gameData) {
+            if (-not ($existingGame.Attributes -band (
+                        [System.IO.FileAttributes]::ReparsePoint
+                    ))) {
+                throw (
+                    'Refusing to replace a non-junction prepared game path: ' +
+                    $stagedGame
+                )
+            }
+            Remove-Item -LiteralPath $stagedGame -Force
+            New-Item -ItemType Junction -Path $stagedGame `
+                -Target $gameData | Out-Null
+        }
+    } else {
+        New-Item -ItemType Junction -Path $stagedGame `
+            -Target $gameData | Out-Null
+    }
 
     $seedRoot = Join-Path $env:APPDATA 'skate3'
     if (Test-Path -LiteralPath $seedRoot -PathType Container) {
@@ -511,9 +546,13 @@ try {
         executable_sha256 = (
             Get-FileHash -LiteralPath $stagedExecutable -Algorithm SHA256
         ).Hash
+        runtime_sha256 = (
+            Get-FileHash -LiteralPath $stagedRuntime -Algorithm SHA256
+        ).Hash
         map_sha256 = (
             Get-FileHash -LiteralPath $stagedPackage -Algorithm SHA256
         ).Hash
+        expected_contract = $expectedPath
         map_analysis = $analysisPath
         map_validation = $validationPath
         collision_source = (
@@ -521,71 +560,18 @@ try {
             'decoder pending'
         )
     }
-    $stageManifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (
-        Join-Path $logRoot 'run-manifest.json'
+    $manifestJson = $stageManifest | ConvertTo-Json -Depth 4
+    $manifestJson | Set-Content -LiteralPath (
+        Join-Path $logRoot 'prepared-manifest.json'
+    ) -Encoding UTF8
+    $manifestJson | Set-Content -LiteralPath (
+        Join-Path $runRoot 'prepared-manifest.json'
     ) -Encoding UTF8
 
     Write-Host ''
-    Write-Host "Prepared visual-check run: $runRoot"
-    Write-Host "All logs and manifests:    $logRoot"
-    if ($PrepareOnly) {
-        Write-Host (
-            'PrepareOnly requested: validation finished and the game was ' +
-            'NOT launched.'
-        )
-        return
-    }
-
-    $running = Get-Process -Name 'skate3' -ErrorAction SilentlyContinue
-    if ($null -ne $running) {
-        throw 'Close existing skate3.exe processes before this visual check.'
-    }
-
-    $runtimeLog = Join-Path $logRoot 'skate3_university.log'
-    $arguments = @(
-        '--fullscreen=false',
-        '--window_width=1280',
-        '--window_height=720',
-        '--draw_resolution_scale_x=1',
-        '--draw_resolution_scale_y=1',
-        '--skate3_direct_boot=true',
-        '--skate3_mechanics_sandbox=true',
-        '--skate3_mechanics_sandbox_visual_map=true',
-        '--skate3_mechanics_sandbox_native_collision=true',
-        '--skate3_mechanics_sandbox_native_collision_replace_retail=true',
-        '--skate3_mechanics_sandbox_native_grinds=false',
-        '--skate3_native_render=true',
-        '--skate3_native_render_scene=true',
-        '--skate3_native_render_log_interval=300',
-        '--skate3_native_render_scene_perf_log=true',
-        '--skate3_native_render_scene_perf_interval=300',
-        '--skate3_native_render_scene_perf_items=false',
-        '--log_level=info',
-        '--log_flush_interval=1',
-        '--log_max_file_size_mb=100',
-        '--log_max_files=5',
-        "--log_file=$runtimeLog"
-    )
-    [Environment]::SetEnvironmentVariable(
-        'SKATE3_OWNED_MAP',
-        $stagedPackage,
-        'Process'
-    )
-    $arguments | Set-Content -LiteralPath (
-        Join-Path $logRoot 'launch-arguments.txt'
-    ) -Encoding UTF8
-
-    Write-Host ''
-    Write-Host 'Launching University visual check for USER inspection.'
-    Write-Host "Runtime log: $runtimeLog"
-    $process = Start-Process -FilePath $stagedExecutable `
-        -WorkingDirectory $runRoot `
-        -ArgumentList $arguments `
-        -PassThru `
-        -Wait
-    if ($process.ExitCode -ne 0) {
-        throw "skate3.exe exited with code $($process.ExitCode)"
-    }
+    Write-Host "Prepared visual-check build: $runRoot"
+    Write-Host "Preparation logs:           $logRoot"
+    Write-Host 'Offline preparation complete. The game was NOT launched.'
 } catch {
     Write-Error $_
     exit 1

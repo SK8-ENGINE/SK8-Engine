@@ -1,19 +1,24 @@
 {
   "format_version": 9,
   "map_name": "University District",
-  "file_bytes": 123930019,
+  "file_bytes": 123936717,
   "texture_decoded_bytes": 222193664,
   "maximum_visual_index": 2081270,
   "counts": {
-    "materials": 350,
+    "materials": 353,
     "textures": 325,
     "vertices": 2081271,
     "indices": 4936851,
-    "collision_triangles": 1329037,
+    "collision_triangles": 1329399,
     "grind_rails": 0,
     "hinged_doors": 0,
     "local_lights": 0,
     "npc_routes": 0
+  },
+  "material_alpha_modes": {
+    "opaque": 296,
+    "mask": 52,
+    "blend": 5
   },
   "bounds_min": [
     -727.3729858398438,
@@ -27,11 +32,11 @@
   ],
   "integrity": {
     "semantic_metadata_sha256": "d9886c7edc5a07ee94552615ffc0cd58b7407017a36f6876ab3615bdcce50011",
-    "materials_sha256": "3128cbe31345832f90f570a5a964e101bca1b32ca049f4229900d76a2603c124",
+    "materials_sha256": "d2e3b15a02695ee90d4ee9e715e0cbd0db252c54ae9e964ea17681f07203144f",
     "decoded_textures_sha256": "464c6c03aaafa91126b758149667e4bf3aaf0b178759e59d94c6e0005dbc77b4",
-    "expanded_visual_triangles_sha256": "740f1a2a2b7ef566946549a8fee1710fc01499b7002db2dbab6d93d1b25c29b6",
-    "expanded_visual_triangles_1e6_sha256": "23296307f6486254ae5c5394fcc9382c4c5b706bb2883702cccdb09a4d2b61e2",
-    "collision_sha256": "9b7a29dcd5b2b37ee2681f402602dc2a8619ea6519f50db3a0c03896ede9813a",
+    "expanded_visual_triangles_sha256": "ca69bbe89e6a2994ddd81529c14b42113c74478f66b4ee20d4e81ef774687a60",
+    "expanded_visual_triangles_1e6_sha256": "aee3e6d44dd3bbd12d2fb3c62801de88c6bbf02e1d89dc7eeb2e4d245e49e73b",
+    "collision_sha256": "9e5bdf4409a67d7a86395f68bef48c1417c689969a72f37cb02bf3129ea63816",
     "authored_features_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
   },
   "compiled_world": {
@@ -41,6 +46,6 @@
     "collision_mode": "spatial",
     "collision_cell_size": 256,
     "collision_chunks": 44,
-    "collision_triangles": 1329037
+    "collision_triangles": 1329399
   }
 }

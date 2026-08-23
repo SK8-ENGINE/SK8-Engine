@@ -41,22 +41,37 @@ def _new_child_collection(
     return collection
 
 
-def _load_materials(
+def _load_images(
     manifest: dict[str, object],
     cache_root: Path,
-) -> dict[str, bpy.types.Material]:
-    materials: dict[str, bpy.types.Material] = {}
+) -> dict[str, bpy.types.Image]:
+    images: dict[str, bpy.types.Image] = {}
     for texture_id, entry in manifest["textures"].items():
         image_path = cache_root / entry["png"]
         image = bpy.data.images.load(str(image_path), check_existing=True)
         image.name = texture_id
+        images[texture_id] = image
+    return images
 
-        material = bpy.data.materials.new(f"MAT_{texture_id}")
-        material.use_nodes = True
-        material.use_backface_culling = True
-        nodes = material.node_tree.nodes
-        links = material.node_tree.links
-        principled = nodes.get("Principled BSDF")
+
+def _new_material(
+    texture_id: str,
+    image: bpy.types.Image | None,
+    alpha_mode: int,
+    *,
+    fallback: bool = False,
+) -> bpy.types.Material:
+    alpha_suffix = ("OPAQUE", "MASK", "BLEND")[alpha_mode]
+    fallback_suffix = "_FALLBACK" if fallback else ""
+    material = bpy.data.materials.new(
+        f"MAT_{texture_id}_{alpha_suffix}{fallback_suffix}"
+    )
+    material.use_nodes = True
+    material.use_backface_culling = True
+    nodes = material.node_tree.nodes
+    links = material.node_tree.links
+    principled = nodes.get("Principled BSDF")
+    if image is not None:
         texture = nodes.new("ShaderNodeTexImage")
         texture.name = f"TEX_{texture_id}"
         texture.label = texture_id
@@ -64,34 +79,31 @@ def _load_materials(
         texture.interpolation = "Linear"
         links.new(texture.outputs["Color"], principled.inputs["Base Color"])
         links.new(texture.outputs["Alpha"], principled.inputs["Alpha"])
-        principled.inputs["Roughness"].default_value = 0.68
-        principled.inputs["Metallic"].default_value = 0.0
-        if entry["format"] in {"DXT3", "DXT5"}:
-            try:
-                material.surface_render_method = "DITHERED"
-            except Exception:
-                try:
-                    material.blend_method = "HASHED"
-                except Exception:
-                    pass
-        material["skate3_texture_id"] = texture_id
-        material["skate3_stream_asset_id"] = entry["stream_asset_id"]
-        material["skate3_stream_file"] = entry["stream_file"]
-        materials[texture_id] = material
-
-    for texture_id in manifest["summary"]["unmatched_diffuse_textures"]:
-        material = bpy.data.materials.new(f"MAT_{texture_id}_FALLBACK")
-        material.use_nodes = True
-        material.use_backface_culling = True
-        principled = material.node_tree.nodes.get("Principled BSDF")
-        principled.inputs["Base Color"].default_value = (1.0, 1.0, 1.0, 1.0)
-        principled.inputs["Roughness"].default_value = 0.68
-        material["skate3_texture_id"] = texture_id
-        material["skate3_fallback_reason"] = (
-            "Package references default_white but does not embed the shared texture."
+    else:
+        principled.inputs["Base Color"].default_value = (
+            1.0,
+            1.0,
+            1.0,
+            1.0,
         )
-        materials[texture_id] = material
-    return materials
+    principled.inputs["Roughness"].default_value = 0.68
+    principled.inputs["Metallic"].default_value = 0.0
+    if alpha_mode != 0:
+        try:
+            material.surface_render_method = "DITHERED"
+        except Exception:
+            try:
+                material.blend_method = "HASHED"
+            except Exception:
+                pass
+    material["skate3_texture_id"] = texture_id
+    material["skate3_alpha_mode"] = alpha_mode
+    material["skate3_alpha_cutoff"] = 0.5
+    if fallback:
+        material["skate3_fallback_reason"] = (
+            "Package references a shared texture that is not embedded."
+        )
+    return material
 
 
 def build_scene(manifest_path: Path) -> dict[str, int]:
@@ -111,7 +123,8 @@ def build_scene(manifest_path: Path) -> dict[str, int]:
     collision.hide_viewport = True
     collision.hide_render = True
     metadata = _new_child_collection(root, "Metadata")
-    materials = _load_materials(manifest, cache_root)
+    images = _load_images(manifest, cache_root)
+    materials: dict[tuple[str, int], bpy.types.Material] = {}
 
     object_count = 0
     vertex_count = 0
@@ -170,13 +183,38 @@ def build_scene(manifest_path: Path) -> dict[str, int]:
                 obj = bpy.data.objects.new(object_name, mesh_data)
                 asset_collection.objects.link(obj)
                 texture_id = mesh_entry["texture_id"]
-                if texture_id in materials:
-                    mesh_data.materials.append(materials[texture_id])
+                alpha_mode = int(mesh_entry.get("alpha_mode", 0))
+                if texture_id:
+                    material_key = (texture_id, alpha_mode)
+                    material = materials.get(material_key)
+                    if material is None:
+                        image = images.get(texture_id)
+                        material = _new_material(
+                            texture_id,
+                            image,
+                            alpha_mode,
+                            fallback=image is None,
+                        )
+                        entry = manifest["textures"].get(texture_id)
+                        if entry is not None:
+                            material["skate3_stream_asset_id"] = entry[
+                                "stream_asset_id"
+                            ]
+                            material["skate3_stream_file"] = entry[
+                                "stream_file"
+                            ]
+                        materials[material_key] = material
+                    mesh_data.materials.append(material)
                 obj["skate3_asset_id"] = asset_id
                 obj["skate3_stream_file"] = model_entry["stream_file"]
                 obj["skate3_mesh_index"] = mesh_index
                 obj["skate3_material_name"] = mesh_entry["material_name"] or ""
                 obj["skate3_texture_id"] = texture_id or ""
+                obj["skate3_shader_name"] = mesh_entry.get("shader_name") or ""
+                obj["skate3_texture_channel"] = (
+                    mesh_entry.get("texture_channel") or ""
+                )
+                obj["skate3_alpha_mode"] = alpha_mode
                 obj["skate3_vertex_stride"] = mesh_entry["vertex_stride"]
                 obj["skate3_source_offsets"] = json.dumps(
                     mesh_entry["source_offsets"],
@@ -221,7 +259,8 @@ def build_scene(manifest_path: Path) -> dict[str, int]:
         "objects": object_count,
         "vertices": vertex_count,
         "triangles": triangle_count,
-        "textures": len(materials),
+        "textures": len(images),
+        "materials": len(materials),
         "simulation_assets": len(manifest["simulation_assets"]),
         "expected_objects": manifest["summary"]["mesh_parts"],
     }

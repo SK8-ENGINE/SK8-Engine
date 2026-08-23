@@ -57,9 +57,10 @@ owned-world authoring contract and saves
 base UVs, material textures, transforms, and the full visual mesh. The current
 owned package has:
 
-- 350 materials and 325 embedded textures;
+- 353 materials and 325 embedded textures;
+- 296 opaque, 52 alpha-mask, and 5 alpha-blended material variants;
 - 2,081,271 indexed visual vertices and 1,645,617 render triangles;
-- 1,329,037 visual-derived collision triangles;
+- 1,329,399 visual-derived collision triangles;
 - bounds from `(-727.373, -6.849, -1413.082)` to
   `(807.640, 296.100, 792.678)`;
 - a runtime spawn at `(200, 59, -50)`.
@@ -72,10 +73,27 @@ approximation, not a claim of retail collision parity. Grind splines, AI
 routes, doors, and local lights are not yet recovered.
 
 The SKATE v9 package is
-`intermediate/university/University.skate`. It is 123,930,019 bytes and
+`intermediate/university/University.skate`. It is 123,936,717 bytes and
 losslessly decodes to the counts and bounds above. The offline engine validator
 also compiles it into 515 render chunks and 44 collision chunks using the
 verified 256 metre collision-cell fallback.
+
+### Material binding and foliage-alpha correction
+
+The first in-game pass exposed two independent source-pipeline faults. The
+retail model parser flattened diffuse parameters across shader groups, so a
+group such as `ocean.default` with no diffuse slot shifted every following
+mesh onto the wrong texture. The parser now keeps parameters grouped per
+retail material and uses that group's diffuse or transparent channel.
+
+The Blender-owned preparation script also overwrote every imported material
+as opaque. It now preserves the retail shader/channel classification through
+Blender and into SKATE as opaque, alpha-mask, or alpha-blend. An offline
+Blender validator checks all 8,546 mesh parts, expected alpha-mode counts, and
+known formerly shifted bindings. A package comparison proves that all
+1,645,617 position/normal/UV triangles and all 325 decoded texture payloads
+are unchanged as multisets; only intended material assignments and the
+resulting presentation-derived collision classification changed.
 
 ## User-run University visual check
 
@@ -85,27 +103,28 @@ From the root of the dedicated University worktree, run:
 .\Run-University-Visual-Check.bat
 ```
 
-The launcher performs stale-only Blender preparation/export, verifies the
-tracked semantic integrity manifest, incrementally builds the dedicated game
-and C++ package validator, validates render and collision compilation, and
-stages an isolated portable run. It then launches the game with University,
-owned collision, map-loader telemetry, and renderer performance telemetry
-enabled.
+The BAT only launches the build previously prepared and validated offline by
+the map agent. It never builds, exports, copies, or deploys content. Before
+launch it verifies SHA-256 hashes for the prepared executable, runtime, and
+University package, then enables owned collision, map-loader telemetry, and
+renderer performance telemetry.
 
 Every invocation uses
 `out/university-visual-check/runs/<yyyyMMdd_HHmmss>/`. Its `logs/` directory
-contains preparation output, package analysis, engine validation, exact launch
-arguments, hashes/commit metadata, and `skate3_university.log`. The launcher
-prints the exact path before starting the game and reports failures before
-launch.
+contains the exact launch arguments, prepared hashes/commit metadata, and
+`skate3_university.log`. The launcher prints the exact path before starting
+the game and reports failures clearly.
 
 Agents must never execute this `.bat` file or launch `skate3.exe`. Offline
-preparation can be checked safely with:
+preparation is performed separately with:
 
 ```powershell
-.\tools\vanilla_map_extraction\tools\Invoke-UniversityVisualCheck.ps1 `
-  -PrepareOnly
+.\tools\vanilla_map_extraction\tools\Invoke-UniversityVisualCheck.ps1
 ```
+
+That command rebuilds stale Blender/package outputs, compiles the game,
+validates the actual engine loader/render/collision worlds, and stages
+`out/university-visual-check/prepared/`, but cannot launch the game.
 
 Visual correctness remains a user decision. Passing loader, counts, bounds,
 hash, render-chunk, collision-chunk, and telemetry checks does not prove that
