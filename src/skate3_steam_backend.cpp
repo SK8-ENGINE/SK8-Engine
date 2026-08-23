@@ -1281,7 +1281,8 @@ std::vector<Peer> LobbyPeers() {
 }
 
 bool SendPacketToPeer(std::uint64_t steam_id, const void* bytes,
-                      std::size_t byte_count, bool reliable) {
+                      std::size_t byte_count,
+                      PacketReliability reliability) {
   std::scoped_lock lock(g_mutex);
   if (!g_runtime.state.initialized || !g_runtime.state.in_lobby ||
       steam_id == 0 || bytes == nullptr || byte_count == 0 ||
@@ -1293,8 +1294,9 @@ bool SendPacketToPeer(std::uint64_t steam_id, const void* bytes,
   return g_runtime.api.send_network_message(
              g_runtime.networking, &identity, bytes,
              static_cast<std::uint32_t>(byte_count),
-             reliable ? kSendReliableAutoRestart
-                      : kSendUnreliableAutoRestart,
+             reliability == PacketReliability::kReliable
+                 ? kSendReliableAutoRestart
+                 : kSendUnreliableAutoRestart,
              kNetworkingChannel) == kResultOk;
 }
 

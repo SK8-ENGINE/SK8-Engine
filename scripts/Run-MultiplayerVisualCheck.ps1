@@ -8,7 +8,8 @@ param(
     [string]$CacAssetRoot = '',
     [switch]$NoDirectBoot,
     [switch]$PrepareOnly,
-    [switch]$AppearanceRecoveryCheck
+    [switch]$AppearanceRecoveryCheck,
+    [switch]$RealtimePriorityCheck
 )
 
 Set-StrictMode -Version Latest
@@ -39,6 +40,12 @@ New-Item -ItemType Directory -Path $runRoot -Force | Out-Null
 $setupLog = Join-Path $runRoot 'setup.log'
 if ($AppearanceRecoveryCheck -and $Clients -lt 3) {
     throw 'The appearance-recovery check requires three clients.'
+}
+if ($RealtimePriorityCheck -and $Clients -ne 5) {
+    throw 'The realtime-priority check requires exactly five clients.'
+}
+if ($AppearanceRecoveryCheck -and $RealtimePriorityCheck) {
+    throw 'Select only one specialized multiplayer visual check.'
 }
 
 function Write-Setup {
@@ -544,6 +551,7 @@ try {
         appearance_install_ops_per_frame = 4
         appearance_install_budget_ms = 4.0
         appearance_recovery_check = [bool]$AppearanceRecoveryCheck
+        realtime_priority_check = [bool]$RealtimePriorityCheck
         appearance_recovery_receiver = if ($AppearanceRecoveryCheck) {
             3
         } else {
@@ -609,6 +617,67 @@ Failure:
 - Any client freezes, stalls, or loses normal local input response.
 
 Do not treat logs as proof of visual correctness. Report the visual result
+separately, then ask the agent to analyze this run directory.
+"@
+    } elseif ($RealtimePriorityCheck) {
+        @"
+MULTIPLAYER REALTIME PRIORITY CHECK
+
+Run directory:
+$runRoot
+
+Clients: 5
+Transport: localhost UDP
+Quality: Balanced, 60 Hz root, 60 Hz animation, 50 ms interpolation
+Wire format: unchanged protocol v11
+Delivery policy: root/animation unreliable and latest-wins; control/outfits
+reliable
+
+Visual scenario:
+1. Wait until all five clients have loaded the same map and each client can
+   see the other four skaters.
+2. Wait for every teal proxy to change to that role's complete saved outfit
+   and board. Initial appearance loading creates the reliable bulk traffic
+   that must not disturb realtime movement.
+3. Use one client as the viewing client. On each of the other roles in turn,
+   skate close to the group for roughly 20 seconds: push, carve sharply,
+   ollie, perform a fast spinning trick, bail, and let the board detach.
+4. Watch each moving role from the viewing client. Pay special attention to
+   rapid spins, feet and board contact, the instant of the bail, detached
+   board motion, hair/hats, and loose clothing.
+5. Keep all five clients running nearby for at least 3 minutes. Periodically
+   switch the viewing client so at least two different clients observe the
+   same moving skater.
+6. Confirm every focused local client retains normal input response and no
+   new frame stalls occur while outfits finish loading or while several
+   remote animation streams are active.
+7. Close all five clients after the 3-minute observation.
+
+Visual success:
+- Nearby remote movement stays smooth and current, without long freezes,
+  bursts of old animation, snapping, or delayed trick playback.
+- Spins, bails, feet, boards, detached boards, hair, hats, and clothing remain
+  attached and visually consistent.
+- Every complete outfit remains complete; no role returns to teal, disappears,
+  mixes pieces, or loses its board.
+- Local input remains normal and no obvious new client-FPS stall appears.
+
+Visual failure:
+- Any remote skater freezes and then catches up, plays obviously stale motion,
+  snaps repeatedly, or loses pose/board/attachment fidelity.
+- Any player disappears, becomes teal after loading, corrupts an outfit, or
+  shows a missing/stretched garment.
+- Any focused local client gains noticeable input delay or a new frame stall.
+
+Telemetry acceptance checked by the agent afterward:
+- Every client reports the explicit transport-policy marker.
+- Animation traffic is classified as unreliable and appearance/control
+  traffic as reliable.
+- Delivery-policy errors, socket failures, and multiplayer errors remain zero.
+- Packet, animation-frame, interpolation, jitter, appearance, and resource
+  counters remain healthy.
+
+Logs cannot establish visual correctness. Report your visual result
 separately, then ask the agent to analyze this run directory.
 "@
     } else {
@@ -839,13 +908,16 @@ separately, then ask the agent to analyze this run directory.
     Write-Host ''
     if ($AppearanceRecoveryCheck) {
         Write-Host 'MULTIPLAYER APPEARANCE RECOVERY CHECK READY'
+    } elseif ($RealtimePriorityCheck) {
+        Write-Host 'MULTIPLAYER REALTIME PRIORITY CHECK READY'
     } else {
         Write-Host 'MULTIPLAYER VISUAL CHECK READY'
     }
     Write-Host "Run folder: $runRoot"
     Write-Host "Instructions: $(Join-Path $runRoot 'VISUAL-CHECK.txt')"
     Write-Host ''
-    if (-not $AppearanceRecoveryCheck) {
+    if (-not $AppearanceRecoveryCheck -and
+        -not $RealtimePriorityCheck) {
         Write-Host (
             'After closing client 3, wait 7 seconds and run ' +
             'RELAUNCH_MULTIPLAYER_VISUAL_CLIENT_3.bat.'

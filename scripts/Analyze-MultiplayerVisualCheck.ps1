@@ -367,6 +367,30 @@ foreach ($client in $clientDirectories) {
         (Maximum-IntegerField $rateLines 'rejected')
     )
     $summary.Add(
+        'transport_policy_events=' +
+        (Match-Count $lines (
+            'multiplayer: transport policy root=unreliable ' +
+            'animation=unreliable control=reliable ' +
+            'appearance=reliable'
+        ))
+    )
+    $summary.Add(
+        'max_animation_unreliable_fragments=' +
+        (Maximum-IntegerField $rateLines 'anim_u')
+    )
+    $summary.Add(
+        'max_appearance_reliable_chunks=' +
+        (Maximum-IntegerField $rateLines 'appearance_r')
+    )
+    $summary.Add(
+        'max_control_reliable_packets=' +
+        (Maximum-IntegerField $rateLines 'control_r')
+    )
+    $summary.Add(
+        'max_delivery_policy_errors=' +
+        (Maximum-IntegerField $rateLines 'errors')
+    )
+    $summary.Add(
         'max_known_peers=' +
         (Maximum-IntegerField $rateLines 'peers')
     )

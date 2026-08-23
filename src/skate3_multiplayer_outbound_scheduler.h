@@ -18,6 +18,11 @@ enum class OutboundTrafficClass {
   kAppearance,
 };
 
+[[nodiscard]] constexpr bool OutboundTrafficReliable(
+    OutboundTrafficClass traffic_class) {
+  return traffic_class != OutboundTrafficClass::kRealtime;
+}
+
 struct OutboundSchedulerLimits {
   std::size_t maximum_datagram_bytes =
       protocol_v12::kMaximumDatagramBytes;

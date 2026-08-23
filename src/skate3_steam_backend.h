@@ -49,6 +49,11 @@ struct Message {
   std::vector<std::byte> bytes;
 };
 
+enum class PacketReliability {
+  kUnreliable,
+  kReliable,
+};
+
 bool Initialize();
 bool IsInitialized();
 void Tick();
@@ -70,7 +75,8 @@ std::uint32_t LocalRole();
 std::uint64_t HostSteamId();
 std::vector<Peer> LobbyPeers();
 bool SendPacketToPeer(std::uint64_t steam_id, const void* bytes,
-                      std::size_t byte_count, bool reliable);
+                      std::size_t byte_count,
+                      PacketReliability reliability);
 std::vector<Message> ReceiveMessages(std::size_t maximum_messages);
 
 }  // namespace skate3::multiplayer::steam

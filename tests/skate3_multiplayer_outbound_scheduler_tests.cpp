@@ -42,6 +42,13 @@ OutboundEnqueueRequest Request(
 }
 
 void TestPriorityAndAppearanceBudget() {
+  Expect(!OutboundTrafficReliable(
+             OutboundTrafficClass::kRealtime) &&
+             OutboundTrafficReliable(
+                 OutboundTrafficClass::kControl) &&
+             OutboundTrafficReliable(
+                 OutboundTrafficClass::kAppearance),
+         "transport reliability mapping changed");
   OutboundScheduler scheduler;
   const std::array<std::uint8_t, 400> appearance{};
   const std::array<std::uint8_t, 100> realtime{};

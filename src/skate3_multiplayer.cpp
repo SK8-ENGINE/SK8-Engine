@@ -1,6 +1,7 @@
 #include "skate3_multiplayer.h"
 
 #include "skate3_multiplayer_lifecycle.h"
+#include "skate3_multiplayer_outbound_scheduler.h"
 #include "skate3_multiplayer_protocol.h"
 #include "skate3_multiplayer_worker.h"
 #include "skate3_steam_backend.h"
@@ -460,6 +461,14 @@ struct TelemetrySnapshot {
   std::uint64_t received_packets = 0;
   std::uint64_t sent_bytes = 0;
   std::uint64_t received_bytes = 0;
+  std::uint64_t sent_unreliable_packets = 0;
+  std::uint64_t sent_unreliable_bytes = 0;
+  std::uint64_t sent_reliable_packets = 0;
+  std::uint64_t sent_reliable_bytes = 0;
+  std::uint64_t sent_animation_unreliable_fragments = 0;
+  std::uint64_t sent_appearance_reliable_chunks = 0;
+  std::uint64_t sent_control_reliable_packets = 0;
+  std::uint64_t delivery_policy_errors = 0;
   std::uint64_t sent_root_packets = 0;
   std::uint64_t sent_root_bytes = 0;
   std::uint64_t sent_animation_fragments = 0;
@@ -2065,6 +2074,22 @@ class Runtime {
         << " multiplayer_rx_packets=" << telemetry_.received_packets
         << " multiplayer_tx_bytes=" << telemetry_.sent_bytes
         << " multiplayer_rx_bytes=" << telemetry_.received_bytes
+        << " multiplayer_tx_unreliable_packets="
+        << telemetry_.sent_unreliable_packets
+        << " multiplayer_tx_unreliable_bytes="
+        << telemetry_.sent_unreliable_bytes
+        << " multiplayer_tx_reliable_packets="
+        << telemetry_.sent_reliable_packets
+        << " multiplayer_tx_reliable_bytes="
+        << telemetry_.sent_reliable_bytes
+        << " multiplayer_tx_animation_unreliable_fragments="
+        << telemetry_.sent_animation_unreliable_fragments
+        << " multiplayer_tx_appearance_reliable_chunks="
+        << telemetry_.sent_appearance_reliable_chunks
+        << " multiplayer_tx_control_reliable_packets="
+        << telemetry_.sent_control_reliable_packets
+        << " multiplayer_delivery_policy_errors="
+        << telemetry_.delivery_policy_errors
         << " multiplayer_tx_root_packets="
         << telemetry_.sent_root_packets
         << " multiplayer_tx_root_bytes="
@@ -2227,6 +2252,14 @@ class Runtime {
         telemetry_.sent_control_bytes,
         last_rate_snapshot_.sent_control_bytes) /
         1024.0;
+    const double tx_unreliable_kib = per_second(
+        telemetry_.sent_unreliable_bytes,
+        last_rate_snapshot_.sent_unreliable_bytes) /
+        1024.0;
+    const double tx_reliable_kib = per_second(
+        telemetry_.sent_reliable_bytes,
+        last_rate_snapshot_.sent_reliable_bytes) /
+        1024.0;
     const double rx_root_kib = per_second(
         telemetry_.received_root_bytes,
         last_rate_snapshot_.received_root_bytes) /
@@ -2270,6 +2303,8 @@ class Runtime {
         "rx={:.1f}KiB/s tx={:.1f}pps rx={:.1f}pps anim={:.1f}/{:.1f}fps "
         "classes=tx({:.1f}r/{:.1f}a/{:.1f}p/{:.1f}c)KiB/s "
         "rx({:.1f}r/{:.1f}a/{:.1f}p/{:.1f}c)KiB/s "
+        "delivery=tx({:.1f}u/{:.1f}r)KiB/s "
+        "policy=anim_u:{} appearance_r:{} control_r:{} errors:{} "
         "bones={} relay={:.1f}pps relevance_drop={:.1f}pps rejected={} "
         "failures={} peer_resets={} "
         "appearance={:.2f}MiB timeout={} budget_reject={} "
@@ -2285,6 +2320,11 @@ class Runtime {
         tx_root_kib, tx_animation_kib, tx_appearance_kib,
         tx_control_kib, rx_root_kib, rx_animation_kib,
         rx_appearance_kib, rx_control_kib,
+        tx_unreliable_kib, tx_reliable_kib,
+        telemetry_.sent_animation_unreliable_fragments,
+        telemetry_.sent_appearance_reliable_chunks,
+        telemetry_.sent_control_reliable_packets,
+        telemetry_.delivery_policy_errors,
         telemetry_.remote_animation_bones, relay_pps, drop_pps,
         telemetry_.rejected_packets, telemetry_.socket_failures,
         telemetry_.outbound_peer_resets,
@@ -2577,6 +2617,10 @@ class Runtime {
           "multiplayer: Steam P2P active as role {} in lobby {} "
           "(protocol={} session={})",
           role, state.lobby_id, kProtocolVersion, session_id_);
+      REXLOG_INFO(
+          "multiplayer: transport policy root=unreliable "
+          "animation=unreliable control=reliable "
+          "appearance=reliable transport=steam");
     }
 
     std::array<bool, 101> observed_roles{};
@@ -2695,6 +2739,10 @@ class Runtime {
         "to 127.0.0.1:{} (protocol={} session={})",
         role, base_port + role - 1, base_port + (role == 1 ? 1 : 0),
         kProtocolVersion, session_id_);
+    REXLOG_INFO(
+        "multiplayer: transport policy root=unreliable "
+        "animation=unreliable control=reliable "
+        "appearance=reliable transport=localhost");
     return true;
 #else
     (void)role;
@@ -2784,7 +2832,8 @@ class Runtime {
             packet.position);
         RelayPacket(
             bytes, received, packet.sender_role,
-            /*animation=*/false, now);
+            OutboundTrafficClass::kRealtime,
+            /*high_detail_only=*/false, now);
       }
     } else if (
         magic == kAnimationPacketMagic &&
@@ -2805,7 +2854,8 @@ class Runtime {
             nullptr);
         RelayPacket(
             bytes, received, packet.sender_role,
-            /*animation=*/true, now);
+            OutboundTrafficClass::kRealtime,
+            /*high_detail_only=*/true, now);
       }
     } else if (
         magic == kAppearancePacketMagic &&
@@ -2827,7 +2877,8 @@ class Runtime {
             nullptr);
         RelayPacket(
             bytes, received, packet.sender_role,
-            /*animation=*/true, now);
+            OutboundTrafficClass::kAppearance,
+            /*high_detail_only=*/true, now);
       }
     } else if (
         magic == kControlPacketMagic &&
@@ -3513,7 +3564,9 @@ class Runtime {
     return true;
   }
 
-  void RecordSentPacketClass(const void* bytes, int byte_count) {
+  void RecordSentPacketClass(
+      const void* bytes, int byte_count,
+      OutboundTrafficClass traffic_class) {
     if (bytes == nullptr ||
         byte_count < static_cast<int>(sizeof(std::uint32_t))) {
       return;
@@ -3524,15 +3577,33 @@ class Runtime {
     if (magic == kPacketMagic) {
       ++telemetry_.sent_root_packets;
       telemetry_.sent_root_bytes += packet_bytes;
+      if (traffic_class != OutboundTrafficClass::kRealtime) {
+        ++telemetry_.delivery_policy_errors;
+      }
     } else if (magic == kAnimationPacketMagic) {
       ++telemetry_.sent_animation_fragments;
       telemetry_.sent_animation_bytes += packet_bytes;
+      if (traffic_class == OutboundTrafficClass::kRealtime) {
+        ++telemetry_.sent_animation_unreliable_fragments;
+      } else {
+        ++telemetry_.delivery_policy_errors;
+      }
     } else if (magic == kAppearancePacketMagic) {
       ++telemetry_.sent_appearance_chunks;
       telemetry_.sent_appearance_bytes += packet_bytes;
+      if (traffic_class == OutboundTrafficClass::kAppearance) {
+        ++telemetry_.sent_appearance_reliable_chunks;
+      } else {
+        ++telemetry_.delivery_policy_errors;
+      }
     } else if (magic == kControlPacketMagic) {
       ++telemetry_.sent_control_packets;
       telemetry_.sent_control_bytes += packet_bytes;
+      if (traffic_class == OutboundTrafficClass::kControl) {
+        ++telemetry_.sent_control_reliable_packets;
+      } else {
+        ++telemetry_.delivery_policy_errors;
+      }
     }
   }
 
@@ -3555,14 +3626,20 @@ class Runtime {
   }
 
 #if defined(_WIN32)
-  bool SendBytes(const void* bytes, int byte_count,
-                 const PacketEndpoint& target, bool animation,
-                 bool relayed) {
+  bool SendBytes(
+      const void* bytes, int byte_count,
+      const PacketEndpoint& target,
+      OutboundTrafficClass traffic_class, bool relayed) {
+    const bool reliable =
+        OutboundTrafficReliable(traffic_class);
     bool success = false;
     if (target.steam) {
       success = steam::SendPacketToPeer(
           target.steam_id, bytes,
-          static_cast<std::size_t>(byte_count), animation);
+          static_cast<std::size_t>(byte_count),
+          reliable
+              ? steam::PacketReliability::kReliable
+              : steam::PacketReliability::kUnreliable);
     } else {
       const int sent = sendto(
           socket_, reinterpret_cast<const char*>(bytes), byte_count, 0,
@@ -3576,7 +3653,16 @@ class Runtime {
     }
     ++telemetry_.sent_packets;
     telemetry_.sent_bytes += static_cast<std::uint64_t>(byte_count);
-    RecordSentPacketClass(bytes, byte_count);
+    if (reliable) {
+      ++telemetry_.sent_reliable_packets;
+      telemetry_.sent_reliable_bytes +=
+          static_cast<std::uint64_t>(byte_count);
+    } else {
+      ++telemetry_.sent_unreliable_packets;
+      telemetry_.sent_unreliable_bytes +=
+          static_cast<std::uint64_t>(byte_count);
+    }
+    RecordSentPacketClass(bytes, byte_count, traffic_class);
     if (relayed) {
       ++telemetry_.relayed_packets;
     }
@@ -3678,7 +3764,7 @@ class Runtime {
     }
     return SendBytes(
         &packet, static_cast<int>(sizeof(packet)), target,
-        /*animation=*/true, relayed);
+        OutboundTrafficClass::kControl, relayed);
   }
 
   std::vector<std::uint32_t> ControlTargetRoles() const {
@@ -3848,9 +3934,11 @@ class Runtime {
 #endif
   }
 
-  void RelayPacket(const void* bytes, int byte_count,
-                   std::uint32_t source_role, bool animation,
-                   Clock::time_point now) {
+  void RelayPacket(
+      const void* bytes, int byte_count,
+      std::uint32_t source_role,
+      OutboundTrafficClass traffic_class,
+      bool high_detail_only, Clock::time_point now) {
 #if defined(_WIN32)
     if (bound_role_ != 1) {
       return;
@@ -3862,18 +3950,22 @@ class Runtime {
       return;
     }
     const auto targets =
-        LocalPacketTargets(source_role, animation, now);
+        LocalPacketTargets(
+            source_role, high_detail_only, now);
     for (const auto& [target_role, endpoint] : targets) {
       if (target_role == source_role) {
         continue;
       }
-      SendBytes(bytes, byte_count, endpoint, animation, true);
+      SendBytes(
+          bytes, byte_count, endpoint, traffic_class,
+          /*relayed=*/true);
     }
 #else
     (void)bytes;
     (void)byte_count;
     (void)source_role;
-    (void)animation;
+    (void)traffic_class;
+    (void)high_detail_only;
     (void)now;
 #endif
   }
@@ -3892,7 +3984,8 @@ class Runtime {
       (void)target_role;
       sent_any |= SendBytes(
           &packet, static_cast<int>(sizeof(packet)), target,
-          /*animation=*/false, /*relayed=*/false);
+          OutboundTrafficClass::kRealtime,
+          /*relayed=*/false);
     }
     if (sent_any) {
       telemetry_.sent_sequence = packet.sequence;
@@ -4016,7 +4109,8 @@ class Runtime {
             AnimationFragmentByteCount(packet.word_count));
         target_complete &=
             SendBytes(&packet, packet.byte_count, target,
-                      /*animation=*/true, /*relayed=*/false);
+                      OutboundTrafficClass::kRealtime,
+                      /*relayed=*/false);
       }
       if (target_complete) {
         outbound_animation_keyframes_[target_role] =
@@ -4121,7 +4215,8 @@ class Runtime {
             AppearanceFragmentByteCount(packet.chunk_bytes));
         if (!SendBytes(
                 &packet, packet.byte_count, target,
-                /*animation=*/true, /*relayed=*/false)) {
+                OutboundTrafficClass::kAppearance,
+                /*relayed=*/false)) {
           break;
         }
         ++state.next_chunk;
