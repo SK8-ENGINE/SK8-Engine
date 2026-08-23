@@ -814,6 +814,16 @@ int main() {
               retail_edge_mesh.mesh.bytes.at(retail_unit + 5) == 0x5a &&
               retail_edge_mesh.mesh.bytes.at(retail_unit + 6) == 0x62,
           "native retail collision edge codes were regenerated");
+  const RwCollisionBuildResult adopted_retail_mesh =
+      LoadSerializedRwCollisionMesh(retail_edge_mesh.mesh.bytes);
+  Require(adopted_retail_mesh.ok, adopted_retail_mesh.error);
+  Require(
+      adopted_retail_mesh.mesh.bytes == retail_edge_mesh.mesh.bytes &&
+          adopted_retail_mesh.mesh.triangle_count ==
+              retail_edge_mesh.mesh.triangle_count &&
+          adopted_retail_mesh.mesh.cluster_count ==
+              retail_edge_mesh.mesh.cluster_count,
+      "serialized retail collision mesh adoption changed the resource");
 
   std::uint32_t kd_leaf_triangles = 0;
   for (std::uint32_t branch = 0; branch < kd_branch_count; ++branch) {

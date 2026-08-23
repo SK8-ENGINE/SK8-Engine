@@ -282,6 +282,14 @@ def _source_matches(
                                 "rx2": str(rx2.relative_to(source_root)),
                                 "mesh_index": mesh_index,
                                 "triangle_index": triangle_index,
+                                "cluster_index": (
+                                    mesh.triangle_cluster_indices[
+                                        triangle_index
+                                    ]
+                                ),
+                                "mesh_flags": mesh.mesh_flags,
+                                "unit_flags": triangle.unit_flags,
+                                "group_id": triangle.group_id,
                                 "surface": triangle.surface,
                                 "edge_codes": triangle.edge_codes,
                                 "vertices": (

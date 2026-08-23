@@ -266,9 +266,15 @@ try {
     $materialVerifier = Join-Path (
         $workspace
     ) 'tools\verify_university_material_channels.py'
+    $collisionProbeBuilder = Join-Path (
+        $workspace
+    ) 'tools\build_university_collision_probe.py'
     $extractionManifest = Join-Path (
         $workspace
     ) 'intermediate\university\manifest.json'
+    $collisionProbe = Join-Path (
+        $workspace
+    ) 'intermediate\university\University.spawn-collision.rwcmset'
     $expectedPath = Join-Path (
         $workspace
     ) 'schemas\university_expected.json'
@@ -403,6 +409,13 @@ try {
         '--expected',
         $expectedPath
     ) -Description 'Verify conservative retail normal-map transport'
+    Invoke-Checked -FilePath 'python' -Arguments @(
+        $collisionProbeBuilder,
+        $extractionManifest,
+        $collisionProbe
+    ) -Description (
+        'Build exact retail Mega Park collision comparison archive'
+    )
 
     Assert-Equal 'format version' $actual.version $expected.format_version
     Assert-Equal 'map name' $actual.map_name $expected.map_name
@@ -566,6 +579,9 @@ try {
     $stagedRuntime = Join-Path $runRoot 'rexruntime.dll'
     $stagedMapRoot = Join-Path $runRoot 'owned_maps'
     $stagedPackage = Join-Path $stagedMapRoot 'University.skate'
+    $stagedCollisionProbe = Join-Path (
+        $stagedMapRoot
+    ) 'University.spawn-collision.rwcmset'
     New-Item -ItemType Directory -Path $stagedMapRoot -Force | Out-Null
     New-Item -ItemType Directory -Path (
         Join-Path $runRoot 'maps'
@@ -580,6 +596,8 @@ try {
         Join-Path $buildRoot 'rexruntime.dll'
     ) -Destination $stagedRuntime -Force
     Copy-Item -LiteralPath $package -Destination $stagedPackage -Force
+    Copy-Item -LiteralPath $collisionProbe `
+        -Destination $stagedCollisionProbe -Force
     $stagedGame = Join-Path $runRoot 'game'
     if (Test-Path -LiteralPath $stagedGame) {
         $existingGame = Get-Item -LiteralPath $stagedGame -Force
@@ -634,12 +652,16 @@ try {
         map_sha256 = (
             Get-FileHash -LiteralPath $stagedPackage -Algorithm SHA256
         ).Hash
+        collision_probe_sha256 = (
+            Get-FileHash -LiteralPath $stagedCollisionProbe `
+                -Algorithm SHA256
+        ).Hash
         expected_contract = $expectedPath
         map_analysis = $analysisPath
         map_validation = $validationPath
         collision_source = (
-            'retail RenderWare ClusteredMesh geometry, packed surfaces, ' +
-            'and native edge codes'
+            'eight untouched retail RenderWare ClusteredMesh resources ' +
+            'nearest the Super Ultra Mega Park spawn'
         )
     }
     $manifestJson = $stageManifest | ConvertTo-Json -Depth 4

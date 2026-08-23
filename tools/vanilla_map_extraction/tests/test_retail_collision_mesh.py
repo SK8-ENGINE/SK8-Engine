@@ -78,9 +78,13 @@ class RetailCollisionMeshTests(unittest.TestCase):
         self.assertEqual(decoded.vertex_count, 3)
         self.assertEqual(decoded.triangle_cluster_indices, (0,))
         self.assertEqual(decoded.compression_counts, ((1, 1),))
+        self.assertEqual(decoded.mesh_flags, 0x10)
+        self.assertEqual(decoded.group_id_width, 1)
+        self.assertEqual(decoded.surface_id_width, 2)
         self.assertEqual(decoded.triangles[0].surface, 0x8312)
         self.assertEqual(decoded.triangles[0].edge_codes, (0, 0, 0))
         self.assertIsNone(decoded.triangles[0].group_id)
+        self.assertEqual(decoded.triangles[0].unit_flags, 0xA1)
         self.assert_vec3_almost_equal(
             decoded.triangles[0].a, (1.0, 2.0, -3.0)
         )

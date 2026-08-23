@@ -14,10 +14,13 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <cstdlib>
 #include <exception>
+#include <fstream>
 #include <limits>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <ostream>
 #include <string>
 #include <unordered_set>
@@ -828,8 +831,111 @@ struct OwnedCollisionBuildSet {
   std::string error;
 };
 
+const char* RetailCollisionArchivePath() {
+  const char* path = std::getenv("SKATE3_NATIVE_COLLISION_ARCHIVE");
+  return path != nullptr && path[0] != '\0' ? path : nullptr;
+}
+
+OwnedCollisionBuildSet LoadRetailCollisionArchive(const char* path) {
+  OwnedCollisionBuildSet result;
+  std::ifstream stream(path, std::ios::binary | std::ios::ate);
+  if (!stream) {
+    result.error = std::string("could not open retail collision archive '") +
+                   path + "'";
+    return result;
+  }
+  const std::streamoff end = stream.tellg();
+  if (end < 12 || end > std::numeric_limits<std::uint32_t>::max()) {
+    result.error = "retail collision archive size is invalid";
+    return result;
+  }
+  stream.seekg(0);
+  std::vector<std::uint8_t> bytes(static_cast<std::size_t>(end));
+  stream.read(reinterpret_cast<char*>(bytes.data()), end);
+  if (!stream) {
+    result.error = "could not read the complete retail collision archive";
+    return result;
+  }
+  constexpr std::array<std::uint8_t, 8> kMagic{
+      'R', 'W', 'C', 'M', 'S', 'E', 'T', '1'};
+  if (!std::equal(kMagic.begin(), kMagic.end(), bytes.begin())) {
+    result.error = "retail collision archive magic is invalid";
+    return result;
+  }
+  std::size_t cursor = kMagic.size();
+  auto read_u32 = [&]() -> std::optional<std::uint32_t> {
+    if (cursor > bytes.size() || bytes.size() - cursor < 4) {
+      return std::nullopt;
+    }
+    const std::uint32_t value =
+        static_cast<std::uint32_t>(bytes[cursor]) |
+        (static_cast<std::uint32_t>(bytes[cursor + 1]) << 8u) |
+        (static_cast<std::uint32_t>(bytes[cursor + 2]) << 16u) |
+        (static_cast<std::uint32_t>(bytes[cursor + 3]) << 24u);
+    cursor += 4;
+    return value;
+  };
+  const std::optional<std::uint32_t> count = read_u32();
+  if (!count || *count == 0 || *count > kMaximumOwnedStaticChunks) {
+    result.error = "retail collision archive mesh count is invalid";
+    return result;
+  }
+  result.chunks.reserve(*count);
+  for (std::uint32_t index = 0; index < *count; ++index) {
+    const std::optional<std::uint32_t> name_size = read_u32();
+    if (!name_size || *name_size > 4096u ||
+        *name_size > bytes.size() - cursor) {
+      result.error = "retail collision archive mesh name is invalid";
+      result.chunks.clear();
+      return result;
+    }
+    const std::string name(
+        reinterpret_cast<const char*>(bytes.data() + cursor), *name_size);
+    cursor += *name_size;
+    const std::optional<std::uint32_t> mesh_size = read_u32();
+    if (!mesh_size || *mesh_size < 96u ||
+        *mesh_size > bytes.size() - cursor) {
+      result.error = "retail collision archive mesh payload is invalid";
+      result.chunks.clear();
+      return result;
+    }
+    skate::world::RwCollisionBuildResult mesh =
+        skate::world::LoadSerializedRwCollisionMesh(
+            std::span<const std::uint8_t>(
+                bytes.data() + cursor, *mesh_size));
+    cursor += *mesh_size;
+    if (!mesh.ok) {
+      result.error = name + ": " + mesh.error;
+      result.chunks.clear();
+      return result;
+    }
+    REXLOG_INFO(
+        "native-collision: adopted exact retail mesh '{}' triangles={} "
+        "vertices={} clusters={} bytes={}",
+        name, mesh.mesh.triangle_count, mesh.mesh.vertex_count,
+        mesh.mesh.cluster_count, mesh.mesh.bytes.size());
+    result.chunks.push_back(std::move(mesh));
+  }
+  if (cursor != bytes.size()) {
+    result.error = "retail collision archive has trailing bytes";
+    result.chunks.clear();
+  }
+  return result;
+}
+
 OwnedCollisionBuildSet CompileOwnedMapChunks(
     const float world_translation[3]) {
+  if (const char* archive = RetailCollisionArchivePath()) {
+    if (world_translation[0] != 0.0f ||
+        world_translation[1] != 0.0f ||
+        world_translation[2] != 0.0f) {
+      OwnedCollisionBuildSet result;
+      result.error =
+          "exact retail collision archive requires zero world translation";
+      return result;
+    }
+    return LoadRetailCollisionArchive(archive);
+  }
   OwnedCollisionBuildSet result;
   skate::world::RwCollisionBuildOptions options;
   options.translation = {
@@ -2265,9 +2371,26 @@ void ObservePlayerCollisionTelemetry(const float world_position[3],
                           package_normal,
                           skate::world::Normalize(contact.hit_normal))
                     : 0.0f;
+    std::uint16_t package_native_surface = 0;
+    if (package_hit) {
+      const skate::world::MapDefinition& definition =
+          mechanics_sandbox::map::ActiveDefinition();
+      const auto material = std::find_if(
+          definition.materials.begin(), definition.materials.end(),
+          [&](const skate::world::SurfaceMaterial& candidate) {
+            return candidate.id == shadow_hit.material;
+          });
+      if (material != definition.materials.end()) {
+        package_native_surface = skate::world::EncodeRwSurfaceId(
+            material->skate_audio_surface,
+            material->skate_physics_surface,
+            material->skate_surface_pattern);
+      }
+    }
     const bool surface_match =
         package_hit &&
-        shadow_hit.id == static_cast<std::uint32_t>(contact.surface);
+        package_native_surface ==
+            static_cast<std::uint16_t>(contact.surface);
     const bool geometry_match =
         package_hit && point_error <= 0.002f &&
         distance_error <= 0.002f && normal_dot >= 0.999f;
@@ -2275,13 +2398,16 @@ void ObservePlayerCollisionTelemetry(const float world_position[3],
         "native-collision-shadow-compare: frame={} rank={} "
         "retail_selected={} package_hit={} geometry_match={} "
         "surface_match={} retail_surface=0x{:04X} "
-        "package_surface=0x{:04X} point_error={:.6f} "
+        "package_surface=0x{:04X} package_internal_surface={} "
+        "package_material={} point_error={:.6f} "
         "distance_error={:.6f} normal_dot={:.6f} "
         "package_hit_position=({:.4f},{:.4f},{:.4f})",
         frame, index + 1, contact.selected_count,
         package_hit ? 1 : 0, geometry_match ? 1 : 0,
         surface_match ? 1 : 0, contact.surface,
-        package_hit ? shadow_hit.id : 0u, point_error,
+        package_hit ? package_native_surface : 0u,
+        package_hit ? shadow_hit.id : 0u,
+        package_hit ? shadow_hit.material : 0u, point_error,
         distance_error, normal_dot,
         package_hit ? shadow_hit.point[0] : 0.0f,
         package_hit ? shadow_hit.point[1] : 0.0f,
@@ -2452,10 +2578,17 @@ void EnsureInstalled(PPCContext& ctx,
   // translation for its authored local-space draw data.
   const skate::world::SpawnPoint& spawn =
       mechanics_sandbox::map::ActiveDefinition().spawn;
-  const float translation[3] = {
+  float translation[3] = {
       map_origin[0] - spawn.position.x,
       ground[1] - spawn.position.y,
       map_origin[2] - spawn.position.z};
+  if (RetailCollisionArchivePath() != nullptr) {
+    // The archived retail ClusteredMesh resources already use University
+    // world coordinates and retain their original KD/cluster organization.
+    translation[0] = 0.0f;
+    translation[1] = 0.0f;
+    translation[2] = 0.0f;
+  }
   if (REXCVAR_GET(
           skate3_mechanics_sandbox_native_collision_retail_only)) {
     // University extraction preserves retail world coordinates. Anchoring

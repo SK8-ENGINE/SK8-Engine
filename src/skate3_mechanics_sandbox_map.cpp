@@ -1627,6 +1627,7 @@ bool QueryRaySegment(const float start[3], const float delta[3], RayHit& out) {
     return false;
   }
   out.id = source.surface;
+  out.material = source.material;
   out.point[0] = source.point.x;
   out.point[1] = source.point.y;
   out.point[2] = source.point.z;

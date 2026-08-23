@@ -60,6 +60,12 @@ RwCollisionBuildResult BuildRwCollisionMesh(
     const MapDefinition& map,
     const RwCollisionBuildOptions& options = {});
 
+// Validates and adopts an untouched serialized retail ClusteredMesh. This is
+// used to distinguish extraction errors from behavior introduced by
+// rebuilding retail triangles into a different KD/cluster layout.
+RwCollisionBuildResult LoadSerializedRwCollisionMesh(
+    std::span<const std::uint8_t> bytes);
+
 // Applies the same mixed pointer/offset contract as Skate's RenderWare asset
 // loader. The top-level KD-tree and cluster-table addresses, plus the KD
 // branch-record address, become absolute guest pointers. Cluster-table

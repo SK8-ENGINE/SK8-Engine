@@ -23,6 +23,7 @@ class CollisionTriangle:
     surface: int
     edge_codes: tuple[int, int, int] | None = None
     group_id: int | None = None
+    unit_flags: int = 0
 
 
 @dataclass(frozen=True)
@@ -35,6 +36,9 @@ class ClusteredMesh:
     vertex_count: int
     unit_count: int
     compression_counts: tuple[tuple[int, int], ...]
+    mesh_flags: int
+    group_id_width: int
+    surface_id_width: int
 
 
 def _require(condition: bool, message: str) -> None:
@@ -271,6 +275,7 @@ def _decode_cluster(
                     surface,
                     triangle_edge_codes,
                     group_id,
+                    flags,
                 )
             )
 
@@ -288,6 +293,7 @@ def decode_clustered_mesh(data: bytes) -> ClusteredMesh:
     kd_tree = _be_u32(data, 48)
     cluster_table = _be_u32(data, 52)
     granularity = _be_f32(data, 56)
+    mesh_flags = _be_u16(data, 60)
     group_id_width = data[62]
     surface_id_width = data[63]
     cluster_count = _be_u32(data, 64)
@@ -386,6 +392,9 @@ def decode_clustered_mesh(data: bytes) -> ClusteredMesh:
         vertex_count=vertex_count,
         unit_count=unit_count,
         compression_counts=tuple(sorted(compression_counts.items())),
+        mesh_flags=mesh_flags,
+        group_id_width=group_id_width,
+        surface_id_width=surface_id_width,
     )
 
 

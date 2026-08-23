@@ -83,6 +83,7 @@ struct GroundHit {
 
 struct RayHit {
   uint32_t id = 0;
+  uint32_t material = 0;
   float point[3] = {};
   float normal[3] = {};
   float distance = 0.0f;

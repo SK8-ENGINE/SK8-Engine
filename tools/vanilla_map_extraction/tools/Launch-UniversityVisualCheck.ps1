@@ -54,10 +54,15 @@ try {
     $executable = Join-Path $preparedRoot 'skate3.exe'
     $runtime = Join-Path $preparedRoot 'rexruntime.dll'
     $package = Join-Path $preparedRoot 'owned_maps\University.skate'
+    $collisionProbe = Join-Path (
+        $preparedRoot
+    ) 'owned_maps\University.spawn-collision.rwcmset'
     Assert-PreparedHash 'executable' $executable `
         $manifest.executable_sha256
     Assert-PreparedHash 'runtime' $runtime $manifest.runtime_sha256
     Assert-PreparedHash 'map package' $package $manifest.map_sha256
+    Assert-PreparedHash 'collision probe' $collisionProbe `
+        $manifest.collision_probe_sha256
 
     $running = Get-Process -Name 'skate3' -ErrorAction SilentlyContinue
     if ($null -ne $running) {
@@ -108,6 +113,11 @@ try {
         $package,
         'Process'
     )
+    [Environment]::SetEnvironmentVariable(
+        'SKATE3_NATIVE_COLLISION_ARCHIVE',
+        $(if ($RetailCollisionOnly) { $null } else { $collisionProbe }),
+        'Process'
+    )
     $arguments | Set-Content -LiteralPath (
         Join-Path $logRoot 'launch-arguments.txt'
     ) -Encoding UTF8
@@ -118,7 +128,7 @@ try {
     $collisionMode = if ($RetailCollisionOnly) {
         'retail-only coordinate-locked A/B collision'
     } else {
-        'owned University collision'
+        'exact retail-resource collision exported for Mega Park'
     }
     Write-Host (
         "Launching the offline-prepared University build ($collisionMode)."
