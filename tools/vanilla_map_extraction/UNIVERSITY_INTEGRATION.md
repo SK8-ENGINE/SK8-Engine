@@ -9,13 +9,15 @@ The ignored local output
 
 | Property | Verified value |
 | --- | ---: |
-| Package bytes | 130,320,474 |
-| Materials | 526 |
-| Opaque / mask / blend materials | 471 / 50 / 5 |
-| Embedded textures | 462 |
-| Decoded RGBA8 texture bytes | 253,257,728 |
+| Package bytes | 195,460,271 |
+| Materials | 4,413 |
+| Opaque / mask / blend materials | 2,972 / 1,414 / 27 |
+| Embedded textures | 1,732 |
+| Decoded RGBA8 texture bytes | 646,391,808 |
 | Retail normal maps / mapped mesh parts | 135 / 2,987 |
-| Indexed visual vertices | 2,081,271 |
+| Retail lightmaps / mapped mesh parts | 1,270 / 8,489 |
+| Exact decoded retail lightmap bytes | 393,134,080 |
+| Indexed visual vertices | 2,085,489 |
 | Visual indices | 4,936,851 |
 | Render triangles | 1,645,617 |
 | Collision triangles | 1,133,642 |
@@ -27,6 +29,23 @@ The ignored local output
 | Native collision clusters | 4,346 |
 | Compiled native collision bytes | 23,993,440 |
 | Top-level collision meshes | 1 |
+
+The previous non-lightmapped package was 130,320,474 bytes. Transporting
+393,134,080 decoded bytes of retail DXT1 lightmap pages increases the
+losslessly compressed package by 65,139,797 bytes, to 195,460,271 bytes.
+The exporter does not re-encode the already encoded retail pages: all 1,270
+selected pages are byte-equal to the decoded source images after Blender's
+documented bottom-row-first storage conversion. The UV V flip is paired with
+that storage conversion, so sampled texels retain their retail orientation.
+
+Retail vertex declarations contain a second TEXCOORD on 8,541 mesh parts.
+The extraction now decodes both explicit `SHORT2N` declarations and the
+previously unclassified `SHORT4` world layout whose `xy` components are the
+lightmap unwrap and whose signs also carry tangent handedness. Static world
+unwraps use the game's `abs(uv)` rule. Thirty-two water/ocean mesh parts are
+kept recorded but deliberately unbound because those shader families do not
+consume a reliable static indirect lightmap in the renderer; one sign mesh
+has a retail lightmap parameter but no secondary TEXCOORD.
 
 The continuous RenderWare collision build sizes KD leaves by the native
 255-local-vertex and 65,520-aligned-byte cluster limits. It no longer cuts
@@ -54,6 +73,9 @@ reviewed export:
   `ClusteredMesh` sections;
 - all 141 source normal IDs, the seven explicit special-map exclusions, and
   all 135 selected linear normal textures through the package material table;
+- all 1,271 source lightmap IDs, the 1,270 selected byte-exact lightmap
+  payloads, 8,489 bound mesh parts, second-UV presence/range, and the 33
+  explicit shader/no-UV exclusions;
 - downstream render-world, native grind-world, and collision-world counts.
 
 The C++ validator is the actual engine loader linked against the same
@@ -77,10 +99,10 @@ parameter and the old Blender preparation forced all alpha modes to opaque.
   contacts are not guessed during engine compilation.
 - The current UTT presentation parser computes averaged geometry normals;
   authoritative packed retail normals are not yet transported.
-- Conventional retail tangent-space normal maps are transported. Seven
-  shader-specific default/water/palm resources remain recorded but unbound;
-  specular, lightmap, detail, decal, macro-overlay, environment, and noise
-  semantics are not reconstructed yet.
+- Conventional retail tangent-space normal maps and static retail lightmaps
+  are transported. Seven shader-specific default/water/palm normal resources
+  remain recorded but unbound; specular, detail, decal, macro-overlay,
+  environment, and noise semantics are not reconstructed yet.
 - AI routes, hinged doors, and local lights are not recovered yet.
 - All 183 packed retail collision surfaces are preserved, including the three
   surface IDs that use native physics channel 13.

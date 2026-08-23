@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -63,27 +64,40 @@ def _new_material(
     image: bpy.types.Image | None,
     alpha_mode: int,
     *,
+    lightmap_texture_id: str = "",
+    lightmap_image: bpy.types.Image | None = None,
     normal_texture_id: str = "",
     normal_image: bpy.types.Image | None = None,
     fallback: bool = False,
 ) -> bpy.types.Material:
     alpha_suffix = ("OPAQUE", "MASK", "BLEND")[alpha_mode]
     fallback_suffix = "_FALLBACK" if fallback else ""
+    identity = "|".join(
+        (
+            texture_id,
+            lightmap_texture_id,
+            normal_texture_id,
+            str(alpha_mode),
+        )
+    )
+    identity_digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:12]
     material = bpy.data.materials.new(
-        f"MAT_{texture_id}_{alpha_suffix}{fallback_suffix}"
+        f"MAT_{texture_id}_{identity_digest}_"
+        f"{alpha_suffix}{fallback_suffix}"
     )
     material.use_nodes = True
     material.use_backface_culling = True
     nodes = material.node_tree.nodes
     links = material.node_tree.links
     principled = nodes.get("Principled BSDF")
+    base_color_output = None
     if image is not None:
         texture = nodes.new("ShaderNodeTexImage")
         texture.name = f"TEX_{texture_id}"
         texture.label = texture_id
         texture.image = image
         texture.interpolation = "Linear"
-        links.new(texture.outputs["Color"], principled.inputs["Base Color"])
+        base_color_output = texture.outputs["Color"]
         links.new(texture.outputs["Alpha"], principled.inputs["Alpha"])
     else:
         principled.inputs["Base Color"].default_value = (
@@ -92,6 +106,51 @@ def _new_material(
             1.0,
             1.0,
         )
+    if lightmap_texture_id:
+        if lightmap_image is None:
+            raise ValueError(
+                f"lightmap texture {lightmap_texture_id} is missing "
+                "from the cache"
+            )
+        lightmap_image.colorspace_settings.name = "Non-Color"
+        lightmap_image["ow_lightmap_encoding"] = (
+            "skate3_retail_sqrt_linear_over_4"
+        )
+        lightmap_texture = nodes.new("ShaderNodeTexImage")
+        lightmap_texture.name = f"LIGHTMAP_{lightmap_texture_id}"
+        lightmap_texture.label = lightmap_texture_id
+        lightmap_texture.image = lightmap_image
+        lightmap_texture.interpolation = "Linear"
+        lightmap_texture.extension = "EXTEND"
+        lightmap_uv = nodes.new("ShaderNodeUVMap")
+        lightmap_uv.name = "RETAIL_LIGHTMAP_UV"
+        lightmap_uv.uv_map = "Lightmap"
+        links.new(lightmap_uv.outputs["UV"], lightmap_texture.inputs["Vector"])
+        lightmap_square = nodes.new("ShaderNodeVectorMath")
+        lightmap_square.name = "RETAIL_LIGHTMAP_SQUARE"
+        lightmap_square.operation = "MULTIPLY"
+        links.new(
+            lightmap_texture.outputs["Color"],
+            lightmap_square.inputs[0],
+        )
+        links.new(
+            lightmap_texture.outputs["Color"],
+            lightmap_square.inputs[1],
+        )
+        lightmap_scale = nodes.new("ShaderNodeVectorMath")
+        lightmap_scale.name = "RETAIL_LIGHTMAP_SCALE"
+        lightmap_scale.operation = "SCALE"
+        lightmap_scale.inputs["Scale"].default_value = 4.0
+        links.new(lightmap_square.outputs["Vector"], lightmap_scale.inputs[0])
+        if base_color_output is not None:
+            baked_color = nodes.new("ShaderNodeVectorMath")
+            baked_color.name = "RETAIL_BAKED_COLOR"
+            baked_color.operation = "MULTIPLY"
+            links.new(base_color_output, baked_color.inputs[0])
+            links.new(lightmap_scale.outputs["Vector"], baked_color.inputs[1])
+            base_color_output = baked_color.outputs["Vector"]
+    if base_color_output is not None:
+        links.new(base_color_output, principled.inputs["Base Color"])
     if normal_texture_id:
         if normal_image is None:
             raise ValueError(
@@ -118,12 +177,22 @@ def _new_material(
             except Exception:
                 pass
     material["skate3_texture_id"] = texture_id
+    material["skate3_lightmap_texture_id"] = lightmap_texture_id
     material["skate3_normal_texture_id"] = normal_texture_id
     material["skate3_alpha_mode"] = alpha_mode
     material["skate3_alpha_cutoff"] = 0.5
     material["ow_normal_image"] = (
         normal_image.name if normal_image is not None else ""
     )
+    material["ow_lightmap_image"] = (
+        lightmap_image.name if lightmap_image is not None else ""
+    )
+    material["ow_lightmap_encoding"] = (
+        "skate3_retail_sqrt_linear_over_4"
+        if lightmap_image is not None
+        else ""
+    )
+    material["ow_baked_strength"] = 1.0 if lightmap_image is not None else 0.0
     if fallback:
         material["skate3_fallback_reason"] = (
             "Package references a shared texture that is not embedded."
@@ -385,7 +454,7 @@ def build_scene(manifest_path: Path) -> dict[str, int]:
     collision.hide_render = True
     metadata = _new_child_collection(root, "Metadata")
     images = _load_images(manifest, cache_root)
-    materials: dict[tuple[str, str, int], bpy.types.Material] = {}
+    materials: dict[tuple[str, str, str, int], bpy.types.Material] = {}
     excluded_normal_texture_ids = {
         str(texture_id).lower()
         for texture_id in manifest.get("normal_texture_policy", {}).get(
@@ -399,6 +468,8 @@ def build_scene(manifest_path: Path) -> dict[str, int]:
     triangle_count = 0
     normal_mapped_object_count = 0
     used_normal_texture_ids: set[str] = set()
+    lightmapped_object_count = 0
+    used_lightmap_texture_ids: set[str] = set()
     for model_entry in manifest["models"]:
         asset_id = model_entry["asset_id"]
         source_stem = Path(model_entry["stream_file"]).stem
@@ -418,6 +489,11 @@ def build_scene(manifest_path: Path) -> dict[str, int]:
                 uvs = (
                     arrays[f"uvs_{mesh_index}"]
                     if f"uvs_{mesh_index}" in arrays
+                    else None
+                )
+                lightmap_uvs = (
+                    arrays[f"lightmap_uvs_{mesh_index}"]
+                    if f"lightmap_uvs_{mesh_index}" in arrays
                     else None
                 )
                 normals = (
@@ -442,6 +518,18 @@ def build_scene(manifest_path: Path) -> dict[str, int]:
                             float(uv[0]),
                             1.0 - float(uv[1]),
                         )
+                if lightmap_uvs is not None:
+                    lightmap_layer = mesh_data.uv_layers.new(name="Lightmap")
+                    shader_name = str(mesh_entry.get("shader_name") or "")
+                    absolute_unwrap = shader_name != "ocean.default"
+                    for loop in mesh_data.loops:
+                        uv = lightmap_uvs[loop.vertex_index]
+                        u = float(uv[0])
+                        v = float(uv[1])
+                        if absolute_unwrap:
+                            u = abs(u)
+                            v = abs(v)
+                        lightmap_layer.data[loop.index].uv = (u, 1.0 - v)
 
                 for polygon in mesh_data.polygons:
                     polygon.use_smooth = True
@@ -458,6 +546,17 @@ def build_scene(manifest_path: Path) -> dict[str, int]:
                     "retail_texture_ids",
                     {},
                 )
+                source_lightmap_texture_id = str(
+                    retail_texture_ids.get("lightmap", "")
+                ).lower()
+                shader_name = str(mesh_entry.get("shader_name") or "")
+                lightmap_texture_id = (
+                    source_lightmap_texture_id
+                    if source_lightmap_texture_id
+                    and lightmap_uvs is not None
+                    and not shader_name.startswith(("water.", "ocean."))
+                    else ""
+                )
                 source_normal_texture_id = str(
                     retail_texture_ids.get("normal", "")
                 ).lower()
@@ -471,6 +570,7 @@ def build_scene(manifest_path: Path) -> dict[str, int]:
                 if texture_id:
                     material_key = (
                         texture_id,
+                        lightmap_texture_id,
                         normal_texture_id,
                         alpha_mode,
                     )
@@ -482,10 +582,17 @@ def build_scene(manifest_path: Path) -> dict[str, int]:
                             if normal_texture_id
                             else None
                         )
+                        lightmap_image = (
+                            images.get(lightmap_texture_id)
+                            if lightmap_texture_id
+                            else None
+                        )
                         material = _new_material(
                             texture_id,
                             image,
                             alpha_mode,
+                            lightmap_texture_id=lightmap_texture_id,
+                            lightmap_image=lightmap_image,
                             normal_texture_id=normal_texture_id,
                             normal_image=normal_image,
                             fallback=image is None,
@@ -503,6 +610,9 @@ def build_scene(manifest_path: Path) -> dict[str, int]:
                 if normal_texture_id:
                     normal_mapped_object_count += 1
                     used_normal_texture_ids.add(normal_texture_id)
+                if lightmap_texture_id:
+                    lightmapped_object_count += 1
+                    used_lightmap_texture_ids.add(lightmap_texture_id)
                 obj["skate3_asset_id"] = asset_id
                 obj["skate3_stream_file"] = model_entry["stream_file"]
                 obj["skate3_mesh_index"] = mesh_index
@@ -519,6 +629,17 @@ def build_scene(manifest_path: Path) -> dict[str, int]:
                     mesh_entry.get("retail_material_group_index", -1)
                 )
                 obj["skate3_texture_id"] = texture_id or ""
+                obj["skate3_lightmap_texture_id"] = lightmap_texture_id
+                obj["skate3_source_lightmap_texture_id"] = (
+                    source_lightmap_texture_id
+                )
+                if source_lightmap_texture_id and not lightmap_texture_id:
+                    obj["skate3_lightmap_exclusion"] = (
+                        "shader family does not consume a reliable static "
+                        "lightmap"
+                        if lightmap_uvs is not None
+                        else "retail mesh has no secondary TEXCOORD"
+                    )
                 obj["skate3_normal_texture_id"] = normal_texture_id
                 obj["skate3_source_normal_texture_id"] = (
                     source_normal_texture_id
@@ -565,10 +686,10 @@ def build_scene(manifest_path: Path) -> dict[str, int]:
     info.empty_display_type = "PLAIN_AXES"
     info.empty_display_size = 2.0
     info["status"] = (
-        "Presentation geometry, diffuse and conservative retail normal "
-        "textures, exact retail collision, and retail grind splines imported. "
-        "Original RX2 assets and all material channel IDs are preserved in "
-        "the cache."
+        "Presentation geometry, diffuse textures, exact retail lightmaps, "
+        "conservative retail normal textures, exact retail collision, and "
+        "retail grind splines imported. Original RX2 assets and all material "
+        "channel IDs are preserved in the cache."
     )
     info["source_manifest"] = str(manifest_path)
     metadata.objects.link(info)
@@ -589,6 +710,10 @@ def build_scene(manifest_path: Path) -> dict[str, int]:
         f"{normal_mapped_object_count} mesh parts use "
         f"{len(used_normal_texture_ids)} conventional retail normal maps"
     )
+    scene["skate3_lightmap_status"] = (
+        f"{lightmapped_object_count} mesh parts use "
+        f"{len(used_lightmap_texture_ids)} exact retail lightmap pages"
+    )
     return {
         "objects": object_count,
         "vertices": vertex_count,
@@ -597,6 +722,8 @@ def build_scene(manifest_path: Path) -> dict[str, int]:
         "materials": len(materials),
         "normal_mapped_objects": normal_mapped_object_count,
         "normal_textures": len(used_normal_texture_ids),
+        "lightmapped_objects": lightmapped_object_count,
+        "lightmap_textures": len(used_lightmap_texture_ids),
         "grind_rails": grind_rail_count,
         "grind_segments": grind_segment_count,
         "collision_meshes": collision_mesh_count,

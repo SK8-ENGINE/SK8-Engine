@@ -18,12 +18,17 @@ EXPECTED_COLLISION_SURFACES = 183
 EXPECTED_COLLISION_TRIANGLES = 1_133_649
 EXPECTED_NORMAL_MAPPED_OBJECTS = 2_987
 EXPECTED_NORMAL_TEXTURES = 135
+EXPECTED_SOURCE_LIGHTMAP_REFERENCES = 8_522
+EXPECTED_LIGHTMAPPED_OBJECTS = 8_489
+EXPECTED_LIGHTMAP_TEXTURES = 1_270
+EXPECTED_LIGHTMAP_EXCLUSIONS = 33
 REGRESSION_BINDINGS = {
     ("0xF6CC7BFCC2C45F8C", 40): (
         "0x861894DE4209CE82",
         "0x00800078",
         24,
         "0x2c70170a001d00aa",
+        "0x893793c0de31aab1",
         0,
     ),
     ("0xF6CC7BFCC2C45F8C", 41): (
@@ -31,6 +36,7 @@ REGRESSION_BINDINGS = {
         "0x0080007B",
         38,
         "0x2c70170a0004000e",
+        "0xba390198c38936f0",
         0,
     ),
     ("0xF6CC7BFCC2C45F8C", 42): (
@@ -38,6 +44,7 @@ REGRESSION_BINDINGS = {
         "0x0080007E",
         12,
         "0x00008d6a03e3870a",
+        "0xba390198c38936f0",
         0,
     ),
     ("0x759E349006948F63", 2): (
@@ -45,6 +52,7 @@ REGRESSION_BINDINGS = {
         "0x00800006",
         0,
         "0x2c70170a001d00aa",
+        "0x893793c0de31aab1",
         0,
     ),
     ("0x759E349006948F63", 3): (
@@ -52,6 +60,7 @@ REGRESSION_BINDINGS = {
         "0x00800009",
         3,
         "0x2c70170a00053a88",
+        "0x893793c0de31aab1",
         1,
     ),
 }
@@ -73,6 +82,11 @@ def main() -> int:
     normal_mapped_objects = 0
     normal_texture_ids: set[str] = set()
     normal_materials: set[int] = set()
+    source_lightmap_references = 0
+    lightmapped_objects = 0
+    lightmap_texture_ids: set[str] = set()
+    lightmap_materials: set[int] = set()
+    lightmap_exclusions = 0
     lookup: dict[tuple[str, int], bpy.types.Object] = {}
     for obj in objects:
         alpha_mode = int(obj.get("skate3_alpha_mode", 0))
@@ -84,11 +98,28 @@ def main() -> int:
                 int(obj["skate3_mesh_index"]),
             )
         ] = obj
+        source_lightmap_texture_id = str(
+            obj.get("skate3_source_lightmap_texture_id", "")
+        )
+        lightmap_texture_id = str(
+            obj.get("skate3_lightmap_texture_id", "")
+        )
+        if source_lightmap_texture_id:
+            source_lightmap_references += 1
         if not texture_id:
             if obj.data.materials:
                 raise RuntimeError(
                     f"{obj.name!r} has no retail texture but has a material"
                 )
+            if source_lightmap_texture_id:
+                if lightmap_texture_id or not str(
+                    obj.get("skate3_lightmap_exclusion", "")
+                ):
+                    raise RuntimeError(
+                        f"{obj.name!r} has an invalid no-material lightmap "
+                        "exclusion"
+                    )
+                lightmap_exclusions += 1
             continue
         if not obj.data.materials:
             raise RuntimeError(
@@ -104,6 +135,61 @@ def main() -> int:
             )
         if "skate3_fallback_reason" in material:
             unresolved[alpha_mode] += 1
+        if lightmap_texture_id:
+            if lightmap_texture_id != source_lightmap_texture_id:
+                raise RuntimeError(
+                    f"{obj.name!r} substituted retail lightmap "
+                    f"{source_lightmap_texture_id!r} with "
+                    f"{lightmap_texture_id!r}"
+                )
+            lightmap_layer = obj.data.uv_layers.get("Lightmap")
+            if (
+                lightmap_layer is None
+                or len(lightmap_layer.data) != len(obj.data.loops)
+            ):
+                raise RuntimeError(
+                    f"{obj.name!r} lost its retail lightmap UVs"
+                )
+            lightmap_image = bpy.data.images.get(lightmap_texture_id)
+            if lightmap_image is None:
+                raise RuntimeError(
+                    f"{obj.name!r} is missing lightmap image "
+                    f"{lightmap_texture_id!r}"
+                )
+            if lightmap_image.colorspace_settings.name != "Non-Color":
+                raise RuntimeError(
+                    f"{lightmap_texture_id!r} is not marked Non-Color"
+                )
+            if (
+                str(material.get("skate3_lightmap_texture_id", ""))
+                != lightmap_texture_id
+                or str(material.get("ow_lightmap_image", ""))
+                != lightmap_image.name
+                or str(material.get("ow_lightmap_encoding", ""))
+                != "skate3_retail_sqrt_linear_over_4"
+                or float(material.get("ow_baked_strength", 0.0)) != 1.0
+            ):
+                raise RuntimeError(
+                    f"{material.name!r} does not export its retail lightmap"
+                )
+            lightmapped_objects += 1
+            lightmap_texture_ids.add(lightmap_texture_id)
+            lightmap_materials.add(material.as_pointer())
+        elif source_lightmap_texture_id:
+            reason = str(obj.get("skate3_lightmap_exclusion", ""))
+            if not reason:
+                raise RuntimeError(
+                    f"{obj.name!r} silently discarded retail lightmap "
+                    f"{source_lightmap_texture_id!r}"
+                )
+            if (
+                str(material.get("skate3_lightmap_texture_id", ""))
+                or str(material.get("ow_lightmap_image", ""))
+            ):
+                raise RuntimeError(
+                    f"{obj.name!r} inherited a lightmap despite exclusion"
+                )
+            lightmap_exclusions += 1
         normal_texture_id = str(
             obj.get("skate3_normal_texture_id", "")
         )
@@ -166,6 +252,26 @@ def main() -> int:
             f"University has {len(normal_texture_ids)} conventional retail "
             f"normal textures, expected {EXPECTED_NORMAL_TEXTURES}"
         )
+    if source_lightmap_references != EXPECTED_SOURCE_LIGHTMAP_REFERENCES:
+        raise RuntimeError(
+            f"University has {source_lightmap_references} source lightmap "
+            f"references, expected {EXPECTED_SOURCE_LIGHTMAP_REFERENCES}"
+        )
+    if lightmapped_objects != EXPECTED_LIGHTMAPPED_OBJECTS:
+        raise RuntimeError(
+            f"University has {lightmapped_objects} lightmapped mesh parts, "
+            f"expected {EXPECTED_LIGHTMAPPED_OBJECTS}"
+        )
+    if len(lightmap_texture_ids) != EXPECTED_LIGHTMAP_TEXTURES:
+        raise RuntimeError(
+            f"University has {len(lightmap_texture_ids)} exported retail "
+            f"lightmaps, expected {EXPECTED_LIGHTMAP_TEXTURES}"
+        )
+    if lightmap_exclusions != EXPECTED_LIGHTMAP_EXCLUSIONS:
+        raise RuntimeError(
+            f"University has {lightmap_exclusions} explicit lightmap "
+            f"exclusions, expected {EXPECTED_LIGHTMAP_EXCLUSIONS}"
+        )
 
     for key, expected in REGRESSION_BINDINGS.items():
         obj = lookup.get(key)
@@ -176,6 +282,7 @@ def main() -> int:
             str(obj.get("skate3_retail_material_handle", "")),
             int(obj.get("skate3_retail_material_group_index", -1)),
             str(obj.get("skate3_texture_id", "")),
+            str(obj.get("skate3_lightmap_texture_id", "")),
             int(obj.get("skate3_alpha_mode", 0)),
         )
         if actual != expected:
@@ -385,6 +492,11 @@ def main() -> int:
                 "normal_mapped_objects": normal_mapped_objects,
                 "normal_textures": len(normal_texture_ids),
                 "normal_materials": len(normal_materials),
+                "source_lightmap_references": source_lightmap_references,
+                "lightmapped_objects": lightmapped_objects,
+                "lightmap_textures": len(lightmap_texture_ids),
+                "lightmap_materials": len(lightmap_materials),
+                "lightmap_exclusions": lightmap_exclusions,
                 "grind_rails": len(grind_objects),
                 "grind_segments": grind_segments,
                 "closed_grind_rails": closed_grinds,

@@ -266,6 +266,9 @@ try {
     $materialVerifier = Join-Path (
         $workspace
     ) 'tools\verify_university_material_channels.py'
+    $lightmapVerifier = Join-Path (
+        $workspace
+    ) 'tools\verify_university_lightmaps.py'
     $collisionProbeBuilder = Join-Path (
         $workspace
     ) 'tools\build_university_collision_probe.py'
@@ -307,6 +310,9 @@ try {
         ))
         (Get-Item -LiteralPath (
             Join-Path $workspace 'tools\retail_grind_splines.py'
+        ))
+        (Get-Item -LiteralPath (
+            Join-Path $workspace 'tools\retail_lightmap_uv.py'
         ))
     )
     if ($ForceExport -or (
@@ -408,7 +414,14 @@ try {
         $package,
         '--expected',
         $expectedPath
-    ) -Description 'Verify conservative retail normal-map transport'
+    ) -Description 'Verify retail normal and material-role transport'
+    Invoke-Checked -FilePath 'python' -Arguments @(
+        $lightmapVerifier,
+        $extractionManifest,
+        $package,
+        '--expected',
+        $expectedPath
+    ) -Description 'Verify exact retail lightmap and UV transport'
     Invoke-Checked -FilePath 'python' -Arguments @(
         $collisionProbeBuilder,
         $extractionManifest,

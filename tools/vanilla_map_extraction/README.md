@@ -59,15 +59,18 @@ To rebuild without making a preview render:
 `blender/prepare_university_owned.py` converts that extraction scene into the
 owned-world authoring contract and saves
 `blender/DIST_University_Owned.blend`. It preserves base UVs, material
-textures, transforms, and the full visual mesh. The configured UTT model
+textures, exact retail lightmap UVs, transforms, and the full visual mesh. The
+configured UTT model
 parser currently supplies geometry-derived averaged normals rather than
 authoritative packed retail vertex normals. Tangent-space retail normal maps
-are transported independently. The current owned package has:
+and static lightmaps are transported independently. The current owned package
+has:
 
-- 526 materials and 462 embedded textures;
-- 471 opaque, 50 alpha-mask, and 5 alpha-blended material variants;
+- 4,413 materials and 1,732 embedded textures;
+- 2,972 opaque, 1,414 alpha-mask, and 27 alpha-blended material variants;
 - 2,987 mesh parts using 135 conventional retail normal maps;
-- 2,081,271 indexed visual vertices and 1,645,617 render triangles;
+- 8,489 mesh parts using 1,270 exact retail lightmap pages;
+- 2,085,489 indexed visual vertices and 1,645,617 render triangles;
 - 1,133,642 cleaned retail collision triangles;
 - 4,201 retail grind rails containing 27,008 exact native cubic segments;
 - bounds from `(-727.373, -6.849, -1413.082)` to
@@ -90,12 +93,12 @@ recovered.
 
 The SKATE v11 package is
 `intermediate/university/University.skate`. It is 130,320,474 bytes after
-adding retail normal maps, restoring two-sided collision, and preserving
-native collision feature codes, and losslessly
+adding retail normal maps, and 195,460,271 bytes after adding exact retail
+lightmaps. It losslessly
 decodes to the counts and bounds above. The offline engine validator also
 compiles it into 515 render chunks, a 4,023,600-byte native
 `tSplineData` blob, and one continuous native collision mesh containing
-32,768 clusters.
+4,346 clusters.
 
 ### Exact retail grind splines
 
@@ -141,9 +144,16 @@ normal pass binds 135 conventional tangent-space maps to 2,987 mesh parts and
 proves that the same 135 IDs reach linear SKATE normal slots. Seven
 shader-specific resources remain recorded but intentionally unbound: two
 non-neutral generic defaults, the primary/secondary Skate 3 water pair, and
-three unusual palm maps. Specular, lightmap, decal, detail, macro-overlay,
-environment, noise, and secondary-normal behavior still needs semantic
+three unusual palm maps. Specular, decal, detail, macro-overlay, environment,
+noise, and secondary-normal behavior still needs semantic
 reconstruction before claiming 1:1 visual parity.
+
+The lightmap pass binds 1,270 byte-exact retail pages to 8,489 mesh parts.
+It decodes both explicit `SHORT2N` secondary UVs and the `SHORT4` world layout
+whose first two components are the unwrap while the sign bits also carry
+tangent handedness. Thirty-two water/ocean parts remain recorded but unbound
+because those shader families intentionally bypass unreliable static
+lightmaps; one sign mesh carries a lightmap parameter but no secondary UV.
 
 ### Point-level collision diagnosis
 

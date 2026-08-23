@@ -14,6 +14,7 @@ import numpy
 
 from retail_collision_mesh import decode_rx2_clustered_meshes
 from retail_grind_splines import decode_grind_splines
+from retail_lightmap_uv import decode_lightmap_uvs
 from skate3_streams import (
     ASSET_TYPE_MODEL,
     ASSET_TYPE_TEXTURE,
@@ -474,6 +475,19 @@ def prepare(
                         mesh.uvs,
                         dtype=numpy.float32,
                     )
+                lightmap_uv = decode_lightmap_uvs(
+                    asset.data,
+                    vertex_buffer_offset=mesh.source_offsets[
+                        "vertex_buffer"
+                    ],
+                    vertex_count=mesh.vertex_count,
+                    vertex_stride=mesh.vertex_stride,
+                    attributes=mesh.attributes,
+                )
+                if lightmap_uv is not None:
+                    arrays[f"lightmap_uvs_{mesh_index}"] = (
+                        lightmap_uv.values
+                    )
                 if mesh.normals is not None:
                     arrays[f"normals_{mesh_index}"] = numpy.asarray(
                         mesh.normals,
@@ -510,6 +524,18 @@ def prepare(
                             }
                             for attribute in mesh.attributes
                         ],
+                        "lightmap_uv": (
+                            {
+                                "format_code": (
+                                    f"0x{lightmap_uv.format_code:08X}"
+                                ),
+                                "offset": lightmap_uv.offset,
+                                "usage_index": lightmap_uv.usage_index,
+                                "signed_tangent_handedness": True,
+                            }
+                            if lightmap_uv is not None
+                            else None
+                        ),
                         "source_offsets": dict(mesh.source_offsets),
                         "bounds": {
                             "minimum": minimum.tolist(),
@@ -649,6 +675,27 @@ def prepare(
         "used_texture_ids_by_channel": {
             channel: len(texture_ids)
             for channel, texture_ids in used_texture_ids_by_channel.items()
+        },
+        "secondary_uv_mesh_parts": sum(
+            mesh["lightmap_uv"] is not None  # type: ignore[index]
+            for model in models
+            for mesh in model["meshes"]  # type: ignore[index]
+        ),
+        "secondary_uv_format_counts": {
+            format_code: sum(
+                mesh["lightmap_uv"] is not None  # type: ignore[index]
+                and mesh["lightmap_uv"]["format_code"] == format_code  # type: ignore[index]
+                for model in models
+                for mesh in model["meshes"]  # type: ignore[index]
+            )
+            for format_code in sorted(
+                {
+                    mesh["lightmap_uv"]["format_code"]  # type: ignore[index]
+                    for model in models
+                    for mesh in model["meshes"]  # type: ignore[index]
+                    if mesh["lightmap_uv"] is not None  # type: ignore[index]
+                }
+            )
         },
         "material_binding_strategies": {
             strategy: sum(

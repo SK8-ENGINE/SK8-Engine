@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify conservative University normal maps through the SKATE package."""
+"""Verify University normal and lightmap roles through the SKATE package."""
 
 from __future__ import annotations
 
@@ -91,9 +91,11 @@ def main() -> int:
             "emissive_texture",
         )
     }
-    if any(unexpected_roles.values()):
+    if unexpected_roles["orm_texture"] or unexpected_roles[
+        "emissive_texture"
+    ]:
         raise RuntimeError(
-            "normal-only milestone unexpectedly populated another material "
+            "University unexpectedly populated an unsupported material "
             f"role: {unexpected_roles}"
         )
 

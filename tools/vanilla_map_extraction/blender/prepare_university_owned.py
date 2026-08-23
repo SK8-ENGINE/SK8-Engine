@@ -78,9 +78,31 @@ def _configure_material(material: bpy.types.Material) -> None:
     )
     material["ow_roughness"] = 0.68
     material["ow_emissive"] = 0.0
-    material["ow_baked_strength"] = 0.0
     material["ow_albedo_image"] = image.name if image is not None else ""
-    material["ow_lightmap_image"] = ""
+    lightmap_texture_id = str(
+        material.get("skate3_lightmap_texture_id", "")
+    )
+    lightmap_image = (
+        bpy.data.images.get(lightmap_texture_id)
+        if lightmap_texture_id
+        else None
+    )
+    if lightmap_texture_id and lightmap_image is None:
+        raise RuntimeError(
+            f"{material.name!r} lost retail lightmap image "
+            f"{lightmap_texture_id!r}"
+        )
+    material["ow_lightmap_image"] = (
+        lightmap_image.name if lightmap_image is not None else ""
+    )
+    material["ow_lightmap_encoding"] = (
+        "skate3_retail_sqrt_linear_over_4"
+        if lightmap_image is not None
+        else ""
+    )
+    material["ow_baked_strength"] = (
+        1.0 if lightmap_image is not None else 0.0
+    )
     normal_texture_id = str(
         material.get("skate3_normal_texture_id", "")
     )
@@ -111,12 +133,20 @@ def _configure_material(material: bpy.types.Material) -> None:
     material["ow_collision_enabled"] = False
 
 
-def _ensure_export_uvs(mesh: bpy.types.Mesh) -> None:
+def _ensure_export_uvs(
+    mesh: bpy.types.Mesh,
+    *,
+    require_retail_lightmap: bool,
+) -> None:
     source = mesh.uv_layers.get("UVMap")
     if source is None:
         source = mesh.uv_layers.new(name="UVMap")
     lightmap = mesh.uv_layers.get("Lightmap")
     if lightmap is None:
+        if require_retail_lightmap:
+            raise RuntimeError(
+                f"{mesh.name!r} lost its exact retail Lightmap UV layer"
+            )
         lightmap = mesh.uv_layers.new(name="Lightmap")
         for index in range(len(source.data)):
             lightmap.data[index].uv = source.data[index].uv
@@ -232,9 +262,17 @@ def main() -> int:
             retail_collision_objects += 1
             retail_collision_triangles += len(obj.data.polygons)
             continue
-        _ensure_export_uvs(obj.data)
         if not obj.data.materials:
             obj.data.materials.append(fallback)
+        require_retail_lightmap = any(
+            material is not None
+            and bool(material.get("skate3_lightmap_texture_id", ""))
+            for material in obj.data.materials
+        )
+        _ensure_export_uvs(
+            obj.data,
+            require_retail_lightmap=require_retail_lightmap,
+        )
         for material in obj.data.materials:
             if material is not None and material.as_pointer() not in material_ids:
                 material_ids.add(material.as_pointer())

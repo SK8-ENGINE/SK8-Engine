@@ -60,7 +60,7 @@ _HELPER_OBJECT_MARKERS = (
     "scale_reference",
     "scale reference",
 )
-CACHE_SCHEMA = 12
+CACHE_SCHEMA = 13
 METADATA_FLOAT_COUNT = 49
 METADATA_BYTE_COUNT = METADATA_FLOAT_COUNT * 4
 RETAIL_EDGE_CODE_ATTRIBUTES = tuple(
@@ -459,6 +459,7 @@ def _scene_content_fingerprint(
         "ow_emissive",
         "ow_albedo_image",
         "ow_lightmap_image",
+        "ow_lightmap_encoding",
         "ow_baked_strength",
         "ow_normal_image",
         "ow_orm_image",
@@ -956,8 +957,19 @@ def _export_local_lights() -> list[ExportLocalLight]:
 
 
 def _image_rgba8(
-    image: bpy.types.Image, *, lightmap: bool = False
+    image: bpy.types.Image,
+    *,
+    lightmap: bool = False,
+    lightmap_encoding: str = "",
 ) -> bytes:
+    retail_encoded = (
+        lightmap_encoding == "skate3_retail_sqrt_linear_over_4"
+    )
+    if lightmap_encoding and not retail_encoded:
+        raise ValueError(
+            f"image {image.name!r} uses unsupported lightmap encoding "
+            f"{lightmap_encoding!r}"
+        )
     expected = image.size[0] * image.size[1] * 4
     if numpy is not None:
         # Blender bundles NumPy and foreach_get writes directly into its
@@ -969,7 +981,7 @@ def _image_rgba8(
             values, nan=0.0, posinf=1.0, neginf=0.0, copy=False
         )
         pixels = values.reshape((-1, 4))
-        if lightmap:
+        if lightmap and not retail_encoded:
             pixels[:, :3] = numpy.sqrt(
                 numpy.clip(pixels[:, :3], 0.0, 4.0) * 0.25
             )
@@ -985,7 +997,7 @@ def _image_rgba8(
     for index, value in enumerate(values):
         channel = index & 3
         linear = max(0.0, float(value))
-        if lightmap and channel != 3:
+        if lightmap and not retail_encoded and channel != 3:
             # SKATE v1 lightmaps use sqrt(linear / 4). This preserves dark
             # indirect energy that direct linear UNORM8 quantization erased,
             # while retaining headroom up to 4.0 for bright colour bounce.
@@ -2526,21 +2538,33 @@ def export_scene(
                 _bounded_int(material, "ow_surface_pattern", 0, 15),
             )
 
-        lightmap_names = {
-            str(material.get("ow_lightmap_image", ""))
-            for material in materials
-        }
+        lightmap_encodings: dict[str, str] = {}
+        for material in materials:
+            lightmap_name = str(material.get("ow_lightmap_image", ""))
+            if not lightmap_name:
+                continue
+            encoding = str(material.get("ow_lightmap_encoding", ""))
+            previous = lightmap_encodings.setdefault(lightmap_name, encoding)
+            if previous != encoding:
+                raise ValueError(
+                    f"lightmap image {lightmap_name!r} is referenced with "
+                    "conflicting encodings"
+                )
         for image_index, image in enumerate(images, start=1):
+            lightmap_encoding = lightmap_encodings.get(image.name, "")
             rgba8 = _image_rgba8(
-                image, lightmap=image.name in lightmap_names
+                image,
+                lightmap=image.name in lightmap_encodings,
+                lightmap_encoding=lightmap_encoding,
             )
             _require_nonblank_rgb(image.name, rgba8)
             _write_string(stream, image.name)
             _write_u32(stream, int(image.size[0]))
             _write_u32(stream, int(image.size[1]))
-            # Blender exposes generated/baked image pixels in scene-linear
-            # space. Compression is lossless; the loader reconstructs these
-            # exact RGBA8 bytes before renderer upload.
+            # Authored bakes arrive scene-linear and use sqrt(linear / 4).
+            # Retail lightmaps already contain that exact encoded quantity,
+            # so their Non-Color bytes pass through without a second transfer.
+            # Compression is lossless in both cases.
             _write_u32(stream, 0)
             _write_stored_bytes(stream, rgba8)
             _report_progress(
