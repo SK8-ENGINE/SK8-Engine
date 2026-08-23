@@ -658,6 +658,18 @@ Current checkpoint:
   quantization, pose data, 60 Hz scheduling, interpolation, attachments,
   boards, appearance, and rendering remain unchanged. Telemetry does not
   establish the user's visual result.
+- The first semantic exact-delta candidate is now isolated behind an offline
+  codec boundary. It preserves root metadata, track identity, change masks,
+  and every 16-bit quantized transform word exactly, while variable-length
+  encoding each changed word's signed difference from the receiver-confirmed
+  baseline. An exact size preflight permits raw fallback without speculative
+  allocation.
+- The twelfth automated suite covers both transform layouts, mixed change
+  masks, both maximum signed-difference directions, every truncated prefix,
+  trailing data, baseline-layout mismatch, transactional decode, and 2,000
+  deterministic randomized exact round trips. Small-difference synthetic
+  frames must save at least 35 percent. This candidate is not yet selected by
+  the live sender in this commit.
 
 Completion:
 

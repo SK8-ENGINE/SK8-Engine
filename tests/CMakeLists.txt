@@ -177,6 +177,29 @@ add_test(
   COMMAND skate3_multiplayer_protocol_v12_quaternion_tests
 )
 
+add_executable(skate3_multiplayer_protocol_v12_delta_tests
+  skate3_multiplayer_protocol_v12_delta_tests.cpp
+)
+target_include_directories(
+  skate3_multiplayer_protocol_v12_delta_tests PRIVATE
+  ${CMAKE_CURRENT_LIST_DIR}/../src
+)
+target_compile_features(
+  skate3_multiplayer_protocol_v12_delta_tests PRIVATE cxx_std_23)
+if(MSVC)
+  target_compile_options(
+    skate3_multiplayer_protocol_v12_delta_tests PRIVATE
+    /W4 /permissive- /utf-8)
+else()
+  target_compile_options(
+    skate3_multiplayer_protocol_v12_delta_tests PRIVATE
+    -Wall -Wextra -Wpedantic)
+endif()
+add_test(
+  NAME skate3_multiplayer_protocol_v12_delta_tests
+  COMMAND skate3_multiplayer_protocol_v12_delta_tests
+)
+
 add_executable(skate3_multiplayer_outbound_scheduler_tests
   skate3_multiplayer_outbound_scheduler_tests.cpp
 )
