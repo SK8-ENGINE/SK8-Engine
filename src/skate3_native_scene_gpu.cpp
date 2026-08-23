@@ -6605,7 +6605,8 @@ static nrhi::TextureView* LookupResolvedTexture(uint32_t tex_ptr) {
 // a stable camera-centered light basis. Static SKATE casters and retained
 // dynamic skater/board casters can therefore share one physical sun axis.
 bool BuildOwnedShadowRows(const FrameScene& scene, float out[36]) {
-  if (!mechanics_sandbox::VisualMapEnabled()) {
+  if (!mechanics_sandbox::VisualMapEnabled() ||
+      !mechanics_sandbox::map::DynamicWorldLightingEnabled()) {
     return false;
   }
   float origin[3] = {};
@@ -11334,14 +11335,20 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
   constants[39] = -41.0f;
   const skate::world::DayNightState celestial =
       mechanics_sandbox::map::ActiveDayNightState();
+  const bool dynamic_lighting =
+      mechanics_sandbox::map::DynamicWorldLightingEnabled();
   constants[40] = celestial.light_direction_to_light.x;
   constants[41] = celestial.light_direction_to_light.y;
   constants[42] = celestial.light_direction_to_light.z;
-  constants[43] = celestial.ambient;
+  // A negative ambient is an owned-world-only sentinel: preserve the
+  // clock/sky state but remove its ambient, direct and shadow lighting.
+  // The shader still evaluates imported baked lightmaps at full exposure.
+  constants[43] = dynamic_lighting ? celestial.ambient : -1.0f;
   constants[44] = celestial.light_color.x;
   constants[45] = celestial.light_color.y;
   constants[46] = celestial.light_color.z;
-  constants[47] = celestial.light_intensity;
+  constants[47] =
+      dynamic_lighting ? celestial.light_intensity : 0.0f;
 
   cmd->SetBindingLayout(g_r.layout);
   cmd->SetPipeline(use_depth ? g_r.pso : g_r.pso_nodepth);
@@ -14170,8 +14177,7 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
       const skate::world::DayNightState celestial =
           mechanics_sandbox::map::ActiveDayNightState();
       cb[201] =
-          mechanics_sandbox::map::ActiveDefinition()
-                  .day_night_cycle.enabled
+          mechanics_sandbox::map::DynamicWorldLightingEnabled()
               ? 1.0f
               : 0.0f;
       cb[202] = celestial.night_amount;

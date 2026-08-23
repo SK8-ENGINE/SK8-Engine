@@ -1343,6 +1343,7 @@ void Skate3BaseApp::ToggleSimpleSettings() {
     state.available = source.available;
     state.paused = source.paused;
     state.ping_pong = source.ping_pong;
+    state.dynamic_lighting_enabled = source.dynamic_lighting_enabled;
     state.time_of_day_hours = source.time_of_day_hours;
     state.cycle_duration_seconds = source.cycle_duration_seconds;
     state.start_hour = source.start_hour;

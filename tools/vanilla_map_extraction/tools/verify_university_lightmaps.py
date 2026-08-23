@@ -86,7 +86,7 @@ def _verify_package(
     counts = struct.unpack("<9I", reader.take(9 * 4, "count table"))
     material_count, texture_count, vertex_count, index_count = counts[:4]
 
-    materials: list[tuple[int, int]] = []
+    materials: list[tuple[int, int, float]] = []
     for index in range(material_count):
         reader.string(f"material {index} name")
         fields = reader.take(76, f"material {index} fields")
@@ -94,6 +94,7 @@ def _verify_package(
             (
                 struct.unpack_from("<I", fields, 32)[0],
                 struct.unpack_from("<I", fields, 36)[0],
+                struct.unpack_from("<f", fields, 40)[0],
             )
         )
 
@@ -127,15 +128,25 @@ def _verify_package(
 
     lightmap_material_ids = {
         material_id
-        for material_id, (_albedo, lightmap) in enumerate(
+        for material_id, (_albedo, lightmap, _strength) in enumerate(
             materials,
             start=1,
         )
         if lightmap != 0
     }
+    lightmap_strengths = {
+        strength
+        for _albedo, lightmap, strength in materials
+        if lightmap != 0
+    }
+    if lightmap_strengths != {0.25}:
+        raise RuntimeError(
+            "retail lightmaps must use console energy scale 0.25, found "
+            f"{sorted(lightmap_strengths)!r}"
+        )
     package_lightmap_names = {
         texture_names[lightmap]
-        for _albedo, lightmap in materials
+        for _albedo, lightmap, _strength in materials
         if lightmap != 0
     }
     if package_lightmap_names != selected_ids:
@@ -189,6 +200,7 @@ def _verify_package(
     return {
         "package_lightmap_texture_ids": len(package_lightmap_names),
         "package_lightmap_materials": len(lightmap_material_ids),
+        "package_lightmap_strength": min(lightmap_strengths),
         "exact_payloads": exact_payloads,
         "exact_payload_bytes": exact_bytes,
         "package_lightmap_vertices": lightmap_vertices,

@@ -157,6 +157,13 @@ SKATE v2 and v3 albedo bytes are scene-linear UNORM8. Textures referenced as
 low-energy indirect detail and headroom through a compact UNORM8 upload.
 Shaders decode those channels as `encoded * encoded * 4`.
 
+Retail Skate 3 pages already store the console light quantity consumed as
+`encoded * encoded`. The Blender addon marks those source images with
+`ow_lightmap_encoding = skate3_retail_sqrt_linear_over_4`, preserves their
+bytes, and multiplies the exported `baked_indirect_strength` by `0.25`.
+This reuses the package's common shader decode without changing the format or
+quietly rescaling authored Blender bakes.
+
 Door geometry uses an orthonormal hinge-local frame. Local X crosses the
 closed leaf, local Y follows `hinge_axis`, and local Z is leaf thickness.
 The runtime rotates the complete visual/collision body around the hinge from

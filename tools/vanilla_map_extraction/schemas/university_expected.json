@@ -67,6 +67,7 @@
     "excluded_shader_mesh_parts": 32,
     "package_lightmap_texture_ids": 1270,
     "package_lightmap_materials": 4222,
+    "package_lightmap_strength": 0.25,
     "exact_payloads": 1270,
     "exact_payload_bytes": 393134080,
     "package_lightmap_vertices": 2084262,
@@ -75,7 +76,7 @@
   },
   "integrity": {
     "semantic_metadata_sha256": "01b3b1150bb715c9bec7078723a8cef81f53b7ee6868adda7839417fd17e5093",
-    "materials_sha256": "adb63613d96a18e2bd430e042ff465571de6c6e6ca5f4dda99da2f4c44e105fa",
+    "materials_sha256": "3e110a05a6e60c6b105d22de89a97def9d281359d7f73483d721938d24c86d5f",
     "decoded_textures_sha256": "3299483b8a19d555cddd74d847a726d6a2c19628b1d1b9f9ed2c78518a5764a1",
     "expanded_visual_triangles_sha256": "103100d9c02e65cc12108ca2af9063fe627e45912d210778dd79885caf1e1601",
     "expanded_visual_triangles_1e6_sha256": "8b14be29d553f7969f9e542415065bf149e63d900f1205f04865b7dc4dae7b6e",

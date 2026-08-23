@@ -156,7 +156,10 @@ geometry and the skater.
 The result can be copied into the game's `maps` folder and selected through
 **Settings > Maps**. Every lighting value is the map's load-time default;
 players can experiment non-destructively through **Settings > World** and
-restore the authored values at any time.
+restore the authored values at any time. **Dynamic Lighting** independently
+disables the moving sun, moon, ambient fill, and their world shadows while
+leaving the clock, sky, baked lightmaps, emissive materials, and local lights
+active.
 
 ## Material and physics UI
 
@@ -215,6 +218,13 @@ Scene property `ow_cycle_seconds` controls the day/night duration; set it to
 zero to freeze lighting at `ow_start_hour`. Set `ow_cycle_ping_pong` with
 `ow_end_hour` to animate from the start hour to the end hour and back without
 traversing the unused part of the 24-hour clock.
+
+Imported Skate 3 lightmaps must set `ow_lightmap_encoding` to
+`skate3_retail_sqrt_linear_over_4`. The addon then preserves their RGBA8
+pages byte-for-byte and applies the console's `encoded²` energy scale in the
+exported material. Ordinary Blender bakes retain the authored
+`encoded² * 4` decode, so the two sources do not accidentally differ by
+four times their lighting energy.
 
 To author a door, keep its mesh in Group 1, choose **Hinged Door** in
 **Object Properties > Physics > Owned World Physics**, place the 3D cursor

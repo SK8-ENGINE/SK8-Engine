@@ -45,6 +45,7 @@ skate::world::DayNightState g_day_night_state;
 skate::world::DayNightCycleDefinition g_day_night_cycle;
 bool g_day_night_runtime_initialized = false;
 bool g_day_night_paused = false;
+bool g_dynamic_lighting_enabled = true;
 float g_day_night_manual_hour = 0.0f;
 std::mutex g_day_night_mutex;
 WeatherSnapshot g_weather_snapshot;
@@ -1324,6 +1325,12 @@ skate::world::DayNightState ActiveDayNightState() {
   return g_day_night_state;
 }
 
+bool DynamicWorldLightingEnabled() {
+  std::scoped_lock lock(g_day_night_mutex);
+  EnsureDayNightRuntimeInitialized();
+  return g_dynamic_lighting_enabled;
+}
+
 WorldLightingSettings ActiveWorldLightingSettings() {
   std::scoped_lock lock(g_day_night_mutex);
   EnsureDayNightRuntimeInitialized();
@@ -1331,6 +1338,7 @@ WorldLightingSettings ActiveWorldLightingSettings() {
   settings.available = g_day_night_cycle.enabled;
   settings.paused = g_day_night_paused;
   settings.ping_pong = g_day_night_cycle.ping_pong;
+  settings.dynamic_lighting_enabled = g_dynamic_lighting_enabled;
   settings.time_of_day_hours = g_day_night_manual_hour;
   settings.cycle_duration_seconds =
       g_day_night_cycle.duration_seconds;
@@ -1440,6 +1448,9 @@ void SetWorldLightingSetting(WorldLightingSetting setting, float value) {
       g_day_night_cycle.night_ambient =
           std::clamp(value, 0.0f, 1.0f);
       break;
+    case WorldLightingSetting::kDynamicLightingEnabled:
+      g_dynamic_lighting_enabled = value >= 0.5f;
+      break;
   }
   g_day_night_initialized = false;
 }
@@ -1450,6 +1461,7 @@ void ResetWorldLightingSettings() {
       ActiveWorld().Definition().day_night_cycle;
   g_day_night_paused =
       g_day_night_cycle.duration_seconds <= 0.0f;
+  g_dynamic_lighting_enabled = true;
   g_day_night_manual_hour =
       WrapHour(g_day_night_cycle.start_time_hours);
   g_day_night_elapsed = 0.0f;

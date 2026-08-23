@@ -154,6 +154,13 @@ whose first two components are the unwrap while the sign bits also carry
 tangent handedness. Thirty-two water/ocean parts remain recorded but unbound
 because those shader families intentionally bypass unreliable static
 lightmaps; one sign mesh carries a lightmap parameter but no secondary UV.
+The addon preserves every retail page byte and exports material strength
+`0.25`, cancelling the generic authored-bake decoder's `* 4` so University
+uses the retail renderer's `encoded²` energy rather than four times that
+energy. The verifier rejects any selected retail material at another scale.
+The World menu's independent **Dynamic Lighting** switch can remove moving
+sun/moon, ambient fill, and world shadows without removing these baked pages,
+which provides an in-game isolation check while retaining the changing sky.
 
 ### Point-level collision diagnosis
 

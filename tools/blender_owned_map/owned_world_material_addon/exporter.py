@@ -2502,6 +2502,23 @@ def export_scene(
 
         for exported in export_materials:
             material = exported.blender_material
+            lightmap_encoding = str(
+                material.get("ow_lightmap_encoding", "")
+            )
+            baked_strength = float(
+                material.get("ow_baked_strength", 1.0)
+            )
+            if (
+                exported.lightmap_texture
+                and lightmap_encoding
+                == "skate3_retail_sqrt_linear_over_4"
+            ):
+                # The owned shader decodes authored Blender bakes from
+                # sqrt(linear / 4) with encoded^2 * 4. Retail pages already
+                # contain the console light value consumed as encoded^2,
+                # so compensate the common decode without altering a byte
+                # of the source page or the artist-facing strength control.
+                baked_strength *= 0.25
             _write_string(stream, material.name)
             _write_u32(stream, int(material.get("ow_flags", 1)))
             _write_f32(stream, float(material.get("ow_friction", 0.82)))
@@ -2511,7 +2528,7 @@ def export_scene(
             _write_f32(stream, float(material.get("ow_emissive", 0.0)))
             _write_u32(stream, exported.albedo_texture)
             _write_u32(stream, exported.lightmap_texture)
-            _write_f32(stream, float(material.get("ow_baked_strength", 1.0)))
+            _write_f32(stream, baked_strength)
             _write_u32(stream, exported.normal_texture)
             _write_u32(stream, exported.orm_texture)
             _write_u32(stream, exported.emissive_texture)

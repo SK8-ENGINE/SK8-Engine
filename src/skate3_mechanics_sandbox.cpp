@@ -1182,6 +1182,8 @@ void AppendTelemetry(std::ostream& out) {
       << weather.thunder_count
       << " sandbox_day_night_elapsed_bits="
       << std::bit_cast<uint32_t>(celestial.elapsed_seconds)
+      << " sandbox_dynamic_world_lighting="
+      << (map::DynamicWorldLightingEnabled() ? 1 : 0)
       << " sandbox_day_night_phase_bits="
       << std::bit_cast<uint32_t>(celestial.phase)
       << " sandbox_time_of_day_hours_bits="

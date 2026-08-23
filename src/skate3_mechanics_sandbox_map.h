@@ -158,6 +158,7 @@ bool ActiveMovingLightSnapshot(std::size_t index,
 // published state.
 void AdvanceDayNightCycle(float frame_seconds);
 skate::world::DayNightState ActiveDayNightState();
+bool DynamicWorldLightingEnabled();
 
 enum class WorldLightingSetting {
   kPaused,
@@ -177,12 +178,14 @@ enum class WorldLightingSetting {
   kMoonIntensity,
   kDayAmbient,
   kNightAmbient,
+  kDynamicLightingEnabled,
 };
 
 struct WorldLightingSettings {
   bool available = false;
   bool paused = false;
   bool ping_pong = false;
+  bool dynamic_lighting_enabled = true;
   float time_of_day_hours = 0.0f;
   float cycle_duration_seconds = 0.0f;
   float start_hour = 0.0f;
