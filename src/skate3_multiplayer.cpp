@@ -304,12 +304,14 @@ struct AppearanceAssembly {
   std::uint32_t total_bytes = 0;
   std::uint16_t chunk_count = 0;
   std::uint16_t received_chunks = 0;
+  Clock::time_point last_update{};
   std::vector<std::uint8_t> bytes;
   std::vector<bool> received;
 };
 
 struct RemotePeerState {
   std::uint32_t session = 0;
+  Clock::time_point last_packet_at{};
   std::int64_t clock_offset_us = 0;
   std::int64_t minimum_clock_offset_us =
       std::numeric_limits<std::int64_t>::max();
@@ -411,6 +413,9 @@ struct TelemetrySnapshot {
   std::uint64_t relevance_drops = 0;
   std::uint64_t far_presence_packets = 0;
   std::uint64_t outbound_peer_resets = 0;
+  std::uint64_t appearance_assembly_timeouts = 0;
+  std::uint64_t appearance_budget_rejections = 0;
+  std::uint64_t incomplete_appearance_bytes = 0;
   std::uint64_t animation_present_interpolated = 0;
   std::uint64_t animation_present_held_latest = 0;
   std::uint64_t animation_present_held_oldest = 0;
@@ -2003,6 +2008,12 @@ class Runtime {
         << telemetry_.far_presence_packets
         << " multiplayer_outbound_peer_resets="
         << telemetry_.outbound_peer_resets
+        << " multiplayer_appearance_assembly_timeouts="
+        << telemetry_.appearance_assembly_timeouts
+        << " multiplayer_appearance_budget_rejections="
+        << telemetry_.appearance_budget_rejections
+        << " multiplayer_incomplete_appearance_bytes="
+        << telemetry_.incomplete_appearance_bytes
         << " multiplayer_animation_present_interpolated="
         << telemetry_.animation_present_interpolated
         << " multiplayer_animation_present_held_latest="
@@ -2106,6 +2117,7 @@ class Runtime {
         "rx({:.1f}r/{:.1f}a/{:.1f}p)KiB/s "
         "bones={} relay={:.1f}pps relevance_drop={:.1f}pps rejected={} "
         "failures={} peer_resets={} "
+        "appearance={:.2f}MiB timeout={} budget_reject={} "
         "present={:.1f}i/{:.1f}new/{:.1f}old fps "
         "timing={:.1f}ms jitter={:.1f}ms buffered={}",
         bound_role_, telemetry_.known_peers,
@@ -2119,6 +2131,11 @@ class Runtime {
         telemetry_.remote_animation_bones, relay_pps, drop_pps,
         telemetry_.rejected_packets, telemetry_.socket_failures,
         telemetry_.outbound_peer_resets,
+        static_cast<double>(
+            telemetry_.incomplete_appearance_bytes) /
+            (1024.0 * 1024.0),
+        telemetry_.appearance_assembly_timeouts,
+        telemetry_.appearance_budget_rejections,
         animation_interpolated_fps, animation_held_latest_fps,
         animation_held_oldest_fps,
         static_cast<double>(telemetry_.animation_period_us) / 1000.0,
@@ -2172,17 +2189,43 @@ class Runtime {
     ResetOutboundPeerState(role, reason);
   }
 
+  [[nodiscard]] std::size_t IncompleteAppearanceBytes(
+      std::uint32_t excluded_role = 0) const {
+    std::size_t total = 0;
+    for (const auto& [role, peer] : remote_peers_) {
+      if (role == excluded_role ||
+          peer.appearance_assembly.identity == 0) {
+        continue;
+      }
+      total += peer.appearance_assembly.bytes.size();
+    }
+    return total;
+  }
+
   void PrunePeers(Clock::time_point now) {
     constexpr auto kForgetPeerAfter = std::chrono::seconds(5);
     for (auto iterator = remote_peers_.begin();
          iterator != remote_peers_.end();) {
-      const RemotePeerState& peer = iterator->second;
-      const Clock::time_point newest =
-          peer.samples.empty()
-              ? (peer.animation_samples.empty()
-                     ? Clock::time_point{}
-                     : peer.animation_samples.back().received_at)
-              : peer.samples.back().received_at;
+      RemotePeerState& peer = iterator->second;
+      if (peer.appearance_assembly.identity != 0 &&
+          lifecycle::AppearanceAssemblyExpired<Clock>(
+              now, peer.appearance_assembly.last_update)) {
+        peer.appearance_assembly = {};
+        ++telemetry_.appearance_assembly_timeouts;
+      }
+      if (peer.appearance_assembly.identity != 0) {
+        ++iterator;
+        continue;
+      }
+      Clock::time_point newest = peer.last_packet_at;
+      if (!peer.samples.empty()) {
+        newest = std::max(
+            newest, peer.samples.back().received_at);
+      }
+      if (!peer.animation_samples.empty()) {
+        newest = std::max(
+            newest, peer.animation_samples.back().received_at);
+      }
       if (newest != Clock::time_point{} &&
           now - newest > kForgetPeerAfter) {
         ForgetPeerGeneration(
@@ -2208,6 +2251,8 @@ class Runtime {
 #endif
     telemetry_.known_peers =
         static_cast<std::uint32_t>(remote_peers_.size());
+    telemetry_.incomplete_appearance_bytes =
+        IncompleteAppearanceBytes();
   }
 
   bool EnsureSteam(std::int32_t role) {
@@ -2543,6 +2588,7 @@ class Runtime {
       ++telemetry_.rejected_packets;
       return false;
     }
+    peer.last_packet_at = now;
     const std::uint64_t receive_time_us = NowMicroseconds();
     const std::int64_t observed_clock_offset =
         static_cast<std::int64_t>(receive_time_us) -
@@ -2632,6 +2678,7 @@ class Runtime {
     ++telemetry_.received_packets;
     RecordReceivedPacketClass(
         kAnimationPacketMagic, expected_bytes);
+    peer.last_packet_at = now;
     if (!peer.animation_samples.empty() &&
         packet.sequence <=
             peer.animation_samples.back().pose.sequence) {
@@ -2784,9 +2831,11 @@ class Runtime {
         std::size_t(packet.chunk_index) *
         kAppearanceChunkBytes;
     const std::size_t expected_chunk_bytes =
-        std::min<std::size_t>(
-            kAppearanceChunkBytes,
-            std::size_t(packet.total_bytes) - offset);
+        offset < packet.total_bytes
+            ? std::min<std::size_t>(
+                  kAppearanceChunkBytes,
+                  std::size_t(packet.total_bytes) - offset)
+            : 0;
     if (!CommonPacketValid(
             packet.version, packet.sender_role,
             packet.sender_session, packet.map_hash, map_hash) ||
@@ -2812,18 +2861,29 @@ class Runtime {
     ++telemetry_.received_packets;
     RecordReceivedPacketClass(
         kAppearancePacketMagic, expected_bytes);
+    peer.last_packet_at = now;
     AppearanceAssembly& assembly =
         peer.appearance_assembly;
     if (assembly.identity != packet.appearance_id ||
         assembly.total_bytes != packet.total_bytes ||
         assembly.chunk_count != packet.chunk_count) {
+      const std::size_t other_incomplete_bytes =
+          IncompleteAppearanceBytes(packet.sender_role);
+      if (!lifecycle::CanBeginAppearanceAssembly(
+              other_incomplete_bytes, packet.total_bytes)) {
+        ++telemetry_.appearance_budget_rejections;
+        ++telemetry_.rejected_packets;
+        return false;
+      }
       assembly = {};
       assembly.identity = packet.appearance_id;
       assembly.total_bytes = packet.total_bytes;
       assembly.chunk_count = packet.chunk_count;
+      assembly.last_update = now;
       assembly.bytes.resize(packet.total_bytes);
       assembly.received.resize(packet.chunk_count);
     }
+    assembly.last_update = now;
     if (!assembly.received[packet.chunk_index]) {
       std::copy_n(
           packet.bytes, packet.chunk_bytes,
@@ -2843,7 +2903,8 @@ class Runtime {
           packet.total_bytes, packet.chunk_count);
       assembly = {};
     }
-    (void)now;
+    telemetry_.incomplete_appearance_bytes =
+        IncompleteAppearanceBytes();
     return true;
   }
 
@@ -3762,6 +3823,7 @@ class Runtime {
     telemetry_.session = 0;
     telemetry_.remote_animation_bones = 0;
     telemetry_.known_peers = 0;
+    telemetry_.incomplete_appearance_bytes = 0;
   }
 
   std::mutex mutex_;

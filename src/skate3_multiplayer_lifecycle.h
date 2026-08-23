@@ -1,10 +1,35 @@
 #pragma once
 
+#include "skate3_multiplayer_protocol.h"
+
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <unordered_map>
 
 namespace skate3::multiplayer::lifecycle {
+
+inline constexpr std::size_t kMaximumIncompleteAppearanceBytes =
+    64 * 1024 * 1024;
+inline constexpr auto kAppearanceAssemblyIdleTimeout = std::chrono::seconds(10);
+
+[[nodiscard]] constexpr bool
+CanBeginAppearanceAssembly(std::size_t other_incomplete_bytes,
+                           std::size_t requested_bytes) {
+  return requested_bytes > 0 &&
+         requested_bytes <= protocol::kMaximumAppearanceBytes &&
+         other_incomplete_bytes <= kMaximumIncompleteAppearanceBytes &&
+         requested_bytes <=
+             kMaximumIncompleteAppearanceBytes - other_incomplete_bytes;
+}
+
+template <typename Clock>
+[[nodiscard]] bool
+AppearanceAssemblyExpired(typename Clock::time_point now,
+                          typename Clock::time_point last_update) {
+  return last_update != typename Clock::time_point{} &&
+         now - last_update > kAppearanceAssemblyIdleTimeout;
+}
 
 // Roles are reusable presentation slots, not durable peer identities. Track
 // both the authenticated transport identity and the sender's process session

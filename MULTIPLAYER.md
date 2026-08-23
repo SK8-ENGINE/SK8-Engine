@@ -103,9 +103,12 @@ AppID and follow Valve's setup and redistributable requirements.
   receiver resolves exact vanilla CAC bind meshes from its local asset
   catalogue and installs the sender's body, clothing, hair, accessories,
   materials, and board without using Skate 3's fragile retail online/NPC
-  presentation entities. The current transitional recipe includes a
-  one-time, several-MiB presentation bundle; moving the remaining data to
-  stable vanilla asset identifiers is the next format optimization.
+  presentation entities. The normal `RCP1` path carries the compact CAC
+  recipe plus model, track, topology, and remap bindings once on join and
+  whenever the appearance changes. The older assembled mesh/texture format
+  remains a bounded compatibility fallback. Incomplete appearance transfers
+  are limited to 16 MiB per peer and 64 MiB in total and expire after ten
+  seconds without a valid chunk.
 - Each client renders at most the nearest 12 remote players by default.
 - Each sender routes full skeletal animation only to nearby peers inside the
   selected relevance radius. Distant peers receive inexpensive root-presence

@@ -1,11 +1,16 @@
 #include "skate3_multiplayer_lifecycle.h"
 
+#include <chrono>
 #include <iostream>
 #include <string_view>
 
 namespace {
 
+using skate3::multiplayer::lifecycle::AppearanceAssemblyExpired;
+using skate3::multiplayer::lifecycle::CanBeginAppearanceAssembly;
+using skate3::multiplayer::lifecycle::kMaximumIncompleteAppearanceBytes;
 using skate3::multiplayer::lifecycle::PeerGenerationTracker;
+using skate3::multiplayer::protocol::kMaximumAppearanceBytes;
 
 int g_failures = 0;
 
@@ -80,6 +85,41 @@ void TestInvalidIdentityDoesNotCreateState() {
          "invalid observations must not allocate generation state");
 }
 
+void TestAppearanceAssemblyBudget() {
+  Expect(!CanBeginAppearanceAssembly(0, 0),
+         "empty appearance assemblies must be rejected");
+  Expect(CanBeginAppearanceAssembly(0, kMaximumAppearanceBytes),
+         "one maximum-size legacy appearance must fit the global budget");
+  Expect(
+      !CanBeginAppearanceAssembly(0, std::size_t{kMaximumAppearanceBytes} + 1),
+      "per-peer appearance cap must be enforced");
+  Expect(CanBeginAppearanceAssembly(kMaximumIncompleteAppearanceBytes -
+                                        kMaximumAppearanceBytes,
+                                    kMaximumAppearanceBytes),
+         "an assembly exactly filling the global budget must be accepted");
+  Expect(!CanBeginAppearanceAssembly(kMaximumIncompleteAppearanceBytes -
+                                         kMaximumAppearanceBytes + 1,
+                                     kMaximumAppearanceBytes),
+         "an assembly exceeding the global budget by one byte must fail");
+  Expect(!CanBeginAppearanceAssembly(kMaximumIncompleteAppearanceBytes + 1, 1),
+         "an already-invalid global total must fail without underflow");
+}
+
+void TestAppearanceAssemblyTimeout() {
+  using Clock = std::chrono::steady_clock;
+  const Clock::time_point start = Clock::now();
+
+  Expect(
+      !AppearanceAssemblyExpired<Clock>(start + std::chrono::seconds(9), start),
+      "active appearance assembly expired too early");
+  Expect(
+      AppearanceAssemblyExpired<Clock>(start + std::chrono::seconds(11), start),
+      "stalled appearance assembly did not expire");
+  Expect(!AppearanceAssemblyExpired<Clock>(start + std::chrono::seconds(30),
+                                           Clock::time_point{}),
+         "empty appearance assembly must not report a timeout");
+}
+
 } // namespace
 
 int main() {
@@ -88,6 +128,8 @@ int main() {
   TestTransportReplacementInvalidatesProcessSession();
   TestDepartureAndRoleReuse();
   TestInvalidIdentityDoesNotCreateState();
+  TestAppearanceAssemblyBudget();
+  TestAppearanceAssemblyTimeout();
 
   if (g_failures != 0) {
     std::cerr << g_failures << " multiplayer lifecycle test(s) failed\n";
