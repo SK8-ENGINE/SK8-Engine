@@ -481,6 +481,23 @@ Current checkpoint:
   current role, process session, and monotonic transport generation. Stale or
   incompatible generations cannot activate. Root, pose, appearance, board,
   and rendering traffic remain protocol v11.
+- Commit `8c94fe6` moves the live root and board-state snapshot to an
+  80-byte explicit-little-endian v12 datagram after both peers acknowledge
+  the active capability generation. Peers that have not completed that gate,
+  including dynamic localhost host-relay paths, retain the v11 fallback.
+  Decoded v12 snapshots enter the existing pose buffer, interpolation, board,
+  and renderer path; skeletal animation and appearance remain v11.
+- In run `20260823-201047-8c94fe69`, the user reported that the five-client
+  root/board migration looked good. Telemetry independently showed every
+  client negotiating v12 with all four peers and carrying approximately
+  21,000 root snapshots in each direction. All 20 sender/receiver paths
+  completed at 59.4-60.2 Hz with zero held-latest playback, sequence gaps, or
+  superseded assemblies. There were no capability incompatibilities, socket
+  failures, delivery-policy errors, appearance-resource faults, renderer
+  release faults, or unsafe GPU upload reuse. Client 4 rejected one early
+  root datagram, then accepted more than 21,000 without another rejection;
+  the isolated rejection did not produce a sustained stream fault. This
+  telemetry does not establish the user's visual result.
 
 Completion:
 
