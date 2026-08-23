@@ -554,9 +554,9 @@ try {
         clients = $Clients
         transport = 'localhost-udp'
         localhost_topology = 'direct-mesh'
-        fidelity_contract = 'full-for-2-to-5-players'
+        fidelity_contract = 'full-for-1-to-100-players'
         guest_fps_cap = 120
-        quality_preset = 2
+        replication_quality = 'full-fidelity'
         root_rate_hz = 60
         animation_rate_hz = 60
         interpolation_ms = 50
@@ -605,7 +605,7 @@ $runRoot
 
 Clients: $Clients
 Transport: localhost UDP
-Quality: Balanced, 60 Hz root, 60 Hz animation, 50 ms interpolation
+Quality: Full fidelity, 60 Hz root, 60 Hz animation, 50 ms interpolation
 Fault: client 3 intentionally drops role 2's final appearance chunk until
 the bounded assembly timeout requests a resend.
 
@@ -645,7 +645,7 @@ $runRoot
 
 Clients: 5
 Transport: localhost UDP
-Quality: Balanced, 60 Hz root, 60 Hz animation, 50 ms minimum interpolation
+Quality: Full fidelity, 60 Hz root, 60 Hz animation, 50 ms minimum interpolation
 Change under test: buffered playback cannot advance beyond an interpolatable
 skeletal frame after a scheduler stall; all five localhost clients exchange
 realtime packets directly instead of routing every stream through client 1;
@@ -706,7 +706,7 @@ $runRoot
 
 Clients: 5
 Transport: localhost UDP
-Quality: Balanced, 60 Hz root, 60 Hz animation, 50 ms interpolation
+Quality: Full fidelity, 60 Hz root, 60 Hz animation, 50 ms interpolation
 Wire format: unchanged protocol v11
 Delivery policy: root/animation unreliable and latest-wins; control/outfits
 reliable
@@ -767,7 +767,7 @@ $runRoot
 
 Clients: $Clients
 Transport: localhost UDP
-Quality: Balanced, 60 Hz root, 60 Hz animation, 50 ms interpolation
+Quality: Full fidelity, 60 Hz root, 60 Hz animation, 50 ms interpolation
 Profiles: persistent per role across visual-check runs
 Appearance preparation: background CPU worker enabled
 Appearance installation: staged GPU upload, maximum 4 operations or 4 ms
@@ -899,7 +899,6 @@ separately, then ask the agent to analyze this run directory.
             '--skate3_multiplayer_local_lane_spacing=0',
             "--skate3_multiplayer_local_client=$role",
             "--skate3_multiplayer_local_peer_count=$Clients",
-            '--skate3_multiplayer_quality_preset=2',
             '--skate3_multiplayer_local_send_rate=60',
             '--skate3_multiplayer_local_animation_rate=60',
             '--skate3_multiplayer_local_interpolation_ms=50',

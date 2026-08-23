@@ -110,21 +110,20 @@ REXCVAR_DEFINE_DOUBLE(
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 REXCVAR_DEFINE_INT32(
     skate3_multiplayer_quality_preset, 2, "Skate 3",
-    "Multiplayer network quality: 0=Auto, 1=Bandwidth Saver, 2=Balanced, "
-    "3=High Fidelity, 4=Custom. Auto selects a preset from the live session "
-    "size; Custom uses the individual multiplayer tuning cvars.")
+    "Legacy multiplayer quality setting retained for configuration "
+    "compatibility. The current policy sends every player at full fidelity.")
     .range(0, 4)
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 REXCVAR_DEFINE_INT32(
     skate3_multiplayer_local_send_rate, 60, "Skate 3",
-    "Custom-preset root pose packets sent per second by the multiplayer "
-    "transport.")
+    "Legacy tuning value retained for settings compatibility. The current "
+    "full-fidelity stream sends root poses at 60 Hz.")
     .range(10, 120)
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 REXCVAR_DEFINE_INT32(
     skate3_multiplayer_local_animation_rate, 60, "Skate 3",
-    "Custom-preset completed skeletal-pose frames sent per second by the "
-    "multiplayer transport.")
+    "Legacy tuning value retained for settings compatibility. The current "
+    "full-fidelity stream sends completed skeletal poses at 60 Hz.")
     .range(10, 60)
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 REXCVAR_DEFINE_INT32(
@@ -145,27 +144,26 @@ REXCVAR_DEFINE_INT32(
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 REXCVAR_DEFINE_DOUBLE(
     skate3_multiplayer_relevance_radius, 80.0, "Skate 3",
-    "Maximum map-space distance for high-detail remote animation routing by "
-    "the transport.")
+    "Reserved for a future explicitly profiled adaptive mode. The current "
+    "full-fidelity policy does not distance-cull replication.")
     .range(5.0, 1000.0)
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 REXCVAR_DEFINE_DOUBLE(
     skate3_multiplayer_attachment_radius, 35.0, "Skate 3",
-    "Distance inside which exact hat, hair, board and wheel attachment "
-    "tracks are sent. More distant skaters retain the canonical body "
-    "skeleton and use receiver-side attachment remaps.")
+    "Reserved for a future explicitly profiled adaptive mode. The current "
+    "policy always transmits exact attachment tracks.")
     .range(5.0, 250.0)
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 REXCVAR_DEFINE_INT32(
     skate3_multiplayer_relevance_players, 12, "Skate 3",
-    "Maximum nearest high-detail remote players routed to each client. "
-    "Cheap root-presence updates continue outside this budget.")
+    "Reserved for a future explicitly profiled adaptive mode. The current "
+    "policy does not cap full-fidelity recipients.")
     .range(1, 32)
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 REXCVAR_DEFINE_INT32(
     skate3_multiplayer_far_presence_rate, 2, "Skate 3",
-    "Root-pose updates per second for players outside the high-detail "
-    "relevance set.")
+    "Reserved for a future explicitly profiled adaptive mode. The current "
+    "policy sends the full stream to every peer.")
     .range(1, 10)
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 REXCVAR_DEFINE_INT32(
@@ -213,120 +211,25 @@ using protocol::kMaximumAppearanceBytes;
 using protocol::kPacketMagic;
 using protocol::kProtocolVersion;
 
-enum class NetworkQualityPreset : std::int32_t {
-  kAuto = 0,
-  kBandwidthSaver = 1,
-  kBalanced = 2,
-  kHighFidelity = 3,
-  kCustom = 4,
-};
-
 struct NetworkTuning {
   std::int32_t pose_rate = 60;
   std::int32_t animation_rate = 60;
   std::int32_t interpolation_ms = 50;
-  float relevance_radius = 80.0f;
-  float attachment_radius = 35.0f;
-  std::int32_t relevance_players = 12;
-  std::int32_t far_presence_rate = 2;
-  bool full_fidelity = false;
-  NetworkQualityPreset selected = NetworkQualityPreset::kBalanced;
-  NetworkQualityPreset effective = NetworkQualityPreset::kBalanced;
+  bool full_fidelity = true;
 };
 
 NetworkTuning ResolveNetworkTuning(std::size_t participant_count) {
-  const auto selected = static_cast<NetworkQualityPreset>(
-      std::clamp(
-          REXCVAR_GET(skate3_multiplayer_quality_preset),
-          static_cast<std::int32_t>(NetworkQualityPreset::kAuto),
-          static_cast<std::int32_t>(NetworkQualityPreset::kCustom)));
-  NetworkQualityPreset effective = selected;
-  if (effective == NetworkQualityPreset::kAuto) {
-    if (participant_count <= 5) {
-      effective = NetworkQualityPreset::kHighFidelity;
-    } else if (participant_count <= 12) {
-      effective = NetworkQualityPreset::kBalanced;
-    } else {
-      effective = NetworkQualityPreset::kBandwidthSaver;
-    }
-  }
-
   NetworkTuning tuning;
+  tuning.interpolation_ms = std::clamp(
+      REXCVAR_GET(skate3_multiplayer_local_interpolation_ms), 0, 250);
   tuning.full_fidelity =
       topology::FullFidelitySession(
           static_cast<std::uint32_t>(participant_count));
-  tuning.selected = selected;
-  tuning.effective = effective;
-  switch (effective) {
-    case NetworkQualityPreset::kBandwidthSaver:
-      tuning.pose_rate = 30;
-      tuning.animation_rate = 10;
-      tuning.interpolation_ms = 100;
-      tuning.relevance_radius = 50.0f;
-      tuning.attachment_radius = 20.0f;
-      tuning.relevance_players = 6;
-      tuning.far_presence_rate = 1;
-      break;
-    case NetworkQualityPreset::kHighFidelity:
-      tuning.pose_rate = 90;
-      tuning.animation_rate = 60;
-      tuning.interpolation_ms = 35;
-      tuning.relevance_radius = 120.0f;
-      tuning.attachment_radius = 50.0f;
-      tuning.relevance_players = 16;
-      tuning.far_presence_rate = 3;
-      break;
-    case NetworkQualityPreset::kCustom:
-      tuning.pose_rate = std::clamp(
-          REXCVAR_GET(skate3_multiplayer_local_send_rate), 10, 120);
-      tuning.animation_rate = std::clamp(
-          REXCVAR_GET(skate3_multiplayer_local_animation_rate), 10, 60);
-      tuning.interpolation_ms = std::clamp(
-          REXCVAR_GET(skate3_multiplayer_local_interpolation_ms), 0, 250);
-      tuning.relevance_radius = static_cast<float>(std::clamp(
-          REXCVAR_GET(skate3_multiplayer_relevance_radius), 5.0, 1000.0));
-      tuning.attachment_radius = static_cast<float>(std::clamp(
-          REXCVAR_GET(skate3_multiplayer_attachment_radius), 5.0, 250.0));
-      tuning.relevance_players = std::clamp(
-          REXCVAR_GET(skate3_multiplayer_relevance_players), 1, 32);
-      tuning.far_presence_rate = std::clamp(
-          REXCVAR_GET(skate3_multiplayer_far_presence_rate), 1, 10);
-      break;
-    case NetworkQualityPreset::kAuto:
-      // Auto is resolved to one of the concrete presets above.
-      break;
-    case NetworkQualityPreset::kBalanced:
-    default:
-      // These defaults deliberately preserve the settings used by the
-      // visually verified multiplayer build.
-      break;
-  }
   return tuning;
 }
 
-const char* NetworkQualityName(const NetworkTuning& tuning) {
-  if (tuning.selected == NetworkQualityPreset::kAuto) {
-    switch (tuning.effective) {
-      case NetworkQualityPreset::kBandwidthSaver:
-        return "Auto/Bandwidth Saver";
-      case NetworkQualityPreset::kHighFidelity:
-        return "Auto/High Fidelity";
-      case NetworkQualityPreset::kBalanced:
-      default:
-        return "Auto/Balanced";
-    }
-  }
-  switch (tuning.effective) {
-    case NetworkQualityPreset::kBandwidthSaver:
-      return "Bandwidth Saver";
-    case NetworkQualityPreset::kHighFidelity:
-      return "High Fidelity";
-    case NetworkQualityPreset::kCustom:
-      return "Custom";
-    case NetworkQualityPreset::kBalanced:
-    default:
-      return "Balanced";
-  }
+const char* NetworkQualityName(const NetworkTuning&) {
+  return "Full Fidelity";
 }
 
 constexpr auto kRemoteTimeout = std::chrono::milliseconds(1500);
@@ -1979,7 +1882,6 @@ class Runtime {
     }
 #endif
     network_tuning_ = ResolveNetworkTuning(participant_count);
-    relevance_cache_.clear();
     local_appearance_identity_ =
         local_appearance != nullptr &&
                 local_appearance->identity != 0 &&
@@ -2069,11 +1971,6 @@ class Runtime {
           return left.first == right.first ? left.second < right.second
                                           : left.first < right.first;
         });
-    const std::size_t visual_budget = static_cast<std::size_t>(
-        std::max(network_tuning_.relevance_players, 1));
-    if (visible_candidates.size() > visual_budget) {
-      visible_candidates.resize(visual_budget);
-    }
     out_remotes.clear();
     out_remotes.reserve(visible_candidates.size());
     std::uint64_t newest_age_ms = 0;
@@ -2520,31 +2417,6 @@ class Runtime {
     bool reset = outbound_animation_keyframes_.erase(role) != 0;
     reset |= outbound_appearance_.erase(role) != 0;
     reset |= peer_control_.erase(role) != 0;
-    for (auto iterator = far_presence_times_.begin();
-         iterator != far_presence_times_.end();) {
-      const std::uint32_t source_role =
-          static_cast<std::uint32_t>(iterator->first >> 32);
-      const std::uint32_t target_role =
-          static_cast<std::uint32_t>(iterator->first);
-      if (source_role == role || target_role == role) {
-        iterator = far_presence_times_.erase(iterator);
-        reset = true;
-      } else {
-        ++iterator;
-      }
-    }
-    for (auto iterator = relevance_cache_.begin();
-         iterator != relevance_cache_.end();) {
-      const std::uint32_t source_role =
-          static_cast<std::uint32_t>(iterator->first >> 32);
-      const std::uint32_t target_role =
-          static_cast<std::uint32_t>(iterator->first);
-      if (source_role == role || target_role == role) {
-        iterator = relevance_cache_.erase(iterator);
-      } else {
-        ++iterator;
-      }
-    }
     if (!reset) {
       return;
     }
@@ -3358,15 +3230,6 @@ class Runtime {
       ++telemetry_.rejected_packets;
       return false;
     }
-    if (bound_role_ == 1 &&
-        !IsHighDetailCached(packet.sender_role, 1)) {
-      // The host can relay an already validated compact fragment without
-      // allocating and decoding a skeleton it will not render locally.
-      ++telemetry_.received_packets;
-      RecordReceivedPacketClass(
-          kAnimationPacketMagic, expected_bytes);
-      return true;
-    }
     RemotePeerState& peer = remote_peers_[packet.sender_role];
     BeginRemoteSession(
         packet.sender_role, peer, packet.sender_session);
@@ -3657,122 +3520,6 @@ class Runtime {
 #endif
   }
 
-  bool PositionForRole(std::uint32_t role, const float*& out) const {
-#if defined(_WIN32)
-    if (role == static_cast<std::uint32_t>(bound_role_) &&
-        local_position_valid_) {
-      out = local_position_;
-      return true;
-    }
-    const auto remote = remote_peers_.find(role);
-    if (remote != remote_peers_.end() &&
-        !remote->second.samples.empty()) {
-      out = remote->second.samples.back().pose.position;
-      return true;
-    }
-    const auto found = host_peers_.find(role);
-    if (found != host_peers_.end() && found->second.position_valid) {
-      out = found->second.position;
-      return true;
-    }
-#else
-    (void)role;
-#endif
-    out = nullptr;
-    return false;
-  }
-
-  bool IsHighDetail(std::uint32_t source_role,
-                    std::uint32_t target_role) const {
-#if defined(_WIN32)
-    if (network_tuning_.full_fidelity) {
-      return true;
-    }
-    const float* source_position = nullptr;
-    const float* target_position = nullptr;
-    if (!PositionForRole(source_role, source_position) ||
-        !PositionForRole(target_role, target_position)) {
-      // New peers receive enough data to become visible before their first
-      // root packet establishes relevance.
-      return true;
-    }
-    const auto distance_squared = [](const float* left,
-                                     const float* right) {
-      const float dx = left[0] - right[0];
-      const float dy = left[1] - right[1];
-      const float dz = left[2] - right[2];
-      return dx * dx + dy * dy + dz * dz;
-    };
-    const float source_distance_squared =
-        distance_squared(source_position, target_position);
-    const float radius = network_tuning_.relevance_radius;
-    if (source_distance_squared > radius * radius) {
-      return false;
-    }
-    const std::size_t budget = static_cast<std::size_t>(
-        std::max(network_tuning_.relevance_players, 1));
-    std::size_t closer = 0;
-    if (source_role != static_cast<std::uint32_t>(bound_role_) &&
-        target_role != static_cast<std::uint32_t>(bound_role_) &&
-        local_position_valid_ &&
-        distance_squared(local_position_, target_position) <
-            source_distance_squared) {
-      ++closer;
-    }
-    for (const auto& [candidate_role, candidate] : remote_peers_) {
-      if (candidate_role == source_role ||
-          candidate_role == target_role ||
-          candidate.samples.empty()) {
-        continue;
-      }
-      if (distance_squared(
-              candidate.samples.back().pose.position,
-              target_position) <
-          source_distance_squared) {
-        ++closer;
-      }
-    }
-    return closer < budget;
-#else
-    (void)source_role;
-    (void)target_role;
-    return true;
-#endif
-  }
-
-  bool IsHighDetailCached(std::uint32_t source_role,
-                          std::uint32_t target_role) {
-    const std::uint64_t key =
-        (static_cast<std::uint64_t>(source_role) << 32) |
-        target_role;
-    const auto found = relevance_cache_.find(key);
-    if (found != relevance_cache_.end()) {
-      return found->second;
-    }
-    const bool result = IsHighDetail(source_role, target_role);
-    relevance_cache_.emplace(key, result);
-    return result;
-  }
-
-  bool AllowFarPresence(std::uint32_t source_role,
-                        std::uint32_t target_role,
-                        Clock::time_point now) {
-    const std::uint64_t key =
-        (static_cast<std::uint64_t>(source_role) << 32) |
-        target_role;
-    const std::int32_t rate =
-        network_tuning_.far_presence_rate;
-    const auto interval = std::chrono::microseconds(
-        1000000 / std::max(rate, 1));
-    Clock::time_point& last = far_presence_times_[key];
-    if (last != Clock::time_point{} && now - last < interval) {
-      return false;
-    }
-    last = now;
-    ++telemetry_.far_presence_packets;
-    return true;
-  }
-
   void RecordSentPacketClass(
       const void* bytes, int byte_count,
       OutboundTrafficClass traffic_class) {
@@ -3898,23 +3645,14 @@ class Runtime {
   std::vector<std::pair<std::uint32_t, PacketEndpoint>>
   LocalPacketTargets(std::uint32_t source_role, bool animation,
                      Clock::time_point now) {
+    (void)animation;
+    (void)now;
     std::vector<std::pair<std::uint32_t, PacketEndpoint>> targets;
     if (using_steam_) {
       for (const auto& [target_role, steam_id] : steam_id_by_role_) {
         if (target_role ==
                 static_cast<std::uint32_t>(bound_role_) ||
             target_role == source_role) {
-          continue;
-        }
-        const bool detailed =
-            IsHighDetailCached(source_role, target_role);
-        if (animation && !detailed) {
-          ++telemetry_.relevance_drops;
-          continue;
-        }
-        if (!animation && !detailed &&
-            !AllowFarPresence(source_role, target_role, now)) {
-          ++telemetry_.relevance_drops;
           continue;
         }
         PacketEndpoint target;
@@ -3933,17 +3671,6 @@ class Runtime {
                 static_cast<std::uint32_t>(bound_role_), target_role,
                 configured_count) ||
             target_role == source_role) {
-          continue;
-        }
-        const bool detailed =
-            IsHighDetailCached(source_role, target_role);
-        if (animation && !detailed) {
-          ++telemetry_.relevance_drops;
-          continue;
-        }
-        if (!animation && !detailed &&
-            !AllowFarPresence(source_role, target_role, now)) {
-          ++telemetry_.relevance_drops;
           continue;
         }
         targets.push_back(
@@ -3967,17 +3694,6 @@ class Runtime {
       return targets;
     }
     for (const auto& [target_role, peer] : host_peers_) {
-      const bool detailed =
-          IsHighDetailCached(source_role, target_role);
-      if (animation && !detailed) {
-        ++telemetry_.relevance_drops;
-        continue;
-      }
-      if (!animation && !detailed &&
-          !AllowFarPresence(source_role, target_role, now)) {
-        ++telemetry_.relevance_drops;
-        continue;
-      }
       targets.push_back({target_role, peer.endpoint});
     }
     return targets;
@@ -4317,31 +4033,6 @@ class Runtime {
     bool complete = true;
     for (const auto& [target_role, target] : targets) {
       std::vector<const AnimationTrack*> target_tracks = tracks;
-      const float* target_position = nullptr;
-      if (local_position_valid_ &&
-          PositionForRole(target_role, target_position)) {
-        const float dx =
-            local_position_[0] - target_position[0];
-        const float dy =
-            local_position_[1] - target_position[1];
-        const float dz =
-            local_position_[2] - target_position[2];
-        const float attachment_radius =
-            network_tuning_.attachment_radius;
-        if (!network_tuning_.full_fidelity &&
-            dx * dx + dy * dy + dz * dz >
-            attachment_radius * attachment_radius) {
-          target_tracks.erase(
-              std::remove_if(
-                  target_tracks.begin(), target_tracks.end(),
-                  [](const AnimationTrack* track) {
-                    return track == nullptr ||
-                           track->mesh_key !=
-                               kCanonicalSkeletonTrackKey;
-                  }),
-              target_tracks.end());
-        }
-      }
       QuantizedAnimationFrame& target_keyframe =
           outbound_animation_keyframes_[target_role];
       auto prepared = std::find_if(
@@ -4927,8 +4618,6 @@ class Runtime {
 #if defined(_WIN32)
     host_peers_.clear();
 #endif
-    far_presence_times_.clear();
-    relevance_cache_.clear();
     appearance_test_released_.clear();
     std::fill_n(local_position_, 3, 0.0f);
     local_position_valid_ = false;
@@ -4985,9 +4674,6 @@ class Runtime {
 #if defined(_WIN32)
   std::unordered_map<std::uint32_t, HostPeer> host_peers_;
 #endif
-  std::unordered_map<std::uint64_t, Clock::time_point>
-      far_presence_times_;
-  std::unordered_map<std::uint64_t, bool> relevance_cache_;
   std::unordered_map<std::uint32_t, std::uint64_t>
       appearance_test_released_;
   float local_position_[3] = {};

@@ -545,10 +545,11 @@ void TestConfiguredLocalMeshTargetsEveryPeerWithoutRelay() {
          "five-client localhost session did not enable direct mesh");
   Expect(!HostRelaysLocalPackets(1, 5),
          "direct localhost mesh still relays through role one");
-  Expect(FullFidelitySession(2) && FullFidelitySession(5),
-         "small localhost session did not require full fidelity");
-  Expect(!FullFidelitySession(1) && !FullFidelitySession(6),
-         "full-fidelity contract escaped the two-to-five player range");
+  Expect(FullFidelitySession(1) && FullFidelitySession(5) &&
+             FullFidelitySession(100),
+         "supported session did not require full fidelity");
+  Expect(!FullFidelitySession(0) && !FullFidelitySession(101),
+         "full-fidelity contract escaped the supported player range");
   for (std::uint32_t local_role = 1; local_role <= 5; ++local_role) {
     std::uint32_t targets = 0;
     for (std::uint32_t target_role = 1; target_role <= 5;

@@ -73,13 +73,13 @@ AppID and follow Valve's setup and redistributable requirements.
 - Steam identities authenticate transport senders. Every receiver rejects a
   packet whose claimed role does not match its Steam lobby member.
 - The fallback backend uses non-blocking localhost UDP with the same packets,
-  roles, interpolation, and relevance routing.
+  roles, interpolation, and full-fidelity routing.
 - The visual-check launcher enables the first protocol-v11-compatible
   replication worker. The render thread publishes its newest immutable local
   capture through a latest-wins mailbox and consumes immutable prepared remote
   presentations; transport polling, validation, reassembly, send scheduling,
-  interpolation, relevance, and network telemetry run on the worker. One-shot
-  peer retirements accumulate until consumed rather than being overwritten by
+  interpolation, recipient fan-out, and network telemetry run on the worker.
+  One-shot peer retirements accumulate until consumed rather than being overwritten by
   a newer presentation. The worker remains disabled by default outside this
   controlled validation path.
 - Installed remote appearances now retain their weighted palette-row masks,
@@ -95,13 +95,14 @@ AppID and follow Valve's setup and redistributable requirements.
   validates the compact wire bindings and performs GPU resource creation.
   This path is disabled by default outside controlled validation while its
   visual and stall telemetry gate is completed.
-- Localhost development still uses role 1 as a small relay because all test
-  processes share one machine. Internet Steam sessions use direct peer fan-out.
+- Configured localhost visual checks use direct peer fan-out, so role 1 does
+  not relay every realtime fragment. Dynamic localhost sessions may retain
+  role 1 discovery/relay compatibility. Internet Steam sessions use direct
+  peer fan-out.
 - Every receiver keeps an independent interpolation/reassembly timeline for
   every player and removes stale peers.
 - Each client publishes its verified local board position, orientation, and
-  board-state flags at the selected preset rate (60 times per second for
-  Balanced).
+  board-state flags at the full-fidelity 60 Hz rate.
 - Positions use custom-map coordinates rather than the hidden retail world's
   absolute coordinates.
 - Received poses use their sender simulation timestamps rather than packet
@@ -111,9 +112,9 @@ AppID and follow Valve's setup and redistributable requirements.
 - Packets from a different map, protocol version, client slot, process
   session, or unexpected Steam identity are rejected.
 - Peers advertise optional control capabilities with a fixed-size packet.
-  Steam sends these advertisements directly; localhost clients use a
-  directed host relay. Peers that do not advertise a feature retain the
-  existing protocol-v11 behavior.
+  Steam and configured localhost meshes send these advertisements directly;
+  dynamic localhost discovery may use a directed host relay. Peers that do
+  not advertise a feature retain the existing protocol-v11 behavior.
 - A stale remote player disappears after 1.5 seconds.
 - The sender captures Skate 3's final rendered bone palettes after its
   animation graph, IK, tricks, and bails have evaluated.
@@ -126,7 +127,7 @@ AppID and follow Valve's setup and redistributable requirements.
   tracks for small or post-processed attachments such as the hat and wheels.
   Affine components use signed 16-bit fixed point with root-relative
   translations, are fragmented into bounded datagrams, reassembled, buffered,
-  and interpolated at 60 frames per second on Balanced. The higher sampling
+  and interpolated at the full-fidelity 60 frames per second. The higher sampling
   rate preserves fast rotations such as a freely rolling skateboard wheel;
   20 Hz can cross the 180-degree ambiguity between orientation samples.
 - The sender publishes a versioned engine-owned appearance recipe. The
@@ -146,34 +147,33 @@ AppID and follow Valve's setup and redistributable requirements.
   Renderer texture ownership is isolated per role even when multiple players
   wear the same recipe. A reused role releases the previous process session's
   meshes and textures immediately. Definitively forgotten peer generations
-  emit a session-matched retirement to the renderer; temporary menu,
-  relevance, or visibility changes do not unload and rebuild appearances.
-  Steam can associate byte receipt with its direct per-recipient stream;
-  localhost preserves all three relay passes because a host receipt alone
-  does not prove every downstream UDP client is complete.
-- Each client renders at most the nearest 12 remote players by default.
-- Each sender routes full skeletal animation only to nearby peers inside the
-  selected relevance radius. Distant peers receive inexpensive root-presence
-  updates.
-- Receivers skip skeletal decoding outside their visual set, cache relevance
-  decisions, use larger UDP buffers, and drain bursty fragmented traffic
+  emit a session-matched retirement to the renderer; temporary menu or
+  visibility changes do not unload and rebuild appearances. Steam and
+  configured localhost meshes associate transfer state with each direct
+  recipient. Localhost repeats the complete UDP stream three times so a
+  single dropped chunk cannot permanently strand the proxy.
+- Every active peer receives the complete root, canonical skeleton, exact
+  appearance tracks, board, wheel, hair, hat, and attachment stream at 60 Hz.
+  Distance, visibility, importance, and player count do not reduce fidelity.
+- Every valid remote peer is reconstructed and rendered. There is no nearest
+  player cap, skeletal decode suppression, or far-presence mode.
+- Receivers use larger UDP buffers and drain bursty fragmented traffic
   without the old 256-packet frame ceiling.
 
-## Network quality presets
+## Full-fidelity policy
 
-Open **Escape → Multiplayer → Network Quality**:
+The current runtime has one replication quality: full fidelity. Legacy
+quality, relevance-radius, attachment-radius, nearby-player-budget, and
+far-presence settings remain registered so existing configuration files load,
+but they do not downgrade or suppress another player's stream. Root and final
+skeletal poses are sent at 60 Hz to every recipient. The interpolation floor
+remains configurable because buffering changes presentation latency and
+jitter tolerance, not pose fidelity.
 
-| Preset | Root pose | Animation | Interpolation | Detail radius | Nearby players |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| Bandwidth Saver | 30 Hz | 10 Hz | 100 ms | 50 m | 6 |
-| Balanced | 60 Hz | 60 Hz | 50 ms | 80 m | 12 |
-| High Fidelity | 90 Hz | 60 Hz | 35 ms | 120 m | 16 |
-
-**Auto** chooses High Fidelity for up to 4 participants, Balanced for 5-12,
-and Bandwidth Saver above 12. **Custom** exposes the individual rates,
-interpolation delay, relevance radius, attachment radius, nearby-player
-budget, and distant-presence rate. Balanced preserves the configuration used
-for the current two-client validation.
+Adaptive tiers are intentionally deferred. They may be reconsidered only if
+measured real-world full-fidelity sessions demonstrate a limit that cannot be
+addressed first through compression, batching, shared serialization,
+transport improvements, parallelism, or relay/server topology.
 
 Both clients currently start at the same authored map spawn and may overlap
 until one moves. Replication uses the exact collision-tested source position;
@@ -258,9 +258,9 @@ relay, not 100 simultaneous full animation streams or internet conditions.
 
 ## Measured skeletal-stream cost
 
-A two-real-client protocol-v11 Balanced-equivalent 60 Hz run on 2026-08-22
+A two-real-client protocol-v11 full-fidelity 60 Hz run on 2026-08-22
 delivered about 54-56 complete animation frames per second and settled around
-274-280 KiB/s and 326-335 packets/s in each direction for one nearby detailed
+274-280 KiB/s and 326-335 packets/s in each direction for one fully replicated
 skater. Both processes reported zero socket failures. Appearance transfer is
 a separate one-time burst when a player first joins or changes outfit.
 Visual-check builds also emit periodic `multiplayer-perf` windows for local
@@ -282,18 +282,18 @@ installation maxima; the background-preparation check should reduce those
 render-thread maxima without changing the installed outfit.
 
 Steam sessions now use direct peer fan-out. With ten players all mutually
-nearby, each player uploads one detailed stream to nine peers and receives
-nine streams: using the measured Balanced localhost payload as a planning
+present, each player uploads one complete stream to nine peers and receives
+nine streams: using the measured full-fidelity localhost payload as a planning
 estimate, about 2.5 MiB/s (roughly 20 Mbit/s) in each direction before Steam
 transport overhead and appearance bootstrap traffic. No lobby owner carries
 the other players' streams. This is a far healthier ten-player topology, but
-it still grows approximately with the square of the nearby player count
+it still grows approximately with the square of the player count
 across the whole session and is not a 100-player full-detail solution.
 
-Higher population work still needs stronger skeleton LOD, lower-rate distant
-players, interest-area partitioning, and eventually dedicated authoritative
-servers or relays. The 99-bot root-presence result validates inexpensive
-presence packets only, not 100 fully animated skaters.
+Higher population work must first pursue compression, packet batching, shared
+serialization, parallel reconstruction, and full-fidelity relays or servers.
+The 99-bot root-presence result validates socket/load behavior only, not 100
+fully animated skaters.
 
 ## Known wardrobe validation limitation
 
@@ -322,9 +322,9 @@ separate correctness task.
   authentication. Do not reuse an important password.
 - A production 100-player session still needs authoritative server
   simulation, transport-level reliability, admission and identity, abuse
-  limits, interest management, and measured internet-scale animation tests.
-  Direct P2P is the current small-session transport; it does not claim that
-  every peer can carry an unrestricted 100-player animation fan-out.
+  limits, efficient full-fidelity relay fan-out, and measured internet-scale
+  animation tests. Direct P2P is the current small-session transport; larger
+  sessions should change topology rather than silently reduce player detail.
 
 ## Transport boundary
 

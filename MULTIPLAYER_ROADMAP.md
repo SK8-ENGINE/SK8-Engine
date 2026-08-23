@@ -2,7 +2,7 @@
 
 This document describes the staged path from the current protocol-v11
 multiplayer implementation to smooth five-player sessions and, later, larger
-adaptive sessions. `MULTIPLAYER.md` remains the description of current
+full-fidelity sessions. `MULTIPLAYER.md` remains the description of current
 behavior.
 
 The roadmap deliberately preserves the working foundations:
@@ -23,24 +23,28 @@ The roadmap deliberately preserves the working foundations:
 
 ### Milestone A: visually faithful sessions of five players or fewer
 
-Nearby players should receive the full final pose at up to 60 Hz. Outfits,
+Every player should receive the full final pose at 60 Hz. Outfits,
 attachments, boards, detached boards, tricks, bails, lighting, and shadows
 must reconstruct correctly. Remote players may use a small interpolation
 delay, but multiplayer must not add local input latency or create client frame
 stalls.
 
-### Milestone B: adaptive sessions of up to 100 players
+### Milestone B: full-fidelity sessions of up to 100 players
 
-Only the closest or most important players need maximum fidelity. Other
-players use progressively cheaper pose, update-rate, rendering, or
-presence-only tiers. Quality adapts to distance, visibility, interaction,
-bandwidth, loss, jitter, CPU, and GPU load.
+Every player receives the same complete 60 Hz final-pose stream, including
+appearance-specific attachments and board state, regardless of distance,
+visibility, importance, or player count. Compression, batching, shared
+serialization, transport improvements, and server topology should be used
+before reducing another player's fidelity. Adaptive quality is deferred
+unless measured real-world limits make it necessary and a later roadmap
+change explicitly authorizes it.
 
 ### Milestone C: shared protocol for P2P and future servers
 
 Localhost, Steam P2P, a future headless relay, and a future authoritative
-server must share packet schemas, scheduling, relevance, and interpolation.
-A dedicated server is not an immediate implementation milestone.
+server must share packet schemas, scheduling, recipient routing, and
+interpolation. A dedicated server is not an immediate implementation
+milestone.
 
 ## Phase 0: freeze the protocol-v11 baseline
 
@@ -107,7 +111,7 @@ Introduce a background replication worker responsible for:
 - Fragment reassembly and decoding.
 - Per-peer clocks and jitter buffers.
 - Animation encoding and send scheduling.
-- Relevance selection and network telemetry.
+- Full-fidelity recipient fan-out and network telemetry.
 
 The render thread should only:
 
@@ -407,9 +411,9 @@ Current checkpoint:
   telemetry for source capture cadence, completed-frame arrival cadence,
   interpolation cursor margin, held-latest runs, sample loss/supersession, and
   worker publication age. Use it to correlate the consistently rough sender
-  roles reported by the user. Then make an independently gated adaptive
-  playback-delay/cadence correction without changing pose bytes, appearance,
-  board handling, or local rendering.
+  roles reported by the user. The subsequent playback-delay/cadence
+  experiment did not change pose bytes, appearance, board handling, local
+  rendering, or recipient fidelity.
 - Commit `5f7cd9e` adds a deterministic five-second timing record for every
   receiver/sender pair. It reports completed-frame rate, sender period,
   arrival variation, chosen playback delay, average/minimum/maximum cursor
@@ -447,6 +451,22 @@ Current checkpoint:
   measured five-client paths and preserves one root/skeleton sender timeline.
   The smoothness launcher now asks only for two minutes of ordinary play; it
   requires no per-role choreography or client identification.
+- Commit `5a577e1` bounded the presentation cursor to an interpolatable
+  skeletal interval after receiver stalls, moved configured localhost tests
+  from host relay to direct peer fan-out, shared identical frame
+  serialization across recipients, enlarged UDP queues, and explicitly paced
+  the five local test clients at 120 FPS.
+- In run `20260823-194302-5a577e17`, the user reported that some peer views
+  became very smooth while others remained laggy. Telemetry independently
+  showed zero held-latest playback freezes, relay traffic, and socket
+  failures, but the legacy relevance policy suppressed complete animation
+  streams for selected sender/receiver pairs.
+- Commit `909df1e` first made five-player sessions exempt from distance and
+  attachment filtering. The product policy was then simplified further:
+  every supported 1-100-player session is full fidelity. Active distance,
+  visibility, nearby-player, far-presence, attachment, and population-based
+  downgrade paths are removed. Adaptive fidelity is deferred unless future
+  measured limits justify a new explicit decision.
 
 Completion:
 
@@ -455,9 +475,9 @@ Completion:
 - Obsolete animation is discarded instead of delivered late.
 - Appearance traffic cannot head-of-line block realtime animation.
 
-## Phase 5: reduce bandwidth behind fidelity gates
+## Phase 5: reduce bandwidth without fidelity loss
 
-Purpose: make exact nearby animation affordable without changing its visible
+Purpose: make exact animation for every player affordable without changing its visible
 result.
 
 Order:
@@ -468,40 +488,37 @@ Order:
 4. Use per-chain translation ranges and omit reconstructable translations.
 5. Preserve affine transforms for scale, shear, pivots, board, and attachment
    exceptions.
-6. Reduce precision only for lower relevance tiers.
+6. Reject any encoding whose measured or visual error exceeds the
+   full-fidelity contract; there are no lower relevance tiers.
 
 Every change is evaluated using final skinned-vertex displacement,
 foot/board contact, board/truck/wheel pivot error, rapid-spin error, temporal
 stability, and a user visual pass.
 
-Initial target: reduce one exact nearby stream from the current measured
+Initial target: reduce one exact full-fidelity stream from the current measured
 approximately 274-280 KiB/s toward 90 KB/s average application payload.
 
-## Phase 6: adaptive quality and relevance
+## Phase 6: full-fidelity scale validation
 
-Purpose: scale while retaining full fidelity for the most important players.
+Purpose: increase player count without changing what any receiver sees.
 
-Initial tiers:
+Every active player remains Exact: complete final pose, appearance-specific
+tracks, board state, and attachments at 60 Hz. There are no Near, Mid,
+Presence, Dormant, distance, visibility, importance, or player-count tiers.
 
-- Exact: full final pose, normally 60 Hz.
-- Near: reduced pose, normally 30 Hz.
-- Mid: important bones and board state, normally 10 Hz.
-- Presence: root and direction, normally 1-2 Hz.
-- Dormant: no periodic update until relevance changes.
+Scale work should focus on:
 
-The scheduler considers:
+- Shared quantization and serialization across recipients.
+- Lossless or fidelity-verified packet compression.
+- Batching and reduced packet count.
+- Transport queue visibility and congestion diagnostics.
+- Parallel decode/reconstruction and bounded renderer work.
+- Direct P2P versus relay/server topology.
+- CPU, GPU, memory, and bandwidth profiling at increasing player counts.
 
-- Distance with enter/exit hysteresis.
-- Camera visibility and projected size.
-- Shared rail, collision, trick, bail, or other interaction.
-- Spectating, party, or challenge importance.
-- Recent state change and time since last update.
-- Estimated packet cost.
-- Available bandwidth, loss, jitter, and queue delay.
-- Client CPU and GPU budgets.
-
-Use per-connection and per-source byte budgets with age-based fairness. Five
-healthy nearby players should remain at Exact quality.
+Adaptive fidelity remains a deferred contingency, not an implementation
+milestone. Reintroducing it requires measured evidence from real full-fidelity
+tests, a written fidelity impact, and an explicit roadmap decision.
 
 ## Phase 7: Steam Networking Sockets transport
 
@@ -522,15 +539,15 @@ independent ordering and scheduling classes.
 
 For 2-5 players, retain direct Steam P2P for high-rate visual pose data.
 
-For 6-20 players, retain P2P support but bound each sender's high-detail
-recipient count and use adaptive lower tiers for the rest. Do not make the
-host relay every complete animation stream.
+For 6-20 players, retain P2P support and send the same full-fidelity stream to
+every recipient. Share serialization work and do not make the host relay every
+complete animation stream.
 
-For 20-100 players, prefer a dedicated relevance-aware relay:
+For 20-100 players, prefer a dedicated full-fidelity relay:
 
 - Each client uploads one primary source stream.
-- The relay reads root, relevance, and pose-group metadata.
-- It forwards an appropriate subset and quality to every receiver.
+- The relay reads root and pose-group metadata.
+- It forwards every complete player stream to every receiver.
 - It does not require retail meshes or textures.
 - Appearance recipes remain sender-owned and receiver-resolved.
 
@@ -576,15 +593,15 @@ Automated network tests should cover:
 - Join storms, wardrobe churn, role reuse, map mismatch, and sequence wrap.
 - Render stall, minimize, and resume.
 
-Soak tests should include two and five real clients, mixed-tier 6- and
+Soak tests should include two and five real clients, full-fidelity 6- and
 20-client sessions, and realistic changing-pose headless tests at 50 and 100
-clients. Root-only synthetic bots are presence/load tests, not evidence of
+clients. Root-only synthetic bots are load tests, not evidence of
 full-animation or visual capacity.
 
 ## Change discipline
 
 - Keep documentation, correctness fixes, threading changes, protocol changes,
-  compression, and adaptive scheduling in separate commits.
+  compression, and transport scheduling in separate commits.
 - Every implementation commit states the visual invariants it preserves.
 - Do not combine the network worker, protocol v12, and compression into one
   refactor.
