@@ -273,10 +273,10 @@ SkatePackageHeader InspectSkatePackage(const std::filesystem::path& path) {
     return result;
   }
   result.valid = true;
-  result.supported = result.version >= 1 && result.version <= 8;
+  result.supported = result.version >= 1 && result.version <= 12;
   if (!result.supported) {
     result.issue =
-        result.version > 8
+        result.version > 12
             ? "This map uses SKATE v" + std::to_string(result.version) +
                   ". Update the Custom Engine Layer before loading it."
             : "This map uses an unsupported legacy SKATE format.";

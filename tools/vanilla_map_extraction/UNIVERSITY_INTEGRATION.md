@@ -3,21 +3,24 @@
 ## Current package
 
 The ignored local output
-`intermediate/university/University.skate` is a SKATE v11 package exported from
+`intermediate/university/University.skate` is a SKATE v12 package exported from
 `blender/DIST_University_Owned.blend`. Its tracked expected contract is
 `schemas/university_expected.json`.
 
 | Property | Verified value |
 | --- | ---: |
-| Package bytes | 195,460,271 |
-| Materials | 4,413 |
-| Opaque / mask / blend materials | 2,972 / 1,414 / 27 |
-| Embedded textures | 1,732 |
-| Decoded RGBA8 texture bytes | 646,391,808 |
+| Package bytes | 254,686,430 |
+| Materials | 8,729 |
+| Retail draw definitions | 8,546 |
+| Opaque / mask / blend materials | 6,572 / 2,118 / 39 |
+| Embedded textures | 2,046 |
+| Named retail texture bindings | 40,663 |
+| Retail parameter entries | 67,475 |
+| Decoded RGBA8 texture bytes | 760,748,032 |
 | Retail normal maps / mapped mesh parts | 135 / 2,987 |
 | Retail lightmaps / mapped mesh parts | 1,270 / 8,489 |
 | Exact decoded retail lightmap bytes | 393,134,080 |
-| Indexed visual vertices | 2,085,489 |
+| Indexed visual vertices | 2,139,713 |
 | Visual indices | 4,936,851 |
 | Render triangles | 1,645,617 |
 | Collision triangles | 1,133,642 |
@@ -30,13 +33,15 @@ The ignored local output
 | Compiled native collision bytes | 23,993,440 |
 | Top-level collision meshes | 1 |
 
-The previous non-lightmapped package was 130,320,474 bytes. Transporting
-393,134,080 decoded bytes of retail DXT1 lightmap pages increases the
-losslessly compressed package by 65,139,797 bytes, to 195,460,271 bytes.
-The exporter does not re-encode the already encoded retail pages: all 1,270
-selected pages are byte-equal to the decoded source images after Blender's
-documented bottom-row-first storage conversion. The UV V flip is paired with
-that storage conversion, so sampled texels retain their retail orientation.
+The v11 lightmapped baseline was 195,460,271 bytes. The v12 package is larger
+because it adds 314 previously omitted textures, complete named bindings and
+parameters for every retail draw, decal UVs, packed tangent frames, and the
+compressed `WMET` extraction manifest. Its first full-fidelity draft was
+301,970,382 bytes; packing the tangent frame to retail-equivalent SNORM8 and
+fixing UV-layer aliasing reduced it to 254,686,430 bytes without reducing
+texture resolution or geometry. All 1,270 selected lightmap pages remain
+byte-equal to the decoded source images after Blender's documented
+bottom-row-first storage conversion.
 
 Retail vertex declarations contain a second TEXCOORD on 8,541 mesh parts.
 The extraction now decodes both explicit `SHORT2N` declarations and the
@@ -64,8 +69,8 @@ reviewed export:
 
 - SKATE version, map name, file size, counts, maximum index, and bounds;
 - material bytes and decoded texture bytes;
-- expanded indexed triangle-corner records, including normals, both UV sets,
-  and material IDs;
+- expanded indexed triangle-corner records, including normals, base/lightmap/
+  decal UVs, packed tangent frame, and material IDs;
 - collision records and authored feature records;
 - byte-exact retail grind records against the extraction manifest;
 - decoded retail collision geometry, winding, packed surface channels, and
@@ -74,8 +79,11 @@ reviewed export:
 - all 141 source normal IDs, the seven explicit special-map exclusions, and
   all 135 selected linear normal textures through the package material table;
 - all 1,271 source lightmap IDs, the 1,270 selected byte-exact lightmap
-  payloads, 8,489 bound mesh parts, second-UV presence/range, and the 33
+  payloads, 8,489 bound mesh parts, exact second-UV bounds, and the 33
   explicit shader/no-UV exclusions;
+- all 8,546 retail material identities, shader names/families, GUIDs, local
+  handles, group indices, 40,663 role bindings, 67,475 parameter entries, and
+  per-mesh source provenance;
 - downstream render-world, native grind-world, and collision-world counts.
 
 The C++ validator is the actual engine loader linked against the same
@@ -94,21 +102,24 @@ parameter and the old Blender preparation forced all alpha modes to opaque.
 - Retail collision exports 1,133,642 triangles after rejecting six
   degenerate source triangles and one same-wound duplicate. It retains 10,691
   reverse-wound retail partners so intentional two-sided patches do not become
-  one-sided dead spots. SKATE v11 also transports all native RenderWare edge
+  one-sided dead spots. SKATE v12 also transports all native RenderWare edge
   codes through Blender face attributes so hard/smooth edge and vertex
   contacts are not guessed during engine compilation.
 - The current UTT presentation parser computes averaged geometry normals;
   authoritative packed retail normals are not yet transported.
-- Conventional retail tangent-space normal maps and static retail lightmaps
-  are transported. Seven shader-specific default/water/palm normal resources
-  remain recorded but unbound; specular, detail, decal, macro-overlay,
-  environment, and noise semantics are not reconstructed yet.
+- All discovered texture roles and shader parameters are transported.
+  Conventional normal/lightmap slots remain available for generic authored
+  rendering, while the exact family path consumes named retail channels.
+  Retail cube-map face/array shape is not yet represented; environment
+  bindings currently resolve to their decoded 2D image and use the renderer's
+  neutral cube fallback.
 - AI routes, hinged doors, and local lights are not recovered yet.
 - All 183 packed retail collision surfaces are preserved, including the three
   surface IDs that use native physics channel 13.
-- No runtime object/instance table exists in SKATE v11. The importer does not
-  retain authoritative retail instance references, so transforms are baked
-  into vertices rather than inventing unsafe instance relationships.
+- The `WMET` extension retains source stream, declaration, offset, bounds,
+  simulation, collision, grind, and texture metadata. A hot runtime
+  object/instance table is not yet reconstructed, so presentation transforms
+  remain baked into vertices.
 
 These limits must be judged in the user-run visual/collision pass and must not
 be hidden by successful telemetry.

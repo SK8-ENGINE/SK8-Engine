@@ -13,7 +13,11 @@ import sys
 REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / "tools" / "blender_owned_map"))
 
-from analyze_skate import VERTEX_BYTES, analyze_package  # noqa: E402
+from analyze_skate import (  # noqa: E402
+    VERTEX_BYTES,
+    VERTEX_BYTES_V12,
+    analyze_package,
+)
 
 
 def main() -> int:
@@ -101,7 +105,12 @@ def main() -> int:
 
     used_material_ids: set[int] = set()
     vertex_bytes = analysis["_vertex_bytes"]
-    for offset in range(0, len(vertex_bytes), VERTEX_BYTES):
+    vertex_stride = (
+        VERTEX_BYTES_V12
+        if int(analysis["version"]) >= 12
+        else VERTEX_BYTES
+    )
+    for offset in range(0, len(vertex_bytes), vertex_stride):
         used_material_ids.add(
             struct.unpack_from("<I", vertex_bytes, offset + 40)[0]
         )

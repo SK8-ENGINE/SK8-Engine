@@ -129,11 +129,13 @@ work is Blender data extraction and binary file packing, where avoiding Python
 scalar overhead is substantially more useful than transferring the data to a
 graphics device. Complete float32 vertex records are indexed exactly, so
 shared corners no longer duplicate position, normal, UV, lightmap UV, and
-material data. SKATE v11 then applies bounded lossless DEFLATE to RGBA8
+material data. SKATE v12 then applies bounded lossless DEFLATE to RGBA8
 textures, vertices, indices, and collision. The loader reconstructs and
 validates the original runtime records; export does not simplify meshes,
 reduce texture resolution, omit maps, quantize attributes, or merge UV/hard
-normal seams. Extracted retail collision can additionally carry exact
+normal seams. V12 adds a third decal UV, a compact SNORM8 tangent frame,
+complete named retail shader bindings/parameters, and an extensible world
+metadata table. Extracted retail collision can additionally carry exact
 per-triangle RenderWare edge/corner feature codes as face attributes; ordinary
 authored maps continue to generate those codes automatically.
 

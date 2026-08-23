@@ -11426,13 +11426,27 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
     // Material colours remain authored beside collision properties, while
     // spatial submission is now independent per visible chunk.
     for (const mechanics_sandbox::map::VisualDraw& draw : chunk.draws) {
+      constants[39] = -41.0f;
+      constants[40] = celestial.light_direction_to_light.x;
+      constants[41] = celestial.light_direction_to_light.y;
+      constants[42] = celestial.light_direction_to_light.z;
+      constants[43] = dynamic_lighting ? celestial.ambient : -1.0f;
+      constants[44] = celestial.light_color.x;
+      constants[45] = celestial.light_color.y;
+      constants[46] = celestial.light_color.z;
+      constants[47] =
+          dynamic_lighting ? celestial.light_intensity : 0.0f;
+      const bool retail_exact =
+          draw.retail_shader_family != 0 && scene.shadow_valid;
       const bool imported =
           draw.albedo_texture != 0 || draw.indirect_lightmap != 0 ||
           draw.normal_texture != 0 || draw.orm_texture != 0 ||
           draw.emissive_texture != 0;
       const bool alpha_blend =
           draw.alpha_mode ==
-          skate::world::SurfaceMaterial::AlphaMode::Blend;
+              skate::world::SurfaceMaterial::AlphaMode::Blend ||
+          (draw.retail_render_flags & 2u) != 0 ||
+          draw.retail_shader_family == 13;
       cmd->SetPipeline(
           alpha_blend && g_r.pso_transparent != nullptr
               ? g_r.pso_transparent
@@ -11448,9 +11462,18 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
           ResolveOwnedMapTexture(
               context, draw.normal_texture, OwnedTextureRole::Normal));
       nrhi::TextureView* owned_material_maps[5] = {
-          g_r.white.srv,
-          ResolveOwnedMapTexture(
-              context, draw.orm_texture, OwnedTextureRole::Data),
+          retail_exact
+              ? ResolveOwnedMapTexture(
+                    context, draw.retail_detail_texture,
+                    OwnedTextureRole::Normal)
+              : g_r.white.srv,
+          retail_exact && draw.retail_shader_family >= 3 &&
+                  draw.retail_shader_family <= 4
+              ? ResolveOwnedMapTexture(
+                    context, draw.retail_specular_texture,
+                    OwnedTextureRole::Data)
+              : ResolveOwnedMapTexture(
+                    context, draw.orm_texture, OwnedTextureRole::Data),
           g_r.owned_nsm_active ? g_r.owned_static_sun_srv[0]
                                : g_r.white.srv,
           g_r.owned_nsm_active ? g_r.owned_static_sun_srv[1]
@@ -11458,6 +11481,35 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
           g_r.owned_nsm_active ? g_r.owned_static_sun_srv[2]
                                : g_r.white.srv};
       cmd->SetTextures(8, owned_material_maps, 5);
+      if (retail_exact) {
+        nrhi::TextureView* macro_texture = ResolveOwnedMapTexture(
+            context,
+            draw.retail_shader_family == 30
+                ? draw.normal_texture
+                : draw.retail_macro_texture,
+            draw.retail_shader_family == 30
+                ? OwnedTextureRole::Normal
+                : OwnedTextureRole::Color);
+        const bool decal_family =
+            draw.retail_shader_family == 3 ||
+            draw.retail_shader_family == 4;
+        const skate::world::TextureId mask_id =
+            decal_family ? draw.retail_decal_texture
+                         : draw.retail_specular_texture;
+        cmd->SetTexture(4, macro_texture);
+        cmd->SetTexturePair(
+            5,
+            ResolveOwnedMapTexture(
+                context, mask_id,
+                decal_family ? OwnedTextureRole::Color
+                             : OwnedTextureRole::Data),
+            ResolveOwnedMapTexture(
+                context, draw.normal_texture,
+                OwnedTextureRole::Normal));
+        cmd->SetTexturePair(
+            7, g_r.white_cube.srv,
+            shadow_ready ? g_r.shadow_srv_final : g_r.white.srv);
+      }
       constants[32] = draw.color[0];
       constants[33] = draw.color[1];
       constants[34] = draw.color[2];
@@ -11478,6 +11530,64 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
           imported
               ? (draw.material[2] < 0.0f ? -draw.material[2] : 0.0f)
               : draw.material[3];
+      if (retail_exact) {
+        const std::uint32_t family = draw.retail_shader_family;
+        const bool decal_family = family == 3 || family == 4;
+        const bool has_macro = draw.retail_macro_texture != 0;
+        const bool has_masks = draw.retail_specular_texture != 0;
+        const bool has_normal = draw.normal_texture != 0;
+        const bool has_detail =
+            draw.retail_detail_texture != 0 &&
+            draw.retail_detail_scale > 0.0f;
+        std::uint32_t v2_flags = 0;
+        if (family >= 1 && family <= 4) {
+          v2_flags |= has_normal ? 1u : 0u;
+          v2_flags |= has_detail && family != 2 ? 2u : 0u;
+          v2_flags |=
+              decal_family && has_masks ? 4u : 0u;
+        }
+        constants[39] = -static_cast<float>(family);
+        constants[40] =
+            draw.indirect_lightmap != 0 ? 1.0f : 0.0f;
+        constants[41] = 0.0f;
+        constants[42] = 0.0f;
+        constants[43] = 0.0f;
+        constants[44] = draw.retail_macro_scale;
+        constants[45] = draw.retail_macro_opacity;
+        constants[46] = has_macro ? 1.0f : 0.0f;
+        constants[47] =
+            decal_family && draw.retail_decal_texture != 0
+                ? (family == 4 ? 2.0f : 1.0f)
+                : (has_masks
+                       ? ((has_normal && family >= 5 && family <= 6)
+                              ? 4.0f
+                              : 3.0f)
+                       : 0.0f);
+        constants[48] = 0.0f;
+        constants[49] =
+            (family >= 5 && family <= 6) || family == 13
+                ? std::log2(std::max(
+                      1.0f,
+                      static_cast<float>(
+                          context.guest_output_height) /
+                          640.0f))
+                : 0.0f;
+        constants[50] = static_cast<float>(v2_flags);
+        constants[51] = draw.retail_detail_scale;
+        if (family == 14) {
+          const float animation_time =
+              scene.scroll_valid ? scene.scroll_rows[0] : 0.0f;
+          const float scroll_u =
+              animation_time * draw.retail_scroll_u;
+          const float scroll_v =
+              animation_time * draw.retail_scroll_v;
+          constants[48] = scroll_u - std::floor(scroll_u);
+          constants[49] = scroll_v - std::floor(scroll_v);
+          constants[50] =
+              scene.scroll_valid ? scene.scroll_rows[1] : 1.0f;
+          constants[51] = 0.0f;
+        }
+      }
       cmd->SetRootConstants(0, 52, constants, 0);
       cmd->DrawIndexed(draw.index_count, draw.first_index, 0);
       ++draw_calls;

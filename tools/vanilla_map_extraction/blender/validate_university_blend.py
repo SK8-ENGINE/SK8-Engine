@@ -106,28 +106,15 @@ def main() -> int:
         )
         if source_lightmap_texture_id:
             source_lightmap_references += 1
-        if not texture_id:
-            if obj.data.materials:
-                raise RuntimeError(
-                    f"{obj.name!r} has no retail texture but has a material"
-                )
-            if source_lightmap_texture_id:
-                if lightmap_texture_id or not str(
-                    obj.get("skate3_lightmap_exclusion", "")
-                ):
-                    raise RuntimeError(
-                        f"{obj.name!r} has an invalid no-material lightmap "
-                        "exclusion"
-                    )
-                lightmap_exclusions += 1
-            continue
         if not obj.data.materials:
             raise RuntimeError(
-                f"{obj.name!r} lost material {texture_id}"
+                f"{obj.name!r} lost its retail material definition"
             )
         material = obj.data.materials[0]
+        expected_material_texture_id = texture_id or "NO_DIFFUSE"
         if (
-            str(material.get("skate3_texture_id", "")) != texture_id
+            str(material.get("skate3_texture_id", ""))
+            != expected_material_texture_id
             or int(material.get("skate3_alpha_mode", -1)) != alpha_mode
         ):
             raise RuntimeError(

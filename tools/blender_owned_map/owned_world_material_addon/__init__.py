@@ -1,4 +1,4 @@
-"""Human-friendly Blender authoring and export tools for SKATE v11.
+"""Human-friendly Blender authoring and export tools for SKATE v12.
 
 This addon and exporter are original project code. They do not import,
 invoke, redistribute, or depend on ArenaBuilder.

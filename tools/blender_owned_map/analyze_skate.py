@@ -13,6 +13,7 @@ from pathlib import Path
 
 
 VERTEX_BYTES = 44
+VERTEX_BYTES_V12 = 56
 COLLISION_TRIANGLE_BYTES_V10 = 44
 COLLISION_TRIANGLE_BYTES_V11 = 48
 
@@ -98,9 +99,10 @@ def analyze_package(
         b"SKATE09\0",
         b"SKATE10\0",
         b"SKATE11\0",
+        b"SKATE12\0",
     ):
         raise PackageError(
-            f"unsupported magic {magic!r}; expected SKATE v8-v11"
+            f"unsupported magic {magic!r}; expected SKATE v8-v12"
         )
     version = int(magic[5:7])
     if reader.u32("endian marker") != 0x12345678:
@@ -126,6 +128,9 @@ def analyze_package(
 
     start = reader.offset
     material_alpha_modes = {0: 0, 1: 0, 2: 0}
+    retail_family_counts: dict[int, int] = {}
+    retail_binding_count = 0
+    retail_parameter_count = 0
     material_records: list[dict[str, object]] = []
     for index in range(material_count):
         name = reader.string(f"material {index} name")
@@ -136,8 +141,7 @@ def analyze_package(
                 f"material {index} uses invalid alpha mode {alpha_mode}"
             )
         material_alpha_modes[alpha_mode] += 1
-        material_records.append(
-            {
+        record = {
                 "id": index + 1,
                 "name": name,
                 "albedo_texture": struct.unpack_from("<I", fields, 32)[0],
@@ -148,8 +152,95 @@ def analyze_package(
                 "audio_surface": struct.unpack_from("<I", fields, 64)[0],
                 "physics_surface": struct.unpack_from("<I", fields, 68)[0],
                 "surface_pattern": struct.unpack_from("<I", fields, 72)[0],
-            }
-        )
+        }
+        if version >= 12:
+            retail_enabled = reader.u32(
+                f"material {index} retail enabled"
+            ) != 0
+            record["retail_enabled"] = retail_enabled
+            if retail_enabled:
+                record["retail_material_guid"] = reader.u64(
+                    f"material {index} retail guid"
+                )
+                record["retail_material_handle"] = reader.u32(
+                    f"material {index} retail handle"
+                )
+                record["retail_material_group_index"] = struct.unpack(
+                    "<i",
+                    reader.take(
+                        4, f"material {index} retail group index"
+                    ),
+                )[0]
+                record["retail_shader_name"] = reader.string(
+                    f"material {index} retail shader"
+                )
+                family = reader.u32(
+                    f"material {index} retail family"
+                )
+                record["retail_shader_family"] = family
+                retail_family_counts[family] = (
+                    retail_family_counts.get(family, 0) + 1
+                )
+                record["retail_render_flags"] = reader.u32(
+                    f"material {index} retail flags"
+                )
+                binding_count = reader.u32(
+                    f"material {index} retail binding count"
+                )
+                bindings = []
+                for binding_index in range(binding_count):
+                    bindings.append(
+                        {
+                            "semantic": reader.string(
+                                f"material {index} binding "
+                                f"{binding_index} semantic"
+                            ),
+                            "texture": reader.u32(
+                                f"material {index} binding "
+                                f"{binding_index} texture"
+                            ),
+                            "uv_set": reader.u32(
+                                f"material {index} binding "
+                                f"{binding_index} uv set"
+                            ),
+                            "address_u": reader.u32(
+                                f"material {index} binding "
+                                f"{binding_index} address u"
+                            ),
+                            "address_v": reader.u32(
+                                f"material {index} binding "
+                                f"{binding_index} address v"
+                            ),
+                        }
+                    )
+                record["retail_texture_bindings"] = bindings
+                retail_binding_count += binding_count
+                parameter_count = reader.u32(
+                    f"material {index} retail parameter count"
+                )
+                parameters = {}
+                for parameter_index in range(parameter_count):
+                    parameter_name = reader.string(
+                        f"material {index} parameter "
+                        f"{parameter_index} name"
+                    )
+                    value_count = reader.u32(
+                        f"material {index} parameter "
+                        f"{parameter_index} value count"
+                    )
+                    parameters[parameter_name] = [
+                        reader.string(
+                            f"material {index} parameter "
+                            f"{parameter_index} value {value_index}"
+                        )
+                        for value_index in range(value_count)
+                    ]
+                record["retail_parameters"] = parameters
+                retail_parameter_count += parameter_count
+                record["retail_source_metadata"] = reader.string(
+                    f"material {index} retail source metadata"
+                )
+        material_records.append(record)
     material_bytes = reader.data[start : reader.offset]
     _section(sections, reader, "materials", start)
 
@@ -191,7 +282,8 @@ def analyze_package(
     _section(sections, reader, "textures", start)
 
     start = reader.offset
-    vertex_byte_count = vertex_count * VERTEX_BYTES
+    vertex_stride = VERTEX_BYTES_V12 if version >= 12 else VERTEX_BYTES
+    vertex_byte_count = vertex_count * vertex_stride
     if version >= 9:
         vertex_bytes = reader.stored(
             vertex_byte_count, "visual vertex block"
@@ -278,7 +370,7 @@ def analyze_package(
         door_index_count = reader.u32(f"door {index} index count")
         door_collision_count = reader.u32(f"door {index} collision count")
         reader.skip(
-            door_vertex_count * VERTEX_BYTES,
+            door_vertex_count * vertex_stride,
             f"door {index} vertices",
         )
         door_indices = reader.take(
@@ -314,6 +406,24 @@ def analyze_package(
         reader.skip(point_count * 12, f"route {index} points")
     _section(sections, reader, "npc_routes", start)
 
+    extension_tags: list[str] = []
+    if version >= 12:
+        start = reader.offset
+        extension_count = reader.u32("extension count")
+        for extension_index in range(extension_count):
+            tag = reader.take(
+                4, f"extension {extension_index} tag"
+            ).decode("ascii", errors="replace")
+            reader.u32(f"extension {extension_index} schema")
+            decoded_size = reader.u32(
+                f"extension {extension_index} decoded size"
+            )
+            reader.stored(
+                decoded_size, f"extension {extension_index}"
+            )
+            extension_tags.append(tag)
+        _section(sections, reader, "extensions", start)
+
     if reader.offset != len(reader.data):
         raise PackageError(
             f"package has {len(reader.data) - reader.offset} trailing bytes"
@@ -322,20 +432,31 @@ def analyze_package(
     triangle_digest = hashlib.sha256()
     quantized_triangle_digest = hashlib.sha256()
     for index in indices:
-        offset = index * VERTEX_BYTES
-        record = vertex_bytes[offset : offset + VERTEX_BYTES]
+        offset = index * vertex_stride
+        record = vertex_bytes[offset : offset + vertex_stride]
         triangle_digest.update(record)
-        values = struct.unpack("<10fI", record)
+        if version >= 12:
+            base_values = struct.unpack("<10fI2f4b", record)
+            floats = (
+                *base_values[:10],
+                *base_values[11:13],
+                *(value / 127.0 for value in base_values[13:17]),
+            )
+            material_id = base_values[10]
+        else:
+            base_values = struct.unpack("<10fI", record)
+            floats = base_values[:10]
+            material_id = base_values[10]
         quantized_triangle_digest.update(
             struct.pack(
-                "<10qI",
-                *(round(value * 1_000_000.0) for value in values[:10]),
-                values[10],
+                f"<{len(floats)}qI",
+                *(round(value * 1_000_000.0) for value in floats),
+                material_id,
             )
         )
     positions = [
         struct.unpack_from("<3f", vertex_bytes, offset)
-        for offset in range(0, len(vertex_bytes), VERTEX_BYTES)
+        for offset in range(0, len(vertex_bytes), vertex_stride)
     ]
     bounds_min = [
         min(position[axis] for position in positions) for axis in range(3)
@@ -360,6 +481,8 @@ def analyze_package(
             "hinged_doors": door_count,
             "local_lights": light_count,
             "npc_routes": route_count,
+            "retail_texture_bindings": retail_binding_count,
+            "retail_material_parameters": retail_parameter_count,
         },
         "sections": sections,
         "material_alpha_modes": {
@@ -367,6 +490,8 @@ def analyze_package(
             "mask": material_alpha_modes[1],
             "blend": material_alpha_modes[2],
         },
+        "retail_shader_families": retail_family_counts,
+        "extension_tags": extension_tags,
         "texture_decoded_bytes": texture_decoded_bytes,
         "texture_dimensions": texture_dimensions,
         "maximum_visual_index": maximum_index,

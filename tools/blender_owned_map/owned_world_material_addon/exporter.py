@@ -1,4 +1,4 @@
-"""Original Blender -> SKATE v11 exporter.
+"""Original Blender -> SKATE v12 exporter.
 
 This module intentionally targets the narrow project-owned scene contract
 documented beside it. It has no ArenaBuilder imports or runtime dependency.
@@ -27,7 +27,7 @@ except ImportError:
     numpy = None
 
 
-MAGIC = b"SKATE11\0"
+MAGIC = b"SKATE12\0"
 ENDIAN_MARKER = 0x12345678
 STORAGE_RAW = 0
 STORAGE_DEFLATE = 1
@@ -60,7 +60,7 @@ _HELPER_OBJECT_MARKERS = (
     "scale_reference",
     "scale reference",
 )
-CACHE_SCHEMA = 13
+CACHE_SCHEMA = 14
 METADATA_FLOAT_COUNT = 49
 METADATA_BYTE_COUNT = METADATA_FLOAT_COUNT * 4
 RETAIL_EDGE_CODE_ATTRIBUTES = tuple(
@@ -77,6 +77,15 @@ class ExportMaterial:
     normal_texture: int
     orm_texture: int
     emissive_texture: int
+    retail_shader_name: str
+    retail_shader_family: int
+    retail_render_flags: int
+    retail_material_guid: int
+    retail_material_handle: int
+    retail_material_group_index: int
+    retail_texture_bindings: list[tuple[str, int, int, int, int]]
+    retail_parameters: list[tuple[str, list[str]]]
+    retail_source_metadata: str
 
 
 @dataclass
@@ -417,6 +426,9 @@ def _hash_mesh(
             _hash_foreach(digest, mesh.loops, "normal", 3, "f")
             _hash_foreach(digest, uv0.data, "uv", 2, "f")
             _hash_foreach(digest, uv1.data, "uv", 2, "f")
+            decal_uv = mesh.uv_layers.get("Decal")
+            if decal_uv is not None:
+                _hash_foreach(digest, decal_uv.data, "uv", 2, "f")
         else:
             _hash_text(digest, source_object.get("ow_material", ""))
             _hash_text(
@@ -470,6 +482,13 @@ def _scene_content_fingerprint(
         "ow_physics_surface",
         "ow_surface_pattern",
         "ow_collision_enabled",
+        "skate3_shader_name",
+        "skate3_retail_material_guid",
+        "skate3_retail_material_handle",
+        "skate3_retail_material_group_index",
+        "skate3_retail_texture_ids",
+        "skate3_retail_parameters",
+        "skate3_retail_source",
     )
     for material in materials:
         _hash_text(digest, material.name)
@@ -477,6 +496,9 @@ def _scene_content_fingerprint(
         for property_name in material_properties:
             _hash_text(digest, property_name)
             _hash_text(digest, repr(material.get(property_name, None)))
+    retail_manifest = bpy.data.texts.get("SKATE3_RETAIL_MANIFEST")
+    if retail_manifest is not None:
+        _hash_text(digest, retail_manifest.as_string())
     for image_index, image in enumerate(images, start=1):
         _hash_image_source(digest, image)
         _report_progress(
@@ -724,7 +746,7 @@ def _sun_metadata() -> tuple[tuple[float, float, float], float, float]:
 def _read_package_header(output: Path) -> tuple[str, int, tuple[int, ...]]:
     with output.open("rb") as stream:
         if stream.read(len(MAGIC)) != MAGIC:
-            raise ValueError(f"{output} is not an SKATE v11 package")
+            raise ValueError(f"{output} is not an SKATE v12 package")
         marker = struct.unpack("<I", stream.read(4))[0]
         if marker != ENDIAN_MARKER:
             raise ValueError(f"{output} has an invalid endian marker")
@@ -901,6 +923,22 @@ def _to_runtime(value) -> tuple[float, float, float]:
     return float(value.x), float(value.z), float(-value.y)
 
 
+def _pack_snorm8(value: float) -> int:
+    return max(-127, min(127, round(max(-1.0, min(1.0, value)) * 127.0)))
+
+
+def _pack_tangent_frame(
+    binormal: tuple[float, float, float] | Vector,
+    handedness: float,
+) -> tuple[int, int, int, int]:
+    return (
+        _pack_snorm8(float(binormal[0])),
+        _pack_snorm8(float(binormal[1])),
+        _pack_snorm8(float(binormal[2])),
+        _pack_snorm8(handedness),
+    )
+
+
 def _export_local_lights() -> list[ExportLocalLight]:
     result: list[ExportLocalLight] = []
     type_ids = {"POINT": 0, "SPOT": 1, "AREA": 2}
@@ -1075,6 +1113,188 @@ def _used_export_materials(
     return result
 
 
+def _json_object_property(
+    owner,
+    property_name: str,
+) -> dict[str, object]:
+    value = owner.get(property_name, "")
+    if not value:
+        return {}
+    if isinstance(value, str):
+        parsed = json.loads(value)
+    else:
+        parsed = dict(value)
+    if not isinstance(parsed, dict):
+        raise ValueError(
+            f"{owner.name!r} property {property_name!r} must contain a JSON "
+            "object"
+        )
+    return {str(key): item for key, item in parsed.items()}
+
+
+def _parse_retail_integer(value: object, bits: int) -> int:
+    if value in (None, ""):
+        return 0
+    parsed = int(str(value), 0)
+    maximum = (1 << bits) - 1
+    if parsed < 0 or parsed > maximum:
+        raise ValueError(f"retail integer {value!r} exceeds u{bits}")
+    return parsed
+
+
+def _retail_shader_family(shader_name: str) -> int:
+    shader = shader_name.lower()
+    if shader.startswith("environment.reflective_simple"):
+        return 6
+    if shader.startswith("environment.reflective_trans"):
+        return 13
+    if shader.startswith("environment.reflective"):
+        return 5
+    if shader.startswith("environment.decal_tileable"):
+        return 4
+    if shader.startswith("environment.decal"):
+        return 3
+    if shader.startswith("environment.default"):
+        return 1
+    if shader.startswith("environmentsimple.alphatest"):
+        return 7
+    if shader.startswith("environmentsimple.diffuse"):
+        return 8
+    if shader.startswith("environmentsimple.default"):
+        return 2
+    if shader.startswith("tree.default"):
+        return 9
+    if shader.startswith("animated.tree"):
+        return 10
+    if shader.startswith("proxyworld."):
+        return 11
+    if shader.startswith("incandescent.backlituvscroll"):
+        return 14
+    if shader.startswith("incandescent.default"):
+        return 12
+    if shader.startswith("water.flowing"):
+        return 30
+    if shader.startswith("ocean.default"):
+        return 31
+    if shader.startswith("ocean.reflection"):
+        return 32
+    if shader.startswith("sky."):
+        return 40
+    return 0
+
+
+def _retail_render_flags(shader_name: str, alpha_mode: int) -> int:
+    shader = shader_name.lower()
+    flags = 0
+    if alpha_mode == 1:
+        flags |= 1
+    elif alpha_mode == 2:
+        flags |= 2
+    if (
+        shader.startswith(("tree.", "animated.tree"))
+        or "alphatest" in shader
+    ):
+        flags |= 1 | 4
+    if shader.startswith("sky."):
+        flags |= 8
+    if shader.startswith("environment.decal"):
+        flags |= 16
+    if shader.startswith("environment.decal_tileable"):
+        flags |= 32
+    if shader.startswith(("water.", "ocean.")):
+        flags |= 64
+    return flags
+
+
+def _retail_material_data(
+    material: bpy.types.Material,
+    image_ids: dict[int, int],
+) -> tuple[
+    str,
+    int,
+    int,
+    int,
+    int,
+    int,
+    list[tuple[str, int, int, int, int]],
+    list[tuple[str, list[str]]],
+    str,
+]:
+    shader_name = str(
+        material.get(
+            "skate3_shader_name",
+            material.get("ow_retail_shader_name", ""),
+        )
+    )
+    if not shader_name:
+        return "", 0, 0, 0, 0, -1, [], [], ""
+
+    texture_ids = _json_object_property(
+        material, "skate3_retail_texture_ids"
+    )
+    bindings: list[tuple[str, int, int, int, int]] = []
+    tileable_decal = shader_name.lower().startswith(
+        "environment.decal_tileable"
+    )
+    for semantic, source_id in sorted(texture_ids.items()):
+        image = bpy.data.images.get(str(source_id).lower())
+        if image is None:
+            raise ValueError(
+                f"retail material {material.name!r} references missing "
+                f"{semantic} image {source_id!r}"
+            )
+        texture_id = image_ids.get(image.as_pointer(), 0)
+        if texture_id == 0:
+            raise ValueError(
+                f"retail image {image.name!r} was not collected for export"
+            )
+        uv_set = 1 if semantic in {"lightmap", "alpha"} else (
+            2 if semantic == "decal" else 0
+        )
+        clamp = semantic == "lightmap" or (
+            semantic == "decal" and not tileable_decal
+        )
+        address = 1 if clamp else 0
+        bindings.append(
+            (semantic, texture_id, uv_set, address, address)
+        )
+
+    raw_parameters = _json_object_property(
+        material, "skate3_retail_parameters"
+    )
+    parameters: list[tuple[str, list[str]]] = []
+    for name, values in raw_parameters.items():
+        if isinstance(values, (list, tuple)):
+            encoded_values = [str(value) for value in values]
+        else:
+            encoded_values = [str(values)]
+        if encoded_values:
+            parameters.append((name, encoded_values))
+    parameters.sort(key=lambda item: item[0])
+
+    alpha_mode = _bounded_int(material, "ow_alpha_mode", 0, 2)
+    source = _json_object_property(
+        material, "skate3_retail_source"
+    )
+    return (
+        shader_name,
+        _retail_shader_family(shader_name),
+        _retail_render_flags(shader_name, alpha_mode),
+        _parse_retail_integer(
+            material.get("skate3_retail_material_guid", ""), 64
+        ),
+        _parse_retail_integer(
+            material.get("skate3_retail_material_handle", ""), 32
+        ),
+        int(material.get("skate3_retail_material_group_index", -1)),
+        bindings,
+        parameters,
+        json.dumps(
+            source, sort_keys=True, separators=(",", ":")
+        ) if source else "",
+    )
+
+
 def _referenced_images(
     materials: list[bpy.types.Material],
 ) -> tuple[list[bpy.types.Image], dict[int, int]]:
@@ -1096,6 +1316,19 @@ def _referenced_images(
                 raise ValueError(
                     f"material {material.name!r} references missing image "
                     f"{image_name!r}"
+                )
+            identity = image.as_pointer()
+            if identity not in ids:
+                ids[identity] = len(images) + 1
+                images.append(image)
+        for source_id in _json_object_property(
+            material, "skate3_retail_texture_ids"
+        ).values():
+            image = bpy.data.images.get(str(source_id).lower())
+            if image is None:
+                raise ValueError(
+                    f"material {material.name!r} references missing retail "
+                    f"image {source_id!r}"
                 )
             identity = image.as_pointer()
             if identity not in ids:
@@ -1156,7 +1389,7 @@ def _export_visual_geometry(
     ]
     total_weight = max(1, sum(weights))
     completed_weight = 0
-    packed_vertex = struct.Struct("<3f3f2f2fI")
+    packed_vertex = struct.Struct("<3f3f2f2fI2f4b")
 
     for object_index, (source_object, object_weight) in enumerate(
         zip(mesh_objects, weights, strict=True),
@@ -1183,6 +1416,28 @@ def _export_visual_geometry(
                 raise ValueError(
                     f"visual mesh {source_object.name!r} has malformed UV "
                     "layer data"
+                )
+            decal_uv = mesh.uv_layers.get("Decal") or uv0
+            if len(decal_uv.data) != loop_count:
+                raise ValueError(
+                    f"visual mesh {source_object.name!r} has malformed "
+                    "decal UV layer data"
+                )
+            tangents_available = True
+            try:
+                mesh.calc_tangents(uvmap=uv0.name)
+            except RuntimeError:
+                tangents_available = False
+            # Blender 5 can replace implicitly shared UV storage while
+            # calculating tangents. Reacquire every layer so the references
+            # below cannot alias the active UVMap after that mutation.
+            uv0 = mesh.uv_layers.get("UVMap")
+            uv1 = mesh.uv_layers.get("Lightmap")
+            decal_uv = mesh.uv_layers.get("Decal") or uv0
+            if uv0 is None or uv1 is None or decal_uv is None:
+                raise ValueError(
+                    f"visual mesh {source_object.name!r} lost an export UV "
+                    "layer while calculating tangents"
                 )
 
             if numpy is not None:
@@ -1225,10 +1480,15 @@ def _export_visual_geometry(
                 light_uvs = numpy.empty(
                     loop_count * 2, dtype=numpy.float32
                 )
+                decal_uvs = numpy.empty(
+                    loop_count * 2, dtype=numpy.float32
+                )
                 uv0.data.foreach_get("uv", base_uvs)
                 uv1.data.foreach_get("uv", light_uvs)
+                decal_uv.data.foreach_get("uv", decal_uvs)
                 base_uvs = base_uvs.reshape((-1, 2))
                 light_uvs = light_uvs.reshape((-1, 2))
+                decal_uvs = decal_uvs.reshape((-1, 2))
 
                 polygon_materials = numpy.empty(
                     len(mesh.polygons), dtype=numpy.int32
@@ -1297,6 +1557,65 @@ def _export_visual_geometry(
                 runtime_positions[:, 2] *= -1.0
                 runtime_normals = normals[:, (0, 2, 1)].copy()
                 runtime_normals[:, 2] *= -1.0
+                runtime_binormals = numpy.zeros_like(runtime_normals)
+                runtime_handedness = numpy.zeros(
+                    corner_count, dtype=numpy.float32
+                )
+                if tangents_available:
+                    loop_tangents = numpy.empty(
+                        loop_count * 3, dtype=numpy.float32
+                    )
+                    loop_signs = numpy.empty(
+                        loop_count, dtype=numpy.float32
+                    )
+                    mesh.loops.foreach_get("tangent", loop_tangents)
+                    mesh.loops.foreach_get(
+                        "bitangent_sign", loop_signs
+                    )
+                    loop_tangents = loop_tangents.reshape((-1, 3))
+                    tangents = (
+                        loop_tangents[triangle_loops].astype(numpy.float64)
+                        @ world_matrix[:3, :3].T
+                    )
+                    runtime_tangents = tangents[:, (0, 2, 1)].copy()
+                    runtime_tangents[:, 2] *= -1.0
+                    source_tangent_lengths = numpy.linalg.norm(
+                        runtime_tangents, axis=1
+                    )
+                    runtime_tangents -= runtime_normals * numpy.sum(
+                        runtime_tangents * runtime_normals,
+                        axis=1,
+                    )[:, None]
+                    tangent_lengths = numpy.linalg.norm(
+                        runtime_tangents, axis=1
+                    )
+                    valid_tangents = tangent_lengths > numpy.maximum(
+                        1.0e-12,
+                        source_tangent_lengths * 1.0e-6,
+                    )
+                    runtime_tangents[valid_tangents] /= tangent_lengths[
+                        valid_tangents, None
+                    ]
+                    runtime_linear = numpy.asarray(
+                        (
+                            (1.0, 0.0, 0.0),
+                            (0.0, 0.0, 1.0),
+                            (0.0, -1.0, 0.0),
+                        ),
+                        dtype=numpy.float64,
+                    ) @ world_matrix[:3, :3]
+                    orientation = (
+                        -1.0
+                        if numpy.linalg.det(runtime_linear) < 0.0
+                        else 1.0
+                    )
+                    runtime_handedness = (
+                        loop_signs[triangle_loops] * orientation
+                    ).astype(numpy.float32)
+                    runtime_handedness[~valid_tangents] = 0.0
+                    runtime_binormals = numpy.cross(
+                        runtime_normals, runtime_tangents
+                    ) * runtime_handedness[:, None]
                 corner_materials = numpy.repeat(
                     mesh_material_ids[
                         polygon_materials[triangle_polygons]
@@ -1311,6 +1630,9 @@ def _export_visual_geometry(
                         runtime_normals,
                         base_uvs[triangle_loops],
                         light_uvs[triangle_loops],
+                        decal_uvs[triangle_loops],
+                        runtime_binormals,
+                        runtime_handedness,
                     )
                 ):
                     raise ValueError(
@@ -1325,6 +1647,8 @@ def _export_visual_geometry(
                         ("uv0", "<f4", (2,)),
                         ("uv1", "<f4", (2,)),
                         ("material", "<u4"),
+                        ("uv2", "<f4", (2,)),
+                        ("tangent_frame", "i1", (4,)),
                     ],
                     align=False,
                 )
@@ -1334,6 +1658,13 @@ def _export_visual_geometry(
                 records["uv0"] = base_uvs[triangle_loops]
                 records["uv1"] = light_uvs[triangle_loops]
                 records["material"] = corner_materials
+                records["uv2"] = decal_uvs[triangle_loops]
+                records["tangent_frame"][:, :3] = numpy.rint(
+                    numpy.clip(runtime_binormals, -1.0, 1.0) * 127.0
+                ).astype(numpy.int8)
+                records["tangent_frame"][:, 3] = numpy.rint(
+                    numpy.clip(runtime_handedness, -1.0, 1.0) * 127.0
+                ).astype(numpy.int8)
                 unique_records, inverse = numpy.unique(
                     records,
                     return_inverse=True,
@@ -1389,6 +1720,41 @@ def _export_visual_geometry(
                         ).normalized()
                         base_uv = uv0.data[loop_index].uv
                         light_uv = uv1.data[loop_index].uv
+                        decal = decal_uv.data[loop_index].uv
+                        handedness = 0.0
+                        binormal = Vector((0.0, 0.0, 0.0))
+                        if tangents_available:
+                            tangent = (
+                                source_object.matrix_world.to_3x3()
+                                @ loop.tangent
+                            )
+                            source_tangent_length = tangent.length
+                            tangent -= normal * normal.dot(tangent)
+                            if tangent.length > max(
+                                1.0e-12,
+                                source_tangent_length * 1.0e-6,
+                            ):
+                                tangent.normalize()
+                                runtime_normal = Vector(
+                                    _to_runtime(normal)
+                                )
+                                runtime_tangent = Vector(
+                                    _to_runtime(tangent)
+                                )
+                                orientation = (
+                                    1.0
+                                    if source_object.matrix_world.to_3x3()
+                                    .determinant() > 0.0
+                                    else -1.0
+                                )
+                                handedness = (
+                                    float(loop.bitangent_sign)
+                                    * orientation
+                                )
+                                binormal = (
+                                    runtime_normal.cross(runtime_tangent)
+                                    * handedness
+                                )
                         values = (
                             *_to_runtime(point),
                             *_to_runtime(normal),
@@ -1397,12 +1763,24 @@ def _export_visual_geometry(
                             float(light_uv.x),
                             float(light_uv.y),
                         )
-                        if not all(math.isfinite(value) for value in values):
+                        retail_values = (
+                            float(decal.x),
+                            float(decal.y),
+                        )
+                        if not all(
+                            math.isfinite(value)
+                            for value in (*values, *retail_values)
+                        ):
                             raise ValueError(
                                 f"visual mesh {source_object.name!r} "
                                 "contains non-finite geometry or UV values"
                             )
-                        record = packed_vertex.pack(*values, material_id)
+                        record = packed_vertex.pack(
+                            *values,
+                            material_id,
+                            *retail_values,
+                            *_pack_tangent_frame(binormal, handedness),
+                        )
                         local_index = unique_vertices.get(record)
                         if local_index is None:
                             local_index = len(unique_vertices)
@@ -2279,6 +2657,17 @@ def export_scene(
 
     export_materials: list[ExportMaterial] = []
     for material in materials:
+        (
+            retail_shader_name,
+            retail_shader_family,
+            retail_render_flags,
+            retail_material_guid,
+            retail_material_handle,
+            retail_material_group_index,
+            retail_texture_bindings,
+            retail_parameters,
+            retail_source_metadata,
+        ) = _retail_material_data(material, image_ids)
         export_materials.append(
             ExportMaterial(
                 blender_material=material,
@@ -2298,6 +2687,15 @@ def export_scene(
                 emissive_texture=_texture_id(
                     material, "ow_emissive_image", image_ids
                 ),
+                retail_shader_name=retail_shader_name,
+                retail_shader_family=retail_shader_family,
+                retail_render_flags=retail_render_flags,
+                retail_material_guid=retail_material_guid,
+                retail_material_handle=retail_material_handle,
+                retail_material_group_index=retail_material_group_index,
+                retail_texture_bindings=retail_texture_bindings,
+                retail_parameters=retail_parameters,
+                retail_source_metadata=retail_source_metadata,
             )
         )
 
@@ -2554,6 +2952,41 @@ def export_scene(
                 stream,
                 _bounded_int(material, "ow_surface_pattern", 0, 15),
             )
+            retail_enabled = bool(exported.retail_shader_name)
+            _write_u32(stream, 1 if retail_enabled else 0)
+            if retail_enabled:
+                _write_u64(stream, exported.retail_material_guid)
+                _write_u32(stream, exported.retail_material_handle)
+                stream.write(
+                    struct.pack(
+                        "<i", exported.retail_material_group_index
+                    )
+                )
+                _write_string(stream, exported.retail_shader_name)
+                _write_u32(stream, exported.retail_shader_family)
+                _write_u32(stream, exported.retail_render_flags)
+                _write_u32(
+                    stream, len(exported.retail_texture_bindings)
+                )
+                for (
+                    semantic,
+                    texture_id,
+                    uv_set,
+                    address_u,
+                    address_v,
+                ) in exported.retail_texture_bindings:
+                    _write_string(stream, semantic)
+                    _write_u32(stream, texture_id)
+                    _write_u32(stream, uv_set)
+                    _write_u32(stream, address_u)
+                    _write_u32(stream, address_v)
+                _write_u32(stream, len(exported.retail_parameters))
+                for name, values in exported.retail_parameters:
+                    _write_string(stream, name)
+                    _write_u32(stream, len(values))
+                    for value in values:
+                        _write_string(stream, value)
+                _write_string(stream, exported.retail_source_metadata)
 
         lightmap_encodings: dict[str, str] = {}
         for material in materials:
@@ -2574,7 +3007,13 @@ def export_scene(
                 lightmap=image.name in lightmap_encodings,
                 lightmap_encoding=lightmap_encoding,
             )
-            _require_nonblank_rgb(image.name, rgba8)
+            if (
+                not bool(image.get("skate3_allow_blank_rgb", False))
+                and not str(
+                    image.get("skate3_retail_texture_id", "")
+                )
+            ):
+                _require_nonblank_rgb(image.name, rgba8)
             _write_string(stream, image.name)
             _write_u32(stream, int(image.size[0]))
             _write_u32(stream, int(image.size[1]))
@@ -2692,6 +3131,8 @@ def export_scene(
                 _write_vec(stream, uv0)
                 _write_vec(stream, uv1)
                 _write_u32(stream, material_id)
+                _write_vec(stream, uv0)
+                stream.write(b"\0\0\0\0")
             for index in door.indices:
                 _write_u32(stream, index)
             for a, b, c, surface_id, material_id in door.collision:
@@ -2728,6 +3169,16 @@ def export_scene(
             _write_u32(stream, len(points))
             for point in points:
                 _write_vec(stream, point)
+        retail_manifest = bpy.data.texts.get("SKATE3_RETAIL_MANIFEST")
+        if retail_manifest is None:
+            _write_u32(stream, 0)
+        else:
+            metadata = retail_manifest.as_string().encode("utf-8")
+            _write_u32(stream, 1)
+            stream.write(b"WMET")
+            _write_u32(stream, 1)
+            _write_u32(stream, len(metadata))
+            _write_stored_bytes(stream, metadata)
 
     print(
         "SKATE export:",

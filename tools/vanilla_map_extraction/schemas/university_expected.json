@@ -1,25 +1,27 @@
 {
-  "format_version": 11,
+  "format_version": 12,
   "map_name": "University District",
-  "file_bytes": 195460271,
-  "texture_decoded_bytes": 646391808,
-  "maximum_visual_index": 2085488,
+  "file_bytes": 254686430,
+  "texture_decoded_bytes": 760748032,
+  "maximum_visual_index": 2139712,
   "counts": {
-    "materials": 4413,
-    "textures": 1732,
-    "vertices": 2085489,
+    "materials": 8729,
+    "textures": 2046,
+    "vertices": 2139713,
     "indices": 4936851,
     "collision_triangles": 1133642,
     "grind_rails": 4201,
     "native_grind_segments": 27008,
     "hinged_doors": 0,
     "local_lights": 0,
-    "npc_routes": 0
+    "npc_routes": 0,
+    "retail_texture_bindings": 40663,
+    "retail_material_parameters": 67475
   },
   "material_alpha_modes": {
-    "opaque": 2972,
-    "mask": 1414,
-    "blend": 27
+    "opaque": 6572,
+    "mask": 2118,
+    "blend": 39
   },
   "bounds_min": [
     -727.3729858398438,
@@ -52,9 +54,9 @@
     "excluded_special_texture_ids": 7,
     "selected_mesh_parts": 2987,
     "package_normal_texture_ids": 135,
-    "package_normal_materials": 1533,
+    "package_normal_materials": 2987,
     "unexpected_role_references": {
-      "lightmap_texture": 4222,
+      "lightmap_texture": 8489,
       "orm_texture": 0,
       "emissive_texture": 0
     }
@@ -66,23 +68,31 @@
     "excluded_no_secondary_uv": 1,
     "excluded_shader_mesh_parts": 32,
     "package_lightmap_texture_ids": 1270,
-    "package_lightmap_materials": 4222,
+    "package_lightmap_materials": 8489,
     "package_lightmap_strength": 0.25,
     "exact_payloads": 1270,
     "exact_payload_bytes": 393134080,
-    "package_lightmap_vertices": 2084262,
-    "package_distinct_uv_vertices": 2084262,
-    "package_lightmap_triangle_corners": 4934604
+    "package_lightmap_vertices": 2138486,
+    "package_distinct_uv_vertices": 2138486,
+    "package_lightmap_triangle_corners": 4934604,
+    "package_lightmap_uv_min": [
+      0.0,
+      0.0
+    ],
+    "package_lightmap_uv_max": [
+      1.0,
+      1.0
+    ]
   },
   "integrity": {
     "semantic_metadata_sha256": "01b3b1150bb715c9bec7078723a8cef81f53b7ee6868adda7839417fd17e5093",
-    "materials_sha256": "3e110a05a6e60c6b105d22de89a97def9d281359d7f73483d721938d24c86d5f",
-    "decoded_textures_sha256": "3299483b8a19d555cddd74d847a726d6a2c19628b1d1b9f9ed2c78518a5764a1",
-    "expanded_visual_triangles_sha256": "103100d9c02e65cc12108ca2af9063fe627e45912d210778dd79885caf1e1601",
-    "expanded_visual_triangles_1e6_sha256": "8b14be29d553f7969f9e542415065bf149e63d900f1205f04865b7dc4dae7b6e",
-    "collision_sha256": "05b7182679d76f61ea975b82c007b4b2d9eefbc44b077da2a7238dc43ef8865e",
+    "materials_sha256": "0d5074e9a67302f4ba4441acfec1283a81eee18136cfd8e9ffc74ad54ea8d857",
+    "decoded_textures_sha256": "ac95b60409efabd2404c5d2f1d866e48dac0b6d2ac02a691c8047c19820c173f",
+    "expanded_visual_triangles_sha256": "d3e03aedfe0f1bdd23b2af8cb0b444275cfaa5eea56761ba6e2c00ec225ef580",
+    "expanded_visual_triangles_1e6_sha256": "f8859725840c0a4101126679896ca0641316db727f9c7f6346822ec03582d821",
+    "collision_sha256": "42f551e8035e9248d1a044e47f05d0ae8e506f510813ad44c66f0d181b3f66df",
     "grind_rails_sha256": "0cc406dd4f68b0dad57215cec3f9cbe9e93be52fe124197ec5bb62c092d63501",
-    "authored_features_sha256": "0cc406dd4f68b0dad57215cec3f9cbe9e93be52fe124197ec5bb62c092d63501"
+    "authored_features_sha256": "5c3af6ee5739178124d1c8622433822cbabb57c7c5e0192bb4e6b6b58a079671"
   },
   "compiled_world": {
     "render_source_triangles": 1645617,

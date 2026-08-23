@@ -53,8 +53,17 @@ def _load_images(
     images: dict[str, bpy.types.Image] = {}
     for texture_id, entry in manifest["textures"].items():
         image_path = cache_root / entry["png"]
-        image = bpy.data.images.load(str(image_path), check_existing=True)
+        # Retail texture IDs are binding identities, even when two IDs resolve
+        # to the same decoded PNG. Reusing a Blender image here allows a later
+        # alias to rename the shared datablock and makes the earlier ID
+        # impossible for the exporter to resolve.
+        image = bpy.data.images.load(str(image_path), check_existing=False)
         image.name = texture_id
+        image["skate3_retail_texture_id"] = texture_id
+        # Most secondary retail roles are not connected to Blender preview
+        # nodes. Keep them in the saved .blend so the SKATE exporter can bind
+        # every original channel rather than losing zero-user datablocks.
+        image.use_fake_user = True
         images[texture_id] = image
     return images
 
@@ -68,6 +77,13 @@ def _new_material(
     lightmap_image: bpy.types.Image | None = None,
     normal_texture_id: str = "",
     normal_image: bpy.types.Image | None = None,
+    shader_name: str = "",
+    retail_material_guid: str = "",
+    retail_material_handle: str = "",
+    retail_material_group_index: int = -1,
+    retail_texture_ids: dict[str, str] | None = None,
+    retail_parameters: dict[str, list[str]] | None = None,
+    retail_source: dict[str, object] | None = None,
     fallback: bool = False,
 ) -> bpy.types.Material:
     alpha_suffix = ("OPAQUE", "MASK", "BLEND")[alpha_mode]
@@ -181,6 +197,27 @@ def _new_material(
     material["skate3_normal_texture_id"] = normal_texture_id
     material["skate3_alpha_mode"] = alpha_mode
     material["skate3_alpha_cutoff"] = 0.5
+    material["skate3_shader_name"] = shader_name
+    material["skate3_retail_material_guid"] = retail_material_guid
+    material["skate3_retail_material_handle"] = retail_material_handle
+    material["skate3_retail_material_group_index"] = (
+        retail_material_group_index
+    )
+    material["skate3_retail_texture_ids"] = json.dumps(
+        retail_texture_ids or {},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    material["skate3_retail_parameters"] = json.dumps(
+        retail_parameters or {},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    material["skate3_retail_source"] = json.dumps(
+        retail_source or {},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
     material["ow_normal_image"] = (
         normal_image.name if normal_image is not None else ""
     )
@@ -436,7 +473,8 @@ def _import_retail_collision(
 
 
 def build_scene(manifest_path: Path) -> dict[str, int]:
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest_text = manifest_path.read_text(encoding="utf-8")
+    manifest = json.loads(manifest_text)
     cache_root = manifest_path.parent
     _clear_scene()
 
@@ -445,6 +483,12 @@ def build_scene(manifest_path: Path) -> dict[str, int]:
     scene.name = scene_name
     scene.unit_settings.system = "METRIC"
     scene.unit_settings.scale_length = 1.0
+    manifest_block = bpy.data.texts.get("SKATE3_RETAIL_MANIFEST")
+    if manifest_block is None:
+        manifest_block = bpy.data.texts.new("SKATE3_RETAIL_MANIFEST")
+    else:
+        manifest_block.clear()
+    manifest_block.write(manifest_text)
 
     root = _new_child_collection(scene, scene_name)
     presentation = _new_child_collection(root, "Presentation")
@@ -454,7 +498,7 @@ def build_scene(manifest_path: Path) -> dict[str, int]:
     collision.hide_render = True
     metadata = _new_child_collection(root, "Metadata")
     images = _load_images(manifest, cache_root)
-    materials: dict[tuple[str, str, str, int], bpy.types.Material] = {}
+    materials: dict[tuple[object, ...], bpy.types.Material] = {}
     excluded_normal_texture_ids = {
         str(texture_id).lower()
         for texture_id in manifest.get("normal_texture_policy", {}).get(
@@ -496,6 +540,11 @@ def build_scene(manifest_path: Path) -> dict[str, int]:
                     if f"lightmap_uvs_{mesh_index}" in arrays
                     else None
                 )
+                decal_uvs = (
+                    arrays[f"decal_uvs_{mesh_index}"]
+                    if f"decal_uvs_{mesh_index}" in arrays
+                    else None
+                )
                 normals = (
                     _runtime_to_blender(arrays[f"normals_{mesh_index}"])
                     if f"normals_{mesh_index}" in arrays
@@ -530,6 +579,14 @@ def build_scene(manifest_path: Path) -> dict[str, int]:
                             u = abs(u)
                             v = abs(v)
                         lightmap_layer.data[loop.index].uv = (u, 1.0 - v)
+                if decal_uvs is not None:
+                    decal_layer = mesh_data.uv_layers.new(name="Decal")
+                    for loop in mesh_data.loops:
+                        uv = decal_uvs[loop.vertex_index]
+                        decal_layer.data[loop.index].uv = (
+                            float(uv[0]),
+                            1.0 - float(uv[1]),
+                        )
 
                 for polygon in mesh_data.polygons:
                     polygon.use_smooth = True
@@ -567,46 +624,102 @@ def build_scene(manifest_path: Path) -> dict[str, int]:
                     not in excluded_normal_texture_ids
                     else ""
                 )
-                if texture_id:
-                    material_key = (
-                        texture_id,
-                        lightmap_texture_id,
-                        normal_texture_id,
-                        alpha_mode,
+                retail_parameters = mesh_entry.get(
+                    "retail_parameters", {}
+                )
+                retail_source = {
+                    "asset_id": asset_id,
+                    "stream_file": model_entry["stream_file"],
+                    "mesh_index": mesh_index,
+                    "vertex_stride": mesh_entry["vertex_stride"],
+                    "attributes": mesh_entry.get("attributes", []),
+                    "source_offsets": mesh_entry["source_offsets"],
+                    "bounds": mesh_entry.get("bounds", {}),
+                    "vertex_count": mesh_entry["vertex_count"],
+                    "triangle_count": mesh_entry["triangle_count"],
+                }
+                material_key = (
+                    asset_id,
+                    mesh_index,
+                    str(mesh_entry.get("retail_material_guid", "")),
+                    str(mesh_entry.get("retail_material_handle", "")),
+                    int(
+                        mesh_entry.get(
+                            "retail_material_group_index", -1
+                        )
+                    ),
+                    shader_name,
+                    json.dumps(
+                        retail_texture_ids,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                    json.dumps(
+                        retail_parameters,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                    alpha_mode,
+                )
+                material = materials.get(material_key)
+                if material is None:
+                    image = images.get(texture_id) if texture_id else None
+                    normal_image = (
+                        images.get(normal_texture_id)
+                        if normal_texture_id
+                        else None
                     )
-                    material = materials.get(material_key)
-                    if material is None:
-                        image = images.get(texture_id)
-                        normal_image = (
-                            images.get(normal_texture_id)
-                            if normal_texture_id
-                            else None
-                        )
-                        lightmap_image = (
-                            images.get(lightmap_texture_id)
-                            if lightmap_texture_id
-                            else None
-                        )
-                        material = _new_material(
-                            texture_id,
-                            image,
-                            alpha_mode,
-                            lightmap_texture_id=lightmap_texture_id,
-                            lightmap_image=lightmap_image,
-                            normal_texture_id=normal_texture_id,
-                            normal_image=normal_image,
-                            fallback=image is None,
-                        )
-                        entry = manifest["textures"].get(texture_id)
-                        if entry is not None:
-                            material["skate3_stream_asset_id"] = entry[
-                                "stream_asset_id"
-                            ]
-                            material["skate3_stream_file"] = entry[
-                                "stream_file"
-                            ]
-                        materials[material_key] = material
-                    mesh_data.materials.append(material)
+                    lightmap_image = (
+                        images.get(lightmap_texture_id)
+                        if lightmap_texture_id
+                        else None
+                    )
+                    material = _new_material(
+                        texture_id or "NO_DIFFUSE",
+                        image,
+                        alpha_mode,
+                        lightmap_texture_id=lightmap_texture_id,
+                        lightmap_image=lightmap_image,
+                        normal_texture_id=normal_texture_id,
+                        normal_image=normal_image,
+                        shader_name=shader_name,
+                        retail_material_guid=str(
+                            mesh_entry.get(
+                                "retail_material_guid", ""
+                            )
+                        ),
+                        retail_material_handle=str(
+                            mesh_entry.get(
+                                "retail_material_handle", ""
+                            )
+                        ),
+                        retail_material_group_index=int(
+                            mesh_entry.get(
+                                "retail_material_group_index", -1
+                            )
+                        ),
+                        retail_texture_ids={
+                            str(key): str(value).lower()
+                            for key, value in retail_texture_ids.items()
+                        },
+                        retail_parameters=retail_parameters,
+                        retail_source=retail_source,
+                        fallback=image is None and bool(texture_id),
+                    )
+                    entry = (
+                        manifest["textures"].get(texture_id)
+                        if texture_id
+                        else None
+                    )
+                    if entry is not None:
+                        material["skate3_stream_asset_id"] = entry[
+                            "stream_asset_id"
+                        ]
+                        material["skate3_stream_file"] = entry[
+                            "stream_file"
+                        ]
+                    materials[material_key] = material
+                mesh_data.materials.append(material)
                 if normal_texture_id:
                     normal_mapped_object_count += 1
                     used_normal_texture_ids.add(normal_texture_id)
@@ -645,6 +758,16 @@ def build_scene(manifest_path: Path) -> dict[str, int]:
                     source_normal_texture_id
                 )
                 obj["skate3_shader_name"] = mesh_entry.get("shader_name") or ""
+                obj["skate3_retail_parameters"] = json.dumps(
+                    retail_parameters,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                obj["skate3_retail_texture_ids"] = json.dumps(
+                    retail_texture_ids,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
                 obj["skate3_texture_channel"] = (
                     mesh_entry.get("texture_channel") or ""
                 )

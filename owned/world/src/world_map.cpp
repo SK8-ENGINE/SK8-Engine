@@ -343,10 +343,19 @@ MaterialId MapBuilder::AddMaterial(std::string name,
   }
 
   const MaterialId id = next_material_id_++;
-  map_.materials.push_back(
-      {id, std::move(name), friction, restitution, flags, display_color,
-       pattern, texture_scale, roughness, variation,
-       emissive_intensity});
+  SurfaceMaterial material;
+  material.id = id;
+  material.name = std::move(name);
+  material.friction = friction;
+  material.restitution = restitution;
+  material.flags = flags;
+  material.display_color = display_color;
+  material.pattern = pattern;
+  material.texture_scale = texture_scale;
+  material.roughness = roughness;
+  material.variation = variation;
+  material.emissive_intensity = emissive_intensity;
+  map_.materials.push_back(std::move(material));
   return id;
 }
 
@@ -720,13 +729,17 @@ void MapBuilder::AddQuad(SurfaceId surface,
   map_.render_mesh.vertices.insert(
       map_.render_mesh.vertices.end(),
       {
-          {a, normal, {0.0f, 0.0f}, material, {0.0f, 0.0f}},
+          {a, normal, {0.0f, 0.0f}, material, {0.0f, 0.0f},
+           {0.0f, 0.0f}, {0.0f, 0.0f, 0.0f}, 0.0f},
           {b, normal, {0.0f, uv_scale.y}, material,
-           {0.0f, uv_scale.y}},
+           {0.0f, uv_scale.y}, {0.0f, uv_scale.y},
+           {0.0f, 0.0f, 0.0f}, 0.0f},
           {c, normal, {uv_scale.x, uv_scale.y}, material,
-           {uv_scale.x, uv_scale.y}},
+           {uv_scale.x, uv_scale.y}, {uv_scale.x, uv_scale.y},
+           {0.0f, 0.0f, 0.0f}, 0.0f},
           {d, normal, {uv_scale.x, 0.0f}, material,
-           {uv_scale.x, 0.0f}},
+           {uv_scale.x, 0.0f}, {uv_scale.x, 0.0f},
+           {0.0f, 0.0f, 0.0f}, 0.0f},
       });
   map_.render_mesh.indices.insert(
       map_.render_mesh.indices.end(),

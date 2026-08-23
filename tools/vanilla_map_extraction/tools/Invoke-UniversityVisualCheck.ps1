@@ -269,6 +269,9 @@ try {
     $lightmapVerifier = Join-Path (
         $workspace
     ) 'tools\verify_university_lightmaps.py'
+    $retailMaterialVerifier = Join-Path (
+        $workspace
+    ) 'tools\verify_university_retail_materials.py'
     $collisionProbeBuilder = Join-Path (
         $workspace
     ) 'tools\build_university_collision_probe.py'
@@ -330,6 +333,8 @@ try {
 
     Invoke-Checked -FilePath $blender -Arguments @(
         '--background',
+        '--python-exit-code',
+        '1',
         $baseBlend,
         '--python',
         $validateBlend
@@ -344,6 +349,8 @@ try {
         )) {
         Invoke-Checked -FilePath $blender -Arguments @(
             '--background',
+            '--python-exit-code',
+            '1',
             $baseBlend,
             '--python',
             $prepareOwned,
@@ -370,6 +377,8 @@ try {
         )) {
         $exportArguments = @(
             '--background',
+            '--python-exit-code',
+            '1',
             $ownedBlend,
             '--python',
             $exporter,
@@ -380,7 +389,7 @@ try {
             $exportArguments += '--force'
         }
         Invoke-Checked -FilePath $blender -Arguments $exportArguments `
-            -Description 'Export University SKATE v11 package'
+            -Description 'Export University SKATE v12 package'
     } else {
         Write-Host "SKATE package is current: $package"
     }
@@ -423,6 +432,13 @@ try {
         $expectedPath
     ) -Description 'Verify exact retail lightmap and UV transport'
     Invoke-Checked -FilePath 'python' -Arguments @(
+        $retailMaterialVerifier,
+        $extractionManifest,
+        $package
+    ) -Description (
+        'Verify complete retail material, texture-role, and provenance transport'
+    )
+    Invoke-Checked -FilePath 'python' -Arguments @(
         $collisionProbeBuilder,
         $extractionManifest,
         $collisionProbe
@@ -449,7 +465,9 @@ try {
             'native_grind_segments',
             'hinged_doors',
             'local_lights',
-            'npc_routes'
+            'npc_routes',
+            'retail_texture_bindings',
+            'retail_material_parameters'
         )) {
         Assert-Equal "count $name" $actual.counts.$name `
             $expected.counts.$name

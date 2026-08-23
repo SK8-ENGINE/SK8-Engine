@@ -21,24 +21,99 @@ class LightmapUvDecode:
     usage_index: int
 
 
-def _secondary_texcoord(
+@dataclass(frozen=True)
+class DecalUvDecode:
+    values: numpy.ndarray
+    format_code: int
+    offset: int
+    usage_index: int
+
+
+def _texture_coordinates(
     attributes: Iterable[VertexAttribute],
-) -> tuple[VertexAttribute, int] | None:
+) -> list[tuple[int, int, VertexAttribute]]:
     texcoords: list[tuple[int, int, VertexAttribute]] = []
     for declaration_index, attribute in enumerate(attributes):
         descriptor = bytes(attribute.descriptor)
         if len(descriptor) != 16:
             raise ValueError("Xenos vertex descriptors must contain 16 bytes")
-        # D3DDECLUSAGE is byte 9 and the usage index is byte 10.
         if descriptor[9] == 5:
             texcoords.append(
                 (int(descriptor[10]), declaration_index, attribute)
             )
+    texcoords.sort(key=lambda item: (item[0], item[1]))
+    return texcoords
+
+
+def _secondary_texcoord(
+    attributes: Iterable[VertexAttribute],
+) -> tuple[VertexAttribute, int] | None:
+    texcoords = _texture_coordinates(attributes)
     if len(texcoords) < 2:
         return None
-    texcoords.sort(key=lambda item: (item[0], item[1]))
     usage_index, _declaration_index, attribute = texcoords[1]
     return attribute, usage_index
+
+
+def decode_decal_uvs(
+    data: bytes,
+    *,
+    vertex_buffer_offset: int,
+    vertex_count: int,
+    vertex_stride: int,
+    attributes: Iterable[VertexAttribute],
+) -> DecalUvDecode | None:
+    """Decode zw from a half4/float4 primary TEXCOORD.
+
+    decalenvironment shaders use this third UV pair for the art overlay while
+    xy remains the base diffuse UV. Two-component declarations have no
+    independent decal coordinates and return ``None``.
+    """
+
+    texcoords = _texture_coordinates(attributes)
+    if not texcoords:
+        return None
+    usage_index, _declaration_index, attribute = texcoords[0]
+    descriptor = bytes(attribute.descriptor)
+    format_code = int.from_bytes(descriptor[4:8], "big")
+    xenos_format = format_code & 0x3F
+    if xenos_format == 32:
+        component_bytes = 2
+        dtype = numpy.dtype(">f2")
+    elif xenos_format == 38:
+        component_bytes = 4
+        dtype = numpy.dtype(">f4")
+    else:
+        return None
+    offset = int(attribute.offset) + component_bytes * 2
+    required_end = (
+        vertex_buffer_offset
+        + max(0, vertex_count - 1) * vertex_stride
+        + offset
+        + component_bytes * 2
+    )
+    if required_end > len(data):
+        raise ValueError(
+            "retail decal UV data extends past the RX2 vertex buffer"
+        )
+    if vertex_count == 0:
+        values = numpy.empty((0, 2), dtype=numpy.float32)
+    else:
+        values = numpy.ndarray(
+            shape=(vertex_count, 2),
+            dtype=dtype,
+            buffer=data,
+            offset=vertex_buffer_offset + offset,
+            strides=(vertex_stride, component_bytes),
+        ).astype(numpy.float32, copy=True)
+    if not numpy.isfinite(values).all():
+        raise ValueError("retail decal UVs contain non-finite values")
+    return DecalUvDecode(
+        values=numpy.ascontiguousarray(values, dtype=numpy.float32),
+        format_code=format_code,
+        offset=offset,
+        usage_index=usage_index,
+    )
 
 
 def decode_lightmap_uvs(

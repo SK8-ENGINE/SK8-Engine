@@ -14,7 +14,8 @@ if ($LASTEXITCODE -ne 0) {
     throw "University cache preparation failed with exit code $LASTEXITCODE"
 }
 
-& $BlenderExe --background --factory-startup --python $importer -- $manifest $blend
+& $BlenderExe --background --python-exit-code 1 --factory-startup `
+    --python $importer -- $manifest $blend
 if ($LASTEXITCODE -ne 0) {
     throw "Blender import failed with exit code $LASTEXITCODE"
 }

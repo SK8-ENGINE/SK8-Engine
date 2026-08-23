@@ -14,7 +14,7 @@ import numpy
 
 from retail_collision_mesh import decode_rx2_clustered_meshes
 from retail_grind_splines import decode_grind_splines
-from retail_lightmap_uv import decode_lightmap_uvs
+from retail_lightmap_uv import decode_decal_uvs, decode_lightmap_uvs
 from skate3_streams import (
     ASSET_TYPE_MODEL,
     ASSET_TYPE_TEXTURE,
@@ -294,6 +294,14 @@ def _material_metadata(
         "shader_name": shader_name,
         "alpha_mode": alpha_mode,
         "alpha_cutoff": 0.5,
+        # Preserve every material channel, including constants and fields the
+        # current renderer does not understand yet. Values remain in parser
+        # order as strings so GUIDs and packed numeric spellings round-trip
+        # without type guessing.
+        "retail_parameters": {
+            name: list(values)
+            for name, values in group.items()
+        },
         # Preserve every retail texture association in the extraction
         # manifest even when the current Blender/export policy does not yet
         # consume that role. This keeps extraction lossless and makes later
@@ -488,6 +496,17 @@ def prepare(
                     arrays[f"lightmap_uvs_{mesh_index}"] = (
                         lightmap_uv.values
                     )
+                decal_uv = decode_decal_uvs(
+                    asset.data,
+                    vertex_buffer_offset=mesh.source_offsets[
+                        "vertex_buffer"
+                    ],
+                    vertex_count=mesh.vertex_count,
+                    vertex_stride=mesh.vertex_stride,
+                    attributes=mesh.attributes,
+                )
+                if decal_uv is not None:
+                    arrays[f"decal_uvs_{mesh_index}"] = decal_uv.values
                 if mesh.normals is not None:
                     arrays[f"normals_{mesh_index}"] = numpy.asarray(
                         mesh.normals,
@@ -534,6 +553,17 @@ def prepare(
                                 "signed_tangent_handedness": True,
                             }
                             if lightmap_uv is not None
+                            else None
+                        ),
+                        "decal_uv": (
+                            {
+                                "format_code": (
+                                    f"0x{decal_uv.format_code:08X}"
+                                ),
+                                "offset": decal_uv.offset,
+                                "usage_index": decal_uv.usage_index,
+                            }
+                            if decal_uv is not None
                             else None
                         ),
                         "source_offsets": dict(mesh.source_offsets),

@@ -32,6 +32,19 @@ struct VisualDraw {
   skate::world::TextureId normal_texture = 0;
   skate::world::TextureId orm_texture = 0;
   skate::world::TextureId emissive_texture = 0;
+  skate::world::TextureId retail_macro_texture = 0;
+  skate::world::TextureId retail_decal_texture = 0;
+  skate::world::TextureId retail_specular_texture = 0;
+  skate::world::TextureId retail_detail_texture = 0;
+  skate::world::TextureId retail_environment_texture = 0;
+  skate::world::TextureId retail_normal2_texture = 0;
+  uint32_t retail_shader_family = 0;
+  uint32_t retail_render_flags = 0;
+  float retail_macro_scale = 1.0f;
+  float retail_macro_opacity = 1.0f;
+  float retail_detail_scale = 0.0f;
+  float retail_scroll_u = 0.0f;
+  float retail_scroll_v = 0.0f;
   float baked_indirect_strength = 0.0f;
   skate::world::SurfaceMaterial::AlphaMode alpha_mode =
       skate::world::SurfaceMaterial::AlphaMode::Opaque;

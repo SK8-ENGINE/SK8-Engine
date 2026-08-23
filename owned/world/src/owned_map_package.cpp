@@ -44,6 +44,8 @@ constexpr std::array<char, 8> kMagicV10 = {
     'S', 'K', 'A', 'T', 'E', '1', '0', '\0'};
 constexpr std::array<char, 8> kMagicV11 = {
     'S', 'K', 'A', 'T', 'E', '1', '1', '\0'};
+constexpr std::array<char, 8> kMagicV12 = {
+    'S', 'K', 'A', 'T', 'E', '1', '2', '\0'};
 constexpr std::uint32_t kEndianMarker = 0x12345678u;
 constexpr std::uint32_t kStorageRaw = 0;
 constexpr std::uint32_t kStorageDeflate = 1;
@@ -52,6 +54,7 @@ constexpr std::uint32_t kMaximumTextureDimension = 8192u;
 constexpr std::uint32_t kMaximumTextureBytes =
     kMaximumTextureDimension * kMaximumTextureDimension * 4u;
 constexpr std::uint32_t kMaximumStringBytes = 64u * 1024u;
+constexpr std::uint32_t kMaximumMetadataBytes = 128u * 1024u * 1024u;
 constexpr std::uint64_t kMaximumPackageBytes = 2ull * 1024ull * 1024ull * 1024ull;
 constexpr float kAreaEpsilon = 1.0e-10f;
 
@@ -155,10 +158,27 @@ std::vector<std::uint8_t> ReadStoredBytes(
   return decoded;
 }
 
+float DecodeSnorm8(std::uint32_t packed, std::uint32_t shift) {
+  const auto value = static_cast<std::int8_t>(
+      static_cast<std::uint8_t>((packed >> shift) & 0xFFu));
+  return std::clamp(static_cast<float>(value) / 127.0f, -1.0f, 1.0f);
+}
+
+void ReadPackedTangentFrame(Reader& reader, RenderVertex& vertex) {
+  const std::uint32_t packed = reader.Scalar<std::uint32_t>();
+  vertex.tangent_binormal = {
+      DecodeSnorm8(packed, 0u),
+      DecodeSnorm8(packed, 8u),
+      DecodeSnorm8(packed, 16u),
+  };
+  vertex.tangent_handedness = DecodeSnorm8(packed, 24u);
+}
+
 void ReadRenderVertices(
     Reader& reader,
     std::uint32_t count,
-    std::vector<RenderVertex>& destination) {
+    std::vector<RenderVertex>& destination,
+    bool has_retail_channels = false) {
   destination.reserve(destination.size() + count);
   for (std::uint32_t index = 0; index < count; ++index) {
     RenderVertex vertex;
@@ -167,6 +187,12 @@ void ReadRenderVertices(
     vertex.uv = reader.Vector2();
     vertex.lightmap_uv = reader.Vector2();
     vertex.material = reader.Scalar<MaterialId>();
+    if (has_retail_channels) {
+      vertex.decal_uv = reader.Vector2();
+      ReadPackedTangentFrame(reader, vertex);
+    } else {
+      vertex.decal_uv = vertex.uv;
+    }
     destination.push_back(vertex);
   }
 }
@@ -307,6 +333,40 @@ void Validate(MapDefinition& map) {
          FindTexture(map, material.emissive_texture) == nullptr)) {
       throw std::runtime_error("SKATE material table is invalid");
     }
+    if (material.retail.enabled) {
+      const std::uint32_t family =
+          static_cast<std::uint32_t>(
+              material.retail.shader_family);
+      const std::uint32_t flags =
+          static_cast<std::uint32_t>(
+              material.retail.render_flags);
+      constexpr std::uint32_t kKnownRetailFlags =
+          (1u << 7u) - 1u;
+      if (material.retail.shader_name.empty() ||
+          family > static_cast<std::uint32_t>(
+                       RetailShaderFamily::Sky) ||
+          (flags & ~kKnownRetailFlags) != 0) {
+        throw std::runtime_error(
+            "SKATE retail material metadata is invalid");
+      }
+      for (const RetailTextureBinding& binding :
+           material.retail.texture_bindings) {
+        if (binding.semantic.empty() || binding.texture == 0 ||
+            FindTexture(map, binding.texture) == nullptr ||
+            binding.uv_set > 2 || binding.address_u > 2 ||
+            binding.address_v > 2) {
+          throw std::runtime_error(
+              "SKATE retail texture binding is invalid");
+        }
+      }
+      for (const RetailMaterialParameter& parameter :
+           material.retail.parameters) {
+        if (parameter.name.empty() || parameter.values.empty()) {
+          throw std::runtime_error(
+              "SKATE retail material parameter is invalid");
+        }
+      }
+    }
   }
 
   std::unordered_set<TextureId> texture_ids;
@@ -330,6 +390,9 @@ void Validate(MapDefinition& map) {
   for (const RenderVertex& vertex : map.render_mesh.vertices) {
     if (!Finite(vertex.position) || !Finite(vertex.normal) ||
         !Finite(vertex.uv) || !Finite(vertex.lightmap_uv) ||
+        !Finite(vertex.decal_uv) ||
+        !Finite(vertex.tangent_binormal) ||
+        !std::isfinite(vertex.tangent_handedness) ||
         FindMaterial(map, vertex.material) == nullptr) {
       throw std::runtime_error("SKATE render vertex is invalid");
     }
@@ -440,6 +503,9 @@ void Validate(MapDefinition& map) {
     for (const RenderVertex& vertex : door.render_mesh.vertices) {
       if (!Finite(vertex.position) || !Finite(vertex.normal) ||
           !Finite(vertex.uv) || !Finite(vertex.lightmap_uv) ||
+          !Finite(vertex.decal_uv) ||
+          !Finite(vertex.tangent_binormal) ||
+          !std::isfinite(vertex.tangent_handedness) ||
           FindMaterial(map, vertex.material) == nullptr) {
         throw std::runtime_error("SKATE hinged-door render vertex is invalid");
       }
@@ -523,7 +589,9 @@ MapDefinition LoadOwnedMapPackage(const std::filesystem::path& path) {
   const bool version_9 = magic == kMagicV9;
   const bool version_10 = magic == kMagicV10;
   const bool version_11 = magic == kMagicV11;
-  const bool version_10_or_newer = version_10 || version_11;
+  const bool version_12 = magic == kMagicV12;
+  const bool version_10_or_newer =
+      version_10 || version_11 || version_12;
   const bool skate_magic =
       std::memcmp(magic.data(), "SKATE", 5) == 0 &&
       std::isdigit(static_cast<unsigned char>(magic[5])) &&
@@ -531,17 +599,17 @@ MapDefinition LoadOwnedMapPackage(const std::filesystem::path& path) {
       magic[7] == '\0';
   const int package_version =
       skate_magic ? (magic[5] - '0') * 10 + (magic[6] - '0') : 0;
-  if (skate_magic && package_version > 11) {
+  if (skate_magic && package_version > 12) {
     throw std::runtime_error(
         "SKATE v" + std::to_string(package_version) +
         " requires a newer Custom Engine Layer release");
   }
   if ((!version_1 && !version_2 && !version_3 && !version_4 && !version_5 &&
        !version_6 && !version_7 && !version_8 && !version_9 &&
-       !version_10 && !version_11) ||
+       !version_10 && !version_11 && !version_12) ||
       reader.Scalar<std::uint32_t>() != kEndianMarker) {
     throw std::runtime_error(
-        "file is not a supported little-endian SKATE v1-v11 package");
+        "file is not a supported little-endian SKATE v1-v12 package");
   }
 
   MapDefinition map;
@@ -632,6 +700,60 @@ MapDefinition LoadOwnedMapPackage(const std::filesystem::path& path) {
       material.skate_surface_pattern =
           static_cast<std::uint8_t>(reader.Scalar<std::uint32_t>());
     }
+    if (package_version >= 12) {
+      material.retail.enabled =
+          reader.Scalar<std::uint32_t>() != 0;
+      if (material.retail.enabled) {
+        material.retail.material_guid =
+            reader.Scalar<std::uint64_t>();
+        material.retail.material_handle =
+            reader.Scalar<std::uint32_t>();
+        material.retail.material_group_index =
+            reader.Scalar<std::int32_t>();
+        material.retail.shader_name = reader.String();
+        material.retail.shader_family =
+            static_cast<RetailShaderFamily>(
+                reader.Scalar<std::uint32_t>());
+        material.retail.render_flags =
+            static_cast<RetailRenderFlags>(
+                reader.Scalar<std::uint32_t>());
+        const std::uint32_t binding_count =
+            reader.Scalar<std::uint32_t>();
+        RequireCount(binding_count, "retail texture binding");
+        material.retail.texture_bindings.reserve(binding_count);
+        for (std::uint32_t binding_index = 0;
+             binding_index < binding_count; ++binding_index) {
+          RetailTextureBinding binding;
+          binding.semantic = reader.String();
+          binding.texture = reader.Scalar<TextureId>();
+          binding.uv_set = reader.Scalar<std::uint32_t>();
+          binding.address_u = reader.Scalar<std::uint32_t>();
+          binding.address_v = reader.Scalar<std::uint32_t>();
+          material.retail.texture_bindings.push_back(
+              std::move(binding));
+        }
+        const std::uint32_t parameter_count =
+            reader.Scalar<std::uint32_t>();
+        RequireCount(parameter_count, "retail material parameter");
+        material.retail.parameters.reserve(parameter_count);
+        for (std::uint32_t parameter_index = 0;
+             parameter_index < parameter_count; ++parameter_index) {
+          RetailMaterialParameter parameter;
+          parameter.name = reader.String();
+          const std::uint32_t value_count =
+              reader.Scalar<std::uint32_t>();
+          RequireCount(value_count, "retail material parameter value");
+          parameter.values.reserve(value_count);
+          for (std::uint32_t value_index = 0;
+               value_index < value_count; ++value_index) {
+            parameter.values.push_back(reader.String());
+          }
+          material.retail.parameters.push_back(
+              std::move(parameter));
+        }
+        material.retail.source_metadata_json = reader.String();
+      }
+    }
     map.materials.push_back(std::move(material));
   }
 
@@ -670,11 +792,14 @@ MapDefinition LoadOwnedMapPackage(const std::filesystem::path& path) {
   if (package_version >= 9) {
     Reader vertex_reader(ReadStoredBytes(
         reader,
-        std::size_t(vertex_count) * sizeof(float) * 10u +
-            std::size_t(vertex_count) * sizeof(std::uint32_t),
+        std::size_t(vertex_count) *
+            (package_version >= 12
+                 ? sizeof(float) * 12u + sizeof(std::uint32_t) * 2u
+                 : sizeof(float) * 10u + sizeof(std::uint32_t)),
         "visual vertex block"));
     ReadRenderVertices(
-        vertex_reader, vertex_count, map.render_mesh.vertices);
+        vertex_reader, vertex_count, map.render_mesh.vertices,
+        package_version >= 12);
     vertex_reader.RequireEnd();
 
     Reader index_reader(ReadStoredBytes(
@@ -697,7 +822,9 @@ MapDefinition LoadOwnedMapPackage(const std::filesystem::path& path) {
         package_version >= 11);
     collision_reader.RequireEnd();
   } else {
-    ReadRenderVertices(reader, vertex_count, map.render_mesh.vertices);
+    ReadRenderVertices(
+        reader, vertex_count, map.render_mesh.vertices,
+        package_version >= 12);
     ReadIndices(reader, index_count, map.render_mesh.indices);
     ReadCollisionTriangles(
         reader,
@@ -784,6 +911,12 @@ MapDefinition LoadOwnedMapPackage(const std::filesystem::path& path) {
       vertex.uv = reader.Vector2();
       vertex.lightmap_uv = reader.Vector2();
       vertex.material = reader.Scalar<MaterialId>();
+      if (package_version >= 12) {
+        vertex.decal_uv = reader.Vector2();
+        ReadPackedTangentFrame(reader, vertex);
+      } else {
+        vertex.decal_uv = vertex.uv;
+      }
       door.render_mesh.vertices.push_back(vertex);
     }
     door.render_mesh.indices.reserve(door_index_count);
@@ -836,6 +969,32 @@ MapDefinition LoadOwnedMapPackage(const std::filesystem::path& path) {
       route.points.push_back(reader.Vector3());
     }
     map.npc_routes.push_back(std::move(route));
+  }
+
+  if (package_version >= 12) {
+    const std::uint32_t extension_count =
+        reader.Scalar<std::uint32_t>();
+    RequireCount(extension_count, "extension");
+    for (std::uint32_t extension_index = 0;
+         extension_index < extension_count; ++extension_index) {
+      std::array<char, 4> tag{};
+      reader.Bytes(tag.data(), tag.size());
+      const std::uint32_t schema = reader.Scalar<std::uint32_t>();
+      const std::uint32_t decoded_size =
+          reader.Scalar<std::uint32_t>();
+      if (decoded_size > kMaximumMetadataBytes) {
+        throw std::runtime_error(
+            "SKATE extension exceeds the metadata limit");
+      }
+      std::vector<std::uint8_t> payload = ReadStoredBytes(
+          reader, decoded_size, "extension");
+      if (tag == std::array<char, 4>{'W', 'M', 'E', 'T'} &&
+          schema == 1) {
+        map.retail_world_metadata_json.assign(
+            reinterpret_cast<const char*>(payload.data()),
+            payload.size());
+      }
+    }
   }
 
   reader.RequireEnd();

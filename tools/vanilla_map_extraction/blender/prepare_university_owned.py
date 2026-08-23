@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from array import array
 import json
 import math
 from pathlib import Path
@@ -63,6 +64,11 @@ def _default_material() -> bpy.types.Material:
 def _configure_material(material: bpy.types.Material) -> None:
     texture_id = str(material.get("skate3_texture_id", ""))
     solid_color = SOLID_COLOR_TEXTURES.get(texture_id)
+    if solid_color is not None:
+        retail_image = bpy.data.images.get(texture_id)
+        if retail_image is not None:
+            retail_image["skate3_allow_blank_rgb"] = True
+            retail_image["skate3_constant_rgb"] = solid_color
     image = (
         bpy.data.images.get(texture_id)
         if texture_id and solid_color is None
@@ -141,6 +147,8 @@ def _ensure_export_uvs(
     source = mesh.uv_layers.get("UVMap")
     if source is None:
         source = mesh.uv_layers.new(name="UVMap")
+    source_uvs = array("f", [0.0]) * (len(mesh.loops) * 2)
+    source.data.foreach_get("uv", source_uvs)
     lightmap = mesh.uv_layers.get("Lightmap")
     if lightmap is None:
         if require_retail_lightmap:
@@ -148,8 +156,11 @@ def _ensure_export_uvs(
                 f"{mesh.name!r} lost its exact retail Lightmap UV layer"
             )
         lightmap = mesh.uv_layers.new(name="Lightmap")
-        for index in range(len(source.data)):
-            lightmap.data[index].uv = source.data[index].uv
+        lightmap.data.foreach_set("uv", source_uvs)
+    decal = mesh.uv_layers.get("Decal")
+    if decal is None:
+        decal = mesh.uv_layers.new(name="Decal")
+        decal.data.foreach_set("uv", source_uvs)
 
 
 def _presentation_only(obj: bpy.types.Object) -> bool:

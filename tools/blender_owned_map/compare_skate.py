@@ -48,14 +48,22 @@ def compare_packages(
     maximum_float_delta = 0.0
     before_vertices = before["_vertex_bytes"]
     after_vertices = after["_vertex_bytes"]
+    before_v12 = int(before["version"]) >= 12
+    after_v12 = int(after["version"]) >= 12
+    before_stride = 56 if before_v12 else 44
+    after_stride = 56 if after_v12 else 44
     for corner, (before_index, after_index) in enumerate(
         zip(before["_indices"], after["_indices"], strict=True)
     ):
         before_record = struct.unpack_from(
-            "<10fI", before_vertices, before_index * 44
+            "<10fI2f4b" if before_v12 else "<10fI",
+            before_vertices,
+            before_index * before_stride,
         )
         after_record = struct.unpack_from(
-            "<10fI", after_vertices, after_index * 44
+            "<10fI2f4b" if after_v12 else "<10fI",
+            after_vertices,
+            after_index * after_stride,
         )
         if before_record[10] != after_record[10]:
             failures.append(
@@ -63,17 +71,59 @@ def compare_packages(
                 f"{before_record[10]} != {after_record[10]}"
             )
             break
-        delta = max(
+        before_floats = (
+            (
+                *before_record[:10],
+                *before_record[11:13],
+                *(value / 127.0 for value in before_record[13:17]),
+            )
+            if before_v12
+            else before_record[:10]
+        )
+        after_floats = (
+            (
+                *after_record[:10],
+                *after_record[11:13],
+                *(value / 127.0 for value in after_record[13:17]),
+            )
+            if after_v12
+            else after_record[:10]
+        )
+        deltas = tuple(
             abs(left - right)
             for left, right in zip(
-                before_record[:10], after_record[:10], strict=True
+                before_floats,
+                after_floats,
+                strict=True,
             )
         )
+        delta = max(deltas)
         maximum_float_delta = max(maximum_float_delta, delta)
         if delta > 1.0e-6:
+            field_names = (
+                "position.x",
+                "position.y",
+                "position.z",
+                "normal.x",
+                "normal.y",
+                "normal.z",
+                "uv0.x",
+                "uv0.y",
+                "uv1.x",
+                "uv1.y",
+                "uv2.x",
+                "uv2.y",
+                "binormal.x",
+                "binormal.y",
+                "binormal.z",
+                "handedness",
+            )
+            field_index = deltas.index(delta)
             failures.append(
                 f"visual corner {corner} maximum float delta "
-                f"{delta:.9g} exceeds 1e-6"
+                f"{delta:.9g} exceeds 1e-6 in {field_names[field_index]}: "
+                f"{before_floats[field_index]:.9g} != "
+                f"{after_floats[field_index]:.9g}"
             )
             break
 

@@ -1,10 +1,10 @@
-# SKATE v11 binary format
+# SKATE v12 binary format
 
 All integers and IEEE-754 floats are little-endian. Strings are a `u32` byte
 length followed by UTF-8 bytes. Coordinates are right-handed Y-up metres.
 
 ```text
-char[8] magic = "SKATE11\0"
+char[8] magic = "SKATE12\0"
 u32 endian_marker = 0x12345678
 string map_name
 f32 spawn_position[3]
@@ -43,6 +43,26 @@ material[material_count]:
   u32 skate_audio_surface        # 0..93
   u32 skate_physics_surface      # 0..13 (13 appears in retail collision)
   u32 skate_surface_pattern      # 0..15
+  u32 has_retail_definition
+  if has_retail_definition:
+    u64 retail_material_guid
+    u32 retail_material_handle
+    i32 retail_material_group_index
+    string retail_shader_name
+    u32 retail_shader_family
+    u32 retail_render_flags
+    u32 texture_binding_count
+    texture_binding[texture_binding_count]:
+      string semantic
+      u32 texture_id
+      u32 uv_set                 # 0 base, 1 lightmap, 2 decal
+      u32 address_u, address_v   # 0 wrap, 1 clamp
+    u32 parameter_count
+    parameter[parameter_count]:
+      string name
+      u32 value_count
+      string value[value_count]
+    string source_metadata_json
 
 texture[texture_count]:
   string name
@@ -55,6 +75,9 @@ stored_bytes visual_vertices:
     f32 position[3], normal[3]
     f32 uv0[2], lightmap_uv[2]
     u32 material_id
+    f32 decal_uv[2]
+    i8 tangent_binormal_snorm8[3]
+    i8 tangent_handedness_snorm8
 
 stored_bytes visual_indices:
   u32 index[index_count]
@@ -120,6 +143,12 @@ npc_route[npc_route_count]:
   f32 spawn_spacing_metres
   u32 point_count
   f32 point[point_count][3]
+
+u32 extension_count
+extension[extension_count]:
+  char tag[4]
+  u32 schema_version
+  stored_bytes payload
 ```
 
 Each `stored_bytes` record is:
@@ -138,9 +167,28 @@ the runtime reconstructs the same float32/u32 records and RGBA8 texels before
 normal validation and renderer upload.
 
 Visual vertices are indexed by their complete record. Two corners share a
-vertex only when position, normal, both UV channels, and material ID are
-bit-identical. UV seams, hard normals, material boundaries, triangle order,
-and all index references are therefore preserved.
+vertex only when position, normal, all three UV channels, material ID, and the
+packed tangent frame are bit-identical. UV seams, hard normals, material
+boundaries, tangent handedness, triangle order, and all index references are
+therefore preserved. The signed-normalized tangent frame matches the precision
+of the retail packed tangent data while avoiding twelve redundant float bytes
+per vertex.
+
+Retail material definitions are additive to the renderer-neutral material
+fields, so authored maps remain simple while extracted maps can retain their
+original shader identity. Texture bindings are named rather than limited to a
+fixed PBR slot list; University currently uses diffuse, transparent, normal,
+normal2, specular, lightmap, detail, macrooverlay, decal, environment, and
+noise. Parameter values remain strings because retail Attribulator data
+contains numbers, texture resource names, empty markers, and other
+shader-specific tokens.
+
+The `WMET` extension uses schema version 1 and contains the losslessly
+DEFLATE-compressed extraction manifest JSON. It preserves source archives,
+stream cells, RX2 declarations and offsets, bounds, simulation/collision/grind
+provenance, and texture decode metadata that do not belong in hot render
+records. Unknown extension tags are safely skipped after their stored payload
+has been validated.
 
 `day_night_duration_seconds == 0` freezes celestial lighting at
 `day_night_start_hour`. With a positive duration and
@@ -194,13 +242,15 @@ The native collision compiler emits those bytes unchanged. Blender-authored
 collision leaves the marker clear, and the compiler derives adjacency,
 edge-angle, and smooth-vertex codes from geometry as before.
 
-The loader retains read compatibility with SKATE v1 through v11. Missing v2
+The loader retains read compatibility with SKATE v1 through v12. Missing v2
 material fields use opaque, polished-concrete/smooth defaults with no
 additional PBR maps. Missing v3 cycle fields retain the original full-day
 behavior. Missing v6 environment fields use the engine's neutral sky grading
 and standard twilight, night, sun, moon, and ambient defaults. Older packages
-simply contain no authored local lights or NPC routes. NPC routes in v8 are
-experimental runtime data and are not yet a stable gameplay feature.
+simply contain no authored local lights or NPC routes. Packages before v12 use
+the base UV as decal UV and have no tangent frame, retail material definition,
+or extension table. NPC routes in v8 are experimental runtime data and are not
+yet a stable gameplay feature.
 
 ## Version compatibility
 
