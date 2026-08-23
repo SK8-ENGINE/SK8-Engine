@@ -553,6 +553,21 @@ Current checkpoint:
   rejected controls. This slice deliberately preserves the validated v11
   keyframe/delta encoder; using only receiver-confirmed baselines for delta
   construction remains the next independently testable step.
+- In run `20260823-203620-d6ea6010`, the user reported that the five-client
+  recovery-control build looked good. Telemetry independently showed all 20
+  sender/receiver paths finishing at 59.9-60.2 Hz with zero held-latest
+  playback, completed-frame gaps, or superseded assemblies. Every client had
+  four known and four visible peers, completed thousands of v12 animation
+  groups, and exchanged thousands of decoded-baseline reports. A healthy run
+  required no baseline requests or forced recovery keyframes.
+- Animation-fragment, socket, delivery-policy, appearance-resource, and
+  unsafe GPU-reuse faults remained zero. Client 2 rejected one delayed pose
+  control among thousands, while clients 4 and 5 rejected 20 and 10 isolated
+  root snapshots respectively without a sustained stream failure. Before
+  decoded-baseline reports control delta selection, retain a bounded history
+  of offered baselines so a valid delayed report cannot be mistaken for an
+  unknown baseline. This telemetry does not establish the user's visual
+  result.
 
 Completion:
 
