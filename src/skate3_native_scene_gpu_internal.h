@@ -8,6 +8,7 @@
 
 #include "skate3_native_scene_state.h"
 
+#include <array>
 #include <chrono>
 #include <unordered_set>
 
@@ -804,17 +805,18 @@ struct RendererState {
   std::unordered_map<uint32_t, GuestTexture> cube_textures;
   GuestTexture white_cube;
   // Bone palette ring: persistent-mapped upload buffer, one region per
-  // in-flight frame.
+  // in-flight renderer frame. Region ownership is tracked by command-
+  // processor submission rather than CPU frame modulo: at high uncapped
+  // render rates, a modulo ring can wrap while the GPU still references
+  // the old palette and make every remote character display a newer pose.
   static constexpr uint32_t kBoneRegionSize = 1u << 20;
-  // 8-deep (was 4): the Vulkan CP was observed letting the GPU lag more
-  // than 3 frames under load - 4-deep regions then recycle while still
-  // referenced (hair shimmer / collapsed garments). If the ring race is
-  // confirmed, the CP-side throttle is the
-  // proper fix and this is defense in depth.
-  static constexpr uint32_t kBoneRegions = 8;
+  static constexpr uint32_t kBoneRegions = 32;
   nrhi::Buffer* bone_ring = nullptr;
   uint8_t* bone_ring_cpu = nullptr;
   uint32_t bone_ring_offset = 0;
+  std::array<uint64_t, kBoneRegions> upload_region_submissions{};
+  uint32_t next_upload_region = 0;
+  uint64_t upload_region_unsafe_reuses = 0;
   // ROPA shape-generation ring (per garment mesh): the last decoded vertex
   // arrays keyed by dyn_seq, so the draw can combine the generations under
   // the interp pass's kernel weights (the body's own 8-tap boxcar /

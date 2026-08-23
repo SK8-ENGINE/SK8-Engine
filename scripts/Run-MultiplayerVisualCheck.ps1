@@ -641,9 +641,9 @@ $runRoot
 Clients: 5
 Transport: localhost UDP
 Quality: Balanced, 60 Hz root, 60 Hz animation, 50 ms minimum interpolation
-Change under test: full capture-to-render skeleton cadence diagnostics
-Diagnostics: captured, interpolated, and final applied bone-palette change and
-hold rates, plus network timing and renderer handoff cadence, are reported
+Change under test: fence-safe GPU bone and garment upload-ring reuse
+Diagnostics: GPU submission lag, busy upload regions, unsafe reuse, full
+skeleton cadence, network timing, and renderer handoff cadence are reported
 
 Visual scenario:
 1. Wait until all five clients have loaded the same map, every client sees
@@ -669,8 +669,7 @@ Visual failure:
 Telemetry acceptance checked by the agent afterward:
 - Every client reports local skeleton capture cadence and each visible remote
   reports interpolated-pose and final applied-palette cadence.
-- The three stages reveal whether repeated or alternating full poses begin at
-  sender capture, receiver interpolation, or final renderer palette mapping.
+- Every client reports GPU upload-ring pressure with zero unsafe region reuse.
 - Existing packet, timing, interpolation, sequence-gap, stall, and resource
   checks remain active.
 - Delivery-policy errors, socket failures, and multiplayer errors stay zero.

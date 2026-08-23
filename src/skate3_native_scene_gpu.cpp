@@ -15227,14 +15227,107 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
 
   ReleaseRetiredAndFlushCaches(context);
 
-  // Reset this frame's bone ring region (shared by the shadow casters and
-  // the main pass: the shadow pass allocates first, the main pass appends).
+  // Acquire a bone / ROPA upload region no submitted GPU work still owns.
+  // CPU frame modulo is unsafe here: this renderer can produce hundreds of
+  // frames per second while several submissions remain in flight, so an
+  // eight-frame ring used to overwrite palettes before queued character
+  // draws consumed them.
   const uint64_t frame_number = g_frames_rendered.load(std::memory_order_relaxed);
+  const uint64_t current_submission =
+      context.device->CurrentSubmission();
+  const uint64_t completed_submission =
+      context.device->CompletedSubmission();
+  uint32_t upload_region_index =
+      g_r.next_upload_region % RendererState::kBoneRegions;
+  bool found_upload_region = false;
+  for (uint32_t scan = 0;
+       scan < RendererState::kBoneRegions; ++scan) {
+    const uint32_t candidate =
+        (g_r.next_upload_region + scan) %
+        RendererState::kBoneRegions;
+    const uint64_t owner =
+        g_r.upload_region_submissions[candidate];
+    if (owner == 0 || owner <= completed_submission) {
+      upload_region_index = candidate;
+      found_upload_region = true;
+      break;
+    }
+  }
+  if (!found_upload_region) {
+    // A 32-deep upload ring should stay ahead of the command processor's
+    // bounded in-flight queue. Preserve rendering if that invariant is
+    // violated, but make the unsafe reuse explicit in telemetry.
+    uint64_t oldest_submission =
+        std::numeric_limits<uint64_t>::max();
+    for (uint32_t candidate = 0;
+         candidate < RendererState::kBoneRegions; ++candidate) {
+      if (g_r.upload_region_submissions[candidate] <
+          oldest_submission) {
+        oldest_submission =
+            g_r.upload_region_submissions[candidate];
+        upload_region_index = candidate;
+      }
+    }
+    ++g_r.upload_region_unsafe_reuses;
+  }
+  g_r.upload_region_submissions[upload_region_index] =
+      std::max<uint64_t>(current_submission, 1);
+  g_r.next_upload_region =
+      (upload_region_index + 1) %
+      RendererState::kBoneRegions;
   const uint32_t bone_region =
-      uint32_t(frame_number % RendererState::kBoneRegions) *
+      upload_region_index *
       RendererState::kBoneRegionSize;
   g_r.bone_ring_offset = 0;
   g_r.ropa_ring_offset = 0;
+  {
+    struct UploadRingTelemetry {
+      std::chrono::steady_clock::time_point last_log{};
+      uint64_t maximum_submission_lag = 0;
+      uint32_t maximum_busy_regions = 0;
+      uint64_t previous_unsafe_reuses = 0;
+    };
+    static UploadRingTelemetry telemetry;
+    const auto upload_now = std::chrono::steady_clock::now();
+    uint32_t busy_regions = 0;
+    for (const uint64_t owner :
+         g_r.upload_region_submissions) {
+      busy_regions +=
+          owner != 0 && owner > completed_submission ? 1u : 0u;
+    }
+    telemetry.maximum_busy_regions =
+        std::max(telemetry.maximum_busy_regions, busy_regions);
+    telemetry.maximum_submission_lag =
+        std::max(
+            telemetry.maximum_submission_lag,
+            current_submission >= completed_submission
+                ? current_submission - completed_submission
+                : uint64_t{0});
+    if (telemetry.last_log ==
+        std::chrono::steady_clock::time_point{}) {
+      telemetry.last_log = upload_now;
+    } else if (
+        upload_now - telemetry.last_log >=
+        std::chrono::seconds(5)) {
+      REXLOG_INFO(
+          "multiplayer-gpu-upload-ring: regions={} busy={}/{} "
+          "submission_lag={}/{} unsafe_reuse={} total={}",
+          RendererState::kBoneRegions, busy_regions,
+          telemetry.maximum_busy_regions,
+          current_submission >= completed_submission
+              ? current_submission - completed_submission
+              : uint64_t{0},
+          telemetry.maximum_submission_lag,
+          g_r.upload_region_unsafe_reuses -
+              telemetry.previous_unsafe_reuses,
+          g_r.upload_region_unsafe_reuses);
+      telemetry.last_log = upload_now;
+      telemetry.maximum_submission_lag = 0;
+      telemetry.maximum_busy_regions = 0;
+      telemetry.previous_unsafe_reuses =
+          g_r.upload_region_unsafe_reuses;
+    }
+  }
 
   {
     const std::string tm(REXCVAR_GET(skate3_native_render_scene_trace_mesh));
@@ -17355,7 +17448,7 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
         }
       }
       const uint32_t region =
-          uint32_t(frame_number % RendererState::kBoneRegions) *
+          upload_region_index *
           RendererState::kRopaRegionSize;
       const uint32_t bytes = uint32_t(want_floats * sizeof(float));
       if (ng > 0 && total >= 0.5f && newest != nullptr &&

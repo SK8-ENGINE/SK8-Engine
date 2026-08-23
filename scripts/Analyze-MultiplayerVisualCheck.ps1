@@ -147,6 +147,11 @@ foreach ($client in $clientDirectories) {
         $lines | Select-String -Pattern 'multiplayer-pose-cadence:' |
             ForEach-Object { $_.Line }
     )
+    $gpuUploadRingLines = @(
+        $lines |
+            Select-String -Pattern 'multiplayer-gpu-upload-ring:' |
+            ForEach-Object { $_.Line }
+    )
     $captureCadenceLines = @(
         $poseCadenceLines |
             Select-String -Pattern ' stage=capture(?:\s|$)' |
@@ -331,6 +336,18 @@ foreach ($client in $clientDirectories) {
     $summary.Add(
         "multiplayer_pose_cadence_samples=" +
         $poseCadenceLines.Count
+    )
+    $summary.Add(
+        "multiplayer_gpu_upload_ring_samples=" +
+        $gpuUploadRingLines.Count
+    )
+    $summary.Add(
+        'max_gpu_upload_unsafe_reuse=' +
+        (Maximum-IntegerField $gpuUploadRingLines 'total')
+    )
+    $summary.Add(
+        'max_gpu_upload_busy_regions=' +
+        (Maximum-IntegerField $gpuUploadRingLines 'busy')
     )
     $summary.Add(
         "appearance_prepare_events=" +
@@ -708,6 +725,14 @@ foreach ($client in $clientDirectories) {
         'last_pose_applied=' +
         $(if ($appliedCadenceLines.Count -gt 0) {
             $appliedCadenceLines[-1]
+        } else {
+            'missing'
+        })
+    )
+    $summary.Add(
+        'last_gpu_upload_ring=' +
+        $(if ($gpuUploadRingLines.Count -gt 0) {
+            $gpuUploadRingLines[-1]
         } else {
             'missing'
         })
