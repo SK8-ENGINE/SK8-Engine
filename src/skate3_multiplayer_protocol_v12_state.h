@@ -340,6 +340,10 @@ class PoseReceiverState {
     }
   }
 
+  void NotifyBaselineUnavailable() {
+    RequestBaseline();
+  }
+
   [[nodiscard]] bool baseline_request_pending() const {
     return request_pending_;
   }

@@ -559,6 +559,7 @@ try {
             'skate3_multiplayer_protocol_v12_tests',
             'skate3_multiplayer_protocol_v12_state_tests',
             'skate3_multiplayer_protocol_v12_pose_tests',
+            'skate3_multiplayer_protocol_v12_transport_tests',
             'skate3_multiplayer_lifecycle_tests',
             'skate3_multiplayer_worker_tests',
             'skate3_multiplayer_render_cache_tests'
