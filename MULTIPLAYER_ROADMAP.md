@@ -498,6 +498,13 @@ Current checkpoint:
   root datagram, then accepted more than 21,000 without another rejection;
   the isolated rejection did not produce a sustained stream fault. This
   telemetry does not establish the user's visual result.
+- The next offline checkpoint defines the exact v12 migration bridge for the
+  already validated v11 animation words. It stores the animation root,
+  root-bone identity, word count, and every 16-bit word explicitly in little
+  endian, then carries that byte stream through the existing bounded pose
+  packetizer and reassembler. Golden bytes, malformed input, maximum 8,192
+  word frames, reverse-order 15-fragment reassembly, and bit-exact recovery
+  are covered without changing live send, receive, or rendering behavior.
 
 Completion:
 

@@ -1,10 +1,13 @@
 #include "skate3_multiplayer_protocol_v12_state.h"
+#include "skate3_multiplayer_protocol_v12_animation.h"
 #include "skate3_multiplayer_protocol_v12_transport.h"
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <iostream>
 #include <span>
 #include <string_view>
@@ -104,6 +107,157 @@ void TestPacketizerBudgetAndRoundTrip() {
                    source.begin() + header.fragment_offset),
            "decoded pose datagram changed fragment data");
   }
+}
+
+void TestAnimationWordStreamGoldenBytesAndRoundTrip() {
+  const float root[3] = {1.0f, -2.5f, 0.25f};
+  const std::vector<std::uint16_t> words = {
+      1, 2, 0x3344, 0x1122, 0x0000, 0xFFFF, 0xA55A,
+  };
+  std::vector<std::uint8_t> encoded(
+      AnimationWordStreamByteCount(words.size()));
+  Expect(EncodeAnimationWordStream(
+             root, 0x7788, words, encoded),
+         "animation word stream did not encode");
+  constexpr std::array<std::uint8_t, 30> golden = {
+      0x00, 0x00, 0x80, 0x3F,
+      0x00, 0x00, 0x20, 0xC0,
+      0x00, 0x00, 0x80, 0x3E,
+      0x88, 0x77, 0x07, 0x00,
+      0x01, 0x00, 0x02, 0x00,
+      0x44, 0x33, 0x22, 0x11,
+      0x00, 0x00, 0xFF, 0xFF,
+      0x5A, 0xA5,
+  };
+  Expect(std::equal(
+             encoded.begin(), encoded.end(), golden.begin()),
+         "animation word stream golden bytes changed");
+
+  float decoded_root[3] = {};
+  std::uint16_t decoded_root_bone = 0;
+  std::vector<std::uint16_t> decoded_words;
+  Expect(DecodeAnimationWordStream(
+             encoded, decoded_root, decoded_root_bone,
+             decoded_words),
+         "animation word stream did not decode");
+  Expect(std::bit_cast<std::uint32_t>(decoded_root[0]) ==
+             std::bit_cast<std::uint32_t>(root[0]) &&
+             std::bit_cast<std::uint32_t>(decoded_root[1]) ==
+                 std::bit_cast<std::uint32_t>(root[1]) &&
+             std::bit_cast<std::uint32_t>(decoded_root[2]) ==
+                 std::bit_cast<std::uint32_t>(root[2]) &&
+             decoded_root_bone == 0x7788 &&
+             decoded_words == words,
+         "animation word stream round trip changed data");
+}
+
+void TestAnimationWordStreamMaximumGroupRoundTrip() {
+  const float root[3] = {123.5f, -45.25f, 0.0f};
+  std::vector<std::uint16_t> words(
+      skate3::multiplayer::protocol::kMaximumAnimationFrameWords);
+  words[0] = 1;
+  words[1] = 32;
+  for (std::size_t index = 2; index < words.size(); ++index) {
+    words[index] = static_cast<std::uint16_t>(
+        index * 40503u + 17u);
+  }
+  std::vector<std::uint8_t> group(
+      AnimationWordStreamByteCount(words.size()));
+  Expect(EncodeAnimationWordStream(
+             root, 130, words, group),
+         "maximum animation word stream did not encode");
+  Expect(group.size() == kMaximumAnimationWordStreamBytes,
+         "maximum animation word stream size changed");
+
+  std::array<PoseGroupDatagram, 58> descriptors{};
+  PoseGroupPacketizeRequest request =
+      Request(MessageKind::kPoseBaseline, group, 71, 0, 0);
+  request.element_count = words[1];
+  const std::size_t count =
+      BuildPoseGroupDatagrams(request, descriptors);
+  Expect(count == 15,
+         "maximum v11 animation bridge made wrong packet count");
+
+  PoseGroupReassembler reassembler;
+  ReassemblyPushResult result;
+  for (std::size_t reverse = count; reverse > 0; --reverse) {
+    const PoseGroupDatagram& descriptor =
+        descriptors[reverse - 1];
+    const std::vector<std::uint8_t> packet =
+        Encode(descriptor, group);
+    Envelope envelope;
+    PoseGroupHeader header;
+    std::span<const std::uint8_t> fragment;
+    Expect(DecodePoseGroupDatagram(
+               packet, envelope, header, fragment),
+           "maximum animation group fragment did not decode");
+    result = reassembler.Push(
+        envelope, header, fragment, 1000 + reverse);
+  }
+  Expect(result.disposition ==
+             ReassemblyDisposition::kGroupComplete &&
+             result.completed.has_value(),
+         "maximum animation group did not reassemble");
+
+  float decoded_root[3] = {};
+  std::uint16_t decoded_root_bone = 0;
+  std::vector<std::uint16_t> decoded_words;
+  Expect(DecodeAnimationWordStream(
+             result.completed->bytes, decoded_root,
+             decoded_root_bone, decoded_words),
+         "reassembled maximum animation stream did not decode");
+  Expect(decoded_words == words && decoded_root_bone == 130 &&
+             std::equal(
+                 std::begin(decoded_root), std::end(decoded_root),
+                 std::begin(root)),
+         "packetized animation bridge changed exact words or root");
+}
+
+void TestAnimationWordStreamRejectsMalformedInput() {
+  const float root[3] = {1.0f, 2.0f, 3.0f};
+  const std::vector<std::uint16_t> words = {
+      0, 1, 9, 0, 0x1234,
+  };
+  std::vector<std::uint8_t> encoded(
+      AnimationWordStreamByteCount(words.size()));
+  Expect(EncodeAnimationWordStream(
+             root, 0xFFFF, words, encoded),
+         "malformed-input fixture did not encode");
+
+  float decoded_root[3] = {};
+  std::uint16_t decoded_root_bone = 0;
+  std::vector<std::uint16_t> decoded_words;
+  Expect(!DecodeAnimationWordStream(
+             std::span<const std::uint8_t>(encoded).first(
+                 encoded.size() - 1),
+             decoded_root, decoded_root_bone, decoded_words),
+         "truncated animation word stream was accepted");
+  encoded.push_back(0);
+  Expect(!DecodeAnimationWordStream(
+             encoded, decoded_root, decoded_root_bone,
+             decoded_words),
+         "animation word stream with trailing data was accepted");
+  encoded.pop_back();
+
+  std::vector<std::uint8_t> invalid_track_count = encoded;
+  invalid_track_count[18] = 0;
+  invalid_track_count[19] = 0;
+  Expect(!DecodeAnimationWordStream(
+             invalid_track_count, decoded_root,
+             decoded_root_bone, decoded_words),
+         "animation word stream with zero tracks was accepted");
+
+  float invalid_root[3] = {
+      std::numeric_limits<float>::quiet_NaN(), 0.0f, 0.0f};
+  Expect(!EncodeAnimationWordStream(
+             invalid_root, 0, words, encoded),
+         "animation word stream accepted a non-finite root");
+  const std::vector<std::uint16_t> too_short = {1, 1, 0};
+  Expect(!EncodeAnimationWordStream(
+             root, 0, too_short,
+             std::span<std::uint8_t>(encoded).first(
+                 AnimationWordStreamByteCount(too_short.size()))),
+         "animation word stream accepted a short word header");
 }
 
 void TestPacketizerBoundarySizesAndRollover() {
@@ -562,6 +716,9 @@ void TestMalformedDatagramFailsWithoutOutputs() {
 
 int main() {
   TestPacketizerBudgetAndRoundTrip();
+  TestAnimationWordStreamGoldenBytesAndRoundTrip();
+  TestAnimationWordStreamMaximumGroupRoundTrip();
+  TestAnimationWordStreamRejectsMalformedInput();
   TestPacketizerBoundarySizesAndRollover();
   TestReorderDuplicateAndCompletion();
   TestLossExpiryRequestsBaseline();
