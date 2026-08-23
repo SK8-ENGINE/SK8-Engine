@@ -115,6 +115,12 @@ REXCVAR_DEFINE_INT32(
     "relevance set.")
     .range(1, 10)
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
+REXCVAR_DEFINE_INT32(
+    skate3_multiplayer_test_drop_appearance_role, 0, "Skate 3",
+    "Diagnostic only: discard the final appearance chunk from this sender "
+    "until the receiver requests a resend. Zero disables fault injection.")
+    .range(0, 100)
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
 namespace skate3::multiplayer {
 namespace {
@@ -457,6 +463,7 @@ struct TelemetrySnapshot {
   std::uint64_t appearance_requests_received = 0;
   std::uint64_t appearance_resends_started = 0;
   std::uint64_t appearance_requests_ignored = 0;
+  std::uint64_t appearance_test_chunks_dropped = 0;
   std::uint64_t duplicate_appearance_chunks = 0;
   std::uint64_t animation_present_interpolated = 0;
   std::uint64_t animation_present_held_latest = 0;
@@ -2093,6 +2100,8 @@ class Runtime {
         << telemetry_.appearance_resends_started
         << " multiplayer_appearance_requests_ignored="
         << telemetry_.appearance_requests_ignored
+        << " multiplayer_appearance_test_chunks_dropped="
+        << telemetry_.appearance_test_chunks_dropped
         << " multiplayer_duplicate_appearance_chunks="
         << telemetry_.duplicate_appearance_chunks
         << " multiplayer_animation_present_interpolated="
@@ -2222,7 +2231,7 @@ class Runtime {
         "bones={} relay={:.1f}pps relevance_drop={:.1f}pps rejected={} "
         "failures={} peer_resets={} "
         "appearance={:.2f}MiB timeout={} budget_reject={} "
-        "requests={}/{}/{}/{} "
+        "requests={}/{}/{}/{} test_drop={} "
         "present={:.1f}i/{:.1f}new/{:.1f}old fps "
         "timing={:.1f}ms jitter={:.1f}ms buffered={}",
         bound_role_, telemetry_.known_peers,
@@ -2246,6 +2255,7 @@ class Runtime {
         telemetry_.appearance_requests_received,
         telemetry_.appearance_resends_started,
         telemetry_.appearance_requests_ignored,
+        telemetry_.appearance_test_chunks_dropped,
         animation_interpolated_fps, animation_held_latest_fps,
         animation_held_oldest_fps,
         static_cast<double>(telemetry_.animation_period_us) / 1000.0,
@@ -2362,6 +2372,46 @@ class Runtime {
     found->second.last_appearance_request_sent = {};
   }
 
+  [[nodiscard]] bool DropAppearanceChunkForRecoveryTest(
+      const AppearanceFragmentPacket& packet) {
+    const std::int32_t target_role =
+        REXCVAR_GET(skate3_multiplayer_test_drop_appearance_role);
+    if (target_role <= 0 ||
+        packet.sender_role !=
+            static_cast<std::uint32_t>(target_role) ||
+        packet.chunk_index + 1 != packet.chunk_count) {
+      return false;
+    }
+    const auto released =
+        appearance_test_released_.find(packet.sender_role);
+    if (released != appearance_test_released_.end() &&
+        released->second == packet.appearance_id) {
+      return false;
+    }
+    ++telemetry_.appearance_test_chunks_dropped;
+    REXLOG_INFO(
+        "multiplayer-test: dropped appearance chunk role={} "
+        "id={:016X} chunk={}/{}",
+        packet.sender_role, packet.appearance_id,
+        packet.chunk_index + 1, packet.chunk_count);
+    return true;
+  }
+
+  void ReleaseAppearanceRecoveryTestDrop(
+      std::uint32_t role, std::uint64_t appearance_id) {
+    if (appearance_id == 0 ||
+        REXCVAR_GET(
+            skate3_multiplayer_test_drop_appearance_role) !=
+            static_cast<std::int32_t>(role)) {
+      return;
+    }
+    appearance_test_released_[role] = appearance_id;
+    REXLOG_INFO(
+        "multiplayer-test: released appearance drop role={} "
+        "id={:016X}",
+        role, appearance_id);
+  }
+
   void PrunePeers(Clock::time_point now) {
     constexpr auto kForgetPeerAfter = std::chrono::seconds(5);
     for (auto iterator = remote_peers_.begin();
@@ -2374,6 +2424,8 @@ class Runtime {
             peer.appearance_assembly.identity;
         peer.appearance_assembly = {};
         ++telemetry_.appearance_assembly_timeouts;
+        ReleaseAppearanceRecoveryTestDrop(
+            iterator->first, timed_out_identity);
         QueueAppearanceRequest(iterator->first, timed_out_identity);
       }
       if (peer.appearance_assembly.identity != 0) {
@@ -3152,6 +3204,9 @@ class Runtime {
     RecordReceivedPacketClass(
         kAppearancePacketMagic, expected_bytes);
     peer.last_packet_at = now;
+    if (DropAppearanceChunkForRecoveryTest(packet)) {
+      return true;
+    }
     CompleteAppearanceRequest(
         packet.sender_role, packet.appearance_id);
     if (peer.appearance.identity == packet.appearance_id &&
@@ -4328,6 +4383,7 @@ class Runtime {
 #endif
     far_presence_times_.clear();
     relevance_cache_.clear();
+    appearance_test_released_.clear();
     std::fill_n(local_position_, 3, 0.0f);
     local_position_valid_ = false;
     local_appearance_identity_ = 0;
@@ -4383,6 +4439,8 @@ class Runtime {
   std::unordered_map<std::uint64_t, Clock::time_point>
       far_presence_times_;
   std::unordered_map<std::uint64_t, bool> relevance_cache_;
+  std::unordered_map<std::uint32_t, std::uint64_t>
+      appearance_test_released_;
   float local_position_[3] = {};
   bool local_position_valid_ = false;
   std::uint64_t local_appearance_identity_ = 0;

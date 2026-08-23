@@ -148,6 +148,18 @@ foreach ($client in $clientDirectories) {
         ))
     )
     $summary.Add(
+        'appearance_test_dropped_chunks=' +
+        (Match-Count $lines (
+            'multiplayer-test: dropped appearance chunk role='
+        ))
+    )
+    $summary.Add(
+        'appearance_test_drop_releases=' +
+        (Match-Count $lines (
+            'multiplayer-test: released appearance drop role='
+        ))
+    )
+    $summary.Add(
         'appearance_receive_events=' +
         (Match-Count $lines 'multiplayer: received appearance role=')
     )

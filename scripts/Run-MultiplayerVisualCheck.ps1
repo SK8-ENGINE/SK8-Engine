@@ -7,7 +7,8 @@ param(
     [string]$BuildPreset = 'release',
     [string]$CacAssetRoot = '',
     [switch]$NoDirectBoot,
-    [switch]$PrepareOnly
+    [switch]$PrepareOnly,
+    [switch]$AppearanceRecoveryCheck
 )
 
 Set-StrictMode -Version Latest
@@ -36,6 +37,9 @@ if (Test-Path -LiteralPath $runRoot) {
 }
 New-Item -ItemType Directory -Path $runRoot -Force | Out-Null
 $setupLog = Join-Path $runRoot 'setup.log'
+if ($AppearanceRecoveryCheck -and $Clients -lt 3) {
+    throw 'The appearance-recovery check requires three clients.'
+}
 
 function Write-Setup {
     param([Parameter(Mandatory)][string]$Message)
@@ -290,6 +294,47 @@ function ConvertTo-BatchArgument {
     return $Value
 }
 
+function Get-CMakeCacheValue {
+    param(
+        [Parameter(Mandatory)][string]$CacheText,
+        [Parameter(Mandatory)][string]$Name
+    )
+
+    $match = [regex]::Match(
+        $CacheText,
+        '(?m)^' + [regex]::Escape($Name) + ':[^=]+=(.*)$'
+    )
+    if (-not $match.Success) {
+        return $null
+    }
+    return $match.Groups[1].Value.Trim()
+}
+
+function Test-SamePath {
+    param(
+        [AllowNull()][string]$Left,
+        [Parameter(Mandatory)][string]$Right
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Left)) {
+        return $false
+    }
+    try {
+        $normalizedLeft = $Left.Replace('/', '\')
+        $leftFull = [System.IO.Path]::GetFullPath(
+            $normalizedLeft
+        )
+        $rightFull = [System.IO.Path]::GetFullPath($Right)
+        return [string]::Equals(
+            $leftFull.TrimEnd('\'),
+            $rightFull.TrimEnd('\'),
+            [System.StringComparison]::OrdinalIgnoreCase
+        )
+    } catch {
+        return $false
+    }
+}
+
 $startedProcesses = New-Object System.Collections.Generic.List[object]
 try {
     Write-Setup "Repository: $repoRoot"
@@ -327,18 +372,28 @@ try {
     Write-Setup "Read-only maps: $mapsRoot"
     Write-Setup "Dedicated CAC cache: $resolvedCacRoot"
 
+    $buildRoot = Join-Path $repoRoot "out\build\$BuildPreset"
+    $cache = Join-Path $buildRoot 'CMakeCache.txt'
+    $buildGraph = Join-Path $buildRoot 'build.ninja'
+    $expectedBuildType = if ($BuildPreset -eq 'release') {
+        'Release'
+    } else {
+        'RelWithDebInfo'
+    }
     $configureArguments = @(
         '--preset', $BuildPreset,
         "-DSKATE3_GAME_DATA_ROOT:PATH=$gameRoot",
         '-DSKATE3_MULTIPLAYER_BUILD_TESTS:BOOL=ON'
     )
+    $clangC = $null
+    $clangCxx = $null
+    $rcCompiler = $null
     if ($env:OS -eq 'Windows_NT') {
         $clangC = 'C:\Program Files\LLVM\bin\clang.exe'
         $clangCxx = 'C:\Program Files\LLVM\bin\clang++.exe'
         $windowsKitsBin = (
             'C:\Program Files (x86)\Windows Kits\10\bin'
         )
-        $rcCompiler = $null
         if (Test-Path -LiteralPath $windowsKitsBin -PathType Container) {
             $kitVersions = Get-ChildItem -LiteralPath $windowsKitsBin `
                 -Directory |
@@ -368,16 +423,53 @@ try {
             "-DCMAKE_RC_COMPILER:FILEPATH=$rcCompiler"
         )
     }
-    Invoke-LoggedNative -Label (
-        "Configuring dedicated $BuildPreset build"
-    ) -FilePath 'cmake' -Arguments $configureArguments
+
+    $compatibleCache = $false
+    if ((Test-Path -LiteralPath $cache -PathType Leaf) -and
+        (Test-Path -LiteralPath $buildGraph -PathType Leaf)) {
+        $existingCache = Get-Content -LiteralPath $cache -Raw
+        $compatibleCache = (
+            (Get-CMakeCacheValue $existingCache 'CMAKE_GENERATOR') -eq
+                'Ninja' -and
+            (Get-CMakeCacheValue $existingCache 'CMAKE_BUILD_TYPE') -eq
+                $expectedBuildType -and
+            (Get-CMakeCacheValue (
+                $existingCache
+            ) 'SKATE3_MULTIPLAYER_BUILD_TESTS') -eq 'ON' -and
+            (Test-SamePath (
+                Get-CMakeCacheValue $existingCache 'CMAKE_HOME_DIRECTORY'
+            ) $repoRoot) -and
+            (Test-SamePath (
+                Get-CMakeCacheValue $existingCache 'SKATE3_GAME_DATA_ROOT'
+            ) $gameRoot)
+        )
+        if ($compatibleCache -and $env:OS -eq 'Windows_NT') {
+            $compatibleCache = (
+                (Test-SamePath (
+                    Get-CMakeCacheValue $existingCache 'CMAKE_C_COMPILER'
+                ) $clangC) -and
+                (Test-SamePath (
+                    Get-CMakeCacheValue $existingCache 'CMAKE_CXX_COMPILER'
+                ) $clangCxx)
+            )
+        }
+    }
+    if ($compatibleCache) {
+        Write-Setup (
+            "Reusing compatible $BuildPreset CMake cache; Ninja will " +
+            'reconfigure automatically only if build inputs require it.'
+        )
+    } else {
+        Invoke-LoggedNative -Label (
+            "Configuring dedicated $BuildPreset build"
+        ) -FilePath 'cmake' -Arguments $configureArguments
+    }
     Invoke-LoggedNative -Label (
         "Building dedicated $BuildPreset binaries"
     ) -FilePath 'cmake' -Arguments @(
         '--build', '--preset', $BuildPreset, '--parallel'
     )
 
-    $buildRoot = Join-Path $repoRoot "out\build\$BuildPreset"
     Invoke-LoggedNative -Label (
         'Running multiplayer protocol and lifecycle tests'
     ) -FilePath 'ctest' -Arguments @(
@@ -392,7 +484,6 @@ try {
         }
     }
 
-    $cache = Join-Path $buildRoot 'CMakeCache.txt'
     $expectedHome = (
         'CMAKE_HOME_DIRECTORY:INTERNAL=' +
         ($repoRoot -replace '\\', '/')
@@ -447,6 +538,17 @@ try {
         root_rate_hz = 60
         animation_rate_hz = 60
         interpolation_ms = 50
+        appearance_recovery_check = [bool]$AppearanceRecoveryCheck
+        appearance_recovery_receiver = if ($AppearanceRecoveryCheck) {
+            3
+        } else {
+            0
+        }
+        appearance_recovery_sender = if ($AppearanceRecoveryCheck) {
+            2
+        } else {
+            0
+        }
         automated_tests = @(
             'skate3_multiplayer_protocol_tests',
             'skate3_multiplayer_lifecycle_tests'
@@ -457,7 +559,48 @@ try {
             Join-Path $runRoot 'run-manifest.json'
         ) -Encoding UTF8
 
-    $instructions = @"
+    $instructions = if ($AppearanceRecoveryCheck) {
+        @"
+MULTIPLAYER APPEARANCE RECOVERY CHECK
+
+Run directory:
+$runRoot
+
+Clients: $Clients
+Transport: localhost UDP
+Quality: Balanced, 60 Hz root, 60 Hz animation, 50 ms interpolation
+Fault: client 3 intentionally drops role 2's final appearance chunk until
+the bounded assembly timeout requests a resend.
+
+Visual scenario:
+1. Wait until every client has loaded the same map.
+2. On client 1, confirm role 2 reaches its normal complete outfit promptly.
+3. Watch role 2 from client 3. Role 2 should deliberately remain the teal
+   proxy for roughly 10 seconds while one appearance chunk is withheld.
+4. Without changing outfits or reconnecting, confirm role 2 automatically
+   changes from the teal proxy to its exact complete outfit within 5 seconds
+   after that timeout.
+5. Skate as role 2 for another minute. On client 3, confirm the recovered
+   outfit, board, attachments, and animation remain stable with no flicker,
+   mixed pieces, or return to teal.
+6. Confirm all focused local clients retain normal input response and show no
+   obvious new frame stalls. Then close all clients.
+
+Success:
+- Only client 3 temporarily shows role 2 as teal during the intentional fault.
+- Client 3 recovers role 2 automatically about 10-15 seconds after map load.
+- The recovered appearance is complete and remains stable.
+
+Failure:
+- Client 3 never recovers role 2, recovers the wrong outfit, mixes old/new
+  pieces, or returns to teal after recovery.
+- Any client freezes, stalls, or loses normal local input response.
+
+Do not treat logs as proof of visual correctness. Report the visual result
+separately, then ask the agent to analyze this run directory.
+"@
+    } else {
+        @"
 MULTIPLAYER VISUAL CHECK
 
 Run directory:
@@ -498,6 +641,7 @@ Outfit/profile behavior:
 Do not treat logs as proof of visual correctness. Report the visual result
 separately, then ask the agent to analyze this run directory.
 "@
+    }
     $instructions | Set-Content -LiteralPath (
         Join-Path $runRoot 'VISUAL-CHECK.txt'
     ) -Encoding UTF8
@@ -573,6 +717,11 @@ separately, then ask the agent to analyze this run directory.
         if (-not $NoDirectBoot) {
             $arguments += '--skate3_direct_boot=true'
         }
+        if ($AppearanceRecoveryCheck -and $role -eq 3) {
+            $arguments += (
+                '--skate3_multiplayer_test_drop_appearance_role=2'
+            )
+        }
         $arguments += (
             '--skate3_multiplayer_cac_asset_root={0}' -f
             $resolvedCacRoot
@@ -635,14 +784,20 @@ separately, then ask the agent to analyze this run directory.
     ) -Encoding UTF8
 
     Write-Host ''
-    Write-Host 'MULTIPLAYER VISUAL CHECK READY'
+    if ($AppearanceRecoveryCheck) {
+        Write-Host 'MULTIPLAYER APPEARANCE RECOVERY CHECK READY'
+    } else {
+        Write-Host 'MULTIPLAYER VISUAL CHECK READY'
+    }
     Write-Host "Run folder: $runRoot"
     Write-Host "Instructions: $(Join-Path $runRoot 'VISUAL-CHECK.txt')"
     Write-Host ''
-    Write-Host (
-        'After closing client 3, wait 3 seconds and run ' +
-        'RELAUNCH_MULTIPLAYER_VISUAL_CLIENT_3.bat.'
-    )
+    if (-not $AppearanceRecoveryCheck) {
+        Write-Host (
+            'After closing client 3, wait 3 seconds and run ' +
+            'RELAUNCH_MULTIPLAYER_VISUAL_CLIENT_3.bat.'
+        )
+    }
     Write-Host (
         'After the full check, close every client and tell the agent ' +
         'that the run is complete.'
