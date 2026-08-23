@@ -46,7 +46,7 @@ function Maximum-IntegerField {
     )
 
     $maximum = $null
-    $pattern = [regex]::Escape($Name) + '=(\d+)'
+    $pattern = [regex]::Escape($Name) + '[=:](\d+)'
     foreach ($line in $Lines) {
         $match = [regex]::Match($line, $pattern)
         if ($match.Success) {

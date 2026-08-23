@@ -383,9 +383,33 @@ Current checkpoint:
   persistent-profile clients, enables existing performance diagnostics, and
   writes a timestamped run with a policy-specific three-minute visual script.
 - Full Release compilation and all nine offline multiplayer suites pass. The
-  live checkpoint is pending the user's visual verdict plus telemetry review;
-  logs alone will not be treated as proof of animation, outfit, board, or
-  input correctness.
+  live checkpoint was exercised by the user in run
+  `20260823-153038-086c02cc`. The user reported correct multiplayer
+  functionality and appearance behavior, but also clearly visible,
+  longstanding remote-motion jitter. Some sender roles appeared substantially
+  smoother than others to every viewer, so the five-player fidelity gate is
+  not complete.
+- Telemetry confirms all five clients reached four known and four visible
+  peers, installed four complete remote appearances, used the intended
+  unreliable-animation/reliable-control-and-appearance policy with zero
+  policy errors, and reported no socket or resource failures. It does not
+  prove the user's visual result.
+- Across the same run, senders averaged only 48.2-49.9 complete animation
+  frames per second despite the configured 60 Hz target, with five-second
+  windows dipping as low as 27.8-38.0 fps. Receiver summaries averaged
+  20.2-20.9 ms sample periods and 4.5-5.7 ms timing variation, while
+  32.8-52.6% of presentation ticks were pinned to the newest available
+  animation sample instead of interpolating between two samples. The current
+  aggregate telemetry cannot identify which sender roles account for those
+  underruns because the per-peer timing fields are overwritten during
+  iteration.
+- Before changing interpolation behavior, add per-sender/per-receiver timing
+  telemetry for source capture cadence, completed-frame arrival cadence,
+  interpolation cursor margin, held-latest runs, sample loss/supersession, and
+  worker publication age. Use it to correlate the consistently rough sender
+  roles reported by the user. Then make an independently gated adaptive
+  playback-delay/cadence correction without changing pose bytes, appearance,
+  board handling, or local rendering.
 
 Completion:
 
