@@ -3,13 +3,13 @@
 ## Current package
 
 The ignored local output
-`intermediate/university/University.skate` is a SKATE v10 package exported from
+`intermediate/university/University.skate` is a SKATE v11 package exported from
 `blender/DIST_University_Owned.blend`. Its tracked expected contract is
 `schemas/university_expected.json`.
 
 | Property | Verified value |
 | --- | ---: |
-| Package bytes | 127,155,624 |
+| Package bytes | 130,320,474 |
 | Materials | 526 |
 | Opaque / mask / blend materials | 471 / 50 / 5 |
 | Embedded textures | 462 |
@@ -24,15 +24,13 @@ The ignored local output
 | Compiled native grind bytes | 4,023,600 |
 | Render chunks after clipping | 515 |
 | Render triangles after clipping | 1,777,954 |
-| Collision fallback cell size | 256 m |
-| Collision chunks | 44 |
+| Native collision clusters | 32,768 |
+| Top-level collision meshes | 1 |
 
-The continuous RenderWare collision build exceeds the native 16-bit cluster
-index. The runtime and validator therefore use a spatial fallback. At the old
-128 metre cell size University required 140 chunks, exceeding the runtime's
-96-slot bound. A 256 metre cell size produces 44 chunks, keeps the largest
-chunk below the existing 400,000-triangle safety bound, and retains every
-collision triangle.
+The continuous RenderWare collision build uses 64-triangle KD leaves, staying
+within the native 16-bit cluster index at exactly 32,768 clusters. University
+therefore installs as one authoritative collision volume rather than the old
+44-volume spatial fallback.
 
 ## Integrity boundary
 
@@ -45,8 +43,9 @@ reviewed export:
   and material IDs;
 - collision records and authored feature records;
 - byte-exact retail grind records against the extraction manifest;
-- decoded retail collision geometry, winding, and packed surface channels
-  against all 301 source `ClusteredMesh` sections;
+- decoded retail collision geometry, winding, packed surface channels, and
+  per-triangle edge/corner feature codes against all 301 source
+  `ClusteredMesh` sections;
 - all 141 source normal IDs, the seven explicit special-map exclusions, and
   all 135 selected linear normal textures through the package material table;
 - downstream render-world, native grind-world, and collision-world counts.
@@ -67,7 +66,9 @@ parameter and the old Blender preparation forced all alpha modes to opaque.
 - Retail collision exports 1,133,642 triangles after rejecting six
   degenerate source triangles and one same-wound duplicate. It retains 10,691
   reverse-wound retail partners so intentional two-sided patches do not become
-  one-sided dead spots.
+  one-sided dead spots. SKATE v11 also transports all native RenderWare edge
+  codes through Blender face attributes so hard/smooth edge and vertex
+  contacts are not guessed during engine compilation.
 - The current UTT presentation parser computes averaged geometry normals;
   authoritative packed retail normals are not yet transported.
 - Conventional retail tangent-space normal maps are transported. Seven
@@ -77,7 +78,7 @@ parameter and the old Blender preparation forced all alpha modes to opaque.
 - AI routes, hinged doors, and local lights are not recovered yet.
 - All 183 packed retail collision surfaces are preserved, including the three
   surface IDs that use native physics channel 13.
-- No runtime object/instance table exists in SKATE v10. The importer does not
+- No runtime object/instance table exists in SKATE v11. The importer does not
   retain authoritative retail instance references, so transforms are baked
   into vertices rather than inventing unsafe instance relationships.
 

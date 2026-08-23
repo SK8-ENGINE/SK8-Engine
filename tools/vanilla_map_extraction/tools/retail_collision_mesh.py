@@ -21,6 +21,8 @@ class CollisionTriangle:
     b: tuple[float, float, float]
     c: tuple[float, float, float]
     surface: int
+    edge_codes: tuple[int, int, int] | None = None
+    group_id: int | None = None
 
 
 @dataclass(frozen=True)
@@ -208,14 +210,21 @@ def _decode_cluster(
             all(index < vertex_count for index in indices),
             "collision unit references a missing cluster vertex",
         )
+        edge_codes: tuple[int, ...] | None = None
         if flags & 0x20:
+            edge_codes = tuple(cluster[cursor : cursor + index_count])
             cursor += index_count
             _require(
                 cursor <= unit_end,
                 "collision unit edge codes extend beyond the unit stream",
             )
+        group_id: int | None = None
         if flags & 0x40:
-            _, cursor = _read_variable_id(cluster, cursor, group_id_width)
+            group_id, cursor = _read_variable_id(
+                cluster,
+                cursor,
+                group_id_width,
+            )
         surface = 0
         if flags & 0x80:
             surface, cursor = _read_variable_id(
@@ -223,13 +232,44 @@ def _decode_cluster(
                 cursor,
                 surface_id_width,
             )
-        for a, b, c in _triangulate_unit(unit_type, indices):
+        for triangle_index, (a, b, c) in enumerate(
+            _triangulate_unit(unit_type, indices)
+        ):
+            triangle_edge_codes: tuple[int, int, int] | None = None
+            if edge_codes is not None:
+                if unit_type == 1:
+                    triangle_edge_codes = (
+                        edge_codes[0],
+                        edge_codes[1],
+                        edge_codes[2],
+                    )
+                else:
+                    # Quad units split as 0-1-2 and 3-2-1. The generated
+                    # diagonal is smooth; boundary codes retain their native
+                    # corner association. University uses triangle units, but
+                    # decoding this correctly keeps the general RX2 reader
+                    # lossless enough for other districts.
+                    triangle_edge_codes = (
+                        (
+                            edge_codes[0],
+                            edge_codes[1],
+                            0x1A,
+                        )
+                        if triangle_index == 0
+                        else (
+                            edge_codes[3],
+                            edge_codes[2],
+                            0x1A,
+                        )
+                    )
             triangles.append(
                 CollisionTriangle(
                     vertices[a],
                     vertices[b],
                     vertices[c],
                     surface,
+                    triangle_edge_codes,
+                    group_id,
                 )
             )
 

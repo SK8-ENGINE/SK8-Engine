@@ -368,7 +368,7 @@ try {
             $exportArguments += '--force'
         }
         Invoke-Checked -FilePath $blender -Arguments $exportArguments `
-            -Description 'Export University SKATE v10 package'
+            -Description 'Export University SKATE v11 package'
     } else {
         Write-Host "SKATE package is current: $package"
     }
@@ -632,7 +632,8 @@ try {
         map_analysis = $analysisPath
         map_validation = $validationPath
         collision_source = (
-            'retail RenderWare ClusteredMesh geometry and packed surfaces'
+            'retail RenderWare ClusteredMesh geometry, packed surfaces, ' +
+            'and native edge codes'
         )
     }
     $manifestJson = $stageManifest | ConvertTo-Json -Depth 4

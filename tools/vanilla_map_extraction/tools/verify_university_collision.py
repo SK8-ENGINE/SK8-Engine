@@ -61,6 +61,25 @@ def _canonical_oriented_record(
     )
 
 
+def _canonical_oriented_edge_record(
+    points: tuple[
+        tuple[float, float, float],
+        tuple[float, float, float],
+        tuple[float, float, float],
+    ],
+    edge_codes: tuple[int, int, int],
+) -> bytes:
+    rotations = tuple(
+        (
+            points[offset:] + points[:offset],
+            edge_codes[offset:] + edge_codes[:offset],
+        )
+        for offset in range(3)
+    )
+    rotated_points, rotated_codes = min(rotations, key=lambda item: item[0])
+    return _canonical_oriented_record(rotated_points) + bytes(rotated_codes)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("manifest", type=Path)
@@ -101,6 +120,8 @@ def main() -> int:
     expected_xor: dict[int, int] = defaultdict(int)
     expected_sum: dict[int, int] = defaultdict(int)
     expected_counts: dict[int, int] = defaultdict(int)
+    expected_edge_xor = 0
+    expected_edge_sum = 0
     seen_positions: set[tuple[tuple[float, float, float], ...]] = set()
     seen_oriented: set[tuple[tuple[float, float, float], ...]] = set()
     degenerate = 0
@@ -151,6 +172,10 @@ def main() -> int:
                 retained_reverse_wound += 1
             seen_positions.add(position_key)
             seen_oriented.add(oriented_key)
+            if triangle.edge_codes is None:
+                raise RuntimeError(
+                    "retail collision triangle omits native edge codes"
+                )
             record_hash = int.from_bytes(
                 hashlib.sha256(
                     _canonical_oriented_record(points)
@@ -162,13 +187,34 @@ def main() -> int:
                 expected_sum[surface] + record_hash
             ) & ((1 << 256) - 1)
             expected_counts[surface] += 1
+            edge_hash = int.from_bytes(
+                hashlib.sha256(
+                    _canonical_oriented_edge_record(
+                        points,
+                        triangle.edge_codes,
+                    )
+                ).digest(),
+                "big",
+            )
+            expected_edge_xor ^= edge_hash
+            expected_edge_sum = (
+                expected_edge_sum + edge_hash
+            ) & ((1 << 256) - 1)
 
     actual_xor: dict[int, int] = defaultdict(int)
     actual_sum: dict[int, int] = defaultdict(int)
     actual_counts: dict[int, int] = defaultdict(int)
+    actual_edge_xor = 0
+    actual_edge_sum = 0
     actual = analysis["_collision_bytes"]
-    for offset in range(0, len(actual), 44):
-        values = struct.unpack_from("<9fII", actual, offset)
+    record_size = 48 if int(analysis["version"]) >= 11 else 44
+    if record_size != 48:
+        raise RuntimeError(
+            "University package format does not preserve native collision "
+            "edge codes"
+        )
+    for offset in range(0, len(actual), record_size):
+        values = struct.unpack_from("<9fII4B", actual, offset)
         material_id = values[10]
         material = material_by_id.get(material_id)
         if material is None:
@@ -198,6 +244,22 @@ def main() -> int:
             actual_sum[surface] + record_hash
         ) & ((1 << 256) - 1)
         actual_counts[surface] += 1
+        edge_codes = tuple(values[11:14])
+        if values[14] != 1:
+            raise RuntimeError(
+                "University package collision triangle omits its native "
+                "edge-code marker"
+            )
+        edge_hash = int.from_bytes(
+            hashlib.sha256(
+                _canonical_oriented_edge_record(points, edge_codes)
+            ).digest(),
+            "big",
+        )
+        actual_edge_xor ^= edge_hash
+        actual_edge_sum = (
+            actual_edge_sum + edge_hash
+        ) & ((1 << 256) - 1)
 
     mismatches = [
         surface
@@ -214,6 +276,15 @@ def main() -> int:
             f"expected_count={expected_counts[surface]} "
             f"actual_xor={actual_xor[surface]:064x} "
             f"expected_xor={expected_xor[surface]:064x}"
+        )
+    if (
+        actual_edge_xor != expected_edge_xor
+        or actual_edge_sum != expected_edge_sum
+    ):
+        raise RuntimeError(
+            "SKATE collision native edge codes differ from decoded retail "
+            f"metadata: actual_xor={actual_edge_xor:064x} "
+            f"expected_xor={expected_edge_xor:064x}"
         )
     canonical_digest = hashlib.sha256()
     for surface in surfaces:
@@ -234,6 +305,8 @@ def main() -> int:
         "retained_reverse_wound": retained_reverse_wound,
         "package_triangles": sum(expected_counts.values()),
         "canonical_sha256": canonical_digest.hexdigest(),
+        "native_edge_codes_xor": f"{expected_edge_xor:064x}",
+        "native_edge_codes_sum": f"{expected_edge_sum:064x}",
     }
     if args.expected is not None:
         contract = json.loads(
@@ -253,6 +326,8 @@ def main() -> int:
             "package_triangles": result["package_triangles"],
             "position_tolerance": result["position_tolerance"],
             "canonical_sha256": result["canonical_sha256"],
+            "native_edge_codes_xor": result["native_edge_codes_xor"],
+            "native_edge_codes_sum": result["native_edge_codes_sum"],
         }
         for name, actual_value in comparisons.items():
             if contract[name] != actual_value:

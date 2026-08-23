@@ -76,7 +76,7 @@ int main() {
         std::filesystem::temp_directory_path() /
         "skate_owned_world_future_format_test.skate";
     const std::array<std::uint8_t, 12> header = {
-        'S', 'K', 'A', 'T', 'E', '1', '1', '\0',
+        'S', 'K', 'A', 'T', 'E', '1', '2', '\0',
         0x78, 0x56, 0x34, 0x12};
     {
       std::ofstream output(
@@ -786,6 +786,30 @@ int main() {
           "RenderWare clusters do not contain every triangle");
   Require(found_concrete_surface,
           "RenderWare material surface ID is wrong");
+
+  MapDefinition retail_edge_definition;
+  CollisionTriangle retail_edge_triangle;
+  retail_edge_triangle.a = {0.0f, 0.0f, 0.0f};
+  retail_edge_triangle.b = {1.0f, 0.0f, 0.0f};
+  retail_edge_triangle.c = {0.0f, 0.0f, 1.0f};
+  retail_edge_triangle.native_edge_codes = {0x1a, 0x5a, 0x62};
+  retail_edge_triangle.has_native_edge_codes = true;
+  retail_edge_definition.collision_triangles.push_back(retail_edge_triangle);
+  const RwCollisionBuildResult retail_edge_mesh =
+      BuildRwCollisionMesh(retail_edge_definition);
+  Require(retail_edge_mesh.ok, retail_edge_mesh.error);
+  const std::uint32_t retail_cluster_table =
+      ReadBeU32(retail_edge_mesh.mesh.bytes, 52);
+  const std::uint32_t retail_cluster =
+      ReadBeU32(retail_edge_mesh.mesh.bytes, retail_cluster_table);
+  const std::uint16_t retail_vertices =
+      ReadBeU16(retail_edge_mesh.mesh.bytes, retail_cluster + 4);
+  const std::size_t retail_unit =
+      retail_cluster + 16 + static_cast<std::size_t>(retail_vertices) * 16;
+  Require(retail_edge_mesh.mesh.bytes.at(retail_unit + 4) == 0x1a &&
+              retail_edge_mesh.mesh.bytes.at(retail_unit + 5) == 0x5a &&
+              retail_edge_mesh.mesh.bytes.at(retail_unit + 6) == 0x62,
+          "native retail collision edge codes were regenerated");
 
   std::uint32_t kd_leaf_triangles = 0;
   for (std::uint32_t branch = 0; branch < kd_branch_count; ++branch) {

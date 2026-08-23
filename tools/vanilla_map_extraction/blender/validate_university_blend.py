@@ -335,6 +335,22 @@ def main() -> int:
             raise RuntimeError(
                 f"{obj.name!r} would discard reverse-wound retail collision"
             )
+        if not bool(obj.get("ow_preserve_retail_edge_codes", False)):
+            raise RuntimeError(
+                f"{obj.name!r} would discard native retail edge codes"
+            )
+        for corner in range(3):
+            attribute_name = f"skate3_retail_edge_code_{corner}"
+            attribute = obj.data.attributes.get(attribute_name)
+            if (
+                attribute is None
+                or attribute.domain != "FACE"
+                or attribute.data_type != "INT"
+                or len(attribute.data) != len(obj.data.polygons)
+            ):
+                raise RuntimeError(
+                    f"{obj.name!r} has invalid {attribute_name!r} metadata"
+                )
         material = obj.data.materials[0]
         encoded = (
             int(material["ow_audio_surface"])

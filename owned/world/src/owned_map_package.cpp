@@ -42,6 +42,8 @@ constexpr std::array<char, 8> kMagicV9 = {
     'S', 'K', 'A', 'T', 'E', '0', '9', '\0'};
 constexpr std::array<char, 8> kMagicV10 = {
     'S', 'K', 'A', 'T', 'E', '1', '0', '\0'};
+constexpr std::array<char, 8> kMagicV11 = {
+    'S', 'K', 'A', 'T', 'E', '1', '1', '\0'};
 constexpr std::uint32_t kEndianMarker = 0x12345678u;
 constexpr std::uint32_t kStorageRaw = 0;
 constexpr std::uint32_t kStorageDeflate = 1;
@@ -182,7 +184,8 @@ void ReadIndices(
 void ReadCollisionTriangles(
     Reader& reader,
     std::uint32_t count,
-    std::vector<CollisionTriangle>& destination) {
+    std::vector<CollisionTriangle>& destination,
+    bool has_native_edge_codes = false) {
   destination.reserve(destination.size() + count);
   for (std::uint32_t index = 0; index < count; ++index) {
     CollisionTriangle triangle;
@@ -191,6 +194,12 @@ void ReadCollisionTriangles(
     triangle.c = reader.Vector3();
     triangle.surface = reader.Scalar<SurfaceId>();
     triangle.material = reader.Scalar<MaterialId>();
+    if (has_native_edge_codes) {
+      for (std::uint8_t& code : triangle.native_edge_codes) {
+        code = reader.Scalar<std::uint8_t>();
+      }
+      triangle.has_native_edge_codes = reader.Scalar<std::uint8_t>() != 0;
+    }
     destination.push_back(triangle);
   }
 }
@@ -513,6 +522,8 @@ MapDefinition LoadOwnedMapPackage(const std::filesystem::path& path) {
   const bool version_8 = magic == kMagicV8;
   const bool version_9 = magic == kMagicV9;
   const bool version_10 = magic == kMagicV10;
+  const bool version_11 = magic == kMagicV11;
+  const bool version_10_or_newer = version_10 || version_11;
   const bool skate_magic =
       std::memcmp(magic.data(), "SKATE", 5) == 0 &&
       std::isdigit(static_cast<unsigned char>(magic[5])) &&
@@ -520,17 +531,17 @@ MapDefinition LoadOwnedMapPackage(const std::filesystem::path& path) {
       magic[7] == '\0';
   const int package_version =
       skate_magic ? (magic[5] - '0') * 10 + (magic[6] - '0') : 0;
-  if (skate_magic && package_version > 10) {
+  if (skate_magic && package_version > 11) {
     throw std::runtime_error(
         "SKATE v" + std::to_string(package_version) +
         " requires a newer Custom Engine Layer release");
   }
-  if ((!version_1 && !version_2 && !version_3 && !version_4 &&
-       !version_5 && !version_6 && !version_7 && !version_8 &&
-       !version_9 && !version_10) ||
+  if ((!version_1 && !version_2 && !version_3 && !version_4 && !version_5 &&
+       !version_6 && !version_7 && !version_8 && !version_9 &&
+       !version_10 && !version_11) ||
       reader.Scalar<std::uint32_t>() != kEndianMarker) {
     throw std::runtime_error(
-        "file is not a supported little-endian SKATE v1-v10 package");
+        "file is not a supported little-endian SKATE v1-v11 package");
   }
 
   MapDefinition map;
@@ -676,16 +687,23 @@ MapDefinition LoadOwnedMapPackage(const std::filesystem::path& path) {
     Reader collision_reader(ReadStoredBytes(
         reader,
         std::size_t(collision_count) *
-            (sizeof(float) * 9u + sizeof(std::uint32_t) * 2u),
+            (sizeof(float) * 9u + sizeof(std::uint32_t) * 2u +
+             (package_version >= 11 ? 4u : 0u)),
         "collision block"));
     ReadCollisionTriangles(
-        collision_reader, collision_count, map.collision_triangles);
+        collision_reader,
+        collision_count,
+        map.collision_triangles,
+        package_version >= 11);
     collision_reader.RequireEnd();
   } else {
     ReadRenderVertices(reader, vertex_count, map.render_mesh.vertices);
     ReadIndices(reader, index_count, map.render_mesh.indices);
     ReadCollisionTriangles(
-        reader, collision_count, map.collision_triangles);
+        reader,
+        collision_count,
+        map.collision_triangles,
+        package_version >= 11);
   }
 
   map.grind_rails.reserve(rail_count);
@@ -695,7 +713,7 @@ MapDefinition LoadOwnedMapPackage(const std::filesystem::path& path) {
     rail.name = reader.String();
     rail.closed = reader.Scalar<std::uint32_t>() != 0;
     const std::uint32_t representation =
-        version_10 ? reader.Scalar<std::uint32_t>() : 0;
+        version_10_or_newer ? reader.Scalar<std::uint32_t>() : 0;
     if (representation == 0) {
       const std::uint32_t point_count = reader.Scalar<std::uint32_t>();
       RequireCount(point_count, "grind point");
@@ -703,7 +721,7 @@ MapDefinition LoadOwnedMapPackage(const std::filesystem::path& path) {
       for (std::uint32_t point = 0; point < point_count; ++point) {
         rail.points.push_back(reader.Vector3());
       }
-    } else if (representation == 1 && version_10) {
+    } else if (representation == 1 && version_10_or_newer) {
       rail.retail_spline_id = reader.Scalar<std::uint64_t>();
       rail.retail_type_signature = reader.Scalar<std::uint64_t>();
       rail.retail_flags = reader.Scalar<std::uint32_t>();
@@ -774,17 +792,8 @@ MapDefinition LoadOwnedMapPackage(const std::filesystem::path& path) {
       door.render_mesh.indices.push_back(
           reader.Scalar<std::uint32_t>());
     }
-    door.collision_triangles.reserve(door_collision_count);
-    for (std::uint32_t triangle_index = 0;
-         triangle_index < door_collision_count; ++triangle_index) {
-      CollisionTriangle triangle;
-      triangle.a = reader.Vector3();
-      triangle.b = reader.Vector3();
-      triangle.c = reader.Vector3();
-      triangle.surface = reader.Scalar<SurfaceId>();
-      triangle.material = reader.Scalar<MaterialId>();
-      door.collision_triangles.push_back(triangle);
-    }
+    ReadCollisionTriangles(reader, door_collision_count,
+                           door.collision_triangles, package_version >= 11);
     map.hinged_doors.push_back(std::move(door));
   }
 

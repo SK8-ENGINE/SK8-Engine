@@ -282,6 +282,7 @@ def _import_retail_collision(
             list[tuple[float, float, float]],
             list[tuple[int, int, int]],
             dict[tuple[float, float, float], int],
+            list[tuple[int, int, int]],
         ],
     ] = {}
     mesh_count = 0
@@ -299,9 +300,11 @@ def _import_retail_collision(
             mesh_count += 1
             source_triangle_count += len(mesh.triangles)
             for triangle in mesh.triangles:
-                vertices, faces, indices = by_surface.setdefault(
-                    triangle.surface,
-                    ([], [], {}),
+                vertices, faces, indices, surface_edge_codes = (
+                    by_surface.setdefault(
+                        triangle.surface,
+                        ([], [], {}, []),
+                    )
                 )
                 face = []
                 for runtime_point in (triangle.a, triangle.b, triangle.c):
@@ -313,13 +316,34 @@ def _import_retail_collision(
                         vertices.append(point)
                     face.append(index)
                 faces.append(tuple(face))
+                if triangle.edge_codes is None:
+                    raise ValueError(
+                        f"{entry['asset_id']} retail collision triangle "
+                        "omits native edge codes"
+                    )
+                surface_edge_codes.append(triangle.edge_codes)
 
     imported_triangles = 0
-    for surface, (vertices, faces, _indices) in sorted(by_surface.items()):
+    for surface, (
+        vertices,
+        faces,
+        _indices,
+        edge_codes,
+    ) in sorted(by_surface.items()):
         name = f"RETAIL_COLLISION_{surface:04X}"
         mesh_data = bpy.data.meshes.new(f"{name}_MESH")
         mesh_data.from_pydata(vertices, [], faces)
         mesh_data.update(calc_edges=False)
+        for corner in range(3):
+            attribute = mesh_data.attributes.new(
+                f"skate3_retail_edge_code_{corner}",
+                type="INT",
+                domain="FACE",
+            )
+            attribute.data.foreach_set(
+                "value",
+                [codes[corner] for codes in edge_codes],
+            )
         material = _retail_collision_material(surface)
         mesh_data.materials.append(material)
         obj = bpy.data.objects.new(name, mesh_data)
@@ -331,6 +355,7 @@ def _import_retail_collision(
         # They make a patch intentionally collidable from both sides and must
         # not be collapsed by the generic collision cleanup.
         obj["ow_preserve_opposite_wound_collision"] = True
+        obj["ow_preserve_retail_edge_codes"] = True
         obj["ow_material"] = material.name
         imported_triangles += len(faces)
 

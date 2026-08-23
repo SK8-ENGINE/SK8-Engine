@@ -1466,13 +1466,18 @@ void ObservePlayerCollisionTelemetry(const float world_position[3],
        within_z, kOwnedCollisionCellSize - within_z});
 
   mechanics_sandbox::map::GroundHit ground;
+  // Start just above the board, not at the top of the whole diagnostic
+  // column. QueryGround returns the first downward hit; a 64 m start selected
+  // ceilings and bridge undersides before the actual support beneath the
+  // skater, which made underpass telemetry look like floor penetration.
   const bool ground_hit =
-      mechanics_sandbox::map::QueryGround(local, 64.0f, 192.0f, ground);
+      mechanics_sandbox::map::QueryGround(local, 0.75f, 192.0f, ground);
   const float ground_delta =
       ground_hit ? local[1] - ground.point[1] : 0.0f;
   REXLOG_INFO(
       "native-collision-telemetry: frame={} local=({:.3f},{:.3f},{:.3f}) "
-      "move={:.3f} package_ground={} ground_y={:.3f} ground_delta={:.3f} "
+      "move={:.3f} package_support={} support_y={:.3f} "
+      "support_delta={:.3f} "
       "normal_y={:.3f} legacy_cell=({}, {}) seam_distance={:.3f} "
       "native_hits_delta={} last_hit_mesh=0x{:08X} collection_count={} "
       "retail_suppressed={} retail_reconciled={}",

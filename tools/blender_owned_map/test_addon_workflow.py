@@ -2,6 +2,7 @@
 
 from pathlib import Path
 import math
+import struct
 import sys
 import tempfile
 
@@ -13,6 +14,7 @@ if str(TOOL_ROOT) not in sys.path:
     sys.path.insert(0, str(TOOL_ROOT))
 
 import owned_world_material_addon as addon
+from analyze_skate import analyze_package
 
 
 def require(condition: bool, message: str) -> None:
@@ -119,13 +121,34 @@ def main() -> None:
             material.name,
         )
         retail_two_sided["ow_preserve_opposite_wound_collision"] = True
+        retail_two_sided["ow_preserve_retail_edge_codes"] = True
+        expected_retail_codes = (
+            (26, 90, 98),
+            (34, 88, 122),
+        )
+        for corner, attribute_name in enumerate(
+            addon.exporter.RETAIL_EDGE_CODE_ATTRIBUTES
+        ):
+            attribute = retail_two_sided.data.attributes.new(
+                attribute_name,
+                type="INT",
+                domain="FACE",
+            )
+            attribute.data.foreach_set(
+                "value",
+                [codes[corner] for codes in expected_retail_codes],
+            )
         retail_triangles, retail_audit = (
             addon.exporter.audit_collision_geometry([retail_two_sided])
         )
         require(
             len(retail_triangles) == 2
-            and retail_audit.skipped_duplicates == 0,
-            "Retail reverse-wound collision partner was discarded",
+            and retail_audit.skipped_duplicates == 0
+            and tuple(
+                triangle[-1] for triangle in retail_triangles
+            )
+            == expected_retail_codes,
+            "Retail reverse-wound collision metadata was discarded",
         )
 
         downward_a = collision_object(
@@ -254,8 +277,19 @@ def main() -> None:
         require(output.is_file(), "Quick Export did not create an SKATE")
         require(cache.is_file(), "Quick Export did not create its cache")
         require(
-            output.read_bytes()[:8] == b"SKATE10\0",
+            output.read_bytes()[:8] == b"SKATE11\0",
             "Exported package has the wrong magic",
+        )
+        analysis = analyze_package(output, include_payloads=True)
+        collision_bytes = analysis["_collision_bytes"]
+        native_codes = []
+        for offset in range(0, len(collision_bytes), 48):
+            record = struct.unpack_from("<9fII4B", collision_bytes, offset)
+            if record[14] == 1:
+                native_codes.append(tuple(record[11:14]))
+        require(
+            tuple(native_codes) == expected_retail_codes,
+            "SKATE package changed native retail collision edge codes",
         )
         _, _, counts = addon.exporter._read_package_header(output)
         collision_triangle_count = counts[4]

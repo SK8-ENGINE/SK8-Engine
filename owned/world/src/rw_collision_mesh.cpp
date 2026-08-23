@@ -123,6 +123,7 @@ QuantizedVertex Quantize(Vec3 value, float epsilon) {
 struct Triangle {
   std::array<std::uint32_t, 3> vertices{};
   std::array<std::uint8_t, 3> edge_codes{};
+  bool has_native_edge_codes = false;
   std::uint16_t surface = 0;
   Vec3 normal;
 };
@@ -442,7 +443,8 @@ RwCollisionBuildResult BuildRwCollisionMesh(
     }
     triangles.push_back(
         {{{*a, *b, *c}},
-         {},
+         source.native_edge_codes,
+         source.has_native_edge_codes,
          ResolveSurface(source, options),
          Normalize(cross)});
   }
@@ -490,6 +492,9 @@ RwCollisionBuildResult BuildRwCollisionMesh(
   for (std::size_t triangle_index = 0;
        triangle_index < triangles.size(); ++triangle_index) {
     for (std::size_t edge = 0; edge < 3; ++edge) {
+      if (triangles[triangle_index].has_native_edge_codes) {
+        continue;
+      }
       triangles[triangle_index].edge_codes[edge] =
           MakeEdgeCode(has_neighbor[triangle_index][edge],
                        edge_cosines[triangle_index][edge]);
@@ -521,6 +526,9 @@ RwCollisionBuildResult BuildRwCollisionMesh(
     }
     for (std::size_t triangle_index : adjacent) {
       Triangle& triangle = triangles[triangle_index];
+      if (triangle.has_native_edge_codes) {
+        continue;
+      }
       for (std::size_t corner = 0; corner < 3; ++corner) {
         if (triangle.vertices[corner] == vertex) {
           triangle.edge_codes[corner] |= 0x40u;

@@ -1,4 +1,4 @@
-"""Original Blender -> SKATE v10 exporter.
+"""Original Blender -> SKATE v11 exporter.
 
 This module intentionally targets the narrow project-owned scene contract
 documented beside it. It has no ArenaBuilder imports or runtime dependency.
@@ -27,7 +27,7 @@ except ImportError:
     numpy = None
 
 
-MAGIC = b"SKATE10\0"
+MAGIC = b"SKATE11\0"
 ENDIAN_MARKER = 0x12345678
 STORAGE_RAW = 0
 STORAGE_DEFLATE = 1
@@ -60,9 +60,12 @@ _HELPER_OBJECT_MARKERS = (
     "scale_reference",
     "scale reference",
 )
-CACHE_SCHEMA = 11
+CACHE_SCHEMA = 12
 METADATA_FLOAT_COUNT = 49
 METADATA_BYTE_COUNT = METADATA_FLOAT_COUNT * 4
+RETAIL_EDGE_CODE_ATTRIBUTES = tuple(
+    f"skate3_retail_edge_code_{corner}" for corner in range(3)
+)
 
 
 @dataclass
@@ -537,6 +540,26 @@ def _scene_content_fingerprint(
                 )
             ),
         )
+        preserve_retail_codes = bool(
+            obj.get("ow_preserve_retail_edge_codes", False)
+        )
+        _hash_text(digest, int(preserve_retail_codes))
+        if preserve_retail_codes:
+            for attribute_name in RETAIL_EDGE_CODE_ATTRIBUTES:
+                attribute = obj.data.attributes.get(attribute_name)
+                _hash_text(digest, attribute_name)
+                if attribute is None:
+                    _hash_text(digest, "MISSING")
+                else:
+                    _hash_text(digest, attribute.domain)
+                    _hash_text(digest, attribute.data_type)
+                    _hash_foreach(
+                        digest,
+                        attribute.data,
+                        "value",
+                        1,
+                        "i",
+                    )
         _hash_mesh(
             digest, obj, visual=False, depsgraph=depsgraph
         )
@@ -700,7 +723,7 @@ def _sun_metadata() -> tuple[tuple[float, float, float], float, float]:
 def _read_package_header(output: Path) -> tuple[str, int, tuple[int, ...]]:
     with output.open("rb") as stream:
         if stream.read(len(MAGIC)) != MAGIC:
-            raise ValueError(f"{output} is not an SKATE v10 package")
+            raise ValueError(f"{output} is not an SKATE v11 package")
         marker = struct.unpack("<I", stream.read(4))[0]
         if marker != ENDIAN_MARKER:
             raise ValueError(f"{output} has an invalid endian marker")
@@ -1451,7 +1474,30 @@ def audit_collision_geometry(
             if material_name_ids is not None
             else 0
         )
-        mesh, evaluated = _mesh_for_export(source_object, depsgraph)
+        preserve_retail_codes = bool(
+            source_object.get("ow_preserve_retail_edge_codes", False)
+        )
+        mesh, evaluated = _mesh_for_export(
+            source_object,
+            depsgraph,
+            preserve_all_data_layers=preserve_retail_codes,
+        )
+        edge_attributes = []
+        if preserve_retail_codes:
+            for attribute_name in RETAIL_EDGE_CODE_ATTRIBUTES:
+                attribute = mesh.attributes.get(attribute_name)
+                if (
+                    attribute is None
+                    or attribute.domain != "FACE"
+                    or attribute.data_type != "INT"
+                ):
+                    issues.append(
+                        f"{source_object.name}: native retail collision "
+                        f"attribute {attribute_name!r} is missing or invalid."
+                    )
+                    edge_attributes = []
+                    break
+                edge_attributes.append(attribute)
         object_degenerate = 0
         object_duplicates = 0
         object_non_finite = 0
@@ -1541,6 +1587,48 @@ def audit_collision_geometry(
                     skipped_duplicates += 1
                     continue
                 triangle_owners[key] = source_object.name
+                native_edge_codes = None
+                if preserve_retail_codes and len(edge_attributes) == 3:
+                    polygon_vertices = tuple(
+                        mesh.polygons[triangle.polygon_index].vertices
+                    )
+                    triangle_vertices = tuple(triangle.vertices)
+                    if len(polygon_vertices) != 3:
+                        issues.append(
+                            f"{source_object.name}: native retail collision "
+                            "metadata is attached to a non-triangle face."
+                        )
+                        continue
+                    rotation = next(
+                        (
+                            offset
+                            for offset in range(3)
+                            if triangle_vertices
+                            == polygon_vertices[offset:]
+                            + polygon_vertices[:offset]
+                        ),
+                        None,
+                    )
+                    if rotation is None:
+                        issues.append(
+                            f"{source_object.name}: Blender reversed a face "
+                            "with native retail collision edge codes."
+                        )
+                        continue
+                    polygon_codes = tuple(
+                        int(attribute.data[triangle.polygon_index].value)
+                        for attribute in edge_attributes
+                    )
+                    if any(code < 0 or code > 255 for code in polygon_codes):
+                        issues.append(
+                            f"{source_object.name}: native retail collision "
+                            "edge code is outside the byte range."
+                        )
+                        continue
+                    native_edge_codes = tuple(
+                        polygon_codes[(rotation + corner) % 3]
+                        for corner in range(3)
+                    )
                 triangles.append(
                     (
                         points[0],
@@ -1548,6 +1636,7 @@ def audit_collision_geometry(
                         points[2],
                         surface_id,
                         material_id,
+                        native_edge_codes,
                     )
                 )
         finally:
@@ -2466,7 +2555,7 @@ def export_scene(
         _report_progress(progress, 0.86, "Compressed visual vertices")
         _write_stored_chunks(stream, geometry.index_chunks)
         _report_progress(progress, 0.89, "Compressed visual indices")
-        packed_collision = struct.Struct("<9fII")
+        packed_collision = struct.Struct("<9fII4B")
         collision_chunks: list[bytes] = []
         collision_buffer = bytearray()
         collision_flush_size = 16_384
@@ -2476,10 +2565,18 @@ def export_scene(
             c,
             surface_id,
             material_id,
+            native_edge_codes,
         ) in enumerate(collision, start=1):
+            edge_codes = native_edge_codes or (0, 0, 0)
             collision_buffer.extend(
                 packed_collision.pack(
-                    *a, *b, *c, surface_id, material_id
+                    *a,
+                    *b,
+                    *c,
+                    surface_id,
+                    material_id,
+                    *edge_codes,
+                    1 if native_edge_codes is not None else 0,
                 )
             )
             if (
@@ -2562,6 +2659,7 @@ def export_scene(
                 _write_vec(stream, c)
                 _write_u32(stream, surface_id)
                 _write_u32(stream, material_id)
+                stream.write(b"\0\0\0\0")
         for light in lights:
             _write_string(stream, light.name)
             _write_u32(stream, light.light_type)

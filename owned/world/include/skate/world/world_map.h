@@ -217,6 +217,12 @@ struct CollisionTriangle {
   Vec3 normal;
   SurfaceId surface = 0;
   MaterialId material = 0;
+  // Extracted retail RenderWare meshes carry authored feature codes for
+  // every directed edge/corner. They distinguish smooth continuations from
+  // hard edge and point contacts. Blender-authored maps leave this false and
+  // let the native collision builder derive codes from topology.
+  std::array<std::uint8_t, 3> native_edge_codes{};
+  bool has_native_edge_codes = false;
 };
 
 // The first 120 bytes of one retail Pegasus tSplineData segment. Values are

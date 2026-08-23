@@ -1,7 +1,7 @@
 {
-  "format_version": 10,
+  "format_version": 11,
   "map_name": "University District",
-  "file_bytes": 127155624,
+  "file_bytes": 130320474,
   "texture_decoded_bytes": 253257728,
   "maximum_visual_index": 2081270,
   "counts": {
@@ -42,7 +42,9 @@
     "retained_reverse_wound": 10691,
     "package_triangles": 1133642,
     "position_tolerance": 1e-06,
-    "canonical_sha256": "b0d122c54322e48a0faa49d44e9f8698dc557425b848c4e372e8fa5ef09bbeaf"
+    "canonical_sha256": "b0d122c54322e48a0faa49d44e9f8698dc557425b848c4e372e8fa5ef09bbeaf",
+    "native_edge_codes_xor": "7a179aaac282d3efcc27228f89616031f57703157aeeaa7f6934956d0d30cb51",
+    "native_edge_codes_sum": "f5386588e1f87c13cd28835d1eba38c738be23e82fa9cec94c4cd1763965da53"
   },
   "retail_normals": {
     "source_normal_references": 6164,
@@ -63,7 +65,7 @@
     "decoded_textures_sha256": "ca6d6dd0356772bf20e8ba4179b6406943b45049e2bd3ae83a7b89bc6dbde696",
     "expanded_visual_triangles_sha256": "28c22d11fc1cfc79b7e48b5aac444cf1c9ca762f8055f4dddd08214872542204",
     "expanded_visual_triangles_1e6_sha256": "52f54d2e10f3ea847791f233054dd7150feebd61a199af66654d39e38a05d9f4",
-    "collision_sha256": "cd2e9004c1133cf8e4cf9da8effd062a157aefe47bdf662b40a5aca5b620cf0a",
+    "collision_sha256": "12422ff3a723c818b7de5c5613ac89f67c07a56e81ffade9a216a94ce732af7c",
     "grind_rails_sha256": "0cc406dd4f68b0dad57215cec3f9cbe9e93be52fe124197ec5bb62c092d63501",
     "authored_features_sha256": "0cc406dd4f68b0dad57215cec3f9cbe9e93be52fe124197ec5bb62c092d63501"
   },

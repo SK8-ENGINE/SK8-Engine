@@ -1,10 +1,10 @@
-# SKATE v10 binary format
+# SKATE v11 binary format
 
 All integers and IEEE-754 floats are little-endian. Strings are a `u32` byte
 length followed by UTF-8 bytes. Coordinates are right-handed Y-up metres.
 
 ```text
-char[8] magic = "SKATE10\0"
+char[8] magic = "SKATE11\0"
 u32 endian_marker = 0x12345678
 string map_name
 f32 spawn_position[3]
@@ -63,6 +63,8 @@ stored_bytes collision:
   collision_triangle[collision_triangle_count]:
     f32 a[3], b[3], c[3]
     u32 surface_id, material_id
+    u8 native_edge_code[3]
+    u8 has_native_edge_codes
 
 grind_rail[grind_rail_count]:
   string name
@@ -179,7 +181,13 @@ representation. Export rejects a retail curve if its controls no longer match
 the retained native payload, preventing an edit from silently emitting stale
 grind data.
 
-The loader retains read compatibility with SKATE v1 through v10. Missing v2
+Retail collision imports set `has_native_edge_codes` and retain the exact
+RenderWare edge/corner feature bytes decoded from the source `ClusteredMesh`.
+The native collision compiler emits those bytes unchanged. Blender-authored
+collision leaves the marker clear, and the compiler derives adjacency,
+edge-angle, and smooth-vertex codes from geometry as before.
+
+The loader retains read compatibility with SKATE v1 through v11. Missing v2
 material fields use opaque, polished-concrete/smooth defaults with no
 additional PBR maps. Missing v3 cycle fields retain the original full-day
 behavior. Missing v6 environment fields use the engine's neutral sky grading

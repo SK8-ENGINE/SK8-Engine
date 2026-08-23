@@ -13,7 +13,8 @@ from pathlib import Path
 
 
 VERTEX_BYTES = 44
-COLLISION_TRIANGLE_BYTES = 44
+COLLISION_TRIANGLE_BYTES_V10 = 44
+COLLISION_TRIANGLE_BYTES_V11 = 48
 
 
 class PackageError(ValueError):
@@ -92,9 +93,14 @@ def analyze_package(
 
     start = reader.offset
     magic = reader.take(8, "magic")
-    if magic not in (b"SKATE08\0", b"SKATE09\0", b"SKATE10\0"):
+    if magic not in (
+        b"SKATE08\0",
+        b"SKATE09\0",
+        b"SKATE10\0",
+        b"SKATE11\0",
+    ):
         raise PackageError(
-            f"unsupported magic {magic!r}; expected SKATE v8-v10"
+            f"unsupported magic {magic!r}; expected SKATE v8-v11"
         )
     version = int(magic[5:7])
     if reader.u32("endian marker") != 0x12345678:
@@ -213,7 +219,12 @@ def analyze_package(
     _section(sections, reader, "visual_indices", start)
 
     start = reader.offset
-    collision_byte_count = collision_count * COLLISION_TRIANGLE_BYTES
+    collision_triangle_bytes = (
+        COLLISION_TRIANGLE_BYTES_V11
+        if version >= 11
+        else COLLISION_TRIANGLE_BYTES_V10
+    )
+    collision_byte_count = collision_count * collision_triangle_bytes
     if version >= 9:
         collision_bytes = reader.stored(
             collision_byte_count, "collision block"
@@ -284,7 +295,7 @@ def analyze_package(
                     f"vertex count {door_vertex_count}"
                 )
         reader.skip(
-            door_collision_count * COLLISION_TRIANGLE_BYTES,
+            door_collision_count * collision_triangle_bytes,
             f"door {index} collision",
         )
     _section(sections, reader, "hinged_doors", start)
