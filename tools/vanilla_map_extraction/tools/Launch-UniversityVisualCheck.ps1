@@ -128,7 +128,7 @@ try {
     $collisionMode = if ($RetailCollisionOnly) {
         'retail-only coordinate-locked A/B collision'
     } else {
-        'exact retail-resource collision exported for Mega Park'
+        'dynamically streamed exact-retail University collision'
     }
     Write-Host (
         "Launching the offline-prepared University build ($collisionMode)."

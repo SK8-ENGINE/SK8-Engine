@@ -414,7 +414,7 @@ try {
         $extractionManifest,
         $collisionProbe
     ) -Description (
-        'Build exact retail Mega Park collision comparison archive'
+        'Build complete exact-retail University collision archive'
     )
 
     Assert-Equal 'format version' $actual.version $expected.format_version
@@ -660,8 +660,8 @@ try {
         map_analysis = $analysisPath
         map_validation = $validationPath
         collision_source = (
-            'eight untouched retail RenderWare ClusteredMesh resources ' +
-            'nearest the Super Ultra Mega Park spawn'
+            'all 301 untouched retail RenderWare ClusteredMesh resources; ' +
+            'the nearest 12 are streamed dynamically around the skater'
         )
     }
     $manifestJson = $stageManifest | ConvertTo-Json -Depth 4

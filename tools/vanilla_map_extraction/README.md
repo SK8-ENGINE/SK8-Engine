@@ -197,17 +197,17 @@ From the root of the dedicated University worktree, run:
 The BAT only launches the build previously prepared and validated offline by
 the map agent. It never builds, exports, copies, or deploys content. Before
 launch it verifies SHA-256 hashes for the prepared executable, runtime, and
-University package plus the exact-collision comparison archive, then enables
+University package plus the exact-retail collision archive, then enables
 owned collision, map-loader telemetry, and renderer performance telemetry.
 
-The current owned-collision check deliberately uses the eight untouched
-retail `ClusteredMesh` resources nearest the Super Ultra Mega Park spawn.
-Their original compressed vertices, KD trees, cluster boundaries, unit flags,
-edge codes, and packed surfaces are adopted directly. This isolates behavior
-introduced by flattening all 301 source meshes into one rebuilt mesh. It is a
-Mega Park comparison probe, not yet the final district-wide streaming
-implementation; collision outside the selected spawn neighbourhood is not
-expected to be complete.
+The owned-collision check packages all 301 untouched retail `ClusteredMesh`
+resources from the University district. Their original compressed vertices,
+KD trees, cluster boundaries, unit flags, edge codes, and packed surfaces are
+adopted directly. At runtime the nearest 12 resources are registered around
+the skater and the active set is refreshed after 24 metres of movement. This
+preserves the exact-resource behavior confirmed in Super Ultra Mega Park
+while extending collision coverage across the complete extracted district
+without flattening unrelated retail resources into one broadphase mesh.
 
 Every invocation uses
 `out/university-visual-check/runs/<yyyyMMdd_HHmmss>/`. Its `logs/` directory

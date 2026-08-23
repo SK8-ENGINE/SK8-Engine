@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build a small exact-retail collision archive around University spawn."""
+"""Build an exact-retail collision archive for the University district."""
 
 from __future__ import annotations
 
@@ -17,7 +17,9 @@ CELL_NAME = re.compile(
     r"^cSim_(-?\d+)_(-?\d+)_high\.xsf$", re.IGNORECASE
 )
 SPAWN_XZ = (330.0, -710.0)
-DEFAULT_ASSET_COUNT = 8
+DEFAULT_ASSET_COUNT = 0
+EXPECTED_FULL_ASSET_COUNT = 299
+EXPECTED_FULL_MESH_COUNT = 301
 REQUIRED_DIAGNOSTIC_ASSET = "0xDE463D6F91D30023"
 
 
@@ -52,8 +54,8 @@ def main() -> int:
     parser.add_argument("output", type=Path)
     parser.add_argument("--asset-count", type=int, default=DEFAULT_ASSET_COUNT)
     args = parser.parse_args()
-    if args.asset_count <= 0:
-        raise ValueError("asset count must be positive")
+    if args.asset_count < 0:
+        raise ValueError("asset count must be zero (all) or positive")
 
     manifest_path = args.manifest.resolve()
     root = manifest_path.parent
@@ -74,7 +76,11 @@ def main() -> int:
             (distance_squared, str(asset["asset_id"]), asset)
         )
     candidates.sort(key=lambda item: (item[0], item[1]))
-    selected = candidates[: args.asset_count]
+    selected = (
+        candidates
+        if args.asset_count == 0
+        else candidates[: args.asset_count]
+    )
     selected_ids = {asset_id for _distance, asset_id, _asset in selected}
     if REQUIRED_DIAGNOSTIC_ASSET not in selected_ids:
         raise RuntimeError(
@@ -106,6 +112,17 @@ def main() -> int:
                 "meshes": len(sections),
             }
         )
+    if args.asset_count == 0:
+        if len(selected) != EXPECTED_FULL_ASSET_COUNT:
+            raise RuntimeError(
+                "full University collision asset count changed: "
+                f"expected {EXPECTED_FULL_ASSET_COUNT}, got {len(selected)}"
+            )
+        if len(records) != EXPECTED_FULL_MESH_COUNT:
+            raise RuntimeError(
+                "full University collision mesh count changed: "
+                f"expected {EXPECTED_FULL_MESH_COUNT}, got {len(records)}"
+            )
 
     payload = bytearray(MAGIC)
     payload.extend(struct.pack("<I", len(records)))
@@ -120,10 +137,16 @@ def main() -> int:
     print(
         json.dumps(
             {
-                "status": "UNIVERSITY_RETAIL_COLLISION_PROBE_OK",
+                "status": "UNIVERSITY_RETAIL_COLLISION_ARCHIVE_OK",
                 "output": str(args.output.resolve()),
                 "spawn_xz": SPAWN_XZ,
-                "assets": selected_assets,
+                "asset_count": len(selected_assets),
+                "nearest_assets": selected_assets[:12],
+                "farthest_asset_distance": (
+                    selected_assets[-1]["distance"]
+                    if selected_assets
+                    else 0.0
+                ),
                 "meshes": len(records),
                 "bytes": len(payload),
                 "sha256": hashlib.sha256(payload).hexdigest(),

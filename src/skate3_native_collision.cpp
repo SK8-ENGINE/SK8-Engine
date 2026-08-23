@@ -101,7 +101,9 @@ constexpr std::uint32_t kAuxiliaryAllocationSize = 192;
 constexpr std::uint32_t kResourceOffset = 96;
 constexpr std::uint32_t kMatrixOffset = 112;
 constexpr std::uint32_t kGroundResultOffset = 176;
-constexpr std::size_t kMaximumOwnedStaticChunks = 96;
+constexpr std::size_t kMaximumOwnedStaticChunks = 384;
+constexpr std::size_t kRetailCollisionActiveMeshes = 12;
+constexpr float kRetailCollisionStreamRefreshDistance = 24.0f;
 constexpr std::size_t kMaximumHingedDoors = 32;
 // University occupies 140 non-empty cells at 128 m, which exceeds the fixed
 // collection capacity. At 256 m it occupies 44 cells, and its largest cell
@@ -127,6 +129,23 @@ std::array<std::atomic<std::uint32_t>, kMaximumOwnedStaticChunks>
     g_static_mesh_addresses{};
 std::array<std::atomic<std::uint32_t>, kMaximumOwnedStaticChunks>
     g_static_volume_addresses{};
+std::array<std::atomic<bool>, kMaximumOwnedStaticChunks>
+    g_static_mesh_desired{};
+std::array<std::atomic<std::uint32_t>, kMaximumOwnedStaticChunks>
+    g_static_bounds_min_x_bits{};
+std::array<std::atomic<std::uint32_t>, kMaximumOwnedStaticChunks>
+    g_static_bounds_min_z_bits{};
+std::array<std::atomic<std::uint32_t>, kMaximumOwnedStaticChunks>
+    g_static_bounds_max_x_bits{};
+std::array<std::atomic<std::uint32_t>, kMaximumOwnedStaticChunks>
+    g_static_bounds_max_z_bits{};
+std::atomic<std::uint32_t> g_static_active_mesh_count{0};
+std::atomic<std::uint64_t> g_static_stream_updates{0};
+std::atomic<std::uint64_t> g_static_stream_added{0};
+std::atomic<std::uint64_t> g_static_stream_removed{0};
+std::atomic<std::uint32_t> g_static_stream_center_x_bits{0};
+std::atomic<std::uint32_t> g_static_stream_center_z_bits{0};
+std::atomic<bool> g_static_stream_center_valid{false};
 std::atomic<std::uint32_t> g_removed_retail_volumes{0};
 std::atomic<std::uint64_t> g_exclusive_reconciliations{0};
 std::atomic<std::uint64_t> g_reintroduced_retail_removed{0};
@@ -1160,6 +1179,80 @@ std::uint32_t OwnedStaticEntryIndex(std::uint32_t volume,
   return UINT32_MAX;
 }
 
+bool OwnedStaticDesired(std::uint32_t index) {
+  return index < kMaximumOwnedStaticChunks &&
+         g_static_mesh_desired[index].load(std::memory_order_acquire);
+}
+
+bool SelectRetailCollisionMeshes(float x, float z, bool force) {
+  if (!std::isfinite(x) || !std::isfinite(z)) {
+    return false;
+  }
+  if (!force &&
+      g_static_stream_center_valid.load(std::memory_order_acquire)) {
+    const float previous_x = std::bit_cast<float>(
+        g_static_stream_center_x_bits.load(std::memory_order_relaxed));
+    const float previous_z = std::bit_cast<float>(
+        g_static_stream_center_z_bits.load(std::memory_order_relaxed));
+    const float dx = x - previous_x;
+    const float dz = z - previous_z;
+    if (dx * dx + dz * dz <
+        kRetailCollisionStreamRefreshDistance *
+            kRetailCollisionStreamRefreshDistance) {
+      return false;
+    }
+  }
+
+  const std::uint32_t count = std::min<std::uint32_t>(
+      g_static_mesh_count.load(std::memory_order_acquire),
+      static_cast<std::uint32_t>(kMaximumOwnedStaticChunks));
+  if (count == 0) {
+    return false;
+  }
+  std::vector<std::pair<float, std::uint32_t>> ranked;
+  ranked.reserve(count);
+  for (std::uint32_t index = 0; index < count; ++index) {
+    const float minimum_x = std::bit_cast<float>(
+        g_static_bounds_min_x_bits[index].load(std::memory_order_relaxed));
+    const float minimum_z = std::bit_cast<float>(
+        g_static_bounds_min_z_bits[index].load(std::memory_order_relaxed));
+    const float maximum_x = std::bit_cast<float>(
+        g_static_bounds_max_x_bits[index].load(std::memory_order_relaxed));
+    const float maximum_z = std::bit_cast<float>(
+        g_static_bounds_max_z_bits[index].load(std::memory_order_relaxed));
+    const float dx =
+        x < minimum_x ? minimum_x - x : (x > maximum_x ? x - maximum_x : 0.0f);
+    const float dz =
+        z < minimum_z ? minimum_z - z : (z > maximum_z ? z - maximum_z : 0.0f);
+    ranked.emplace_back(dx * dx + dz * dz, index);
+  }
+  std::sort(
+      ranked.begin(), ranked.end(),
+      [](const auto& left, const auto& right) {
+        return left.first == right.first ? left.second < right.second
+                                         : left.first < right.first;
+      });
+  const std::uint32_t desired_count = std::min<std::uint32_t>(
+      count, static_cast<std::uint32_t>(kRetailCollisionActiveMeshes));
+  std::vector<bool> desired(count, false);
+  for (std::uint32_t rank = 0; rank < desired_count; ++rank) {
+    desired[ranked[rank].second] = true;
+  }
+  bool changed = false;
+  for (std::uint32_t index = 0; index < count; ++index) {
+    changed |= OwnedStaticDesired(index) != desired[index];
+    g_static_mesh_desired[index].store(
+        desired[index], std::memory_order_release);
+  }
+  g_static_active_mesh_count.store(desired_count, std::memory_order_release);
+  g_static_stream_center_x_bits.store(
+      std::bit_cast<std::uint32_t>(x), std::memory_order_relaxed);
+  g_static_stream_center_z_bits.store(
+      std::bit_cast<std::uint32_t>(z), std::memory_order_relaxed);
+  g_static_stream_center_valid.store(true, std::memory_order_release);
+  return changed;
+}
+
 bool IsOwnedKinematicEntry(std::uint32_t volume, std::uint32_t mesh) {
   return volume != 0 && mesh != 0 &&
          volume ==
@@ -1202,7 +1295,11 @@ bool ExclusiveCollectionDrifted(std::uint8_t* base,
     const std::uint32_t owned_index =
         OwnedStaticEntryIndex(volume, mesh);
     if (owned_index != UINT32_MAX) {
-      seen[owned_index] = true;
+      if (OwnedStaticDesired(owned_index)) {
+        seen[owned_index] = true;
+      } else {
+        unexpected = true;
+      }
     } else if (!IsOwnedKinematicEntry(volume, mesh) &&
                !IsOwnedDoorEntry(volume, mesh)) {
       unexpected = true;
@@ -1212,7 +1309,7 @@ bool ExclusiveCollectionDrifted(std::uint8_t* base,
     return true;
   }
   for (std::uint32_t index = 0; index < owned_count; ++index) {
-    if (!seen[index]) {
+    if (OwnedStaticDesired(index) && !seen[index]) {
       return true;
     }
   }
@@ -1241,36 +1338,52 @@ bool ReconcileExclusiveCollection(PPCContext& source,
     return false;
   }
 
-  std::vector<std::uint32_t> unexpected_volumes;
+  struct Removal {
+    std::uint32_t volume = 0;
+    bool owned_static = false;
+  };
+  std::vector<Removal> unexpected_volumes;
   unexpected_volumes.reserve(count);
   for (std::uint32_t index = 0; index < count; ++index) {
     const std::uint32_t entry =
         read_entries + index * kCollectionEntrySize;
     const std::uint32_t volume = LoadU32(base, entry);
     const std::uint32_t mesh = LoadU32(base, entry + 4);
-    if (OwnedStaticEntryIndex(volume, mesh) == UINT32_MAX &&
+    const std::uint32_t owned_index =
+        OwnedStaticEntryIndex(volume, mesh);
+    const bool inactive_owned =
+        owned_index != UINT32_MAX && !OwnedStaticDesired(owned_index);
+    const bool unexpected_retail =
+        owned_index == UINT32_MAX &&
         !IsOwnedKinematicEntry(volume, mesh) &&
-        !IsOwnedDoorEntry(volume, mesh)) {
+        !IsOwnedDoorEntry(volume, mesh);
+    if (inactive_owned || unexpected_retail) {
       if (!IsGuestDataAddress(volume)) {
         return false;
       }
-      unexpected_volumes.push_back(volume);
+      unexpected_volumes.push_back(
+          Removal{volume, inactive_owned});
     }
   }
 
-  std::uint32_t removed = 0;
-  for (std::uint32_t volume : unexpected_volumes) {
+  std::uint32_t removed_retail = 0;
+  std::uint32_t removed_inactive = 0;
+  for (const Removal& removal : unexpected_volumes) {
     const std::uint32_t before = LoadU32(base, collection + 20);
     PPCContext remove = source;
     remove.r3.u64 = collection;
-    remove.r4.u64 = volume;
+    remove.r4.u64 = removal.volume;
     sub_82775FC8(remove, base);
     const std::uint32_t after = LoadU32(base, collection + 20);
     if (after + 1 != before) {
       return false;
     }
     PublishWriteEntries(base, read_entries, write_entries, after);
-    ++removed;
+    if (removal.owned_static) {
+      ++removed_inactive;
+    } else {
+      ++removed_retail;
+    }
   }
 
   count = LoadU32(base, collection + 20);
@@ -1279,6 +1392,9 @@ bool ReconcileExclusiveCollection(PPCContext& source,
       static_cast<std::uint32_t>(kMaximumOwnedStaticChunks));
   std::uint32_t readded = 0;
   for (std::uint32_t index = 0; index < owned_count; ++index) {
+    if (!OwnedStaticDesired(index)) {
+      continue;
+    }
     const std::uint32_t volume =
         g_static_volume_addresses[index].load(std::memory_order_acquire);
     const std::uint32_t mesh =
@@ -1316,15 +1432,20 @@ bool ReconcileExclusiveCollection(PPCContext& source,
   }
 
   g_collection_count_after.store(count, std::memory_order_release);
-  g_removed_retail_volumes.fetch_add(removed, std::memory_order_relaxed);
+  g_removed_retail_volumes.fetch_add(
+      removed_retail, std::memory_order_relaxed);
   g_reintroduced_retail_removed.fetch_add(
-      removed, std::memory_order_relaxed);
+      removed_retail, std::memory_order_relaxed);
   g_owned_static_readded.fetch_add(readded, std::memory_order_relaxed);
+  g_static_stream_removed.fetch_add(
+      removed_inactive, std::memory_order_relaxed);
+  g_static_stream_added.fetch_add(readded, std::memory_order_relaxed);
   g_exclusive_reconciliations.fetch_add(1, std::memory_order_relaxed);
   REXLOG_INFO(
       "native-collision: reconciled exclusive collection "
-      "(removed_reintroduced={} readded_owned={} count={})",
-      removed, readded, count);
+      "(removed_reintroduced={} removed_inactive={} "
+      "added_active={} count={})",
+      removed_retail, removed_inactive, readded, count);
   return true;
 }
 
@@ -2487,11 +2608,26 @@ void EnsureInstalled(PPCContext& ctx,
                replace_retail) {
       const std::uint32_t collection =
           g_collection.load(std::memory_order_acquire);
-      if (ExclusiveCollectionDrifted(base, collection)) {
+      bool stream_selection_changed = false;
+      if (RetailCollisionArchivePath() != nullptr &&
+          g_native_player_position_valid.load(
+              std::memory_order_acquire)) {
+        const float player_x = std::bit_cast<float>(
+            g_native_player_position_bits[0].load(
+                std::memory_order_relaxed));
+        const float player_z = std::bit_cast<float>(
+            g_native_player_position_bits[2].load(
+                std::memory_order_relaxed));
+        stream_selection_changed =
+            SelectRetailCollisionMeshes(player_x, player_z, false);
+      }
+      if (stream_selection_changed ||
+          ExclusiveCollectionDrifted(base, collection)) {
         std::scoped_lock lock(g_install_mutex);
         if (g_state.load(std::memory_order_acquire) ==
                 State::InstalledExclusive &&
-            ExclusiveCollectionDrifted(base, collection)) {
+            (stream_selection_changed ||
+             ExclusiveCollectionDrifted(base, collection))) {
           if (!ReconcileExclusiveCollection(
                   ctx, base, collection)) {
             const std::uint64_t failures =
@@ -2505,6 +2641,24 @@ void EnsureInstalled(PPCContext& ctx,
                   failures);
             }
           } else {
+            if (stream_selection_changed) {
+              const std::uint64_t update =
+                  g_static_stream_updates.fetch_add(
+                      1, std::memory_order_relaxed) +
+                  1;
+              REXLOG_INFO(
+                  "native-collision: streamed exact retail resources "
+                  "around player=({:.3f},{:.3f}) active={} update={}",
+                  std::bit_cast<float>(
+                      g_static_stream_center_x_bits.load(
+                          std::memory_order_relaxed)),
+                  std::bit_cast<float>(
+                      g_static_stream_center_z_bits.load(
+                          std::memory_order_relaxed)),
+                  g_static_active_mesh_count.load(
+                      std::memory_order_acquire),
+                  update);
+            }
             ObserveLiveCollection(base);
           }
         }
@@ -2644,12 +2798,19 @@ void EnsureInstalled(PPCContext& ctx,
     g_state.store(State::BuildFailed, std::memory_order_release);
     return;
   }
+  const bool exact_retail_archive =
+      RetailCollisionArchivePath() != nullptr;
+  const std::size_t initially_active_chunks =
+      exact_retail_archive
+          ? std::min(builds.chunks.size(),
+                     kRetailCollisionActiveMeshes)
+          : builds.chunks.size();
   if (builds.chunks.size() > kMaximumOwnedStaticChunks ||
-      count + builds.chunks.size() > capacity) {
+      count + initially_active_chunks > capacity) {
     REXLOG_ERROR(
-        "native-collision: {} owned chunks do not fit collection "
-        "(count={} capacity={})",
-        builds.chunks.size(), count, capacity);
+        "native-collision: {} active owned chunks from {} resources "
+        "do not fit collection (count={} capacity={})",
+        initially_active_chunks, builds.chunks.size(), count, capacity);
     REX_KERNEL_MEMORY()->SystemHeapFree(auxiliary);
     g_state.store(State::CollectionFull, std::memory_order_release);
     return;
@@ -2753,6 +2914,47 @@ void EnsureInstalled(PPCContext& ctx,
       std::bit_cast<std::uint32_t>(translation[2]),
       std::memory_order_relaxed);
 
+  std::uint64_t total_bytes = 0;
+  std::uint64_t total_triangles = 0;
+  std::uint64_t total_vertices = 0;
+  for (std::size_t index = 0; index < guest_chunks.size(); ++index) {
+    g_static_mesh_addresses[index].store(
+        guest_chunks[index].mesh, std::memory_order_relaxed);
+    g_static_volume_addresses[index].store(
+        guest_chunks[index].volume, std::memory_order_relaxed);
+    const skate::world::RwCollisionMeshBlob& mesh =
+        builds.chunks[index].mesh;
+    g_static_bounds_min_x_bits[index].store(
+        std::bit_cast<std::uint32_t>(mesh.bounds_min.x),
+        std::memory_order_relaxed);
+    g_static_bounds_min_z_bits[index].store(
+        std::bit_cast<std::uint32_t>(mesh.bounds_min.z),
+        std::memory_order_relaxed);
+    g_static_bounds_max_x_bits[index].store(
+        std::bit_cast<std::uint32_t>(mesh.bounds_max.x),
+        std::memory_order_relaxed);
+    g_static_bounds_max_z_bits[index].store(
+        std::bit_cast<std::uint32_t>(mesh.bounds_max.z),
+        std::memory_order_relaxed);
+    g_static_mesh_desired[index].store(
+        !exact_retail_archive, std::memory_order_relaxed);
+    total_bytes += mesh.bytes.size();
+    total_triangles += mesh.triangle_count;
+    total_vertices += mesh.vertex_count;
+  }
+  g_static_mesh_count.store(
+      static_cast<std::uint32_t>(guest_chunks.size()),
+      std::memory_order_release);
+  if (exact_retail_archive) {
+    SelectRetailCollisionMeshes(ground[0], ground[2], true);
+  } else {
+    g_static_active_mesh_count.store(
+        static_cast<std::uint32_t>(guest_chunks.size()),
+        std::memory_order_release);
+    g_static_stream_center_valid.store(false,
+                                       std::memory_order_release);
+  }
+
   g_original_volumes.clear();
   g_original_volumes.reserve(count);
   for (std::uint32_t index = 0; index < count; ++index) {
@@ -2766,6 +2968,9 @@ void EnsureInstalled(PPCContext& ctx,
   g_collection_count_before.store(count, std::memory_order_release);
   std::uint32_t current_count = count;
   for (std::size_t index = 0; index < guest_chunks.size(); ++index) {
+    if (!OwnedStaticDesired(static_cast<std::uint32_t>(index))) {
+      continue;
+    }
     const GuestChunk& guest = guest_chunks[index];
     PPCContext add = ctx;
     add.r3.u64 = collection;
@@ -2815,22 +3020,23 @@ void EnsureInstalled(PPCContext& ctx,
   g_collection_count_after.store(current_count,
                                  std::memory_order_release);
 
-  std::uint64_t total_bytes = 0;
-  std::uint64_t total_triangles = 0;
-  std::uint64_t total_vertices = 0;
-  for (std::size_t index = 0; index < guest_chunks.size(); ++index) {
-    g_static_mesh_addresses[index].store(
-        guest_chunks[index].mesh, std::memory_order_relaxed);
-    g_static_volume_addresses[index].store(
-        guest_chunks[index].volume, std::memory_order_relaxed);
-    total_bytes += builds.chunks[index].mesh.bytes.size();
-    total_triangles += builds.chunks[index].mesh.triangle_count;
-    total_vertices += builds.chunks[index].mesh.vertex_count;
+  std::size_t first_active = 0;
+  while (first_active < guest_chunks.size() &&
+         !OwnedStaticDesired(
+             static_cast<std::uint32_t>(first_active))) {
+    ++first_active;
+  }
+  if (first_active == guest_chunks.size()) {
+    REXLOG_ERROR(
+        "native-collision: no static collision resources were selected");
+    g_state.store(State::RegistrationFailed,
+                  std::memory_order_release);
+    return;
   }
   g_mesh_address.store(
-      guest_chunks.front().mesh, std::memory_order_release);
+      guest_chunks[first_active].mesh, std::memory_order_release);
   g_volume_address.store(
-      guest_chunks.front().volume, std::memory_order_release);
+      guest_chunks[first_active].volume, std::memory_order_release);
   g_mesh_bytes.store(
       static_cast<std::uint32_t>(total_bytes),
       std::memory_order_release);
@@ -2840,12 +3046,10 @@ void EnsureInstalled(PPCContext& ctx,
   g_mesh_vertices.store(
       static_cast<std::uint32_t>(total_vertices),
       std::memory_order_release);
-  g_static_mesh_count.store(
-      static_cast<std::uint32_t>(guest_chunks.size()),
-      std::memory_order_release);
   REXLOG_INFO(
-      "native-collision: installed {} spatial chunks "
+      "native-collision: installed {} of {} spatial resources "
       "(triangles={} vertices={} bytes={})",
+      g_static_active_mesh_count.load(std::memory_order_acquire),
       guest_chunks.size(), total_triangles, total_vertices, total_bytes);
   g_world_origin_valid.store(true, std::memory_order_release);
   g_state.store(State::InstalledAdditive, std::memory_order_release);
@@ -2854,7 +3058,8 @@ void EnsureInstalled(PPCContext& ctx,
           skate3_mechanics_sandbox_native_collision_replace_retail)) {
     const bool removed =
         RemoveOriginalVolumes(
-            ctx, base, collection, guest_chunks.front().volume);
+            ctx, base, collection,
+            guest_chunks[first_active].volume);
     g_state.store(removed ? State::InstalledExclusive
                           : State::ReplacementFailed,
                   std::memory_order_release);
@@ -3655,6 +3860,18 @@ void AppendTelemetry(std::ostream& out) {
       << g_mesh_vertices.load(std::memory_order_acquire)
       << " sandbox_native_collision_chunks="
       << g_static_mesh_count.load(std::memory_order_acquire)
+      << " sandbox_native_collision_active_chunks="
+      << g_static_active_mesh_count.load(std::memory_order_acquire)
+      << " sandbox_native_collision_stream_updates="
+      << g_static_stream_updates.load(std::memory_order_relaxed)
+      << " sandbox_native_collision_stream_added="
+      << g_static_stream_added.load(std::memory_order_relaxed)
+      << " sandbox_native_collision_stream_removed="
+      << g_static_stream_removed.load(std::memory_order_relaxed)
+      << " sandbox_native_collision_stream_center_x_bits="
+      << g_static_stream_center_x_bits.load(std::memory_order_acquire)
+      << " sandbox_native_collision_stream_center_z_bits="
+      << g_static_stream_center_z_bits.load(std::memory_order_acquire)
       << " sandbox_native_collision_removed_retail="
       << g_removed_retail_volumes.load(std::memory_order_acquire)
       << " sandbox_native_collision_reconciliations="
