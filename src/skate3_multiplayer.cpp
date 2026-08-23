@@ -121,9 +121,12 @@ namespace {
 
 using Clock = std::chrono::steady_clock;
 using protocol::AnimationFragmentByteCount;
+using protocol::AnimationFragmentShapeValid;
 using protocol::AnimationFragmentPacket;
 using protocol::AnimationTrackEncoding;
+using protocol::AppearanceChunkByteOffset;
 using protocol::AppearanceFragmentByteCount;
+using protocol::AppearanceFragmentShapeValid;
 using protocol::AppearanceFragmentPacket;
 using protocol::PosePacket;
 using protocol::SequenceNewer;
@@ -133,7 +136,6 @@ using protocol::kAnimationPacketMagic;
 using protocol::kAppearanceChunkBytes;
 using protocol::kAppearancePacketMagic;
 using protocol::kMaximumAnimationBones;
-using protocol::kMaximumAnimationFragments;
 using protocol::kMaximumAnimationFrameWords;
 using protocol::kMaximumAnimationTracks;
 using protocol::kMaximumAppearanceBytes;
@@ -2644,24 +2646,8 @@ class Runtime {
             packet.map_hash, map_hash) ||
         packet.byte_count != expected_bytes ||
         received_bytes != static_cast<int>(expected_bytes) ||
-        packet.fragment_count == 0 ||
-        packet.fragment_count > kMaximumAnimationFragments ||
-        packet.fragment_index >= packet.fragment_count ||
-        packet.total_words == 0 ||
-        packet.total_words > kMaximumAnimationFrameWords ||
-        packet.word_count == 0 ||
-        packet.word_count > kAnimationFragmentWords ||
-        packet.word_offset !=
-            std::size_t(packet.fragment_index) *
-                kAnimationFragmentWords ||
-        std::size_t(packet.word_offset) +
-                packet.word_count >
-            packet.total_words ||
-        !Finite3(packet.root_position) ||
-        packet.fragment_count !=
-            (std::size_t(packet.total_words) +
-                 kAnimationFragmentWords - 1) /
-                kAnimationFragmentWords) {
+        !AnimationFragmentShapeValid(packet) ||
+        !Finite3(packet.root_position)) {
       ++telemetry_.rejected_packets;
       return false;
     }
@@ -2830,34 +2816,15 @@ class Runtime {
       int received_bytes) {
     const std::size_t expected_bytes =
         AppearanceFragmentByteCount(packet.chunk_bytes);
-    const std::size_t expected_chunks =
-        (std::size_t(packet.total_bytes) +
-             kAppearanceChunkBytes - 1) /
-        kAppearanceChunkBytes;
     const std::size_t offset =
-        std::size_t(packet.chunk_index) *
-        kAppearanceChunkBytes;
-    const std::size_t expected_chunk_bytes =
-        offset < packet.total_bytes
-            ? std::min<std::size_t>(
-                  kAppearanceChunkBytes,
-                  std::size_t(packet.total_bytes) - offset)
-            : 0;
+        AppearanceChunkByteOffset(packet.chunk_index);
     if (!CommonPacketValid(
             packet.version, packet.sender_role,
             packet.sender_session, packet.map_hash, map_hash) ||
         packet.byte_count != expected_bytes ||
         received_bytes != static_cast<int>(expected_bytes) ||
         packet.appearance_id == 0 ||
-        packet.total_bytes == 0 ||
-        packet.total_bytes > kMaximumAppearanceBytes ||
-        packet.chunk_count == 0 ||
-        packet.chunk_count != expected_chunks ||
-        packet.chunk_index >= packet.chunk_count ||
-        packet.chunk_bytes == 0 ||
-        packet.chunk_bytes > kAppearanceChunkBytes ||
-        offset >= packet.total_bytes ||
-        packet.chunk_bytes != expected_chunk_bytes) {
+        !AppearanceFragmentShapeValid(packet)) {
       ++telemetry_.rejected_packets;
       return false;
     }

@@ -12,8 +12,10 @@ namespace {
 
 using skate3::multiplayer::protocol::AnimationFragmentByteCount;
 using skate3::multiplayer::protocol::AnimationFragmentPacket;
+using skate3::multiplayer::protocol::AnimationFragmentShapeValid;
 using skate3::multiplayer::protocol::AppearanceFragmentByteCount;
 using skate3::multiplayer::protocol::AppearanceFragmentPacket;
+using skate3::multiplayer::protocol::AppearanceFragmentShapeValid;
 using skate3::multiplayer::protocol::PosePacket;
 using skate3::multiplayer::protocol::SequenceNewer;
 using skate3::multiplayer::protocol::SequenceOlder;
@@ -23,6 +25,7 @@ using skate3::multiplayer::protocol::kAppearanceChunkBytes;
 using skate3::multiplayer::protocol::kAppearancePacketMagic;
 using skate3::multiplayer::protocol::kMaximumAnimationFragments;
 using skate3::multiplayer::protocol::kMaximumAnimationFrameWords;
+using skate3::multiplayer::protocol::kMaximumAppearanceBytes;
 using skate3::multiplayer::protocol::kPacketMagic;
 using skate3::multiplayer::protocol::kProtocolVersion;
 
@@ -187,6 +190,103 @@ void TestVariablePacketSizes() {
          "full appearance fragment size changed");
 }
 
+void TestAnimationFragmentShapes() {
+  AnimationFragmentPacket packet;
+  packet.total_words = 522;
+  packet.fragment_count = 2;
+  packet.fragment_index = 0;
+  packet.word_offset = 0;
+  packet.word_count = kAnimationFragmentWords;
+  Expect(AnimationFragmentShapeValid(packet),
+         "full non-final animation fragment was rejected");
+
+  packet.fragment_index = 1;
+  packet.word_offset = kAnimationFragmentWords;
+  packet.word_count = 2;
+  Expect(AnimationFragmentShapeValid(packet),
+         "short final animation fragment was rejected");
+
+  packet.fragment_index = 0;
+  packet.word_offset = 0;
+  packet.word_count = kAnimationFragmentWords - 1;
+  Expect(!AnimationFragmentShapeValid(packet),
+         "undersized non-final fragment left a zero-filled pose gap");
+
+  packet.fragment_index = 1;
+  packet.word_offset = kAnimationFragmentWords;
+  packet.word_count = 3;
+  Expect(!AnimationFragmentShapeValid(packet),
+         "oversized final animation fragment was accepted");
+
+  packet.word_count = 2;
+  packet.word_offset = kAnimationFragmentWords - 1;
+  Expect(!AnimationFragmentShapeValid(packet),
+         "animation fragment with a shifted offset was accepted");
+
+  packet.word_offset = kAnimationFragmentWords;
+  packet.fragment_count = 3;
+  Expect(!AnimationFragmentShapeValid(packet),
+         "animation fragment with an inconsistent count was accepted");
+
+  packet.fragment_count = 2;
+  packet.fragment_index = 2;
+  Expect(!AnimationFragmentShapeValid(packet),
+         "out-of-range animation fragment index was accepted");
+
+  packet = {};
+  Expect(!AnimationFragmentShapeValid(packet),
+         "empty animation frame was accepted");
+  packet.total_words = kMaximumAnimationFrameWords + 1;
+  Expect(!AnimationFragmentShapeValid(packet),
+         "oversized animation frame was accepted");
+}
+
+void TestAppearanceFragmentShapes() {
+  AppearanceFragmentPacket packet;
+  packet.total_bytes = kAppearanceChunkBytes + 1;
+  packet.chunk_count = 2;
+  packet.chunk_index = 0;
+  packet.chunk_bytes = kAppearanceChunkBytes;
+  Expect(AppearanceFragmentShapeValid(packet),
+         "full non-final appearance chunk was rejected");
+
+  packet.chunk_index = 1;
+  packet.chunk_bytes = 1;
+  Expect(AppearanceFragmentShapeValid(packet),
+         "short final appearance chunk was rejected");
+
+  packet.chunk_index = 0;
+  packet.chunk_bytes = kAppearanceChunkBytes - 1;
+  Expect(!AppearanceFragmentShapeValid(packet),
+         "undersized non-final appearance chunk was accepted");
+
+  packet.chunk_index = 1;
+  packet.chunk_bytes = 2;
+  Expect(!AppearanceFragmentShapeValid(packet),
+         "oversized final appearance chunk was accepted");
+
+  packet.chunk_bytes = 1;
+  packet.chunk_count = 3;
+  Expect(!AppearanceFragmentShapeValid(packet),
+         "appearance chunk with an inconsistent count was accepted");
+
+  packet.chunk_count = 2;
+  packet.chunk_index = 2;
+  Expect(!AppearanceFragmentShapeValid(packet),
+         "out-of-range appearance chunk index was accepted");
+
+  packet = {};
+  Expect(!AppearanceFragmentShapeValid(packet),
+         "empty appearance payload was accepted");
+  packet.total_bytes = kMaximumAppearanceBytes + 1;
+  packet.chunk_count = static_cast<std::uint16_t>(
+      (packet.total_bytes + kAppearanceChunkBytes - 1) /
+      kAppearanceChunkBytes);
+  packet.chunk_bytes = kAppearanceChunkBytes;
+  Expect(!AppearanceFragmentShapeValid(packet),
+         "oversized appearance payload was accepted");
+}
+
 void TestSequenceOrderingAcrossWrap() {
   Expect(SequenceNewer(11, 10), "ordinary newer sequence was rejected");
   Expect(SequenceOlder(10, 11), "ordinary older sequence was accepted");
@@ -212,6 +312,8 @@ int main() {
   TestAnimationGoldenBytes();
   TestAppearanceGoldenBytes();
   TestVariablePacketSizes();
+  TestAnimationFragmentShapes();
+  TestAppearanceFragmentShapes();
   TestSequenceOrderingAcrossWrap();
 
   if (g_failures != 0) {

@@ -100,6 +100,87 @@ struct AppearanceFragmentPacket {
   return offsetof(AppearanceFragmentPacket, bytes) + chunk_bytes;
 }
 
+[[nodiscard]] constexpr std::size_t AnimationFragmentCount(
+    std::uint16_t total_words) {
+  return (std::size_t(total_words) + kAnimationFragmentWords - 1) /
+         kAnimationFragmentWords;
+}
+
+[[nodiscard]] constexpr std::size_t AnimationFragmentWordOffset(
+    std::uint16_t fragment_index) {
+  return std::size_t(fragment_index) * kAnimationFragmentWords;
+}
+
+[[nodiscard]] constexpr std::size_t AnimationFragmentWordCount(
+    std::uint16_t total_words, std::uint16_t fragment_index) {
+  const std::size_t offset =
+      AnimationFragmentWordOffset(fragment_index);
+  if (offset >= total_words) {
+    return 0;
+  }
+  const std::size_t remaining = std::size_t(total_words) - offset;
+  return remaining < kAnimationFragmentWords
+             ? remaining
+             : kAnimationFragmentWords;
+}
+
+// Every non-final fragment must fill its complete fixed-size range. Accepting
+// a short fragment would mark the range received while leaving the missing
+// words as zeroes in the assembled pose.
+[[nodiscard]] constexpr bool AnimationFragmentShapeValid(
+    const AnimationFragmentPacket& packet) {
+  const std::size_t expected_fragments =
+      AnimationFragmentCount(packet.total_words);
+  return packet.total_words > 0 &&
+         packet.total_words <= kMaximumAnimationFrameWords &&
+         expected_fragments > 0 &&
+         expected_fragments <= kMaximumAnimationFragments &&
+         packet.fragment_count == expected_fragments &&
+         packet.fragment_index < packet.fragment_count &&
+         packet.word_offset ==
+             AnimationFragmentWordOffset(packet.fragment_index) &&
+         packet.word_count ==
+             AnimationFragmentWordCount(
+                 packet.total_words, packet.fragment_index);
+}
+
+[[nodiscard]] constexpr std::size_t AppearanceChunkCount(
+    std::uint32_t total_bytes) {
+  return (std::size_t(total_bytes) + kAppearanceChunkBytes - 1) /
+         kAppearanceChunkBytes;
+}
+
+[[nodiscard]] constexpr std::size_t AppearanceChunkByteOffset(
+    std::uint16_t chunk_index) {
+  return std::size_t(chunk_index) * kAppearanceChunkBytes;
+}
+
+[[nodiscard]] constexpr std::size_t AppearanceChunkByteCount(
+    std::uint32_t total_bytes, std::uint16_t chunk_index) {
+  const std::size_t offset = AppearanceChunkByteOffset(chunk_index);
+  if (offset >= total_bytes) {
+    return 0;
+  }
+  const std::size_t remaining = std::size_t(total_bytes) - offset;
+  return remaining < kAppearanceChunkBytes
+             ? remaining
+             : kAppearanceChunkBytes;
+}
+
+[[nodiscard]] constexpr bool AppearanceFragmentShapeValid(
+    const AppearanceFragmentPacket& packet) {
+  const std::size_t expected_chunks =
+      AppearanceChunkCount(packet.total_bytes);
+  return packet.total_bytes > 0 &&
+         packet.total_bytes <= kMaximumAppearanceBytes &&
+         expected_chunks > 0 &&
+         packet.chunk_count == expected_chunks &&
+         packet.chunk_index < packet.chunk_count &&
+         packet.chunk_bytes ==
+             AppearanceChunkByteCount(
+                 packet.total_bytes, packet.chunk_index);
+}
+
 // Sequence numbers use the standard half-range rule. Subtraction is
 // intentionally unsigned so rollover from UINT32_MAX to zero remains a
 // forward step; the signed interpretation is only used after that defined
