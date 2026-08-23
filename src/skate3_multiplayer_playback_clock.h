@@ -14,11 +14,26 @@ class PresentationClock {
  public:
   std::int64_t Advance(std::int64_t local_time_us,
                        std::int64_t ideal_sender_time_us) {
+    return AdvanceBounded(
+        local_time_us, ideal_sender_time_us,
+        std::numeric_limits<std::int64_t>::max());
+  }
+
+  // Advances the presentation cursor without allowing a receiver scheduling
+  // stall to run it beyond the newest interval that can actually be
+  // interpolated. The upper bound must itself be monotonic; an older packet
+  // can never rewind a pose that was already displayed.
+  std::int64_t AdvanceBounded(
+      std::int64_t local_time_us,
+      std::int64_t ideal_sender_time_us,
+      std::int64_t maximum_sender_time_us) {
     if (!valid_) {
       valid_ = true;
       last_local_time_us_ = local_time_us;
-      target_sender_time_us_ = ideal_sender_time_us;
-      ideal_error_us_ = 0;
+      target_sender_time_us_ =
+          std::min(ideal_sender_time_us, maximum_sender_time_us);
+      ideal_error_us_ = SaturatingSubtract(
+          ideal_sender_time_us, target_sender_time_us_);
       applied_correction_us_ = 0;
       return target_sender_time_us_;
     }
@@ -44,11 +59,15 @@ class PresentationClock {
             desired_correction_us,
             -maximum_correction_us,
             maximum_correction_us);
-    target_sender_time_us_ =
+    const std::int64_t proposed_target_us =
+        SaturatingAdd(
+            natural_target_us, applied_correction_us_);
+    const std::int64_t monotonic_maximum_us =
         std::max(
-            target_sender_time_us_,
-            SaturatingAdd(
-                natural_target_us, applied_correction_us_));
+            target_sender_time_us_, maximum_sender_time_us);
+    target_sender_time_us_ = std::clamp(
+        proposed_target_us, target_sender_time_us_,
+        monotonic_maximum_us);
     ideal_error_us_ =
         SaturatingSubtract(
             ideal_sender_time_us, target_sender_time_us_);

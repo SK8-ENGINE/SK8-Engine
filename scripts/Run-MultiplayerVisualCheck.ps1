@@ -553,6 +553,8 @@ try {
         )
         clients = $Clients
         transport = 'localhost-udp'
+        localhost_topology = 'direct-mesh'
+        guest_fps_cap = 120
         quality_preset = 2
         root_rate_hz = 60
         animation_rate_hz = 60
@@ -643,9 +645,10 @@ $runRoot
 Clients: 5
 Transport: localhost UDP
 Quality: Balanced, 60 Hz root, 60 Hz animation, 50 ms minimum interpolation
-Change under test: fresh render inputs wake presentation immediately, and
-four-sample affine curves keep visible-vertex velocity continuous across
-60 Hz packet boundaries
+Change under test: buffered playback cannot advance beyond an interpolatable
+skeletal frame after a scheduler stall; all five localhost clients exchange
+realtime packets directly instead of routing every stream through client 1;
+the five-instance test has an explicit 120 fps per-client resource budget
 Diagnostics: representative visible body vertices are sampled before send and
 after remote reconstruction, alongside skeleton, network, and GPU timing
 
@@ -676,6 +679,10 @@ Telemetry acceptance checked by the agent afterward:
 - Every client reports actual visible-body vertex motion for local capture and
   final remote reconstruction, using the same skinning equation as rendering.
 - GPU upload-ring pressure remains healthy with zero unsafe region reuse.
+- Client 1 reports direct-mesh topology and zero relayed realtime packets.
+- Playback cursor margins remain inside the animation buffer, with no
+  hundreds-of-milliseconds held-latest runs after a scheduler stall.
+- Render cadence respects the explicit five-instance 120 fps test budget.
 - Existing packet, timing, interpolation, sequence-gap, stall, and resource
   checks remain active.
 - Delivery-policy errors, socket failures, and multiplayer errors stay zero.
@@ -886,6 +893,7 @@ separately, then ask the agent to analyze this run directory.
             '--skate3_multiplayer_local_visuals=true',
             '--skate3_multiplayer_local_lane_spacing=0',
             "--skate3_multiplayer_local_client=$role",
+            "--skate3_multiplayer_local_peer_count=$Clients",
             '--skate3_multiplayer_quality_preset=2',
             '--skate3_multiplayer_local_send_rate=60',
             '--skate3_multiplayer_local_animation_rate=60',
@@ -899,6 +907,8 @@ separately, then ask the agent to analyze this run directory.
             '--skate3_multiplayer_incremental_appearance_install=true',
             '--skate3_multiplayer_appearance_install_ops_per_frame=4',
             '--skate3_multiplayer_appearance_install_budget_ms=4',
+            '--skate3_guest_fps_cap_auto=false',
+            '--skate3_guest_fps_cap=120',
             '--skate3_native_render_scene_perf_log=true',
             '--skate3_native_render_scene_perf_interval=300',
             (

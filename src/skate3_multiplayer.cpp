@@ -2,6 +2,7 @@
 
 #include "skate3_multiplayer_interpolation.h"
 #include "skate3_multiplayer_lifecycle.h"
+#include "skate3_multiplayer_local_topology.h"
 #include "skate3_multiplayer_motion_trace.h"
 #include "skate3_multiplayer_outbound_scheduler.h"
 #include "skate3_multiplayer_playback_clock.h"
@@ -88,6 +89,13 @@ REXCVAR_DEFINE_INT32(
     skate3_multiplayer_local_client, 0, "Skate 3",
     "Local multiplayer client slot: 0 disables networking, 1 binds the first "
     "localhost port as logical host, and 2-100 join that host.")
+    .range(0, 100)
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+REXCVAR_DEFINE_INT32(
+    skate3_multiplayer_local_peer_count, 0, "Skate 3",
+    "Known localhost participant count. Values 2-100 enable direct peer "
+    "fan-out so realtime animation does not make role 1 relay every "
+    "fragment. Zero preserves dynamic host-relay discovery.")
     .range(0, 100)
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 REXCVAR_DEFINE_INT32(
@@ -1000,6 +1008,24 @@ bool SameTrackLayout(const QuantizedAnimationTrack& left,
          left.bone_count == right.bone_count &&
          left.encoding == right.encoding &&
          left.words.size() == right.words.size();
+}
+
+bool SameQuantizedAnimationFrame(
+    const QuantizedAnimationFrame& left,
+    const QuantizedAnimationFrame& right) {
+  if (left.sequence != right.sequence ||
+      left.tracks.size() != right.tracks.size()) {
+    return false;
+  }
+  for (std::size_t index = 0; index < left.tracks.size(); ++index) {
+    const QuantizedAnimationTrack& left_track = left.tracks[index];
+    const QuantizedAnimationTrack& right_track = right.tracks[index];
+    if (!SameTrackLayout(left_track, right_track) ||
+        left_track.words != right_track.words) {
+      return false;
+    }
+  }
+  return true;
 }
 
 bool BuildAnimationFrameWords(
@@ -1938,6 +1964,11 @@ class Runtime {
     if (using_steam_) {
       participant_count =
           std::max(participant_count, steam_id_by_role_.size());
+    } else if (const std::uint32_t configured_count =
+                   ConfiguredLocalPeerCount();
+               configured_count != 0) {
+      participant_count =
+          std::max<std::size_t>(participant_count, configured_count);
     } else if (bound_role_ == 1) {
       participant_count =
           std::max(participant_count, host_peers_.size() + 1);
@@ -2827,7 +2858,10 @@ class Runtime {
         socket_, SIO_UDP_CONNRESET, &report_udp_resets,
         sizeof(report_udp_resets), nullptr, 0, &ioctl_bytes, nullptr,
         nullptr);
-    const int socket_buffer_bytes = 4 * 1024 * 1024;
+    // A protocol-v11 high-fidelity pose consists of several MTU-safe
+    // fragments. Give localhost enough queue depth to survive a short
+    // scheduler pause without discarding complete animation frames.
+    const int socket_buffer_bytes = 16 * 1024 * 1024;
     setsockopt(
         socket_, SOL_SOCKET, SO_RCVBUF,
         reinterpret_cast<const char*>(&socket_buffer_bytes),
@@ -2873,7 +2907,10 @@ class Runtime {
     REXLOG_INFO(
         "multiplayer: transport policy root=unreliable "
         "animation=unreliable control=reliable "
-        "appearance=reliable transport=localhost");
+        "appearance=reliable transport=localhost topology={}",
+        topology::DirectLocalMeshEnabled(ConfiguredLocalPeerCount())
+            ? "direct-mesh"
+            : "host-relay");
     return true;
 #else
     (void)role;
@@ -3041,7 +3078,11 @@ class Runtime {
       const ControlPacket& packet, int received_bytes) {
     bool can_relay_to_target = false;
 #if defined(_WIN32)
-    can_relay_to_target = !using_steam_ && bound_role_ == 1;
+    can_relay_to_target =
+        !using_steam_ &&
+        topology::HostRelaysLocalPackets(
+            static_cast<std::uint32_t>(bound_role_),
+            ConfiguredLocalPeerCount());
 #endif
     if (received_bytes != static_cast<int>(sizeof(packet)) ||
         !ControlPacketShapeValid(packet) ||
@@ -3083,11 +3124,18 @@ class Runtime {
 #if defined(_WIN32)
       steam_transport = using_steam_;
 #endif
+      const bool direct_local_mesh =
+          !steam_transport &&
+          topology::DirectLocalMeshEnabled(
+              ConfiguredLocalPeerCount());
       const std::uint32_t fanout_target =
-          lifecycle::LocalhostAppearanceFanoutRestartTarget(
-              static_cast<std::uint32_t>(bound_role_),
-              steam_transport, packet.sender_role, changed,
-              local_appearance_identity_);
+          direct_local_mesh && changed &&
+                  local_appearance_identity_ != 0
+              ? packet.sender_role
+              : lifecycle::LocalhostAppearanceFanoutRestartTarget(
+                    static_cast<std::uint32_t>(bound_role_),
+                    steam_transport, packet.sender_role, changed,
+                    local_appearance_identity_);
       if (fanout_target != 0) {
         outbound_appearance_[fanout_target].Reset(
             local_appearance_identity_);
@@ -3829,6 +3877,15 @@ class Runtime {
     return target;
   }
 
+  std::uint32_t ConfiguredLocalPeerCount() const {
+    if (using_steam_) {
+      return 0;
+    }
+    return static_cast<std::uint32_t>(
+        std::clamp(
+            REXCVAR_GET(skate3_multiplayer_local_peer_count), 0, 100));
+  }
+
   std::vector<std::pair<std::uint32_t, PacketEndpoint>>
   LocalPacketTargets(std::uint32_t source_role, bool animation,
                      Clock::time_point now) {
@@ -3855,6 +3912,36 @@ class Runtime {
         target.steam = true;
         target.steam_id = steam_id;
         targets.push_back({target_role, target});
+      }
+      return targets;
+    }
+    const std::uint32_t configured_count =
+        ConfiguredLocalPeerCount();
+    if (topology::DirectLocalMeshEnabled(configured_count)) {
+      for (std::uint32_t target_role = 1;
+           target_role <= configured_count; ++target_role) {
+        if (!topology::DirectLocalTarget(
+                static_cast<std::uint32_t>(bound_role_), target_role,
+                configured_count) ||
+            target_role == source_role) {
+          continue;
+        }
+        const bool detailed =
+            IsHighDetailCached(source_role, target_role);
+        if (animation && !detailed) {
+          ++telemetry_.relevance_drops;
+          continue;
+        }
+        if (!animation && !detailed &&
+            !AllowFarPresence(source_role, target_role, now)) {
+          ++telemetry_.relevance_drops;
+          continue;
+        }
+        targets.push_back(
+            {target_role,
+             LoopbackTarget(
+                 bound_base_port_ +
+                 static_cast<std::int32_t>(target_role) - 1)});
       }
       return targets;
     }
@@ -3903,6 +3990,16 @@ class Runtime {
       }
       target.steam = true;
       target.steam_id = found->second;
+    } else if (topology::DirectLocalMeshEnabled(
+                   ConfiguredLocalPeerCount())) {
+      if (!topology::DirectLocalTarget(
+              static_cast<std::uint32_t>(bound_role_), target_role,
+              ConfiguredLocalPeerCount())) {
+        return false;
+      }
+      target = LoopbackTarget(
+          bound_base_port_ +
+          static_cast<std::int32_t>(target_role) - 1);
     } else if (bound_role_ == 1) {
       const auto found = host_peers_.find(target_role);
       if (found == host_peers_.end()) {
@@ -3929,6 +4026,15 @@ class Runtime {
           roles.push_back(role);
         }
       }
+    } else if (const std::uint32_t configured_count =
+                   ConfiguredLocalPeerCount();
+               topology::DirectLocalMeshEnabled(configured_count)) {
+      roles.reserve(configured_count - 1);
+      for (std::uint32_t role = 1; role <= configured_count; ++role) {
+        if (role != static_cast<std::uint32_t>(bound_role_)) {
+          roles.push_back(role);
+        }
+      }
     } else if (bound_role_ == 1) {
       roles.reserve(host_peers_.size());
       for (const auto& [role, peer] : host_peers_) {
@@ -3951,7 +4057,10 @@ class Runtime {
   }
 
   void RelayControlPacket(const ControlPacket& packet) {
-    if (bound_role_ != 1 || using_steam_) {
+    if (using_steam_ ||
+        !topology::HostRelaysLocalPackets(
+            static_cast<std::uint32_t>(bound_role_),
+            ConfiguredLocalPeerCount())) {
       return;
     }
     (void)SendControlPacketToRole(
@@ -4092,7 +4201,9 @@ class Runtime {
       OutboundTrafficClass traffic_class,
       bool high_detail_only, Clock::time_point now) {
 #if defined(_WIN32)
-    if (bound_role_ != 1) {
+    if (!topology::HostRelaysLocalPackets(
+            static_cast<std::uint32_t>(bound_role_),
+            ConfiguredLocalPeerCount())) {
       return;
     }
     // Steam peers exchange authenticated packets directly. Relaying the
@@ -4185,6 +4296,15 @@ class Runtime {
     if (targets.empty()) {
       return;
     }
+    struct PreparedAnimationFrame {
+      std::vector<const AnimationTrack*> tracks;
+      QuantizedAnimationFrame base_keyframe;
+      QuantizedAnimationFrame proposed_keyframe;
+      std::vector<std::uint16_t> words;
+      bool valid = false;
+    };
+    std::vector<PreparedAnimationFrame> prepared_frames;
+    prepared_frames.reserve(2);
     bool complete = true;
     for (const auto& [target_role, target] : targets) {
       std::vector<const AnimationTrack*> target_tracks = tracks;
@@ -4212,17 +4332,32 @@ class Runtime {
               target_tracks.end());
         }
       }
-      QuantizedAnimationFrame proposed_keyframe =
+      QuantizedAnimationFrame& target_keyframe =
           outbound_animation_keyframes_[target_role];
-      std::vector<std::uint16_t> frame_words;
-      if (!BuildAnimationFrameWords(
-              pose, target_tracks, sequence, proposed_keyframe,
-              frame_words)) {
+      auto prepared = std::find_if(
+          prepared_frames.begin(), prepared_frames.end(),
+          [&](const PreparedAnimationFrame& candidate) {
+            return candidate.tracks == target_tracks &&
+                   SameQuantizedAnimationFrame(
+                       candidate.base_keyframe, target_keyframe);
+          });
+      if (prepared == prepared_frames.end()) {
+        PreparedAnimationFrame frame;
+        frame.tracks = target_tracks;
+        frame.base_keyframe = target_keyframe;
+        frame.proposed_keyframe = target_keyframe;
+        frame.valid = BuildAnimationFrameWords(
+            pose, target_tracks, sequence, frame.proposed_keyframe,
+            frame.words);
+        prepared_frames.push_back(std::move(frame));
+        prepared = std::prev(prepared_frames.end());
+      }
+      if (!prepared->valid) {
         complete = false;
         continue;
       }
       const std::size_t fragment_count =
-          (frame_words.size() +
+          (prepared->words.size() +
                kAnimationFragmentWords - 1) /
           kAnimationFragmentWords;
       bool target_complete = true;
@@ -4250,13 +4385,13 @@ class Runtime {
         packet.word_offset =
             static_cast<std::uint16_t>(offset);
         packet.total_words =
-            static_cast<std::uint16_t>(frame_words.size());
+            static_cast<std::uint16_t>(prepared->words.size());
         packet.word_count = static_cast<std::uint16_t>(
             std::min<std::size_t>(
                 kAnimationFragmentWords,
-                frame_words.size() - offset));
+                prepared->words.size() - offset));
         std::copy_n(
-            frame_words.begin() + offset,
+            prepared->words.begin() + offset,
             packet.word_count, packet.words);
         packet.byte_count = static_cast<std::uint16_t>(
             AnimationFragmentByteCount(packet.word_count));
@@ -4267,7 +4402,7 @@ class Runtime {
       }
       if (target_complete) {
         outbound_animation_keyframes_[target_role] =
-            std::move(proposed_keyframe);
+            prepared->proposed_keyframe;
       }
       complete &= target_complete;
     }
@@ -4311,11 +4446,10 @@ class Runtime {
       if (state.identity != appearance.identity) {
         state.Reset(appearance.identity);
       }
-      // Steam sends one independent reliable appearance stream to each
-      // final recipient, so that recipient's receipt completes its stream.
-      // A localhost non-host sends one stream to role 1 for fan-out; the
-      // host's receipt does not prove every downstream UDP recipient has
-      // every chunk, so preserve the existing three complete passes there.
+      // Steam and a configured localhost mesh keep independent appearance
+      // state per final recipient. Dynamic localhost discovery may still
+      // route through role 1. UDP receipt does not prove that every chunk
+      // arrived, so localhost preserves three complete passes either way.
       if (using_steam_ &&
           AppearanceTransferReceived(
               state.acknowledged_state)) {
@@ -4462,9 +4596,24 @@ class Runtime {
     const std::int64_t ideal_sender_time_us =
         local_now_us - peer.clock_offset_us -
         interpolation_delay_us;
+    std::int64_t maximum_sender_time_us =
+        std::numeric_limits<std::int64_t>::max();
+    if (peer.animation_samples.size() >= 2) {
+      // Keep one complete future skeletal sample available. If this process
+      // is descheduled while localhost/Steam packets accumulate, wall time
+      // can advance hundreds of milliseconds beyond the receive queue. An
+      // unconstrained cursor then holds every remote on its latest frame
+      // until networking catches up. Capping at the penultimate complete
+      // frame resumes inside an interpolatable interval instead.
+      maximum_sender_time_us = static_cast<std::int64_t>(
+          peer.animation_samples[
+              peer.animation_samples.size() - 2]
+              .pose.sender_time_us);
+    }
     const std::int64_t target_sender_time_us =
-        peer.presentation_clock.Advance(
-            local_now_us, ideal_sender_time_us);
+        peer.presentation_clock.AdvanceBounded(
+            local_now_us, ideal_sender_time_us,
+            maximum_sender_time_us);
     if (target_sender_time_us <=
         static_cast<std::int64_t>(
             peer.samples.front().sender_time_us)) {

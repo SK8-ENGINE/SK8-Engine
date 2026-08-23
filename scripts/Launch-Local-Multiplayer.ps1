@@ -185,7 +185,8 @@ foreach ($role in 1..$Clients) {
         '--skate3_input_lab=false',
         '--skate3_multiplayer_local_visuals=true',
         '--skate3_multiplayer_local_lane_spacing=0',
-        "--skate3_multiplayer_local_client=$role"
+        "--skate3_multiplayer_local_client=$role",
+        "--skate3_multiplayer_local_peer_count=$Clients"
     )
     if (-not $NoDirectBoot) {
         $arguments += '--skate3_direct_boot=true'

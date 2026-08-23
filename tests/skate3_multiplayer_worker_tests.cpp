@@ -1,4 +1,5 @@
 #include "skate3_multiplayer_interpolation.h"
+#include "skate3_multiplayer_local_topology.h"
 #include "skate3_multiplayer_worker.h"
 #include "skate3_multiplayer_latest_request.h"
 #include "skate3_multiplayer_motion_trace.h"
@@ -506,6 +507,58 @@ void TestPresentationClockSmoothsSteppedSceneAnchors() {
   }
 }
 
+void TestPresentationClockStaysInsideBufferedTimelineAfterStall() {
+  using skate3::multiplayer::playback::PresentationClock;
+
+  PresentationClock clock;
+  Expect(
+      clock.AdvanceBounded(1000000, 900000, 950000) == 900000,
+      "bounded presentation clock did not initialize at ideal time");
+
+  // The process is descheduled for 600 ms, but the receive queue has only
+  // reached sender time 980 ms. Resuming at wall time would otherwise jump
+  // the cursor to 1.5 s and hold the latest pose for more than half a second.
+  const std::int64_t recovered =
+      clock.AdvanceBounded(1600000, 1500000, 980000);
+  Expect(recovered == 980000,
+         "presentation clock escaped the buffered interpolation range");
+  Expect(recovered >= 900000,
+         "stall recovery rewound the visible presentation cursor");
+
+  const std::int64_t following =
+      clock.AdvanceBounded(1604000, 1504000, 984000);
+  Expect(following == 984000,
+         "presentation clock did not advance with the recovering buffer");
+}
+
+void TestConfiguredLocalMeshTargetsEveryPeerWithoutRelay() {
+  using skate3::multiplayer::topology::DirectLocalMeshEnabled;
+  using skate3::multiplayer::topology::DirectLocalTarget;
+  using skate3::multiplayer::topology::HostRelaysLocalPackets;
+
+  Expect(!DirectLocalMeshEnabled(0),
+         "dynamic localhost discovery unexpectedly enabled direct mesh");
+  Expect(HostRelaysLocalPackets(1, 0),
+         "dynamic localhost host stopped relaying packets");
+  Expect(DirectLocalMeshEnabled(5),
+         "five-client localhost session did not enable direct mesh");
+  Expect(!HostRelaysLocalPackets(1, 5),
+         "direct localhost mesh still relays through role one");
+  for (std::uint32_t local_role = 1; local_role <= 5; ++local_role) {
+    std::uint32_t targets = 0;
+    for (std::uint32_t target_role = 1; target_role <= 5;
+         ++target_role) {
+      if (DirectLocalTarget(local_role, target_role, 5)) {
+        ++targets;
+      }
+    }
+    Expect(targets == 4,
+           "direct localhost mesh did not target every other peer");
+    Expect(!DirectLocalTarget(local_role, local_role, 5),
+           "direct localhost mesh looped a packet back to its sender");
+  }
+}
+
 void TestBoundedPoseCurvePreservesSamplesAndLimits() {
   using skate3::multiplayer::pose_curve::
       InterpolateBoundedHermite;
@@ -681,6 +734,8 @@ int main() {
   TestPresentationClockRejectsCursorJumps();
   TestPresentationClockConvergesWithoutRewinding();
   TestPresentationClockSmoothsSteppedSceneAnchors();
+  TestPresentationClockStaysInsideBufferedTimelineAfterStall();
+  TestConfiguredLocalMeshTargetsEveryPeerWithoutRelay();
   TestBoundedPoseCurvePreservesSamplesAndLimits();
   TestPoseCurveHasContinuousSegmentVelocity();
   TestAffineCurveHasContinuousVisibleVertexVelocity();
