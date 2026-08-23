@@ -275,10 +275,29 @@ struct PrimitivePairContact {
   std::array<skate::world::Vec3, 3> vertices{};
 };
 
+struct PendingNativeTriangleTest {
+  bool valid = false;
+  std::uint32_t result = 0;
+  skate::world::Vec3 line_start{};
+  skate::world::Vec3 line_end{};
+};
+
+struct NativeLineContact {
+  std::uint64_t count = 0;
+  float player_distance = 0.0f;
+  skate::world::Vec3 line_start{};
+  skate::world::Vec3 line_end{};
+  std::array<skate::world::Vec3, 3> vertices{};
+};
+
 constexpr std::size_t kMaximumPrimitivePairContacts = 64;
+constexpr std::size_t kMaximumNativeLineContacts = 128;
 thread_local PendingPrimitivePair g_pending_primitive_pair;
+thread_local PendingNativeTriangleTest g_pending_native_triangle_test;
 std::mutex g_primitive_pair_contact_mutex;
 std::vector<PrimitivePairContact> g_primitive_pair_contacts;
+std::mutex g_native_line_contact_mutex;
+std::vector<NativeLineContact> g_native_line_contacts;
 
 bool IsGuestDataAddress(std::uint32_t address) {
   return address >= 0x00010000u && address < 0x80000000u;
@@ -1361,6 +1380,30 @@ void ObserveNativeClusterDecode(
                                        std::memory_order_relaxed);
 }
 
+void PrepareNativeTriangleTest(std::uint32_t result,
+                               std::uint32_t line_start,
+                               std::uint32_t line_end,
+                               std::uint8_t* base) noexcept {
+  g_pending_native_triangle_test = {};
+  if (!base || !IsGuestDataAddress(result) ||
+      !IsGuestDataAddress(line_start) ||
+      !IsGuestDataAddress(line_start + 8) ||
+      !IsGuestDataAddress(line_end) ||
+      !IsGuestDataAddress(line_end + 8)) {
+    return;
+  }
+  const skate::world::Vec3 start =
+      LoadVec3(base, line_start);
+  const skate::world::Vec3 end = LoadVec3(base, line_end);
+  if (!IsFiniteVec3(start) || !IsFiniteVec3(end)) {
+    return;
+  }
+  g_pending_native_triangle_test.valid = true;
+  g_pending_native_triangle_test.result = result;
+  g_pending_native_triangle_test.line_start = start;
+  g_pending_native_triangle_test.line_end = end;
+}
+
 void ObserveNativeTriangleResult(std::uint32_t hit,
                                  std::uint32_t decoded_triangle,
                                  std::uint8_t* base) noexcept {
@@ -1437,6 +1480,42 @@ void ObserveNativeTriangleResult(std::uint32_t hit,
               std::memory_order_release);
           g_native_near_triangle_hits.fetch_add(
               1, std::memory_order_relaxed);
+
+          const PendingNativeTriangleTest query =
+              g_pending_native_triangle_test;
+          NativeLineContact sample{
+              .count = 1,
+              .player_distance = std::sqrt(distance_squared),
+              .line_start = query.line_start,
+              .line_end = query.line_end,
+              .vertices = vertices,
+          };
+          std::scoped_lock lock(g_native_line_contact_mutex);
+          bool merged = false;
+          for (NativeLineContact& contact :
+               g_native_line_contacts) {
+            if (!SameContactTriangle(contact.vertices,
+                                     sample.vertices)) {
+              continue;
+            }
+            ++contact.count;
+            if (sample.player_distance <
+                contact.player_distance) {
+              contact.player_distance =
+                  sample.player_distance;
+              if (query.valid) {
+                contact.line_start = sample.line_start;
+                contact.line_end = sample.line_end;
+              }
+            }
+            merged = true;
+            break;
+          }
+          if (!merged &&
+              g_native_line_contacts.size() <
+                  kMaximumNativeLineContacts) {
+            g_native_line_contacts.push_back(sample);
+          }
         }
       }
     }
@@ -1875,6 +1954,20 @@ void ObservePlayerCollisionTelemetry(const float world_position[3],
         }
         return left.player_distance < right.player_distance;
       });
+  std::vector<NativeLineContact> line_contacts;
+  {
+    std::scoped_lock lock(g_native_line_contact_mutex);
+    line_contacts.swap(g_native_line_contacts);
+  }
+  std::sort(
+      line_contacts.begin(), line_contacts.end(),
+      [](const NativeLineContact& left,
+         const NativeLineContact& right) {
+        if (left.count != right.count) {
+          return left.count > right.count;
+        }
+        return left.player_distance < right.player_distance;
+      });
   for (std::size_t vertex = 0; vertex < 3; ++vertex) {
     near_vertices[vertex * 3] -= translation[0];
     near_vertices[vertex * 3 + 1] -= translation[1];
@@ -1912,6 +2005,61 @@ void ObservePlayerCollisionTelemetry(const float world_position[3],
         near_vertices[0], near_vertices[1], near_vertices[2],
         near_vertices[3], near_vertices[4], near_vertices[5],
         near_vertices[6], near_vertices[7], near_vertices[8]);
+  }
+  constexpr std::size_t kMaximumLoggedLineContacts = 16;
+  const std::size_t logged_line_contact_count = std::min(
+      line_contacts.size(), kMaximumLoggedLineContacts);
+  for (std::size_t index = 0;
+       index < logged_line_contact_count; ++index) {
+    const NativeLineContact& contact = line_contacts[index];
+    const skate::world::Vec3 normal = skate::world::Normalize(
+        skate::world::Cross(
+            contact.vertices[1] - contact.vertices[0],
+            contact.vertices[2] - contact.vertices[0]));
+    const skate::world::Vec3 segment =
+        contact.line_end - contact.line_start;
+    const float segment_length =
+        std::sqrt(skate::world::LengthSquared(segment));
+    const skate::world::Vec3 direction =
+        segment_length > 1.0e-6f
+            ? segment * (1.0f / segment_length)
+            : skate::world::Vec3{};
+    std::array<skate::world::Vec3, 3> local_vertices =
+        contact.vertices;
+    for (skate::world::Vec3& vertex : local_vertices) {
+      vertex.x -= translation[0];
+      vertex.y -= translation[1];
+      vertex.z -= translation[2];
+    }
+    skate::world::Vec3 local_line_start = contact.line_start;
+    skate::world::Vec3 local_line_end = contact.line_end;
+    local_line_start.x -= translation[0];
+    local_line_start.y -= translation[1];
+    local_line_start.z -= translation[2];
+    local_line_end.x -= translation[0];
+    local_line_end.y -= translation[1];
+    local_line_end.z -= translation[2];
+    REXLOG_INFO(
+        "native-collision-line-contact: frame={} rank={} count={} "
+        "player_distance={:.4f} segment_length={:.4f} "
+        "direction=({:.4f},{:.4f},{:.4f}) "
+        "normal=({:.4f},{:.4f},{:.4f}) "
+        "local_line=(({:.4f},{:.4f},{:.4f}),"
+        "({:.4f},{:.4f},{:.4f})) "
+        "local_triangle=(({:.4f},{:.4f},{:.4f}),"
+        "({:.4f},{:.4f},{:.4f}),({:.4f},{:.4f},{:.4f}))",
+        frame, index + 1, contact.count,
+        contact.player_distance, segment_length,
+        direction.x, direction.y, direction.z,
+        normal.x, normal.y, normal.z,
+        local_line_start.x, local_line_start.y,
+        local_line_start.z, local_line_end.x,
+        local_line_end.y, local_line_end.z,
+        local_vertices[0].x, local_vertices[0].y,
+        local_vertices[0].z, local_vertices[1].x,
+        local_vertices[1].y, local_vertices[1].z,
+        local_vertices[2].x, local_vertices[2].y,
+        local_vertices[2].z);
   }
   constexpr std::size_t kMaximumLoggedPhysicalContacts = 12;
   const std::size_t logged_contact_count = std::min(

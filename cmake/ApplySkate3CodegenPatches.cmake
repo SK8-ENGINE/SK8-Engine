@@ -486,6 +486,48 @@ if(NOT _native_collision_query_observer_patched)
     "Failed to apply owned native-collision query observers")
 endif()
 
+set(_native_collision_triangle_context_patched FALSE)
+foreach(_file IN LISTS _skate3_recomp_files)
+  file(READ "${_file}" _contents)
+  if(_contents MATCHES "PrepareNativeTriangleTest")
+    set(_native_collision_triangle_context_patched TRUE)
+    break()
+  endif()
+  if(NOT _contents MATCHES "DEFINE_REX_FUNC\\(sub_827719B8\\)")
+    continue()
+  endif()
+
+  foreach(_return_address IN ITEMS 82771B58 82771EAC)
+    set(_triangle_context_site
+"	ctx.lr = 0x${_return_address};
+	sub_82ADF5D8(ctx, base);")
+    set(_triangle_context_patch
+"	skate3::native_collision::PrepareNativeTriangleTest(
+		ctx.r3.u32, ctx.r4.u32, ctx.r5.u32, base);
+	ctx.lr = 0x${_return_address};
+	sub_82ADF5D8(ctx, base);")
+    string(REPLACE "${_triangle_context_site}"
+      "${_triangle_context_patch}" _patched "${_contents}")
+    if(_patched STREQUAL _contents)
+      message(FATAL_ERROR
+        "Failed to patch native triangle test context at "
+        "${_return_address}")
+    endif()
+    set(_contents "${_patched}")
+  endforeach()
+
+  _skate3_add_include(_contents "skate3_native_collision.h")
+  file(WRITE "${_file}" "${_contents}")
+  set(_native_collision_triangle_context_patched TRUE)
+  message(STATUS
+    "Applied native triangle-test context observers in ${_file}")
+  break()
+endforeach()
+if(NOT _native_collision_triangle_context_patched)
+  message(FATAL_ERROR
+    "Failed to apply native triangle-test context observers")
+endif()
+
 set(_native_collision_primitive_pair_observer_patched FALSE)
 foreach(_file IN LISTS _skate3_recomp_files)
   file(READ "${_file}" _contents)

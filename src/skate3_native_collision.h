@@ -25,6 +25,10 @@ void ObserveNativeLineQueryBatch(std::uint32_t batch,
 void PrepareNativeBoxQueryBatch(std::uint32_t batch,
                                 std::uint8_t* base) noexcept;
 void ObserveNativeClusterDecode(std::uint32_t triangle_count) noexcept;
+void PrepareNativeTriangleTest(std::uint32_t result,
+                               std::uint32_t line_start,
+                               std::uint32_t line_end,
+                               std::uint8_t* base) noexcept;
 void ObserveNativeTriangleResult(std::uint32_t hit,
                                  std::uint32_t decoded_triangle,
                                  std::uint8_t* base) noexcept;

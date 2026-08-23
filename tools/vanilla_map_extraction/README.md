@@ -163,6 +163,12 @@ hit by native line or box queries within four metres of the player. Those
 queries are useful for support/raycast diagnosis but are not evidence that a
 triangle physically stopped the skater.
 
+`native-collision-line-contact` aggregates every unique successful triangle
+test in that path over each telemetry interval. It reports hit frequency,
+triangle normal/vertices, and the representative query segment so a blocking
+side face cannot be hidden by whichever support triangle happened to run
+last.
+
 `native-collision-physical-contact` separately brackets RenderWare
 `PrimitivePairIntersect` and records only successful triangle-volume
 intersections within four metres of the player. It reports the exact triangle,
