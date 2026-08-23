@@ -9014,41 +9014,22 @@ void BuildFrameScene(uint8_t* base, const SubmitRecord* records, size_t count) {
         continue;  // a live copy published; nothing to rescue
       }
       // Dropped-garment gate: when the owning entity's garment table no
-      // longer claims this VB (the game removed the cloth model; its
-      // pieces render skinned with the body now), the cached rigid state
-      // is a ghost: the retained drape tracks the live character as a
-      // floating garment. Suppress instead of rescuing.
+      // longer claims this VB, the cached rigid state is a ghost. Do not
+      // reinterpret its already CPU-deformed vertices with the owning
+      // instance palette: that is the exact double-deformation which turns
+      // a shirt into a long ribbon. It also exposes a transient bad binding
+      // to multiplayer appearance capture. Suppress this retired VB and
+      // wait for the replacement garment's own live capture.
       if (skate3::native_entity::RopaGarmentDropped(base, cand->ctx,
                                                     cand->vb_obj)) {
-        // The game renders a dropped garment SKINNED with the body (its
-        // sim-inactive path); the cached rigid state is a ghost. Resolve
-        // with the owning instance's own live packed palette; when that
-        // fails, suppress (invisible beats floating).
-        float rows[96 * 12];
-        const uint32_t n = skate3::native_entity::ServeInstancePalette(
-            base, cand->ctx, rows, 96);
         static std::atomic<uint32_t> s_drop_logged{0};
         const uint32_t ln =
             s_drop_logged.fetch_add(1, std::memory_order_relaxed);
         if (ln < 16 || (ln & 511u) == 0) {
           REXLOG_INFO(
-              "native-scene: ropa rescue DROPPED-GARMENT {} mesh={:08X} "
-              "ctx={:08X} vb={:08X} rows={} (n={})",
-              n ? "resolved SKINNED" : "suppressed", cand->mesh, cand->ctx,
-              cand->vb_obj, n, ln);
-        }
-        if (n != 0) {
-          scene.items.push_back(*cand);
-          DrawItem& resolved = scene.items.back();
-          resolved.skinned = true;
-          resolved.bones.assign(rows, rows + size_t(n) * 12);
-          resolved.pending = false;
-          resolved.caster_bank = false;
-          resolved.dbg_src = 4;
-          if (resolved.ctx != 0) {
-            dyn_slot.try_emplace(resolved.ctx, scene.items.size() - 1);
-          }
-          g_ropa_rescued.fetch_add(1, std::memory_order_relaxed);
+              "native-scene: ropa rescue DROPPED-GARMENT suppressed "
+              "mesh={:08X} ctx={:08X} vb={:08X} (n={})",
+              cand->mesh, cand->ctx, cand->vb_obj, ln);
         }
         continue;
       }

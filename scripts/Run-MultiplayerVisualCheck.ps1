@@ -626,17 +626,25 @@ Visual scenario:
    rotate separately, collapse, or disappear.
 3. On both other clients, inspect that female skater from the front, sides,
    and rear while she performs the same movement. Her hair should be present,
-   attached to her head, correctly cut out at the strands, and stable.
-4. Keep all players near each other and continue for about 2 minutes. Also
-   glance over the other outfits and boards to catch any unrelated regression.
-5. Watch remote players for pose fidelity, smooth motion, snapping, freezing,
+   attached to her head, normally opaque through the body of the hair,
+   correctly cut out only at the strand edges, and stable.
+4. Focus on the male skater whose T-shirt disappeared in the previous run.
+   Check the shirt on his own client and both remote views from initial spawn
+   through skating, turning, ollies, and one bail. Do not change outfits.
+5. Keep all players near each other and continue for about 2 minutes. The
+   T-shirt must not disappear, stretch, trail away from the body, or extend
+   toward the session marker. Also glance over the other outfits and boards.
+6. Watch remote players for pose fidelity, smooth motion, snapping, freezing,
    attachment drift, duplicated pieces, stale pieces, flicker, or teal-proxy
    fallback while they are nearby.
-5. Confirm the focused local client keeps normal input response and has no
+7. Confirm the focused local client keeps normal input response and has no
    obvious new frame stalls. Then close all clients.
 
 Success:
 - Existing outfits and boards stay complete and correct.
+- The female hair is firmly attached and has normal opacity remotely, with
+  transparency limited to the authored strand cutout.
+- The male T-shirt remains present and body-shaped locally and remotely.
 - Each remote outfit replaces its temporary proxy promptly, without an
   obvious client-FPS freeze at the installation moment.
 - Nearby remote animation remains smooth through the bail and detached board.
@@ -646,6 +654,8 @@ Success:
 Failure:
 - Any nearby player becomes teal, disappears, freezes, mixes outfit pieces,
   loses its board/attachments, or causes a noticeable new frame stall.
+- The female hair remains broadly see-through, or the male T-shirt disappears,
+  stretches, trails away, or reaches toward the session marker.
 
 Outfit/profile behavior:
 - Each numbered client keeps its own writable profile under

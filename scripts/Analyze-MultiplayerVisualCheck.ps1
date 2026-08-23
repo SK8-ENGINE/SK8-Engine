@@ -168,6 +168,27 @@ foreach ($client in $clientDirectories) {
             ) |
             ForEach-Object { $_.Line }
     )
+    $appearanceNormalizationLines = @(
+        $lines |
+            Select-String -Pattern (
+                'multiplayer-appearance-normalize:'
+            ) |
+            ForEach-Object { $_.Line }
+    )
+    $droppedGarmentLines = @(
+        $lines |
+            Select-String -Pattern (
+                'ropa rescue DROPPED-GARMENT suppressed'
+            ) |
+            ForEach-Object { $_.Line }
+    )
+    $ropaBindingLines = @(
+        $lines |
+            Select-String -Pattern (
+                'multiplayer-appearance-binding: .*kind=ropa'
+            ) |
+            ForEach-Object { $_.Line }
+    )
     $lastRate = if ($rateLines.Count -gt 0) {
         $rateLines[-1]
     } else {
@@ -214,6 +235,18 @@ foreach ($client in $clientDirectories) {
     $summary.Add(
         'remote_hair_route_events=' +
         $hairRouteLines.Count
+    )
+    $summary.Add(
+        'remote_appearance_fade_normalizations=' +
+        $appearanceNormalizationLines.Count
+    )
+    $summary.Add(
+        'local_dropped_garment_suppressions=' +
+        $droppedGarmentLines.Count
+    )
+    $summary.Add(
+        'remote_ropa_binding_events=' +
+        $ropaBindingLines.Count
     )
     $summary.Add(
         'local_ropa_hair_rigid_guards=' +
@@ -443,6 +476,30 @@ foreach ($client in $clientDirectories) {
         'last_remote_hair_route=' +
         $(if ($hairRouteLines.Count -gt 0) {
             $hairRouteLines[-1]
+        } else {
+            'missing'
+        })
+    )
+    $summary.Add(
+        'last_remote_appearance_normalization=' +
+        $(if ($appearanceNormalizationLines.Count -gt 0) {
+            $appearanceNormalizationLines[-1]
+        } else {
+            'missing'
+        })
+    )
+    $summary.Add(
+        'last_local_dropped_garment_suppression=' +
+        $(if ($droppedGarmentLines.Count -gt 0) {
+            $droppedGarmentLines[-1]
+        } else {
+            'missing'
+        })
+    )
+    $summary.Add(
+        'last_remote_ropa_binding=' +
+        $(if ($ropaBindingLines.Count -gt 0) {
+            $ropaBindingLines[-1]
         } else {
             'missing'
         })

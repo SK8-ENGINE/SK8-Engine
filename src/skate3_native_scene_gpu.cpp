@@ -9376,6 +9376,32 @@ enum NetworkAppearancePieceFlags : uint32_t {
   kNetworkPieceShadow = 1u << 4,
 };
 
+void NormalizeRemoteAppearanceTransientRows(
+    DrawItem& item, uint32_t role) {
+  const float captured_fade = item.char_rows[14 * 4 + 0];
+  const float captured_hair_scale =
+      item.char_rows[13 * 4 + 3];
+  // Appearance rows are transmitted once, but these fields are per-frame
+  // entity fades. Capturing a player during map-entry fade permanently made
+  // ordinary pieces invisible and multiplied hair strand coverage by values
+  // such as 0.275. Remote-player visibility is managed by multiplayer
+  // relevance; retain the coverage texture, but never retain the sender's
+  // transient fade in the appearance recipe.
+  item.char_rows[14 * 4 + 0] = 1.0f;
+  if (item.hair) {
+    item.char_rows[13 * 4 + 3] = 1.0f;
+  }
+  if (captured_fade < 0.999f ||
+      (item.hair && captured_hair_scale < 0.999f)) {
+    REXLOG_INFO(
+        "multiplayer-appearance-normalize: role={} mesh={:08X} "
+        "kind={} fade={:.3f}->1.000 hair_scale={:.3f}->{}",
+        role, item.mesh, item.hair ? "hair" : "character",
+        captured_fade, captured_hair_scale,
+        item.hair ? "1.000" : "unchanged");
+  }
+}
+
 template <typename T>
 void AppendAppearancePod(
     std::vector<uint8_t>& bytes, const T& value) {
@@ -9596,7 +9622,14 @@ multiplayer::AppearanceBlob BuildLocalRecipeAppearanceBlob(
     if (match != nullptr) {
       used_meshes.insert(match->mesh);
       ++matched_pieces;
-      binding.wire.track_key = match->mesh;
+      // Recipe geometry is an immutable bind mesh. A ROPA source track
+      // describes a dynamic CPU-cloth VB and may temporarily switch modes
+      // when the garment table changes. Applying that exact track to the
+      // bind mesh double-deforms it into a long ribbon. Leave ROPA recipe
+      // pieces on the canonical body track and use the recipe mesh's own
+      // palette mapping. Detached-board tracks remain exact.
+      binding.wire.track_key =
+          match->ropa ? 0u : match->mesh;
       binding.wire.flags =
           (match->skinned ? kNetworkPieceSkinned : 0u) |
           (match->hair ? kNetworkPieceHair : 0u) |
@@ -9608,13 +9641,18 @@ multiplayer::AppearanceBlob BuildLocalRecipeAppearanceBlob(
           match->char_rows, 72, binding.wire.char_rows);
       std::copy_n(
           match->tint, 4, binding.wire.tint);
-      native_palette::CanonicalRigSample rig;
-      if (native_palette::LookupCanonicalRig(
-              match->ctx, match->mesh, rig) &&
-          !rig.palette_to_canonical.empty()) {
-        binding.remap.assign(
-            rig.palette_to_canonical.begin(),
-            rig.palette_to_canonical.end());
+      if (match->ropa) {
+        binding.remap =
+            recipe_piece.mesh.palette_to_canonical;
+      } else {
+        native_palette::CanonicalRigSample rig;
+        if (native_palette::LookupCanonicalRig(
+                match->ctx, match->mesh, rig) &&
+            !rig.palette_to_canonical.empty()) {
+          binding.remap.assign(
+              rig.palette_to_canonical.begin(),
+              rig.palette_to_canonical.end());
+        }
       }
     } else {
       const auto cached_binding =
@@ -10967,6 +11005,16 @@ bool InstallRemoteRecipeAppearance(
         metadata.wire.char_rows, 72, item.char_rows);
     std::copy_n(
         metadata.wire.tint, 4, item.tint);
+    NormalizeRemoteAppearanceTransientRows(item, role);
+    if ((metadata.wire.flags & kNetworkPieceRopa) != 0) {
+      REXLOG_INFO(
+          "multiplayer-appearance-binding: role={} kind=ropa "
+          "model={:016X} rx_mesh={:08X} route={} track={:08X} "
+          "remap={}",
+          role, source.model_id, item.mesh,
+          metadata.wire.track_key == 0 ? "canonical" : "exact",
+          metadata.wire.track_key, metadata.remap.size());
+    }
     item.world[0] = 1.0f;
     item.world[5] = 1.0f;
     item.world[10] = 1.0f;
@@ -11353,6 +11401,7 @@ bool InstallRemoteAppearance(
         size_t(piece.bone_count) * 12);
     std::copy_n(piece.char_rows, 72, item.char_rows);
     std::copy_n(piece.tint, 4, item.tint);
+    NormalizeRemoteAppearanceTransientRows(item, role);
     std::copy_n(piece.world, 16, item.world);
     std::copy_n(piece.bbox_min, 3, item.bbox_min);
     std::copy_n(piece.bbox_max, 3, item.bbox_max);
