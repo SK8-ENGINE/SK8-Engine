@@ -554,6 +554,7 @@ try {
         clients = $Clients
         transport = 'localhost-udp'
         localhost_topology = 'direct-mesh'
+        fidelity_contract = 'full-for-2-to-5-players'
         guest_fps_cap = 120
         quality_preset = 2
         root_rate_hz = 60
@@ -648,7 +649,9 @@ Quality: Balanced, 60 Hz root, 60 Hz animation, 50 ms minimum interpolation
 Change under test: buffered playback cannot advance beyond an interpolatable
 skeletal frame after a scheduler stall; all five localhost clients exchange
 realtime packets directly instead of routing every stream through client 1;
-the five-instance test has an explicit 120 fps per-client resource budget
+all five peers receive full root, skeletal, board, clothing, and attachment
+streams regardless of distance; the five-instance test has an explicit
+120 fps per-client resource budget
 Diagnostics: representative visible body vertices are sampled before send and
 after remote reconstruction, alongside skeleton, network, and GPU timing
 
@@ -680,6 +683,8 @@ Telemetry acceptance checked by the agent afterward:
   final remote reconstruction, using the same skinning equation as rendering.
 - GPU upload-ring pressure remains healthy with zero unsafe region reuse.
 - Client 1 reports direct-mesh topology and zero relayed realtime packets.
+- Every active sender/receiver pair reports the full-fidelity contract,
+  continuous pose/animation traffic, and zero relevance drops.
 - Playback cursor margins remain inside the animation buffer, with no
   hundreds-of-milliseconds held-latest runs after a scheduler stall.
 - Render cadence respects the explicit five-instance 120 fps test budget.

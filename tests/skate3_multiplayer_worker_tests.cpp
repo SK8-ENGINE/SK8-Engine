@@ -534,6 +534,7 @@ void TestPresentationClockStaysInsideBufferedTimelineAfterStall() {
 void TestConfiguredLocalMeshTargetsEveryPeerWithoutRelay() {
   using skate3::multiplayer::topology::DirectLocalMeshEnabled;
   using skate3::multiplayer::topology::DirectLocalTarget;
+  using skate3::multiplayer::topology::FullFidelitySession;
   using skate3::multiplayer::topology::HostRelaysLocalPackets;
 
   Expect(!DirectLocalMeshEnabled(0),
@@ -544,6 +545,10 @@ void TestConfiguredLocalMeshTargetsEveryPeerWithoutRelay() {
          "five-client localhost session did not enable direct mesh");
   Expect(!HostRelaysLocalPackets(1, 5),
          "direct localhost mesh still relays through role one");
+  Expect(FullFidelitySession(2) && FullFidelitySession(5),
+         "small localhost session did not require full fidelity");
+  Expect(!FullFidelitySession(1) && !FullFidelitySession(6),
+         "full-fidelity contract escaped the two-to-five player range");
   for (std::uint32_t local_role = 1; local_role <= 5; ++local_role) {
     std::uint32_t targets = 0;
     for (std::uint32_t target_role = 1; target_role <= 5;

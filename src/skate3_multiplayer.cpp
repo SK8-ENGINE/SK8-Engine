@@ -229,6 +229,7 @@ struct NetworkTuning {
   float attachment_radius = 35.0f;
   std::int32_t relevance_players = 12;
   std::int32_t far_presence_rate = 2;
+  bool full_fidelity = false;
   NetworkQualityPreset selected = NetworkQualityPreset::kBalanced;
   NetworkQualityPreset effective = NetworkQualityPreset::kBalanced;
 };
@@ -241,7 +242,7 @@ NetworkTuning ResolveNetworkTuning(std::size_t participant_count) {
           static_cast<std::int32_t>(NetworkQualityPreset::kCustom)));
   NetworkQualityPreset effective = selected;
   if (effective == NetworkQualityPreset::kAuto) {
-    if (participant_count <= 4) {
+    if (participant_count <= 5) {
       effective = NetworkQualityPreset::kHighFidelity;
     } else if (participant_count <= 12) {
       effective = NetworkQualityPreset::kBalanced;
@@ -251,6 +252,9 @@ NetworkTuning ResolveNetworkTuning(std::size_t participant_count) {
   }
 
   NetworkTuning tuning;
+  tuning.full_fidelity =
+      topology::FullFidelitySession(
+          static_cast<std::uint32_t>(participant_count));
   tuning.selected = selected;
   tuning.effective = effective;
   switch (effective) {
@@ -2355,7 +2359,8 @@ class Runtime {
         telemetry_.animation_present_held_oldest,
         last_rate_snapshot_.animation_present_held_oldest);
     REXLOG_INFO(
-        "multiplayer-net: role={} peers={} visible={} quality={} interp={} "
+        "multiplayer-net: role={} peers={} visible={} quality={} fidelity={} "
+        "interp={} "
         "clock=network-capture "
         "rates={}/{}Hz tx={:.1f}KiB/s "
         "rx={:.1f}KiB/s tx={:.1f}pps rx={:.1f}pps anim={:.1f}/{:.1f}fps "
@@ -2371,6 +2376,7 @@ class Runtime {
         "timing={:.1f}ms jitter={:.1f}ms buffered={}",
         bound_role_, telemetry_.known_peers,
         telemetry_.visible_players, NetworkQualityName(network_tuning_),
+        network_tuning_.full_fidelity ? "full" : "adaptive",
         REXCVAR_GET(skate3_multiplayer_animation_interpolation_mode),
         network_tuning_.pose_rate, network_tuning_.animation_rate,
         tx_kib, rx_kib, tx_pps, rx_pps,
@@ -3679,6 +3685,9 @@ class Runtime {
   bool IsHighDetail(std::uint32_t source_role,
                     std::uint32_t target_role) const {
 #if defined(_WIN32)
+    if (network_tuning_.full_fidelity) {
+      return true;
+    }
     const float* source_position = nullptr;
     const float* target_position = nullptr;
     if (!PositionForRole(source_role, source_position) ||
@@ -4319,7 +4328,8 @@ class Runtime {
             local_position_[2] - target_position[2];
         const float attachment_radius =
             network_tuning_.attachment_radius;
-        if (dx * dx + dy * dy + dz * dz >
+        if (!network_tuning_.full_fidelity &&
+            dx * dx + dy * dy + dz * dz >
             attachment_radius * attachment_radius) {
           target_tracks.erase(
               std::remove_if(

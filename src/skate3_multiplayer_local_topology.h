@@ -8,6 +8,10 @@ inline bool DirectLocalMeshEnabled(std::uint32_t participant_count) {
   return participant_count >= 2 && participant_count <= 100;
 }
 
+inline bool FullFidelitySession(std::uint32_t participant_count) {
+  return participant_count >= 2 && participant_count <= 5;
+}
+
 inline bool DirectLocalTarget(std::uint32_t local_role,
                               std::uint32_t target_role,
                               std::uint32_t participant_count) {
