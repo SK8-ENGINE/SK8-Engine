@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <array>
 #include <charconv>
+#include <chrono>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -237,6 +238,7 @@ struct Runtime {
   bool pending_allow_late_join = true;
   std::uint64_t pending_password_hash = 0;
   bool bootstrap_attempted = false;
+  std::chrono::steady_clock::time_point initialize_retry_after{};
 };
 
 std::mutex g_mutex;
@@ -1002,6 +1004,15 @@ bool InitializeLocked(Runtime& runtime) {
   if (runtime.state.initialized) {
     return true;
   }
+  const auto now = std::chrono::steady_clock::now();
+  if (now < runtime.initialize_retry_after) {
+    return false;
+  }
+  // SteamAPI_InitFlat can take tens of milliseconds when AppID 480 is
+  // unavailable (for example while another local test client owns it).
+  // Cache a failed attempt instead of retrying that synchronous call every
+  // render frame.
+  runtime.initialize_retry_after = now + std::chrono::seconds(2);
   if (runtime.api.module == nullptr && !LoadApi(runtime)) {
     return false;
   }
@@ -1082,6 +1093,9 @@ bool InitializeLocked(Runtime& runtime) {
   runtime.state.persona_name =
       persona == nullptr ? std::string{} : std::string(persona);
   runtime.state.initialized = runtime.state.local_steam_id != 0;
+  if (runtime.state.initialized) {
+    runtime.initialize_retry_after = {};
+  }
   runtime.state.status = runtime.state.initialized
                              ? "Steam connected as " +
                                    runtime.state.persona_name +
@@ -1114,6 +1128,11 @@ void TickLocked(Runtime& runtime) {
 bool Initialize() {
   std::scoped_lock lock(g_mutex);
   return InitializeLocked(g_runtime);
+}
+
+bool IsInitialized() {
+  std::scoped_lock lock(g_mutex);
+  return g_runtime.state.initialized;
 }
 
 void Tick() {

@@ -50,6 +50,7 @@ struct Message {
 };
 
 bool Initialize();
+bool IsInitialized();
 void Tick();
 State GetState();
 void RefreshLobbies();

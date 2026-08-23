@@ -1812,14 +1812,20 @@ class Runtime {
             const AnimationPose* local_animation,
             const AppearanceBlob* local_appearance,
             std::vector<RemotePlayer>& out_remotes) {
-    steam::Tick();
-    std::scoped_lock lock(mutex_);
     // The explicit local-visuals mode is the isolated multi-process test
     // transport. Steam can still be active in both portable clients under
     // the same account, which would otherwise make them choose the same
     // lobby role and never exercise localhost replication.
     const bool local_test_active =
         REXCVAR_GET(skate3_multiplayer_local_visuals);
+    // Session UI owns Steam initialization. The renderer only pumps an
+    // already initialized backend; otherwise a failed SteamAPI_InitFlat call
+    // can synchronously stall every rendered frame even in solo/local-test
+    // play.
+    if (!local_test_active && steam::IsInitialized()) {
+      steam::Tick();
+    }
+    std::scoped_lock lock(mutex_);
     const bool steam_active =
         steam::TransportActive() && !local_test_active;
     const bool enabled =
