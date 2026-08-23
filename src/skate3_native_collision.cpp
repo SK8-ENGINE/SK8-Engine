@@ -151,6 +151,17 @@ std::atomic<std::uint64_t> g_native_decoded_triangles{0};
 std::atomic<std::uint64_t> g_native_triangle_tests{0};
 std::atomic<std::uint64_t> g_native_triangle_hits{0};
 std::atomic<std::uint32_t> g_native_last_hit_mesh{0};
+std::atomic<bool> g_native_player_position_valid{false};
+std::array<std::atomic<std::uint32_t>, 3>
+    g_native_player_position_bits{};
+std::atomic<std::uint64_t> g_native_near_triangle_hits{0};
+std::array<std::atomic<std::uint32_t>, 9>
+    g_native_near_triangle_vertex_bits{};
+std::array<std::atomic<std::uint32_t>, 3>
+    g_native_near_triangle_normal_bits{};
+std::atomic<std::uint32_t> g_native_near_triangle_distance_bits{
+    std::bit_cast<std::uint32_t>(
+        std::numeric_limits<float>::infinity())};
 std::atomic<KinematicState> g_kinematic_state{
     KinematicState::Disabled};
 std::atomic<std::uint32_t> g_kinematic_mesh_address{0};
@@ -288,6 +299,79 @@ void StoreU32(std::uint8_t* base,
 
 void StoreF32(std::uint8_t* base, std::uint32_t address, float value) {
   StoreU32(base, address, std::bit_cast<std::uint32_t>(value));
+}
+
+float LoadF32(std::uint8_t* base, std::uint32_t address) {
+  return std::bit_cast<float>(LoadU32(base, address));
+}
+
+skate::world::Vec3 LoadVec3(std::uint8_t* base,
+                            std::uint32_t address) {
+  return {
+      LoadF32(base, address),
+      LoadF32(base, address + 4),
+      LoadF32(base, address + 8),
+  };
+}
+
+bool IsFiniteVec3(skate::world::Vec3 value) {
+  return std::isfinite(value.x) && std::isfinite(value.y) &&
+         std::isfinite(value.z);
+}
+
+float PointTriangleDistanceSquared(skate::world::Vec3 point,
+                                   skate::world::Vec3 a,
+                                   skate::world::Vec3 b,
+                                   skate::world::Vec3 c) {
+  const skate::world::Vec3 ab = b - a;
+  const skate::world::Vec3 ac = c - a;
+  const skate::world::Vec3 ap = point - a;
+  const float d1 = skate::world::Dot(ab, ap);
+  const float d2 = skate::world::Dot(ac, ap);
+  if (d1 <= 0.0f && d2 <= 0.0f) {
+    return skate::world::LengthSquared(ap);
+  }
+
+  const skate::world::Vec3 bp = point - b;
+  const float d3 = skate::world::Dot(ab, bp);
+  const float d4 = skate::world::Dot(ac, bp);
+  if (d3 >= 0.0f && d4 <= d3) {
+    return skate::world::LengthSquared(bp);
+  }
+
+  const float vc = d1 * d4 - d3 * d2;
+  if (vc <= 0.0f && d1 >= 0.0f && d3 <= 0.0f) {
+    const float v = d1 / (d1 - d3);
+    return skate::world::LengthSquared(point - (a + ab * v));
+  }
+
+  const skate::world::Vec3 cp = point - c;
+  const float d5 = skate::world::Dot(ab, cp);
+  const float d6 = skate::world::Dot(ac, cp);
+  if (d6 >= 0.0f && d5 <= d6) {
+    return skate::world::LengthSquared(cp);
+  }
+
+  const float vb = d5 * d2 - d1 * d6;
+  if (vb <= 0.0f && d2 >= 0.0f && d6 <= 0.0f) {
+    const float w = d2 / (d2 - d6);
+    return skate::world::LengthSquared(point - (a + ac * w));
+  }
+
+  const float va = d3 * d6 - d5 * d4;
+  if (va <= 0.0f && d4 - d3 >= 0.0f &&
+      d5 - d6 >= 0.0f) {
+    const skate::world::Vec3 bc = c - b;
+    const float w =
+        (d4 - d3) / ((d4 - d3) + (d5 - d6));
+    return skate::world::LengthSquared(point - (b + bc * w));
+  }
+
+  const float inverse = 1.0f / (va + vb + vc);
+  const float v = vb * inverse;
+  const float w = vc * inverse;
+  return skate::world::LengthSquared(
+      point - (a + ab * v + ac * w));
 }
 
 const char* StateName(State state) {
@@ -1200,7 +1284,9 @@ void ObserveNativeClusterDecode(
                                        std::memory_order_relaxed);
 }
 
-void ObserveNativeTriangleResult(std::uint32_t hit) noexcept {
+void ObserveNativeTriangleResult(std::uint32_t hit,
+                                 std::uint32_t decoded_triangle,
+                                 std::uint8_t* base) noexcept {
   if (!g_querying_owned_mesh) {
     return;
   }
@@ -1213,6 +1299,70 @@ void ObserveNativeTriangleResult(std::uint32_t hit) noexcept {
     g_native_triangle_hits.fetch_add(1, std::memory_order_relaxed);
     g_native_last_hit_mesh.store(g_querying_mesh,
                                  std::memory_order_relaxed);
+    if (g_native_player_position_valid.load(
+            std::memory_order_acquire) &&
+        decoded_triangle >= 136 &&
+        IsGuestDataAddress(decoded_triangle - 136)) {
+      const skate::world::Vec3 a =
+          LoadVec3(base, decoded_triangle - 104);
+      const skate::world::Vec3 b =
+          LoadVec3(base, decoded_triangle - 88);
+      const skate::world::Vec3 c =
+          LoadVec3(base, decoded_triangle - 136);
+      const skate::world::Vec3 player{
+          std::bit_cast<float>(
+              g_native_player_position_bits[0].load(
+                  std::memory_order_relaxed)),
+          std::bit_cast<float>(
+              g_native_player_position_bits[1].load(
+                  std::memory_order_relaxed)),
+          std::bit_cast<float>(
+              g_native_player_position_bits[2].load(
+                  std::memory_order_relaxed)),
+      };
+      if (IsFiniteVec3(a) && IsFiniteVec3(b) &&
+          IsFiniteVec3(c) && IsFiniteVec3(player)) {
+        const float distance_squared =
+            PointTriangleDistanceSquared(player, a, b, c);
+        constexpr float kNearPlayerDistance = 4.0f;
+        if (std::isfinite(distance_squared) &&
+            distance_squared <=
+                kNearPlayerDistance * kNearPlayerDistance) {
+          const std::array<skate::world::Vec3, 3> vertices{
+              a, b, c};
+          for (std::size_t vertex = 0; vertex < vertices.size();
+               ++vertex) {
+            g_native_near_triangle_vertex_bits[vertex * 3].store(
+                std::bit_cast<std::uint32_t>(vertices[vertex].x),
+                std::memory_order_relaxed);
+            g_native_near_triangle_vertex_bits[vertex * 3 + 1].store(
+                std::bit_cast<std::uint32_t>(vertices[vertex].y),
+                std::memory_order_relaxed);
+            g_native_near_triangle_vertex_bits[vertex * 3 + 2].store(
+                std::bit_cast<std::uint32_t>(vertices[vertex].z),
+                std::memory_order_relaxed);
+          }
+          const skate::world::Vec3 normal =
+              skate::world::Normalize(
+                  skate::world::Cross(b - a, c - a));
+          g_native_near_triangle_normal_bits[0].store(
+              std::bit_cast<std::uint32_t>(normal.x),
+              std::memory_order_relaxed);
+          g_native_near_triangle_normal_bits[1].store(
+              std::bit_cast<std::uint32_t>(normal.y),
+              std::memory_order_relaxed);
+          g_native_near_triangle_normal_bits[2].store(
+              std::bit_cast<std::uint32_t>(normal.z),
+              std::memory_order_relaxed);
+          g_native_near_triangle_distance_bits.store(
+              std::bit_cast<std::uint32_t>(
+                  std::sqrt(distance_squared)),
+              std::memory_order_release);
+          g_native_near_triangle_hits.fetch_add(
+              1, std::memory_order_relaxed);
+        }
+      }
+    }
     if (g_querying_kinematic_mesh) {
       g_kinematic_triangle_hits.fetch_add(1,
                                           std::memory_order_relaxed);
@@ -1431,6 +1581,13 @@ void ObservePlayerCollisionTelemetry(const float world_position[3],
       !std::isfinite(local[2])) {
     return;
   }
+  for (std::size_t axis = 0; axis < 3; ++axis) {
+    g_native_player_position_bits[axis].store(
+        std::bit_cast<std::uint32_t>(world_position[axis]),
+        std::memory_order_relaxed);
+  }
+  g_native_player_position_valid.store(true,
+                                       std::memory_order_release);
 
   thread_local std::uint64_t previous_frame = 0;
   thread_local std::uint64_t previous_hits = 0;
@@ -1474,6 +1631,33 @@ void ObservePlayerCollisionTelemetry(const float world_position[3],
       mechanics_sandbox::map::QueryGround(local, 0.75f, 192.0f, ground);
   const float ground_delta =
       ground_hit ? local[1] - ground.point[1] : 0.0f;
+  const std::uint64_t near_hits =
+      g_native_near_triangle_hits.exchange(
+          0, std::memory_order_relaxed);
+  std::array<float, 9> near_vertices{};
+  for (std::size_t component = 0;
+       component < near_vertices.size(); ++component) {
+    near_vertices[component] =
+        std::bit_cast<float>(
+            g_native_near_triangle_vertex_bits[component].load(
+                std::memory_order_relaxed));
+  }
+  std::array<float, 3> near_normal{};
+  for (std::size_t axis = 0; axis < near_normal.size(); ++axis) {
+    near_normal[axis] =
+        std::bit_cast<float>(
+            g_native_near_triangle_normal_bits[axis].load(
+                std::memory_order_relaxed));
+  }
+  const float near_distance =
+      std::bit_cast<float>(
+          g_native_near_triangle_distance_bits.load(
+              std::memory_order_acquire));
+  for (std::size_t vertex = 0; vertex < 3; ++vertex) {
+    near_vertices[vertex * 3] -= translation[0];
+    near_vertices[vertex * 3 + 1] -= translation[1];
+    near_vertices[vertex * 3 + 2] -= translation[2];
+  }
   REXLOG_INFO(
       "native-collision-telemetry: frame={} local=({:.3f},{:.3f},{:.3f}) "
       "move={:.3f} package_support={} support_y={:.3f} "
@@ -1489,6 +1673,18 @@ void ObservePlayerCollisionTelemetry(const float world_position[3],
       g_live_collection_count.load(std::memory_order_acquire),
       g_suppressed_retail_volumes.load(std::memory_order_relaxed),
       g_reintroduced_retail_removed.load(std::memory_order_relaxed));
+  if (near_hits != 0) {
+    REXLOG_INFO(
+        "native-collision-contact: frame={} near_hits={} "
+        "distance={:.4f} normal=({:.4f},{:.4f},{:.4f}) "
+        "local_triangle=(({:.4f},{:.4f},{:.4f}),"
+        "({:.4f},{:.4f},{:.4f}),({:.4f},{:.4f},{:.4f}))",
+        frame, near_hits, near_distance,
+        near_normal[0], near_normal[1], near_normal[2],
+        near_vertices[0], near_vertices[1], near_vertices[2],
+        near_vertices[3], near_vertices[4], near_vertices[5],
+        near_vertices[6], near_vertices[7], near_vertices[8]);
+  }
 
   previous_frame = frame;
   previous_hits = hits;

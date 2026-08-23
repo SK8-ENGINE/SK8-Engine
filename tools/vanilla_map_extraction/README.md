@@ -145,6 +145,24 @@ three unusual palm maps. Specular, lightmap, decal, detail, macro-overlay,
 environment, noise, and secondary-normal behavior still needs semantic
 reconstruction before claiming 1:1 visual parity.
 
+### Point-level collision diagnosis
+
+`tools/inspect_university_point.py` compares package collision and render
+triangles around any local telemetry coordinate and maps collision triangles
+back to their original retail `cSim` asset. It also decodes the material's
+runtime RenderWare surface channels, keeping package object IDs distinct from
+retail packed surface values.
+
+```powershell
+python .\tools\vanilla_map_extraction\tools\inspect_university_point.py `
+  --point 255.25 74.34 -625.60 --radius 4
+```
+
+The game-side `native-collision-contact` telemetry records the exact decoded
+triangle hit by native line or box queries within four metres of the player.
+This is read-only instrumentation: it does not filter triangles or alter
+contacts.
+
 ## User-run University visual check
 
 From the root of the dedicated University worktree, run:

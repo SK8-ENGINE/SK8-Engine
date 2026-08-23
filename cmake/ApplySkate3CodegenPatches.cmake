@@ -363,8 +363,20 @@ set(_native_collision_query_observer_patched FALSE)
 foreach(_file IN LISTS _skate3_recomp_files)
   file(READ "${_file}" _contents)
   if(_contents MATCHES
-      "ObserveNativeTriangleResult\\(ctx\\.r3\\.u32\\)")
+      "ctx\\.r31\\.u32, base\\)")
     set(_native_collision_query_observer_patched TRUE)
+    break()
+  endif()
+  if(_contents MATCHES
+      "ObserveNativeTriangleResult\\(ctx\\.r3\\.u32\\)")
+    string(REPLACE
+      "ObserveNativeTriangleResult(ctx.r3.u32);"
+      "ObserveNativeTriangleResult(ctx.r3.u32, ctx.r31.u32, base);"
+      _contents "${_contents}")
+    file(WRITE "${_file}" "${_contents}")
+    set(_native_collision_query_observer_patched TRUE)
+    message(STATUS
+      "Upgraded owned native-collision contact observers in ${_file}")
     break()
   endif()
   if(NOT _contents MATCHES "DEFINE_REX_FUNC\\(sub_827719B8\\)")
@@ -451,7 +463,8 @@ foreach(_file IN LISTS _skate3_recomp_files)
     set(_triangle_patch
 "	ctx.lr = 0x${_return_address};
 	sub_82ADF5D8(ctx, base);
-	skate3::native_collision::ObserveNativeTriangleResult(ctx.r3.u32);")
+	skate3::native_collision::ObserveNativeTriangleResult(
+		ctx.r3.u32, ctx.r31.u32, base);")
     string(REPLACE "${_triangle_site}" "${_triangle_patch}"
       _patched "${_contents}")
     if(_patched STREQUAL _contents)

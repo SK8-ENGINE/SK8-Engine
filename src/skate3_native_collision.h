@@ -25,7 +25,9 @@ void ObserveNativeLineQueryBatch(std::uint32_t batch,
 void PrepareNativeBoxQueryBatch(std::uint32_t batch,
                                 std::uint8_t* base) noexcept;
 void ObserveNativeClusterDecode(std::uint32_t triangle_count) noexcept;
-void ObserveNativeTriangleResult(std::uint32_t hit) noexcept;
+void ObserveNativeTriangleResult(std::uint32_t hit,
+                                 std::uint32_t decoded_triangle,
+                                 std::uint8_t* base) noexcept;
 
 // Emits bounded, position-aware collision telemetry from the verified local
 // board seam. It compares the player against the package collision world and
