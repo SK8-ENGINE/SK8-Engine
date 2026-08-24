@@ -19,6 +19,8 @@ class UniversityLauncherContractTests(unittest.TestCase):
         self.assertNotIn("'--fullscreen=false'", source)
         self.assertNotIn("--window_width=1280", source)
         self.assertNotIn("--window_height=720", source)
+        self.assertNotIn("--draw_resolution_scale", source)
+        self.assertNotIn("--resolution_scale", source)
 
 
 if __name__ == "__main__":

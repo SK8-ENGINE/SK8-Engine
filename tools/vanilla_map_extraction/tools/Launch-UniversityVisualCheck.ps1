@@ -89,8 +89,9 @@ try {
         # Do not force a window size here; that previously capped this visual
         # check at 1280x720 regardless of the user's display.
         '--fullscreen=true',
-        '--draw_resolution_scale_x=1',
-        '--draw_resolution_scale_y=1',
+        # Resolution scale intentionally comes from the user's saved
+        # %APPDATA%\skate3\settings.toml. Do not silently replace their
+        # selected high-resolution render scale with the old 1x diagnostic.
         '--skate3_direct_boot=true',
         '--skate3_mechanics_sandbox=true',
         '--skate3_mechanics_sandbox_visual_map=true',
