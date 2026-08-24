@@ -8,6 +8,7 @@ import struct
 
 import bpy
 from mathutils import Vector
+import numpy
 
 
 EXPECTED_MODE_COUNTS = {0: 6389, 1: 2118, 2: 39}
@@ -22,6 +23,12 @@ EXPECTED_SOURCE_LIGHTMAP_REFERENCES = 8_522
 EXPECTED_LIGHTMAPPED_OBJECTS = 8_489
 EXPECTED_LIGHTMAP_TEXTURES = 1_270
 EXPECTED_LIGHTMAP_EXCLUSIONS = 33
+EXPECTED_RETAIL_WORLD_FRAMES = 3_121
+RETAIL_WORLD_FRAME_ATTRIBUTES = (
+    ("skate3_retail_normal", "FLOAT_VECTOR", "vector", 3),
+    ("skate3_retail_binormal", "FLOAT_VECTOR", "vector", 3),
+    ("skate3_retail_tangent_handedness", "FLOAT", "value", 1),
+)
 REGRESSION_BINDINGS = {
     ("0xF6CC7BFCC2C45F8C", 40): (
         "0x861894DE4209CE82",
@@ -87,6 +94,7 @@ def main() -> int:
     lightmap_texture_ids: set[str] = set()
     lightmap_materials: set[int] = set()
     lightmap_exclusions = 0
+    retail_world_frames = 0
     lookup: dict[tuple[str, int], bpy.types.Object] = {}
     for obj in objects:
         alpha_mode = int(obj.get("skate3_alpha_mode", 0))
@@ -111,6 +119,72 @@ def main() -> int:
                 f"{obj.name!r} lost its retail material definition"
             )
         material = obj.data.materials[0]
+        has_retail_world_frame = bool(
+            obj.get("skate3_retail_world_frame", False)
+        )
+        frame_attributes = []
+        for (
+            attribute_name,
+            data_type,
+            _property_name,
+            _components,
+        ) in RETAIL_WORLD_FRAME_ATTRIBUTES:
+            attribute = obj.data.attributes.get(attribute_name)
+            if has_retail_world_frame:
+                if (
+                    attribute is None
+                    or attribute.domain != "POINT"
+                    or attribute.data_type != data_type
+                    or len(attribute.data) != len(obj.data.vertices)
+                ):
+                    raise RuntimeError(
+                        f"{obj.name!r} has invalid retail world-frame "
+                        f"attribute {attribute_name!r}"
+                    )
+                frame_attributes.append(attribute)
+            elif attribute is not None:
+                raise RuntimeError(
+                    f"{obj.name!r} has unexpected retail world-frame "
+                    f"attribute {attribute_name!r}"
+                )
+        if has_retail_world_frame:
+            decoded = []
+            for attribute, (
+                _attribute_name,
+                _data_type,
+                property_name,
+                components,
+            ) in zip(
+                frame_attributes,
+                RETAIL_WORLD_FRAME_ATTRIBUTES,
+                strict=True,
+            ):
+                values = numpy.empty(
+                    len(attribute.data) * components,
+                    dtype=numpy.float32,
+                )
+                attribute.data.foreach_get(property_name, values)
+                if not numpy.isfinite(values).all():
+                    raise RuntimeError(
+                        f"{obj.name!r} retail world frame is non-finite"
+                    )
+                decoded.append(values.reshape((-1, components)))
+            normal_lengths = numpy.linalg.norm(decoded[0], axis=1)
+            if (
+                normal_lengths.size
+                and (
+                    float(normal_lengths.min()) < 0.999
+                    or float(normal_lengths.max()) > 1.001
+                )
+            ):
+                raise RuntimeError(
+                    f"{obj.name!r} retail normals are not unit length"
+                )
+            if not numpy.all(numpy.abs(decoded[2][:, 0]) > 0.999):
+                raise RuntimeError(
+                    f"{obj.name!r} retail tangent handedness is invalid"
+                )
+            retail_world_frames += 1
         expected_material_texture_id = texture_id or "NO_DIFFUSE"
         if (
             str(material.get("skate3_texture_id", ""))
@@ -258,6 +332,11 @@ def main() -> int:
         raise RuntimeError(
             f"University has {lightmap_exclusions} explicit lightmap "
             f"exclusions, expected {EXPECTED_LIGHTMAP_EXCLUSIONS}"
+        )
+    if retail_world_frames != EXPECTED_RETAIL_WORLD_FRAMES:
+        raise RuntimeError(
+            f"University has {retail_world_frames} exact retail world "
+            f"frames, expected {EXPECTED_RETAIL_WORLD_FRAMES}"
         )
 
     for key, expected in REGRESSION_BINDINGS.items():
@@ -484,6 +563,7 @@ def main() -> int:
                 "lightmap_textures": len(lightmap_texture_ids),
                 "lightmap_materials": len(lightmap_materials),
                 "lightmap_exclusions": lightmap_exclusions,
+                "retail_world_frames": retail_world_frames,
                 "grind_rails": len(grind_objects),
                 "grind_segments": grind_segments,
                 "closed_grind_rails": closed_grinds,

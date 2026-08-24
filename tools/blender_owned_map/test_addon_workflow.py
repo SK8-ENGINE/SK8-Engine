@@ -14,7 +14,7 @@ if str(TOOL_ROOT) not in sys.path:
     sys.path.insert(0, str(TOOL_ROOT))
 
 import owned_world_material_addon as addon
-from analyze_skate import analyze_package
+from analyze_skate import VERTEX_BYTES_V12, analyze_package
 
 
 def require(condition: bool, message: str) -> None:
@@ -70,6 +70,48 @@ def main() -> None:
             bpy.ops.skate_map.create_uv_layers() == {"FINISHED"},
             "UV layer helper failed",
         )
+
+        # Retail imports carry their authored frame as hidden point
+        # attributes. Verify that it takes precedence over Blender tangent
+        # generation while the ordinary TestFloor above still exercises the
+        # custom-map fallback.
+        retail_mesh = bpy.data.meshes.new("RetailFrameMesh")
+        retail_mesh.from_pydata(
+            [(100.0, 0.0, 0.0), (101.0, 0.0, 0.0), (100.0, 1.0, 0.0)],
+            [],
+            [(0, 1, 2)],
+        )
+        retail_mesh.update()
+        retail_mesh.materials.append(material)
+        retail_mesh.uv_layers.new(name="UVMap")
+        retail_mesh.uv_layers.new(name="Lightmap")
+        retail_normal = retail_mesh.attributes.new(
+            addon.exporter.RETAIL_NORMAL_ATTRIBUTE,
+            type="FLOAT_VECTOR",
+            domain="POINT",
+        )
+        retail_normal.data.foreach_set(
+            "vector", (0.0, 0.0, 1.0) * 3
+        )
+        retail_binormal = retail_mesh.attributes.new(
+            addon.exporter.RETAIL_BINORMAL_ATTRIBUTE,
+            type="FLOAT_VECTOR",
+            domain="POINT",
+        )
+        retail_binormal.data.foreach_set(
+            "vector", (0.0, 1.0, 0.0) * 3
+        )
+        retail_handedness = retail_mesh.attributes.new(
+            addon.exporter.RETAIL_HANDEDNESS_ATTRIBUTE,
+            type="FLOAT",
+            domain="POINT",
+        )
+        retail_handedness.data.foreach_set("value", (-1.0,) * 3)
+        retail_frame = bpy.data.objects.new("RetailFrame", retail_mesh)
+        retail_frame["ow_physics_type"] = "PRESENTATION_ONLY"
+        bpy.data.collections[
+            addon.exporter.VISUAL_COLLECTION
+        ].objects.link(retail_frame)
 
         # Old add-on versions could leave imported scale-reference meshes in
         # both export collections. Existing scenes must ignore them without
@@ -281,6 +323,31 @@ def main() -> None:
             "Exported package has the wrong magic",
         )
         analysis = analyze_package(output, include_payloads=True)
+        retail_frame_records = []
+        vertex_bytes = analysis["_vertex_bytes"]
+        for offset in range(
+            0,
+            len(vertex_bytes),
+            VERTEX_BYTES_V12,
+        ):
+            position = struct.unpack_from("<3f", vertex_bytes, offset)
+            if position[0] < 90.0:
+                continue
+            retail_frame_records.append(
+                (
+                    struct.unpack_from("<3f", vertex_bytes, offset + 12),
+                    struct.unpack_from("<4b", vertex_bytes, offset + 52),
+                )
+            )
+        require(
+            retail_frame_records
+            and all(
+                normal == (0.0, 1.0, 0.0)
+                and frame == (0, 0, -127, -127)
+                for normal, frame in retail_frame_records
+            ),
+            "Retail point attributes did not override generated tangents",
+        )
         collision_bytes = analysis["_collision_bytes"]
         native_codes = []
         for offset in range(0, len(collision_bytes), 48):
@@ -296,9 +363,9 @@ def main() -> None:
         local_light_count = counts[-2]
         npc_route_count = counts[-1]
         require(
-            collision_triangle_count == 5,
+            collision_triangle_count == 6,
             "Degenerate or duplicate collision reached the package "
-            f"(got {collision_triangle_count}, expected 5)",
+            f"(got {collision_triangle_count}, expected 6)",
         )
         require(
             local_light_count == 3,

@@ -29,6 +29,17 @@ class DecalUvDecode:
     usage_index: int
 
 
+@dataclass(frozen=True)
+class RetailWorldFrameDecode:
+    normals: numpy.ndarray
+    binormals: numpy.ndarray
+    tangent_handedness: numpy.ndarray
+    lightmap_format_code: int
+    lightmap_offset: int
+    binormal_format_code: int
+    binormal_offset: int
+
+
 def _texture_coordinates(
     attributes: Iterable[VertexAttribute],
 ) -> list[tuple[int, int, VertexAttribute]]:
@@ -186,4 +197,147 @@ def decode_lightmap_uvs(
         format_code=format_code,
         offset=offset,
         usage_index=usage_index,
+    )
+
+
+def decode_retail_world_frame(
+    data: bytes,
+    *,
+    vertex_buffer_offset: int,
+    vertex_count: int,
+    vertex_stride: int,
+    attributes: Iterable[VertexAttribute],
+) -> RetailWorldFrameDecode | None:
+    """Decode the exact static-world normal, binormal, and handedness.
+
+    Skate 3's environment vertex layouts do not store a conventional normal
+    attribute. Their signed SHORT4 secondary TEXCOORD stores the lightmap
+    unwrap in ``xy`` and the normal's ``xy`` in ``zw``. The sign of unwrap
+    ``y`` reconstructs normal ``z``; unwrap ``x`` is the tangent handedness.
+    The usage-6 PACKED11_11_10N attribute is the authored binormal.
+    """
+
+    attributes = tuple(attributes)
+    selected = _secondary_texcoord(attributes)
+    if selected is None:
+        return None
+    lightmap_attribute, _usage_index = selected
+    lightmap_descriptor = bytes(lightmap_attribute.descriptor)
+    lightmap_format_code = int.from_bytes(
+        lightmap_descriptor[4:8], "big"
+    )
+    if (lightmap_format_code & 0x3F) != 26:
+        return None
+
+    binormal_attribute = None
+    for attribute in attributes:
+        descriptor = bytes(attribute.descriptor)
+        if len(descriptor) != 16:
+            raise ValueError("Xenos vertex descriptors must contain 16 bytes")
+        format_code = int.from_bytes(descriptor[4:8], "big")
+        if descriptor[9] == 6 and (format_code & 0x3F) == 16:
+            binormal_attribute = attribute
+            break
+    if binormal_attribute is None:
+        return None
+
+    lightmap_offset = int(lightmap_attribute.offset)
+    binormal_offset = int(binormal_attribute.offset)
+    if (
+        vertex_count < 0
+        or vertex_stride <= 0
+        or lightmap_offset < 0
+        or binormal_offset < 0
+    ):
+        raise ValueError("invalid retail vertex-buffer dimensions")
+    required_end = (
+        vertex_buffer_offset
+        + max(0, vertex_count - 1) * vertex_stride
+        + max(lightmap_offset + 8, binormal_offset + 4)
+    )
+    if required_end > len(data):
+        raise ValueError(
+            "retail world tangent-frame data extends past the RX2 "
+            "vertex buffer"
+        )
+
+    if vertex_count == 0:
+        short4 = numpy.empty((0, 4), dtype=numpy.int16)
+        words = numpy.empty((0,), dtype=numpy.uint32)
+    else:
+        short4 = numpy.ndarray(
+            shape=(vertex_count, 4),
+            dtype=numpy.dtype(">i2"),
+            buffer=data,
+            offset=vertex_buffer_offset + lightmap_offset,
+            strides=(vertex_stride, 2),
+        ).astype(numpy.int32, copy=True)
+        words = numpy.ndarray(
+            shape=(vertex_count,),
+            dtype=numpy.dtype(">u4"),
+            buffer=data,
+            offset=vertex_buffer_offset + binormal_offset,
+            strides=(vertex_stride,),
+        ).astype(numpy.uint32, copy=True)
+
+    normals = numpy.empty((vertex_count, 3), dtype=numpy.float32)
+    normals[:, :2] = short4[:, 2:4].astype(numpy.float32)
+    normals[:, :2] /= numpy.float32(32767.0)
+    normal_z_squared = (
+        1.0
+        - normals[:, 0] * normals[:, 0]
+        - normals[:, 1] * normals[:, 1]
+    )
+    normals[:, 2] = numpy.sqrt(
+        numpy.maximum(normal_z_squared, numpy.float32(0.0))
+    )
+    normals[:, 2] *= numpy.where(
+        short4[:, 1] > 0,
+        numpy.float32(1.0),
+        numpy.float32(-1.0),
+    )
+
+    def signed_component(
+        values: numpy.ndarray, shift: int, bits: int
+    ) -> numpy.ndarray:
+        mask = numpy.uint32((1 << bits) - 1)
+        decoded = ((values >> numpy.uint32(shift)) & mask).astype(
+            numpy.int32
+        )
+        sign_bit = 1 << (bits - 1)
+        decoded[decoded >= sign_bit] -= 1 << bits
+        return decoded
+
+    binormals = numpy.empty((vertex_count, 3), dtype=numpy.float32)
+    binormals[:, 0] = signed_component(words, 0, 11).astype(numpy.float32)
+    binormals[:, 1] = signed_component(words, 11, 11).astype(numpy.float32)
+    binormals[:, 2] = signed_component(words, 22, 10).astype(numpy.float32)
+    binormals[:, 0:2] /= numpy.float32(1023.0)
+    binormals[:, 2] /= numpy.float32(511.0)
+
+    tangent_handedness = numpy.where(
+        short4[:, 0] > 0,
+        numpy.float32(1.0),
+        numpy.float32(-1.0),
+    )
+    if not (
+        numpy.isfinite(normals).all()
+        and numpy.isfinite(binormals).all()
+        and numpy.isfinite(tangent_handedness).all()
+    ):
+        raise ValueError("retail world tangent frame contains non-finite data")
+
+    binormal_descriptor = bytes(binormal_attribute.descriptor)
+    return RetailWorldFrameDecode(
+        normals=numpy.ascontiguousarray(normals, dtype=numpy.float32),
+        binormals=numpy.ascontiguousarray(binormals, dtype=numpy.float32),
+        tangent_handedness=numpy.ascontiguousarray(
+            tangent_handedness, dtype=numpy.float32
+        ),
+        lightmap_format_code=lightmap_format_code,
+        lightmap_offset=lightmap_offset,
+        binormal_format_code=int.from_bytes(
+            binormal_descriptor[4:8], "big"
+        ),
+        binormal_offset=binormal_offset,
     )

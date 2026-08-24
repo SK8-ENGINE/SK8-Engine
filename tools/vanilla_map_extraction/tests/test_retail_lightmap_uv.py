@@ -17,6 +17,7 @@ sys.path.insert(
 from retail_lightmap_uv import (  # noqa: E402
     decode_decal_uvs,
     decode_lightmap_uvs,
+    decode_retail_world_frame,
 )
 
 
@@ -45,6 +46,14 @@ def descriptor(
 
 
 class RetailLightmapUvTests(unittest.TestCase):
+    @staticmethod
+    def _pack_11_11_10(x: int, y: int, z: int) -> int:
+        return (
+            (x & 0x7FF)
+            | ((y & 0x7FF) << 11)
+            | ((z & 0x3FF) << 22)
+        )
+
     def test_short4_secondary_texcoord_keeps_sign_bits(self) -> None:
         stride = 28
         data = bytearray(stride * 2)
@@ -134,6 +143,87 @@ class RetailLightmapUvTests(unittest.TestCase):
             atol=5.0e-4,
         )
         self.assertEqual(result.offset, 16)
+
+    def test_static_world_frame_uses_short4_normal_and_usage6_binormal(
+        self,
+    ) -> None:
+        stride = 28
+        data = bytearray(stride * 2)
+        struct.pack_into(
+            ">4hI",
+            data,
+            16,
+            1234,
+            2000,
+            16384,
+            -8192,
+            self._pack_11_11_10(1023, -512, 255),
+        )
+        struct.pack_into(
+            ">4hI",
+            data,
+            stride + 16,
+            -1234,
+            -2000,
+            -16384,
+            8192,
+            self._pack_11_11_10(-1023, 512, -255),
+        )
+        result = decode_retail_world_frame(
+            bytes(data),
+            vertex_buffer_offset=0,
+            vertex_count=2,
+            vertex_stride=stride,
+            attributes=(
+                Attribute(12, descriptor(12, 0x002C235F, 0)),
+                Attribute(16, descriptor(16, 0x001A215A, 1)),
+                Attribute(
+                    24,
+                    struct.pack(
+                        ">HHIBBBB I",
+                        0,
+                        24,
+                        0x002A2190,
+                        0,
+                        6,
+                        0,
+                        0x15,
+                        1,
+                    ),
+                ),
+            ),
+        )
+        self.assertIsNotNone(result)
+        assert result is not None
+        expected_xy = numpy.asarray(
+            ((0.5, -0.25), (-0.5, 0.25)),
+            dtype=numpy.float32,
+        )
+        expected_z = numpy.sqrt(
+            1.0 - numpy.sum(expected_xy * expected_xy, axis=1)
+        )
+        expected_z[1] *= -1.0
+        numpy.testing.assert_allclose(
+            result.normals,
+            numpy.column_stack((expected_xy, expected_z)),
+            rtol=0.0,
+            atol=5.0e-5,
+        )
+        numpy.testing.assert_allclose(
+            result.binormals,
+            (
+                (1.0, -512 / 1023, 255 / 511),
+                (-1.0, 512 / 1023, -255 / 511),
+            ),
+            rtol=0.0,
+            atol=1.0e-6,
+        )
+        numpy.testing.assert_array_equal(
+            result.tangent_handedness,
+            (1.0, -1.0),
+        )
+        self.assertEqual(result.lightmap_format_code, 0x001A215A)
+        self.assertEqual(result.binormal_format_code, 0x002A2190)
 
 
 if __name__ == "__main__":

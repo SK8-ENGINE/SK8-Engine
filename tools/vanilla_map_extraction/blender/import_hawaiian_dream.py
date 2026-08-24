@@ -16,6 +16,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 from retail_collision_mesh import decode_rx2_clustered_meshes
 
 
+RETAIL_NORMAL_ATTRIBUTE = "skate3_retail_normal"
+RETAIL_BINORMAL_ATTRIBUTE = "skate3_retail_binormal"
+RETAIL_HANDEDNESS_ATTRIBUTE = "skate3_retail_tangent_handedness"
+
+
 def _safe_name(value: str, fallback: str) -> str:
     cleaned = re.sub(r"[^A-Za-z0-9_.-]+", "_", value).strip("_")
     return (cleaned or fallback)[:120]
@@ -25,6 +30,48 @@ def _runtime_to_blender(values: numpy.ndarray) -> numpy.ndarray:
     converted = values[:, [0, 2, 1]].copy()
     converted[:, 1] *= -1.0
     return converted
+
+
+def _set_point_vector_attribute(
+    mesh: bpy.types.Mesh,
+    name: str,
+    values: numpy.ndarray,
+) -> None:
+    if values.shape != (len(mesh.vertices), 3):
+        raise ValueError(
+            f"{mesh.name} attribute {name!r} has shape {values.shape}, "
+            f"expected ({len(mesh.vertices)}, 3)"
+        )
+    attribute = mesh.attributes.new(
+        name=name,
+        type="FLOAT_VECTOR",
+        domain="POINT",
+    )
+    attribute.data.foreach_set(
+        "vector",
+        numpy.ascontiguousarray(values, dtype=numpy.float32).ravel(),
+    )
+
+
+def _set_point_float_attribute(
+    mesh: bpy.types.Mesh,
+    name: str,
+    values: numpy.ndarray,
+) -> None:
+    if values.shape != (len(mesh.vertices),):
+        raise ValueError(
+            f"{mesh.name} attribute {name!r} has shape {values.shape}, "
+            f"expected ({len(mesh.vertices)},)"
+        )
+    attribute = mesh.attributes.new(
+        name=name,
+        type="FLOAT",
+        domain="POINT",
+    )
+    attribute.data.foreach_set(
+        "value",
+        numpy.ascontiguousarray(values, dtype=numpy.float32),
+    )
 
 
 def _clear_scene() -> None:
@@ -514,6 +561,7 @@ def build_scene(manifest_path: Path) -> dict[str, int]:
     used_normal_texture_ids: set[str] = set()
     lightmapped_object_count = 0
     used_lightmap_texture_ids: set[str] = set()
+    retail_world_frame_object_count = 0
     for model_entry in manifest["models"]:
         asset_id = model_entry["asset_id"]
         source_stem = Path(model_entry["stream_file"]).stem
@@ -545,11 +593,37 @@ def build_scene(manifest_path: Path) -> dict[str, int]:
                     if f"decal_uvs_{mesh_index}" in arrays
                     else None
                 )
-                normals = (
-                    _runtime_to_blender(arrays[f"normals_{mesh_index}"])
-                    if f"normals_{mesh_index}" in arrays
-                    else None
+                retail_frame_available = all(
+                    name in arrays
+                    for name in (
+                        f"retail_normals_{mesh_index}",
+                        f"retail_binormals_{mesh_index}",
+                        f"retail_tangent_handedness_{mesh_index}",
+                    )
                 )
+                if retail_frame_available:
+                    normals = _runtime_to_blender(
+                        arrays[f"retail_normals_{mesh_index}"]
+                    )
+                    retail_binormals = _runtime_to_blender(
+                        arrays[f"retail_binormals_{mesh_index}"]
+                    )
+                    retail_handedness = numpy.asarray(
+                        arrays[
+                            f"retail_tangent_handedness_{mesh_index}"
+                        ],
+                        dtype=numpy.float32,
+                    )
+                else:
+                    normals = (
+                        _runtime_to_blender(
+                            arrays[f"normals_{mesh_index}"]
+                        )
+                        if f"normals_{mesh_index}" in arrays
+                        else None
+                    )
+                    retail_binormals = None
+                    retail_handedness = None
 
                 object_name = _safe_name(
                     mesh_entry["material_name"] or mesh_entry["name"],
@@ -558,6 +632,23 @@ def build_scene(manifest_path: Path) -> dict[str, int]:
                 mesh_data = bpy.data.meshes.new(f"{object_name}_MESH")
                 mesh_data.from_pydata(vertices.tolist(), [], faces.tolist())
                 mesh_data.update(calc_edges=True)
+                if retail_frame_available:
+                    _set_point_vector_attribute(
+                        mesh_data,
+                        RETAIL_NORMAL_ATTRIBUTE,
+                        normals,
+                    )
+                    _set_point_vector_attribute(
+                        mesh_data,
+                        RETAIL_BINORMAL_ATTRIBUTE,
+                        retail_binormals,
+                    )
+                    _set_point_float_attribute(
+                        mesh_data,
+                        RETAIL_HANDEDNESS_ATTRIBUTE,
+                        retail_handedness,
+                    )
+                    retail_world_frame_object_count += 1
 
                 if uvs is not None:
                     uv_layer = mesh_data.uv_layers.new(name="UVMap")
@@ -637,6 +728,9 @@ def build_scene(manifest_path: Path) -> dict[str, int]:
                     "bounds": mesh_entry.get("bounds", {}),
                     "vertex_count": mesh_entry["vertex_count"],
                     "triangle_count": mesh_entry["triangle_count"],
+                    "retail_world_frame": mesh_entry.get(
+                        "retail_world_frame"
+                    ),
                 }
                 material_key = (
                     asset_id,
@@ -742,6 +836,7 @@ def build_scene(manifest_path: Path) -> dict[str, int]:
                     mesh_entry.get("retail_material_group_index", -1)
                 )
                 obj["skate3_texture_id"] = texture_id or ""
+                obj["skate3_retail_world_frame"] = retail_frame_available
                 obj["skate3_lightmap_texture_id"] = lightmap_texture_id
                 obj["skate3_source_lightmap_texture_id"] = (
                     source_lightmap_texture_id
@@ -837,6 +932,10 @@ def build_scene(manifest_path: Path) -> dict[str, int]:
         f"{lightmapped_object_count} mesh parts use "
         f"{len(used_lightmap_texture_ids)} exact retail lightmap pages"
     )
+    scene["skate3_retail_world_frame_status"] = (
+        f"{retail_world_frame_object_count} mesh parts preserve exact retail "
+        "normal, binormal, and tangent-handedness data"
+    )
     return {
         "objects": object_count,
         "vertices": vertex_count,
@@ -847,6 +946,7 @@ def build_scene(manifest_path: Path) -> dict[str, int]:
         "normal_textures": len(used_normal_texture_ids),
         "lightmapped_objects": lightmapped_object_count,
         "lightmap_textures": len(used_lightmap_texture_ids),
+        "retail_world_frames": retail_world_frame_object_count,
         "grind_rails": grind_rail_count,
         "grind_segments": grind_segment_count,
         "collision_meshes": collision_mesh_count,

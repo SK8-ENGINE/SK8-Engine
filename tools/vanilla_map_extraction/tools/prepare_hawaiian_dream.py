@@ -14,7 +14,11 @@ import numpy
 
 from retail_collision_mesh import decode_rx2_clustered_meshes
 from retail_grind_splines import decode_grind_splines
-from retail_lightmap_uv import decode_decal_uvs, decode_lightmap_uvs
+from retail_lightmap_uv import (
+    decode_decal_uvs,
+    decode_lightmap_uvs,
+    decode_retail_world_frame,
+)
 from skate3_streams import (
     ASSET_TYPE_MODEL,
     ASSET_TYPE_TEXTURE,
@@ -42,6 +46,11 @@ RETAIL_TEXTURE_CHANNELS = (
     "decal",
     "environment",
     "noise",
+)
+RETAIL_WORLD_FRAME_SHADER_PREFIXES = (
+    "environment.default",
+    "environment.decal",
+    "environment.reflective",
 )
 RX2_TOC_RECORD_SIZE = 24
 RX2_TYPE_MATERIAL = 0x00EB0005
@@ -496,6 +505,32 @@ def prepare(
                     arrays[f"lightmap_uvs_{mesh_index}"] = (
                         lightmap_uv.values
                     )
+                shader_name = str(material.get("shader_name") or "")
+                retail_world_frame = (
+                    decode_retail_world_frame(
+                        asset.data,
+                        vertex_buffer_offset=mesh.source_offsets[
+                            "vertex_buffer"
+                        ],
+                        vertex_count=mesh.vertex_count,
+                        vertex_stride=mesh.vertex_stride,
+                        attributes=mesh.attributes,
+                    )
+                    if shader_name.startswith(
+                        RETAIL_WORLD_FRAME_SHADER_PREFIXES
+                    )
+                    else None
+                )
+                if retail_world_frame is not None:
+                    arrays[f"retail_normals_{mesh_index}"] = (
+                        retail_world_frame.normals
+                    )
+                    arrays[f"retail_binormals_{mesh_index}"] = (
+                        retail_world_frame.binormals
+                    )
+                    arrays[f"retail_tangent_handedness_{mesh_index}"] = (
+                        retail_world_frame.tangent_handedness
+                    )
                 decal_uv = decode_decal_uvs(
                     asset.data,
                     vertex_buffer_offset=mesh.source_offsets[
@@ -553,6 +588,24 @@ def prepare(
                                 "signed_tangent_handedness": True,
                             }
                             if lightmap_uv is not None
+                            else None
+                        ),
+                        "retail_world_frame": (
+                            {
+                                "normal_source": (
+                                    "secondary_texcoord_zw_and_y_sign"
+                                ),
+                                "binormal_format_code": (
+                                    f"0x{retail_world_frame.binormal_format_code:08X}"
+                                ),
+                                "binormal_offset": (
+                                    retail_world_frame.binormal_offset
+                                ),
+                                "tangent_handedness_source": (
+                                    "secondary_texcoord_x_sign"
+                                ),
+                            }
+                            if retail_world_frame is not None
                             else None
                         ),
                         "decal_uv": (

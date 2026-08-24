@@ -160,6 +160,12 @@ whose first two components are the unwrap while the sign bits also carry
 tangent handedness. Thirty-two water/ocean parts remain recorded but unbound
 because those shader families intentionally bypass unreliable static
 lightmaps; one sign mesh carries a lightmap parameter but no secondary UV.
+For 3,121 exact environment-family mesh parts, the same `SHORT4` field also
+reconstructs the retail normal while the usage-6 `PACKED11_11_10N` field
+supplies the authored binormal. The importer preserves those values as hidden
+Blender point attributes and the addon prefers them over regenerated
+tangents. `verify_university_world_frames.py` checks all 1,579,005 affected
+triangle corners against the RX2 source after export.
 The addon preserves every retail page byte and exports material strength
 `0.25`, cancelling the generic authored-bake decoder's `* 4` so University
 uses the retail renderer's `encoded²` energy rather than four times that

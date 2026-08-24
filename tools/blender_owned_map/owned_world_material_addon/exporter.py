@@ -60,9 +60,12 @@ _HELPER_OBJECT_MARKERS = (
     "scale_reference",
     "scale reference",
 )
-CACHE_SCHEMA = 14
+CACHE_SCHEMA = 15
 METADATA_FLOAT_COUNT = 49
 METADATA_BYTE_COUNT = METADATA_FLOAT_COUNT * 4
+RETAIL_NORMAL_ATTRIBUTE = "skate3_retail_normal"
+RETAIL_BINORMAL_ATTRIBUTE = "skate3_retail_binormal"
+RETAIL_HANDEDNESS_ATTRIBUTE = "skate3_retail_tangent_handedness"
 RETAIL_EDGE_CODE_ATTRIBUTES = tuple(
     f"skate3_retail_edge_code_{corner}" for corner in range(3)
 )
@@ -361,6 +364,44 @@ def _mesh_for_export(
     return mesh, evaluated
 
 
+def _retail_world_frame_attributes(mesh):
+    names = (
+        RETAIL_NORMAL_ATTRIBUTE,
+        RETAIL_BINORMAL_ATTRIBUTE,
+        RETAIL_HANDEDNESS_ATTRIBUTE,
+    )
+    attributes = tuple(mesh.attributes.get(name) for name in names)
+    if all(attribute is None for attribute in attributes):
+        return None
+    if any(attribute is None for attribute in attributes):
+        missing = [
+            name
+            for name, attribute in zip(names, attributes, strict=True)
+            if attribute is None
+        ]
+        raise ValueError(
+            f"mesh {mesh.name!r} has an incomplete retail world frame; "
+            f"missing {', '.join(missing)}"
+        )
+    normal, binormal, handedness = attributes
+    expected = (
+        (normal, "POINT", "FLOAT_VECTOR"),
+        (binormal, "POINT", "FLOAT_VECTOR"),
+        (handedness, "POINT", "FLOAT"),
+    )
+    for attribute, domain, data_type in expected:
+        if (
+            attribute.domain != domain
+            or attribute.data_type != data_type
+            or len(attribute.data) != len(mesh.vertices)
+        ):
+            raise ValueError(
+                f"mesh {mesh.name!r} retail attribute {attribute.name!r} "
+                f"must be {domain}/{data_type} with one value per vertex"
+            )
+    return normal, binormal, handedness
+
+
 def _hash_mesh(
     digest,
     source_object: bpy.types.Object,
@@ -429,6 +470,13 @@ def _hash_mesh(
             decal_uv = mesh.uv_layers.get("Decal")
             if decal_uv is not None:
                 _hash_foreach(digest, decal_uv.data, "uv", 2, "f")
+            retail_frame = _retail_world_frame_attributes(mesh)
+            if retail_frame is not None:
+                normal, binormal, handedness = retail_frame
+                _hash_text(digest, "RETAIL_WORLD_FRAME")
+                _hash_foreach(digest, normal.data, "vector", 3, "f")
+                _hash_foreach(digest, binormal.data, "vector", 3, "f")
+                _hash_foreach(digest, handedness.data, "value", 1, "f")
         else:
             _hash_text(digest, source_object.get("ow_material", ""))
             _hash_text(
@@ -1423,11 +1471,13 @@ def _export_visual_geometry(
                     f"visual mesh {source_object.name!r} has malformed "
                     "decal UV layer data"
                 )
-            tangents_available = True
-            try:
-                mesh.calc_tangents(uvmap=uv0.name)
-            except RuntimeError:
-                tangents_available = False
+            retail_frame_attributes = _retail_world_frame_attributes(mesh)
+            tangents_available = retail_frame_attributes is None
+            if tangents_available:
+                try:
+                    mesh.calc_tangents(uvmap=uv0.name)
+                except RuntimeError:
+                    tangents_available = False
             # Blender 5 can replace implicitly shared UV storage while
             # calculating tangents. Reacquire every layer so the references
             # below cannot alias the active UVMap after that mutation.
@@ -1459,14 +1509,27 @@ def _export_visual_geometry(
                 loop_vertices = numpy.empty(
                     loop_count, dtype=numpy.int32
                 )
-                loop_normals = numpy.empty(
-                    loop_count * 3, dtype=numpy.float32
-                )
                 mesh.loops.foreach_get(
                     "vertex_index", loop_vertices
                 )
-                mesh.loops.foreach_get("normal", loop_normals)
-                loop_normals = loop_normals.reshape((-1, 3))
+                if retail_frame_attributes is None:
+                    loop_normals = numpy.empty(
+                        loop_count * 3, dtype=numpy.float32
+                    )
+                    mesh.loops.foreach_get("normal", loop_normals)
+                    loop_normals = loop_normals.reshape((-1, 3))
+                else:
+                    retail_normal_attribute = retail_frame_attributes[0]
+                    retail_point_normals = numpy.empty(
+                        len(mesh.vertices) * 3,
+                        dtype=numpy.float32,
+                    )
+                    retail_normal_attribute.data.foreach_get(
+                        "vector", retail_point_normals
+                    )
+                    retail_point_normals = retail_point_normals.reshape(
+                        (-1, 3)
+                    )
 
                 source_positions = numpy.empty(
                     len(mesh.vertices) * 3, dtype=numpy.float32
@@ -1543,15 +1606,24 @@ def _export_visual_geometry(
                     .transposed(),
                     dtype=numpy.float64,
                 )
-                normals = (
-                    loop_normals[triangle_loops].astype(numpy.float64)
-                    @ normal_matrix.T
-                )
+                if retail_frame_attributes is None:
+                    normals = (
+                        loop_normals[triangle_loops].astype(numpy.float64)
+                        @ normal_matrix.T
+                    )
+                else:
+                    normals = (
+                        retail_point_normals[corner_vertices].astype(
+                            numpy.float64
+                        )
+                        @ normal_matrix.T
+                    )
                 lengths = numpy.linalg.norm(normals, axis=1)
                 nonzero_normals = lengths > 1.0e-12
-                normals[nonzero_normals] /= lengths[
-                    nonzero_normals, None
-                ]
+                if retail_frame_attributes is None:
+                    normals[nonzero_normals] /= lengths[
+                        nonzero_normals, None
+                    ]
 
                 runtime_positions = positions[:, (0, 2, 1)].copy()
                 runtime_positions[:, 2] *= -1.0
@@ -1561,7 +1633,54 @@ def _export_visual_geometry(
                 runtime_handedness = numpy.zeros(
                     corner_count, dtype=numpy.float32
                 )
-                if tangents_available:
+                runtime_linear = numpy.asarray(
+                    (
+                        (1.0, 0.0, 0.0),
+                        (0.0, 0.0, 1.0),
+                        (0.0, -1.0, 0.0),
+                    ),
+                    dtype=numpy.float64,
+                ) @ world_matrix[:3, :3]
+                orientation = (
+                    -1.0
+                    if numpy.linalg.det(runtime_linear) < 0.0
+                    else 1.0
+                )
+                if retail_frame_attributes is not None:
+                    (
+                        _retail_normal_attribute,
+                        retail_binormal_attribute,
+                        retail_handedness_attribute,
+                    ) = retail_frame_attributes
+                    retail_point_binormals = numpy.empty(
+                        len(mesh.vertices) * 3,
+                        dtype=numpy.float32,
+                    )
+                    retail_point_handedness = numpy.empty(
+                        len(mesh.vertices),
+                        dtype=numpy.float32,
+                    )
+                    retail_binormal_attribute.data.foreach_get(
+                        "vector", retail_point_binormals
+                    )
+                    retail_handedness_attribute.data.foreach_get(
+                        "value", retail_point_handedness
+                    )
+                    retail_point_binormals = (
+                        retail_point_binormals.reshape((-1, 3))
+                    )
+                    binormals = (
+                        retail_point_binormals[corner_vertices].astype(
+                            numpy.float64
+                        )
+                        @ world_matrix[:3, :3].T
+                    )
+                    runtime_binormals = binormals[:, (0, 2, 1)].copy()
+                    runtime_binormals[:, 2] *= -1.0
+                    runtime_handedness = (
+                        retail_point_handedness[corner_vertices] * orientation
+                    ).astype(numpy.float32)
+                elif tangents_available:
                     loop_tangents = numpy.empty(
                         loop_count * 3, dtype=numpy.float32
                     )
@@ -1596,19 +1715,6 @@ def _export_visual_geometry(
                     runtime_tangents[valid_tangents] /= tangent_lengths[
                         valid_tangents, None
                     ]
-                    runtime_linear = numpy.asarray(
-                        (
-                            (1.0, 0.0, 0.0),
-                            (0.0, 0.0, 1.0),
-                            (0.0, -1.0, 0.0),
-                        ),
-                        dtype=numpy.float64,
-                    ) @ world_matrix[:3, :3]
-                    orientation = (
-                        -1.0
-                        if numpy.linalg.det(runtime_linear) < 0.0
-                        else 1.0
-                    )
                     runtime_handedness = (
                         loop_signs[triangle_loops] * orientation
                     ).astype(numpy.float32)
@@ -1715,15 +1821,51 @@ def _export_visual_geometry(
                             source_object.matrix_world
                             @ mesh.vertices[loop.vertex_index].co
                         )
-                        normal = (
-                            normal_matrix @ loop.normal
-                        ).normalized()
+                        if retail_frame_attributes is None:
+                            normal = (
+                                normal_matrix @ loop.normal
+                            ).normalized()
+                        else:
+                            normal = (
+                                normal_matrix
+                                @ Vector(
+                                    retail_frame_attributes[0]
+                                    .data[loop.vertex_index]
+                                    .vector
+                                )
+                            )
                         base_uv = uv0.data[loop_index].uv
                         light_uv = uv1.data[loop_index].uv
                         decal = decal_uv.data[loop_index].uv
                         handedness = 0.0
                         binormal = Vector((0.0, 0.0, 0.0))
-                        if tangents_available:
+                        orientation = (
+                            1.0
+                            if source_object.matrix_world.to_3x3()
+                            .determinant() > 0.0
+                            else -1.0
+                        )
+                        if retail_frame_attributes is not None:
+                            local_binormal = Vector(
+                                retail_frame_attributes[1]
+                                .data[loop.vertex_index]
+                                .vector
+                            )
+                            binormal = Vector(
+                                _to_runtime(
+                                    source_object.matrix_world.to_3x3()
+                                    @ local_binormal
+                                )
+                            )
+                            handedness = (
+                                float(
+                                    retail_frame_attributes[2]
+                                    .data[loop.vertex_index]
+                                    .value
+                                )
+                                * orientation
+                            )
+                        elif tangents_available:
                             tangent = (
                                 source_object.matrix_world.to_3x3()
                                 @ loop.tangent
@@ -1740,12 +1882,6 @@ def _export_visual_geometry(
                                 )
                                 runtime_tangent = Vector(
                                     _to_runtime(tangent)
-                                )
-                                orientation = (
-                                    1.0
-                                    if source_object.matrix_world.to_3x3()
-                                    .determinant() > 0.0
-                                    else -1.0
                                 )
                                 handedness = (
                                     float(loop.bitangent_sign)

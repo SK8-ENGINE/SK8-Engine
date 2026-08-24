@@ -79,6 +79,7 @@ def _source_metadata(
         "bounds": mesh.get("bounds", {}),
         "vertex_count": mesh["vertex_count"],
         "triangle_count": mesh["triangle_count"],
+        "retail_world_frame": mesh.get("retail_world_frame"),
     }
 
 

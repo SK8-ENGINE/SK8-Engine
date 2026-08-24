@@ -272,6 +272,9 @@ try {
     $retailMaterialVerifier = Join-Path (
         $workspace
     ) 'tools\verify_university_retail_materials.py'
+    $worldFrameVerifier = Join-Path (
+        $workspace
+    ) 'tools\verify_university_world_frames.py'
     $collisionProbeBuilder = Join-Path (
         $workspace
     ) 'tools\build_university_collision_probe.py'
@@ -437,6 +440,15 @@ try {
         $package
     ) -Description (
         'Verify complete retail material, texture-role, and provenance transport'
+    )
+    Invoke-Checked -FilePath 'python' -Arguments @(
+        $worldFrameVerifier,
+        $extractionManifest,
+        $package,
+        '--expected',
+        $expectedPath
+    ) -Description (
+        'Verify exact retail normal, binormal, and handedness transport'
     )
     Invoke-Checked -FilePath 'python' -Arguments @(
         $collisionProbeBuilder,

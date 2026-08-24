@@ -139,6 +139,14 @@ metadata table. Extracted retail collision can additionally carry exact
 per-triangle RenderWare edge/corner feature codes as face attributes; ordinary
 authored maps continue to generate those codes automatically.
 
+Retail-imported meshes may carry the hidden point attributes
+`skate3_retail_normal`, `skate3_retail_binormal`, and
+`skate3_retail_tangent_handedness`. When the complete validated set is
+present, the exporter uses it instead of recalculating tangents from Blender
+UVs. This preserves the game's authored per-island lighting orientation.
+Ordinary custom maps do not need these attributes and continue to use
+Blender's generated tangent frame.
+
 Maps can contain any number of local lights. The renderer dynamically keeps
 the lights relevant to the current view active instead of evaluating every
 distant city light for every pixel. Emissive materials remain separate: they

@@ -174,6 +174,13 @@ therefore preserved. The signed-normalized tangent frame matches the precision
 of the retail packed tangent data while avoiding twelve redundant float bytes
 per vertex.
 
+For ordinary authored meshes the frame is generated from Blender's `UVMap`.
+Retail extraction can instead provide the complete validated point-attribute
+set `skate3_retail_normal`, `skate3_retail_binormal`, and
+`skate3_retail_tangent_handedness`; those values take precedence and are
+transported through the same compact vertex record. Partial or malformed
+retail frame metadata is an export error rather than a silent fallback.
+
 Retail material definitions are additive to the renderer-neutral material
 fields, so authored maps remain simple while extracted maps can retain their
 original shader identity. Texture bindings are named rather than limited to a
