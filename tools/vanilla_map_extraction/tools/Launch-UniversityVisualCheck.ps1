@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
-    [switch]$RetailCollisionOnly
+    [switch]$RetailCollisionOnly,
+    [switch]$NoShadows
 )
 
 $ErrorActionPreference = 'Stop'
@@ -108,6 +109,13 @@ try {
         '--log_max_files=5',
         "--log_file=$runtimeLog"
     )
+    if ($NoShadows) {
+        # Diagnostic A/B: keep retail diffuse/decal/macro/lightmap material
+        # data unchanged and disable only CSM/static sun-shadow sampling.
+        # This distinguishes shadow-map self-shadowing from bad texture,
+        # lightmap, or UV data without requiring a separate executable.
+        $arguments += '--skate3_native_render_scene_shadows=false'
+    }
     [Environment]::SetEnvironmentVariable(
         'SKATE3_OWNED_MAP',
         $package,
@@ -130,8 +138,14 @@ try {
     } else {
         'dynamically streamed exact-retail University collision'
     }
+    $renderMode = if ($NoShadows) {
+        'shadow-map isolation; baked lightmaps remain enabled'
+    } else {
+        'normal renderer settings'
+    }
     Write-Host (
-        "Launching the offline-prepared University build ($collisionMode)."
+        "Launching the offline-prepared University build " +
+        "($collisionMode; $renderMode)."
     )
     Write-Host "This run's logs: $logRoot"
     $process = Start-Process -FilePath $runExecutable `
