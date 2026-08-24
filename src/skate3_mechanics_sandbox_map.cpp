@@ -516,8 +516,6 @@ void PopulateVisualDrawMaterial(
       RetailTexture(material, "transparent");
   const skate::world::TextureId retail_lightmap =
       RetailTexture(material, "lightmap");
-  const skate::world::TextureId retail_normal =
-      RetailTexture(material, "normal");
   if (draw.albedo_texture == 0) {
     draw.albedo_texture =
         retail_diffuse != 0 ? retail_diffuse : retail_transparent;
@@ -525,9 +523,15 @@ void PopulateVisualDrawMaterial(
   if (draw.indirect_lightmap == 0) {
     draw.indirect_lightmap = retail_lightmap;
   }
-  if (draw.normal_texture == 0) {
-    draw.normal_texture = retail_normal;
-  }
+  // The dedicated normal slot is the Blender/export policy's authoritative
+  // decision. Retail metadata deliberately remains lossless and can still
+  // contain pseudo-normal constants such as default_normal
+  // 0x0000043d03e3870a, even when extraction excludes them from
+  // `normal_texture`. Backfilling that preserved binding here defeated the
+  // exclusion and sampled its black/green 16x16 pattern as tangent normals,
+  // producing the repeating black bands on University decal materials.
+  // A zero dedicated slot therefore means "use the exact shader's flat
+  // normal fallback", not "restore the provenance-only retail binding".
   draw.retail_macro_texture = RetailTexture(material, "macrooverlay");
   draw.retail_decal_texture = RetailTexture(material, "decal");
   draw.retail_specular_texture = RetailTexture(material, "specular");

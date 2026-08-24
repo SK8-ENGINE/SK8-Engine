@@ -7,6 +7,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
 SCENE_RUNTIME = ROOT / "src" / "skate3_native_scene_gpu.cpp"
+MAP_RUNTIME = ROOT / "src" / "skate3_mechanics_sandbox_map.cpp"
 SCENE_STATE = ROOT / "src" / "skate3_native_scene_gpu_internal.h"
 SCENE_SHADER = ROOT / "src" / "native" / "shaders" / "scene.hlsl"
 
@@ -63,6 +64,28 @@ class RuntimeOwnedDecalContractTests(unittest.TestCase):
             "dlin = lerp(dlin, dk.rgb * dk.rgb, dk.a);",
             shader,
             "owned mip correction must not alter the guest retail shader",
+        )
+
+    def test_exported_normal_exclusion_is_not_backfilled(self) -> None:
+        runtime = MAP_RUNTIME.read_text(encoding="utf-8")
+        populate = re.search(
+            r"void\s+PopulateVisualDrawMaterial(?P<body>.*?)"
+            r"\n}\n\nVisualWorld\s+BuildVisualWorld",
+            runtime,
+            flags=re.DOTALL,
+        )
+        self.assertIsNotNone(populate)
+        body = populate.group("body")
+        self.assertNotRegex(
+            body,
+            r"normal_texture\s*==\s*0[^}]+"
+            r"normal_texture\s*=\s*retail_normal",
+            "provenance-only retail normals must not override the "
+            "Blender/exporter's explicit normal-slot exclusion",
+        )
+        self.assertIn(
+            "A zero dedicated slot therefore means",
+            body,
         )
 
 
