@@ -108,10 +108,14 @@ VSOut vs_main(float3 p : POSITION, float2 uv : TEXCOORD0, float2 uv2 : TEXCOORD1
   VSOut o;
   float4 mp = float4(p, 1.0);
   float3 n = nrm;
-  // tint.g > 0 marks a skinned item: the bone palette (row-vector matrices)
-  // maps model space to world space; mvp is then just view*proj.
+  // tint.g > 0 marks a retained-scene skinned item. Owned static worlds use
+  // negative cam_pos.w material-family sentinels and may carry an authored
+  // tangent frame in bw, so they must never enter the bone-palette path.
+  // The palette (row-vector matrices) maps model space to world space; mvp is
+  // then just view*proj.
   float wsum = dot(bw, float4(1, 1, 1, 1));
-  if (tint.g > 0.0 && wsum > 0.001) {
+  bool is_skinned = cam_pos.w >= 0.0 && tint.g > 0.0 && wsum > 0.001;
+  if (is_skinned) {
     float3 skinned = float3(0, 0, 0);
     float3 sn = float3(0, 0, 0);
     // Guest blend indices are plain bone numbers (verified live: byte
@@ -139,8 +143,8 @@ VSOut vs_main(float3 p : POSITION, float2 uv : TEXCOORD0, float2 uv2 : TEXCOORD1
   // RAW: ~0 = no stored frame, ~0.39 = negative handedness, ~0.78 =
   // positive (the DecodeMesh sentinel bytes 0/100/200).
   float3 sb = bw.xyz * 2.0 - 1.0;
-  o.tanb = tint.g > 0.0 ? float4(0.0, 0.0, 0.0, 0.0)
-                        : float4(mul(sb, (float3x3)world), bw.w);
+  o.tanb = is_skinned ? float4(0.0, 0.0, 0.0, 0.0)
+                      : float4(mul(sb, (float3x3)world), bw.w);
   return o;
 }
 // ---- Graphics build-up showcase -------------------------------------------
