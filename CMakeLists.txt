@@ -273,6 +273,8 @@ add_subdirectory(
 set(SKATE3_COMMON_SOURCES
     src/exception_compat.cpp
     src/skate3_app_common.cpp
+    src/skate3_cac_archive.cpp
+    src/skate3_cac_catalogue.cpp
     src/skate3_cac_gesture.cpp
     src/skate3_dlc_runtime.cpp
     src/skate3_custom_trick.cpp

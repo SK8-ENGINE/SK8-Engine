@@ -80,7 +80,7 @@ REXCVAR_DEFINE_BOOL(
     "presentation remain renderer-owned.")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 REXCVAR_DEFINE_BOOL(
-    skate3_multiplayer_incremental_appearance_install, false,
+    skate3_multiplayer_incremental_appearance_install, true,
     "Skate 3/Multiplayer",
     "Install prepared remote appearance textures and meshes transactionally "
     "over multiple render frames. The proxy remains visible until every "

@@ -6,6 +6,7 @@
 #include "skate3_input_lab.h"
 #include "skate3_iso_installer.h"
 #include "skate3_mechanics_sandbox_map.h"
+#include "skate3_multiplayer_assets.h"
 #include "skate3_multiplayer_session.h"
 #include "skate3_native_render.h"
 #include "skate3_native_scene.h"
@@ -1080,6 +1081,8 @@ void Skate3BaseApp::OnPostSetup() {
   skate3::shader_disasm::RunIfRequested();
   ApplySelectedProfileToRuntime();
   ApplyGameplayCursorMode();
+  skate3::multiplayer_assets::StartLocalCatalogue(
+      runtime()->game_data_root(), cache_root());
   release_updater_ = std::make_unique<skate3::ReleaseUpdater>(
       rex::filesystem::GetExecutablePath(), SKATE3_VERSION_STRING,
       [this]() {
@@ -1183,6 +1186,7 @@ void Skate3BaseApp::OnShutdown() {
   ApplyGameplayCursorMode();
   skate3::native_scene::SetSettingsMenuBlur(false);
   skate3::multiplayer::ShutdownSessions();
+  skate3::multiplayer_assets::ShutdownLocalCatalogue();
   simple_settings_dialog_.reset();
   release_updater_.reset();
   native_debug_dialog_.reset();

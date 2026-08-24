@@ -1,8 +1,10 @@
 #include "skate3_multiplayer_assets.h"
+#include "skate3_cac_catalogue.h"
 #include "skate3_multiplayer_latest_request.h"
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <bit>
 #include <chrono>
 #include <cmath>
@@ -35,7 +37,7 @@ REXCVAR_DEFINE_STRING(
     "is used for live wardrobe appearance changes. Only the compact recipe "
     "is read; no other save data enters multiplayer.");
 REXCVAR_DEFINE_BOOL(
-    skate3_multiplayer_async_appearance_prepare, false,
+    skate3_multiplayer_async_appearance_prepare, true,
     "Skate 3/Multiplayer",
     "Resolve remote Create-a-Skater models and textures on a background "
     "asset worker before the renderer uploads them.");
@@ -1081,20 +1083,27 @@ bool DecodeRecipeTexture(
   return true;
 }
 
-std::filesystem::path ConfiguredRoot() {
+std::filesystem::path ConfiguredRoot(bool wait_for_automatic = false) {
   const std::string configured =
       REXCVAR_GET(skate3_multiplayer_cac_asset_root);
-  if (configured.empty()) {
-    return {};
+  if (!configured.empty()) {
+    std::error_code error;
+    std::filesystem::path root =
+        std::filesystem::weakly_canonical(
+            std::filesystem::path(configured), error);
+    if (!error && std::filesystem::is_directory(root)) {
+      return root;
+    }
   }
+  return cac_catalogue::Root(wait_for_automatic);
+}
+
+bool EnsureResolvedAsset(const std::filesystem::path& path) {
   std::error_code error;
-  std::filesystem::path root =
-      std::filesystem::weakly_canonical(
-          std::filesystem::path(configured), error);
-  if (error || !std::filesystem::is_directory(root)) {
-    return {};
+  if (std::filesystem::is_regular_file(path, error)) {
+    return true;
   }
-  return root;
+  return cac_catalogue::Ensure(path);
 }
 
 void ResetForRoot(const std::filesystem::path& root) {
@@ -1162,6 +1171,25 @@ void ScanCategory(
 
 }  // namespace
 
+void StartLocalCatalogue(
+    const std::filesystem::path& game_data_root,
+    const std::filesystem::path& cache_root) {
+  const std::string configured =
+      REXCVAR_GET(skate3_multiplayer_cac_asset_root);
+  if (!configured.empty()) {
+    REXLOG_INFO(
+        "multiplayer-assets: using explicitly configured CAC "
+        "catalogue root={}",
+        configured);
+    return;
+  }
+  cac_catalogue::Start(game_data_root, cache_root);
+}
+
+void ShutdownLocalCatalogue() {
+  cac_catalogue::Stop();
+}
+
 bool ResolveRecipeAppearance(
     const std::vector<std::uint8_t>& recipe,
     bool load_textures,
@@ -1177,11 +1205,14 @@ bool ResolveRecipeAppearance(
         recipe.size());
     return false;
   }
-  const std::filesystem::path root = ConfiguredRoot();
+  const std::filesystem::path root = ConfiguredRoot(true);
   if (root.empty()) {
-    REXLOG_WARN(
-        "multiplayer-assets: cannot resolve cas_db recipe because the local "
-        "CAC asset root is not configured");
+    static std::atomic<bool> logged{false};
+    if (!logged.exchange(true, std::memory_order_relaxed)) {
+      REXLOG_WARN(
+          "multiplayer-assets: cannot resolve cas_db recipe because the "
+          "local CAC catalogue is unavailable");
+    }
     return false;
   }
   std::lock_guard lock(g_mutex);
@@ -1205,7 +1236,8 @@ bool ResolveRecipeAppearance(
           RecipeTexture decoded;
           const std::filesystem::path path =
               texture_root / AssetFileName(texture_id);
-          if (!DecodeRecipeTexture(path, texture_id, decoded)) {
+          if (!EnsureResolvedAsset(path) ||
+              !DecodeRecipeTexture(path, texture_id, decoded)) {
             REXLOG_WARN(
                 "multiplayer-assets: failed to decode recipe texture "
                 "id={:016X} path={}",
@@ -1245,13 +1277,14 @@ bool ResolveRecipeAppearance(
           AssetFileName(parsed.model_id);
       ParsedLayout layout;
       BindMesh mesh;
-      if (!ParseLayout(path, layout) ||
+      if (!EnsureResolvedAsset(path) ||
+          !ParseLayout(path, layout) ||
           !DecodeBindMesh(path, layout, mesh)) {
         REXLOG_WARN(
             "multiplayer-assets: failed to decode recipe model "
             "category={} id={:016X} path={}",
             parsed.category, parsed.model_id, path.string());
-        continue;
+        return false;
       }
       cached_mesh = g_recipe_meshes.emplace(
           parsed.model_id, std::move(mesh)).first;

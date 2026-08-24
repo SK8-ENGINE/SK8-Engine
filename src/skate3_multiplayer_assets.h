@@ -10,6 +10,16 @@
 
 namespace skate3::multiplayer_assets {
 
+// Starts receiver-side discovery of the retail Create-a-Skater archive and
+// prepares a small persistent model cache on a background thread. Retail
+// files remain local; textures are extracted lazily only when a received
+// compact recipe references them.
+void StartLocalCatalogue(
+    const std::filesystem::path& game_data_root,
+    const std::filesystem::path& cache_root);
+
+void ShutdownLocalCatalogue();
+
 // Renderer-ready vanilla bind mesh resolved from the locally installed
 // Create-a-Skater catalogue. No retail presentation entity is involved: the
 // custom renderer consumes this geometry and the normal replicated canonical
