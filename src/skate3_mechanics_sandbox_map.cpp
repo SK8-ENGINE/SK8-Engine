@@ -45,6 +45,7 @@ skate::world::DayNightState g_day_night_state;
 skate::world::DayNightCycleDefinition g_day_night_cycle;
 bool g_day_night_runtime_initialized = false;
 bool g_day_night_paused = false;
+bool g_dynamic_lighting_enabled = true;
 float g_day_night_manual_hour = 0.0f;
 std::mutex g_day_night_mutex;
 WeatherSnapshot g_weather_snapshot;
@@ -421,12 +422,136 @@ VisualVertex ConvertVertex(
   vertex.uv[1] = source_vertex.uv.y;
   vertex.uv2[0] = source_vertex.lightmap_uv.x;
   vertex.uv2[1] = source_vertex.lightmap_uv.y;
+  if (std::abs(source_vertex.tangent_handedness) > 0.5f) {
+    const auto pack_snorm = [](float value) {
+      return static_cast<std::uint8_t>(std::lround(
+          (std::clamp(value, -1.0f, 1.0f) * 0.5f + 0.5f) *
+          255.0f));
+    };
+    vertex.blend_weight[0] =
+        pack_snorm(source_vertex.tangent_binormal.x);
+    vertex.blend_weight[1] =
+        pack_snorm(source_vertex.tangent_binormal.y);
+    vertex.blend_weight[2] =
+        pack_snorm(source_vertex.tangent_binormal.z);
+    vertex.blend_weight[3] =
+        source_vertex.tangent_handedness >= 0.0f ? 200 : 100;
+  }
   vertex.normal[0] = source_vertex.normal.x;
   vertex.normal[1] = source_vertex.normal.y;
   vertex.normal[2] = source_vertex.normal.z;
-  vertex.uv3[0] = source_vertex.uv.x;
-  vertex.uv3[1] = source_vertex.uv.y;
+  vertex.uv3[0] = source_vertex.decal_uv.x;
+  vertex.uv3[1] = source_vertex.decal_uv.y;
   return vertex;
+}
+
+skate::world::TextureId RetailTexture(
+    const skate::world::SurfaceMaterial& material,
+    const char* semantic) {
+  const auto found = std::find_if(
+      material.retail.texture_bindings.begin(),
+      material.retail.texture_bindings.end(),
+      [semantic](const skate::world::RetailTextureBinding& binding) {
+        return binding.semantic == semantic;
+      });
+  return found == material.retail.texture_bindings.end()
+             ? 0
+             : found->texture;
+}
+
+float RetailParameter(
+    const skate::world::SurfaceMaterial& material,
+    const char* name,
+    float fallback) {
+  const auto found = std::find_if(
+      material.retail.parameters.begin(),
+      material.retail.parameters.end(),
+      [name](const skate::world::RetailMaterialParameter& parameter) {
+        return parameter.name == name;
+      });
+  if (found == material.retail.parameters.end() ||
+      found->values.empty()) {
+    return fallback;
+  }
+  char* end = nullptr;
+  const float value = std::strtof(found->values.front().c_str(), &end);
+  return end != found->values.front().c_str() &&
+                 std::isfinite(value)
+             ? value
+             : fallback;
+}
+
+void PopulateVisualDrawMaterial(
+    VisualDraw& draw,
+    const skate::world::SurfaceMaterial& material) {
+  draw.color[0] = material.display_color.x;
+  draw.color[1] = material.display_color.y;
+  draw.color[2] = material.display_color.z;
+  draw.color[3] = 1.0f;
+  draw.material[0] = static_cast<float>(material.pattern);
+  draw.material[1] = material.texture_scale;
+  draw.material[2] =
+      material.emissive_intensity > 0.0f
+          ? -material.emissive_intensity
+          : material.roughness;
+  draw.material[3] = material.variation;
+  draw.albedo_texture = material.albedo_texture;
+  draw.indirect_lightmap = material.indirect_lightmap;
+  draw.normal_texture = material.normal_texture;
+  draw.orm_texture = material.orm_texture;
+  draw.emissive_texture = material.emissive_texture;
+  draw.baked_indirect_strength = material.baked_indirect_strength;
+  draw.alpha_mode = material.alpha_mode;
+  draw.alpha_cutoff = material.alpha_cutoff;
+  if (!material.retail.enabled) {
+    return;
+  }
+  draw.retail_shader_family =
+      static_cast<std::uint32_t>(material.retail.shader_family);
+  draw.retail_render_flags =
+      static_cast<std::uint32_t>(material.retail.render_flags);
+  const skate::world::TextureId retail_diffuse =
+      RetailTexture(material, "diffuse");
+  const skate::world::TextureId retail_transparent =
+      RetailTexture(material, "transparent");
+  const skate::world::TextureId retail_lightmap =
+      RetailTexture(material, "lightmap");
+  if (draw.albedo_texture == 0) {
+    draw.albedo_texture =
+        retail_diffuse != 0 ? retail_diffuse : retail_transparent;
+  }
+  if (draw.indirect_lightmap == 0) {
+    draw.indirect_lightmap = retail_lightmap;
+  }
+  // The dedicated normal slot is the Blender/export policy's authoritative
+  // decision. Retail metadata deliberately remains lossless and can still
+  // contain pseudo-normal constants such as default_normal
+  // 0x0000043d03e3870a, even when extraction excludes them from
+  // `normal_texture`. Backfilling that preserved binding here defeated the
+  // exclusion and sampled its black/green 16x16 pattern as tangent normals,
+  // producing the repeating black bands on University decal materials.
+  // A zero dedicated slot therefore means "use the exact shader's flat
+  // normal fallback", not "restore the provenance-only retail binding".
+  draw.retail_macro_texture = RetailTexture(material, "macrooverlay");
+  draw.retail_decal_texture = RetailTexture(material, "decal");
+  draw.retail_specular_texture = RetailTexture(material, "specular");
+  if (draw.retail_specular_texture == 0) {
+    draw.retail_specular_texture = RetailTexture(material, "noise");
+  }
+  draw.retail_detail_texture = RetailTexture(material, "detail");
+  draw.retail_environment_texture =
+      RetailTexture(material, "environment");
+  draw.retail_normal2_texture = RetailTexture(material, "normal2");
+  draw.retail_macro_scale =
+      RetailParameter(material, "macroOverlayUVScale", 1.0f);
+  draw.retail_macro_opacity =
+      RetailParameter(material, "macroOverlayOpacity", 1.0f);
+  draw.retail_detail_scale =
+      RetailParameter(material, "detailNormalUVScale", 0.0f);
+  draw.retail_scroll_u =
+      RetailParameter(material, "uAnimationSpeed", 0.0f);
+  draw.retail_scroll_v =
+      RetailParameter(material, "vAnimationSpeed", 0.0f);
 }
 
 VisualWorld BuildVisualWorld() {
@@ -479,27 +604,7 @@ VisualWorld BuildVisualWorld() {
       VisualDraw draw;
       draw.first_index = source_draw.first_index;
       draw.index_count = source_draw.index_count;
-      draw.color[0] = material->display_color.x;
-      draw.color[1] = material->display_color.y;
-      draw.color[2] = material->display_color.z;
-      draw.color[3] = 1.0f;
-      draw.material[0] =
-          static_cast<float>(material->pattern);
-      draw.material[1] = material->texture_scale;
-      draw.material[2] =
-          material->emissive_intensity > 0.0f
-              ? -material->emissive_intensity
-              : material->roughness;
-      draw.material[3] = material->variation;
-      draw.albedo_texture = material->albedo_texture;
-      draw.indirect_lightmap = material->indirect_lightmap;
-      draw.normal_texture = material->normal_texture;
-      draw.orm_texture = material->orm_texture;
-      draw.emissive_texture = material->emissive_texture;
-      draw.baked_indirect_strength =
-          material->baked_indirect_strength;
-      draw.alpha_mode = material->alpha_mode;
-      draw.alpha_cutoff = material->alpha_cutoff;
+      PopulateVisualDrawMaterial(draw, *material);
       chunk.draws.push_back(draw);
     }
     world.chunks.push_back(std::move(chunk));
@@ -722,26 +827,7 @@ std::vector<VisualMesh> BuildKinematicVisualMeshes() {
     }
     VisualDraw draw;
     draw.index_count = static_cast<uint32_t>(mesh.indices.size());
-    draw.color[0] = material->display_color.x;
-    draw.color[1] = material->display_color.y;
-    draw.color[2] = material->display_color.z;
-    draw.color[3] = 1.0f;
-    draw.material[0] = static_cast<float>(material->pattern);
-    draw.material[1] = material->texture_scale;
-    draw.material[2] =
-        material->emissive_intensity > 0.0f
-            ? -material->emissive_intensity
-            : material->roughness;
-    draw.material[3] = material->variation;
-    draw.albedo_texture = material->albedo_texture;
-    draw.indirect_lightmap = material->indirect_lightmap;
-    draw.normal_texture = material->normal_texture;
-    draw.orm_texture = material->orm_texture;
-    draw.emissive_texture = material->emissive_texture;
-    draw.baked_indirect_strength =
-        material->baked_indirect_strength;
-    draw.alpha_mode = material->alpha_mode;
-    draw.alpha_cutoff = material->alpha_cutoff;
+    PopulateVisualDrawMaterial(draw, *material);
     mesh.draws.push_back(draw);
     meshes.push_back(std::move(mesh));
   }
@@ -801,26 +887,7 @@ std::vector<VisualMesh> BuildHingedDoorVisualMeshes() {
       draw.first_index =
           static_cast<std::uint32_t>(mesh.indices.size());
       draw.index_count = static_cast<std::uint32_t>(indices.size());
-      draw.color[0] = material->display_color.x;
-      draw.color[1] = material->display_color.y;
-      draw.color[2] = material->display_color.z;
-      draw.color[3] = 1.0f;
-      draw.material[0] = static_cast<float>(material->pattern);
-      draw.material[1] = material->texture_scale;
-      draw.material[2] =
-          material->emissive_intensity > 0.0f
-              ? -material->emissive_intensity
-              : material->roughness;
-      draw.material[3] = material->variation;
-      draw.albedo_texture = material->albedo_texture;
-      draw.indirect_lightmap = material->indirect_lightmap;
-      draw.normal_texture = material->normal_texture;
-      draw.orm_texture = material->orm_texture;
-      draw.emissive_texture = material->emissive_texture;
-      draw.baked_indirect_strength =
-          material->baked_indirect_strength;
-      draw.alpha_mode = material->alpha_mode;
-      draw.alpha_cutoff = material->alpha_cutoff;
+      PopulateVisualDrawMaterial(draw, *material);
       mesh.indices.insert(
           mesh.indices.end(), indices.begin(), indices.end());
       mesh.draws.push_back(draw);
@@ -868,26 +935,7 @@ VisualMesh BuildWaterPusherVisualMesh(
   }
   VisualDraw draw;
   draw.index_count = static_cast<uint32_t>(mesh.indices.size());
-  draw.color[0] = material->display_color.x;
-  draw.color[1] = material->display_color.y;
-  draw.color[2] = material->display_color.z;
-  draw.color[3] = 1.0f;
-  draw.material[0] = static_cast<float>(material->pattern);
-  draw.material[1] = material->texture_scale;
-  draw.material[2] =
-      material->emissive_intensity > 0.0f
-          ? -material->emissive_intensity
-          : material->roughness;
-  draw.material[3] = material->variation;
-  draw.albedo_texture = material->albedo_texture;
-  draw.indirect_lightmap = material->indirect_lightmap;
-  draw.normal_texture = material->normal_texture;
-  draw.orm_texture = material->orm_texture;
-  draw.emissive_texture = material->emissive_texture;
-  draw.baked_indirect_strength =
-      material->baked_indirect_strength;
-  draw.alpha_mode = material->alpha_mode;
-  draw.alpha_cutoff = material->alpha_cutoff;
+  PopulateVisualDrawMaterial(draw, *material);
   mesh.draws.push_back(draw);
   return mesh;
 }
@@ -1324,6 +1372,12 @@ skate::world::DayNightState ActiveDayNightState() {
   return g_day_night_state;
 }
 
+bool DynamicWorldLightingEnabled() {
+  std::scoped_lock lock(g_day_night_mutex);
+  EnsureDayNightRuntimeInitialized();
+  return g_dynamic_lighting_enabled;
+}
+
 WorldLightingSettings ActiveWorldLightingSettings() {
   std::scoped_lock lock(g_day_night_mutex);
   EnsureDayNightRuntimeInitialized();
@@ -1331,6 +1385,7 @@ WorldLightingSettings ActiveWorldLightingSettings() {
   settings.available = g_day_night_cycle.enabled;
   settings.paused = g_day_night_paused;
   settings.ping_pong = g_day_night_cycle.ping_pong;
+  settings.dynamic_lighting_enabled = g_dynamic_lighting_enabled;
   settings.time_of_day_hours = g_day_night_manual_hour;
   settings.cycle_duration_seconds =
       g_day_night_cycle.duration_seconds;
@@ -1440,6 +1495,9 @@ void SetWorldLightingSetting(WorldLightingSetting setting, float value) {
       g_day_night_cycle.night_ambient =
           std::clamp(value, 0.0f, 1.0f);
       break;
+    case WorldLightingSetting::kDynamicLightingEnabled:
+      g_dynamic_lighting_enabled = value >= 0.5f;
+      break;
   }
   g_day_night_initialized = false;
 }
@@ -1450,6 +1508,7 @@ void ResetWorldLightingSettings() {
       ActiveWorld().Definition().day_night_cycle;
   g_day_night_paused =
       g_day_night_cycle.duration_seconds <= 0.0f;
+  g_dynamic_lighting_enabled = true;
   g_day_night_manual_hour =
       WrapHour(g_day_night_cycle.start_time_hours);
   g_day_night_elapsed = 0.0f;
@@ -1606,6 +1665,35 @@ bool QueryContact(const float position[3], float radius, Contact& out) {
   out.normal[1] = source.normal.y;
   out.normal[2] = source.normal.z;
   out.penetration = source.penetration;
+  return true;
+}
+
+bool QueryRaySegment(const float start[3], const float delta[3], RayHit& out) {
+  if (start == nullptr || delta == nullptr ||
+      !std::isfinite(start[0]) || !std::isfinite(start[1]) ||
+      !std::isfinite(start[2]) || !std::isfinite(delta[0]) ||
+      !std::isfinite(delta[1]) || !std::isfinite(delta[2])) {
+    return false;
+  }
+  const skate::world::Vec3 direction{delta[0], delta[1], delta[2]};
+  const float distance = std::sqrt(skate::world::LengthSquared(direction));
+  if (!std::isfinite(distance) || distance <= 1.0e-6f) {
+    return false;
+  }
+  const skate::world::RayHit source = ActiveWorld().RayCast(
+      {start[0], start[1], start[2]}, direction, distance);
+  if (!source.hit) {
+    return false;
+  }
+  out.id = source.surface;
+  out.material = source.material;
+  out.point[0] = source.point.x;
+  out.point[1] = source.point.y;
+  out.point[2] = source.point.z;
+  out.normal[0] = source.normal.x;
+  out.normal[1] = source.normal.y;
+  out.normal[2] = source.normal.z;
+  out.distance = source.distance;
   return true;
 }
 

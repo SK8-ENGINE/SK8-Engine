@@ -1,0 +1,15 @@
+# Retail game data and generated artifacts remain local to this worktree.
+raw/**
+!raw/**/
+!raw/**/.gitkeep
+
+intermediate/**
+!intermediate/**/
+!intermediate/**/.gitkeep
+
+blender/**/*.blend
+blender/**/*.blend1
+blender/**/*_preview.png
+blender/**/__pycache__/
+tools/**/__pycache__/
+*.pyc

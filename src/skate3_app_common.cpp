@@ -274,10 +274,10 @@ SkatePackageHeader InspectSkatePackage(const std::filesystem::path& path) {
     return result;
   }
   result.valid = true;
-  result.supported = result.version >= 1 && result.version <= 8;
+  result.supported = result.version >= 1 && result.version <= 12;
   if (!result.supported) {
     result.issue =
-        result.version > 8
+        result.version > 12
             ? "This map uses SKATE v" + std::to_string(result.version) +
                   ". Update the Custom Engine Layer before loading it."
             : "This map uses an unsupported legacy SKATE format.";
@@ -1347,6 +1347,7 @@ void Skate3BaseApp::ToggleSimpleSettings() {
     state.available = source.available;
     state.paused = source.paused;
     state.ping_pong = source.ping_pong;
+    state.dynamic_lighting_enabled = source.dynamic_lighting_enabled;
     state.time_of_day_hours = source.time_of_day_hours;
     state.cycle_duration_seconds = source.cycle_duration_seconds;
     state.start_hour = source.start_hour;

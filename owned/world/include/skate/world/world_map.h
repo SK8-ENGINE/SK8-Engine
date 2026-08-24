@@ -2,6 +2,7 @@
 
 #include "skate/world/math.h"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -55,6 +56,92 @@ constexpr bool HasFlag(SurfaceFlags value, SurfaceFlags flag) {
           static_cast<std::uint32_t>(flag)) != 0;
 }
 
+// Original Skate 3 world-material families. These values deliberately match
+// the exact renderer's family selector so an imported map can use the same
+// shader implementation as a retained retail draw rather than being reduced
+// to the generic owned-world material.
+enum class RetailShaderFamily : std::uint32_t {
+  None = 0,
+  Environment = 1,
+  EnvironmentSimple = 2,
+  EnvironmentDecal = 3,
+  EnvironmentDecalTileable = 4,
+  EnvironmentReflective = 5,
+  EnvironmentReflectiveSimple = 6,
+  EnvironmentAlphaTest = 7,
+  EnvironmentDiffuse = 8,
+  Tree = 9,
+  AnimatedTree = 10,
+  ProxyWorld = 11,
+  Incandescent = 12,
+  EnvironmentReflectiveTransparent = 13,
+  IncandescentUvScroll = 14,
+  FlowingWater = 30,
+  Ocean = 31,
+  OceanReflection = 32,
+  Sky = 40,
+};
+
+enum class RetailRenderFlags : std::uint32_t {
+  None = 0,
+  AlphaTest = 1u << 0,
+  AlphaBlend = 1u << 1,
+  TwoSided = 1u << 2,
+  Unlit = 1u << 3,
+  Decal = 1u << 4,
+  TileableDecal = 1u << 5,
+  Water = 1u << 6,
+};
+
+constexpr RetailRenderFlags operator|(
+    RetailRenderFlags left, RetailRenderFlags right) {
+  return static_cast<RetailRenderFlags>(
+      static_cast<std::uint32_t>(left) |
+      static_cast<std::uint32_t>(right));
+}
+
+constexpr bool HasFlag(RetailRenderFlags value, RetailRenderFlags flag) {
+  return (static_cast<std::uint32_t>(value) &
+          static_cast<std::uint32_t>(flag)) != 0;
+}
+
+// A named binding retains the retail semantic instead of forcing it into one
+// of the five generic owned-world texture slots. uv_set uses Blender/export
+// convention: 0 = base UV, 1 = lightmap/secondary UV, 2 = decal UV.
+struct RetailTextureBinding {
+  std::string semantic;
+  TextureId texture = 0;
+  std::uint32_t uv_set = 0;
+  // Addressing is explicit because environment.decal clamps while
+  // environment.decal_tileable wraps. 0 = wrap, 1 = clamp, 2 = mirror.
+  std::uint32_t address_u = 0;
+  std::uint32_t address_v = 0;
+};
+
+// Values stay as their canonical extracted strings. This preserves GUIDs,
+// booleans, vectors, matrices, and unknown future parameter types losslessly;
+// consumers parse only the names they understand.
+struct RetailMaterialParameter {
+  std::string name;
+  std::vector<std::string> values;
+};
+
+struct RetailMaterialDefinition {
+  bool enabled = false;
+  std::uint64_t material_guid = 0;
+  std::uint32_t material_handle = 0;
+  std::int32_t material_group_index = -1;
+  std::string shader_name;
+  RetailShaderFamily shader_family = RetailShaderFamily::None;
+  RetailRenderFlags render_flags = RetailRenderFlags::None;
+  std::vector<RetailTextureBinding> texture_bindings;
+  std::vector<RetailMaterialParameter> parameters;
+  // Canonical JSON from extraction. It carries the original asset/stream,
+  // mesh index, declaration, offsets, bounds, and any still-unknown fields,
+  // keeping the Blender round trip extensible without recompiling this ABI.
+  std::string source_metadata_json;
+};
+
 struct SurfaceMaterial {
   MaterialId id = 0;
   std::string name;
@@ -91,6 +178,7 @@ struct SurfaceMaterial {
   std::uint8_t skate_audio_surface = 3;    // Concrete_Polished
   std::uint8_t skate_physics_surface = 1;  // Smooth
   std::uint8_t skate_surface_pattern = 0;  // None
+  RetailMaterialDefinition retail;
 };
 
 enum class TextureColorSpace : std::uint32_t {
@@ -202,6 +290,14 @@ struct RenderVertex {
   Vec2 uv;
   MaterialId material = 0;
   Vec2 lightmap_uv;
+  // Third UV pair used by retail decal shaders. Generic authored maps leave
+  // it equal to uv.
+  Vec2 decal_uv;
+  // Retail world shaders consume an authored tangent frame whose mirror
+  // handedness is encoded per UV island. tangent_binormal plus handedness
+  // is enough to reconstruct T = cross(B, N) * handedness.
+  Vec3 tangent_binormal;
+  float tangent_handedness = 0.0f;
 };
 
 struct RenderMesh {
@@ -216,16 +312,34 @@ struct CollisionTriangle {
   Vec3 normal;
   SurfaceId surface = 0;
   MaterialId material = 0;
+  // Extracted retail RenderWare meshes carry authored feature codes for
+  // every directed edge/corner. They distinguish smooth continuations from
+  // hard edge and point contacts. Blender-authored maps leave this false and
+  // let the native collision builder derive codes from topology.
+  std::array<std::uint8_t, 3> native_edge_codes{};
+  bool has_native_edge_codes = false;
 };
 
-// A grind rail is an authored path, independent from its visible/collision
-// mesh. Skate's physics uses this centerline to select and follow a grind;
-// the surrounding collision remains authoritative for ordinary contact.
+// The first 120 bytes of one retail Pegasus tSplineData segment. Values are
+// stored as host-order IEEE-754 bit patterns so an extracted retail segment
+// can round-trip without changing a single coefficient or auxiliary field.
+struct NativeGrindSegment {
+  std::array<std::uint32_t, 30> words{};
+};
+
+// A grind rail is independent from its visible/collision mesh. Hand-authored
+// maps use readable points. Retail imports instead preserve exact native cubic
+// segment payloads plus their original spline identity/type.
 struct GrindRail {
   GrindRailId id = 0;
   std::string name;
   std::vector<Vec3> points;
   bool closed = false;
+  std::uint64_t retail_spline_id = 0;
+  std::uint64_t retail_type_signature = 0;
+  std::uint32_t retail_flags = 0;
+  std::uint32_t retail_trailing_word = 0;
+  std::vector<NativeGrindSegment> native_segments;
 };
 
 // A route consumed by Skate's native AI skater controller. The owned map
@@ -381,6 +495,10 @@ struct MovingLightOrbPose {
 
 struct MapDefinition {
   std::string name;
+  // Canonical extraction manifest carried by SKATE v12's extensible WMET
+  // section. Runtime code need not understand every retail record for the
+  // package to preserve it through Blender and future tool revisions.
+  std::string retail_world_metadata_json;
   SpawnPoint spawn;
   SkyDefinition sky;
   DirectionalLightDefinition sun;

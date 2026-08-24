@@ -6,15 +6,21 @@
 #include "skate3_mechanics_sandbox_map.h"
 #include "skate3_trick_pipeline.h"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <bit>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <cstring>
+#include <cstdlib>
 #include <exception>
+#include <fstream>
+#include <limits>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <ostream>
 #include <string>
 #include <unordered_set>
@@ -35,6 +41,13 @@ REXCVAR_DEFINE_BOOL(
     "collection, remove the previously streamed retail static volumes. The "
     "owned mesh remains the sole static-world collision provider.")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+REXCVAR_DEFINE_BOOL(
+    skate3_mechanics_sandbox_native_collision_retail_only, false, "Skate 3",
+    "Diagnostic A/B mode: place the extracted presentation and grinds in "
+    "their original retail world coordinates, but do not compile or register "
+    "owned static collision. Leave the game's streamed retail collision "
+    "collection authoritative.")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 
 namespace skate3::native_collision {
 namespace {
@@ -51,6 +64,7 @@ enum class State : std::uint8_t {
   RegistrationFailed,
   InstalledAdditive,
   InstalledExclusive,
+  RetailOnly,
   ReplacementFailed,
 };
 
@@ -87,9 +101,14 @@ constexpr std::uint32_t kAuxiliaryAllocationSize = 192;
 constexpr std::uint32_t kResourceOffset = 96;
 constexpr std::uint32_t kMatrixOffset = 112;
 constexpr std::uint32_t kGroundResultOffset = 176;
-constexpr std::size_t kMaximumOwnedStaticChunks = 96;
+constexpr std::size_t kMaximumOwnedStaticChunks = 384;
+constexpr std::size_t kRetailCollisionActiveMeshes = 12;
+constexpr float kRetailCollisionStreamRefreshDistance = 24.0f;
 constexpr std::size_t kMaximumHingedDoors = 32;
-constexpr float kOwnedCollisionCellSize = 128.0f;
+// University occupies 140 non-empty cells at 128 m, which exceeds the fixed
+// collection capacity. At 256 m it occupies 44 cells, and its largest cell
+// remains below kMaximumTrianglesPerOwnedChunk without dropping triangles.
+constexpr float kOwnedCollisionCellSize = 256.0f;
 constexpr std::size_t kMaximumTrianglesPerOwnedChunk = 400000;
 
 std::atomic<State> g_state{State::Disabled};
@@ -110,11 +129,30 @@ std::array<std::atomic<std::uint32_t>, kMaximumOwnedStaticChunks>
     g_static_mesh_addresses{};
 std::array<std::atomic<std::uint32_t>, kMaximumOwnedStaticChunks>
     g_static_volume_addresses{};
+std::array<std::atomic<bool>, kMaximumOwnedStaticChunks>
+    g_static_mesh_desired{};
+std::array<std::atomic<std::uint32_t>, kMaximumOwnedStaticChunks>
+    g_static_bounds_min_x_bits{};
+std::array<std::atomic<std::uint32_t>, kMaximumOwnedStaticChunks>
+    g_static_bounds_min_z_bits{};
+std::array<std::atomic<std::uint32_t>, kMaximumOwnedStaticChunks>
+    g_static_bounds_max_x_bits{};
+std::array<std::atomic<std::uint32_t>, kMaximumOwnedStaticChunks>
+    g_static_bounds_max_z_bits{};
+std::atomic<std::uint32_t> g_static_active_mesh_count{0};
+std::atomic<std::uint64_t> g_static_stream_updates{0};
+std::atomic<std::uint64_t> g_static_stream_added{0};
+std::atomic<std::uint64_t> g_static_stream_removed{0};
+std::atomic<std::uint32_t> g_static_stream_center_x_bits{0};
+std::atomic<std::uint32_t> g_static_stream_center_z_bits{0};
+std::atomic<bool> g_static_stream_center_valid{false};
 std::atomic<std::uint32_t> g_removed_retail_volumes{0};
 std::atomic<std::uint64_t> g_exclusive_reconciliations{0};
 std::atomic<std::uint64_t> g_reintroduced_retail_removed{0};
 std::atomic<std::uint64_t> g_owned_static_readded{0};
 std::atomic<std::uint64_t> g_exclusive_reconcile_failures{0};
+std::atomic<std::uint64_t> g_suppressed_retail_batches{0};
+std::atomic<std::uint64_t> g_suppressed_retail_volumes{0};
 std::atomic<std::uint32_t> g_ground_x_bits{0};
 std::atomic<std::uint32_t> g_ground_y_bits{0};
 std::atomic<std::uint32_t> g_ground_z_bits{0};
@@ -145,6 +183,22 @@ std::atomic<std::uint64_t> g_native_cluster_decodes{0};
 std::atomic<std::uint64_t> g_native_decoded_triangles{0};
 std::atomic<std::uint64_t> g_native_triangle_tests{0};
 std::atomic<std::uint64_t> g_native_triangle_hits{0};
+std::atomic<std::uint64_t> g_native_accepted_triangle_hits{0};
+std::atomic<std::uint32_t> g_native_last_hit_mesh{0};
+std::atomic<bool> g_native_player_position_valid{false};
+std::array<std::atomic<std::uint32_t>, 3>
+    g_native_player_position_bits{};
+std::atomic<std::uint64_t> g_native_near_triangle_hits{0};
+std::array<std::atomic<std::uint32_t>, 9>
+    g_native_near_triangle_vertex_bits{};
+std::array<std::atomic<std::uint32_t>, 3>
+    g_native_near_triangle_normal_bits{};
+std::atomic<std::uint32_t> g_native_near_triangle_distance_bits{
+    std::bit_cast<std::uint32_t>(
+        std::numeric_limits<float>::infinity())};
+std::atomic<std::uint64_t> g_native_primitive_pair_tests{0};
+std::atomic<std::uint64_t> g_native_primitive_pair_hits{0};
+std::atomic<std::uint64_t> g_native_near_primitive_pair_hits{0};
 std::atomic<KinematicState> g_kinematic_state{
     KinematicState::Disabled};
 std::atomic<std::uint32_t> g_kinematic_mesh_address{0};
@@ -229,6 +283,65 @@ std::vector<std::uint32_t> g_original_volumes;
 thread_local bool g_querying_owned_mesh = false;
 thread_local bool g_querying_kinematic_mesh = false;
 thread_local std::int32_t g_querying_door_index = -1;
+thread_local std::uint32_t g_querying_mesh = 0;
+
+struct PendingPrimitivePair {
+  bool active = false;
+  std::uint32_t result = 0;
+  std::uint32_t triangle_volume = 0;
+  std::uint32_t other_volume = 0;
+  std::uint32_t triangle_flags = 0;
+  std::uint32_t other_flags = 0;
+  float other_radius = 0.0f;
+  float player_distance = 0.0f;
+  std::array<skate::world::Vec3, 3> vertices{};
+};
+
+struct PrimitivePairContact {
+  std::uint64_t count = 0;
+  std::uint32_t triangle_flags = 0;
+  std::uint32_t other_flags = 0;
+  float other_radius = 0.0f;
+  float player_distance = 0.0f;
+  std::array<skate::world::Vec3, 3> vertices{};
+};
+
+struct PendingNativeTriangleTest {
+  bool valid = false;
+  std::uint32_t result = 0;
+  skate::world::Vec3 line_start{};
+  skate::world::Vec3 line_delta{};
+};
+
+struct NativeLineContact {
+  std::uint64_t count = 0;
+  std::uint64_t accepted_count = 0;
+  std::uint64_t selected_count = 0;
+  std::uint32_t accepted_worker = 0;
+  std::uint32_t selected_worker = 0;
+  std::uint16_t surface = 0;
+  float player_distance = 0.0f;
+  float hit_fraction = 0.0f;
+  skate::world::Vec3 line_start{};
+  skate::world::Vec3 line_delta{};
+  skate::world::Vec3 hit_position{};
+  skate::world::Vec3 hit_normal{};
+  std::array<skate::world::Vec3, 3> vertices{};
+};
+
+constexpr std::size_t kMaximumPrimitivePairContacts = 64;
+constexpr std::size_t kMaximumNativeLineContacts = 128;
+thread_local PendingPrimitivePair g_pending_primitive_pair;
+thread_local PendingNativeTriangleTest g_pending_native_triangle_test;
+std::mutex g_primitive_pair_contact_mutex;
+std::vector<PrimitivePairContact> g_primitive_pair_contacts;
+std::mutex g_native_line_contact_mutex;
+std::vector<NativeLineContact> g_native_line_contacts;
+
+bool ObserveCurrentTriangleQuery() {
+  return g_querying_owned_mesh ||
+         g_state.load(std::memory_order_acquire) == State::RetailOnly;
+}
 
 bool IsGuestDataAddress(std::uint32_t address) {
   return address >= 0x00010000u && address < 0x80000000u;
@@ -283,6 +396,124 @@ void StoreF32(std::uint8_t* base, std::uint32_t address, float value) {
   StoreU32(base, address, std::bit_cast<std::uint32_t>(value));
 }
 
+float LoadF32(std::uint8_t* base, std::uint32_t address) {
+  return std::bit_cast<float>(LoadU32(base, address));
+}
+
+skate::world::Vec3 LoadVec3(std::uint8_t* base,
+                            std::uint32_t address) {
+  return {
+      LoadF32(base, address),
+      LoadF32(base, address + 4),
+      LoadF32(base, address + 8),
+  };
+}
+
+skate::world::Vec3 TransformPoint(std::uint8_t* base,
+                                  std::uint32_t matrix,
+                                  skate::world::Vec3 point) {
+  if (matrix == 0) {
+    return point;
+  }
+  if (!IsGuestDataAddress(matrix) ||
+      !IsGuestDataAddress(matrix + 56)) {
+    return {
+        std::numeric_limits<float>::quiet_NaN(),
+        std::numeric_limits<float>::quiet_NaN(),
+        std::numeric_limits<float>::quiet_NaN(),
+    };
+  }
+  const skate::world::Vec3 x_axis = LoadVec3(base, matrix);
+  const skate::world::Vec3 y_axis = LoadVec3(base, matrix + 16);
+  const skate::world::Vec3 z_axis = LoadVec3(base, matrix + 32);
+  const skate::world::Vec3 translation = LoadVec3(base, matrix + 48);
+  return translation + x_axis * point.x + y_axis * point.y +
+         z_axis * point.z;
+}
+
+bool IsFiniteVec3(skate::world::Vec3 value) {
+  return std::isfinite(value.x) && std::isfinite(value.y) &&
+         std::isfinite(value.z);
+}
+
+float PointTriangleDistanceSquared(skate::world::Vec3 point,
+                                   skate::world::Vec3 a,
+                                   skate::world::Vec3 b,
+                                   skate::world::Vec3 c) {
+  const skate::world::Vec3 ab = b - a;
+  const skate::world::Vec3 ac = c - a;
+  const skate::world::Vec3 ap = point - a;
+  const float d1 = skate::world::Dot(ab, ap);
+  const float d2 = skate::world::Dot(ac, ap);
+  if (d1 <= 0.0f && d2 <= 0.0f) {
+    return skate::world::LengthSquared(ap);
+  }
+
+  const skate::world::Vec3 bp = point - b;
+  const float d3 = skate::world::Dot(ab, bp);
+  const float d4 = skate::world::Dot(ac, bp);
+  if (d3 >= 0.0f && d4 <= d3) {
+    return skate::world::LengthSquared(bp);
+  }
+
+  const float vc = d1 * d4 - d3 * d2;
+  if (vc <= 0.0f && d1 >= 0.0f && d3 <= 0.0f) {
+    const float v = d1 / (d1 - d3);
+    return skate::world::LengthSquared(point - (a + ab * v));
+  }
+
+  const skate::world::Vec3 cp = point - c;
+  const float d5 = skate::world::Dot(ab, cp);
+  const float d6 = skate::world::Dot(ac, cp);
+  if (d6 >= 0.0f && d5 <= d6) {
+    return skate::world::LengthSquared(cp);
+  }
+
+  const float vb = d5 * d2 - d1 * d6;
+  if (vb <= 0.0f && d2 >= 0.0f && d6 <= 0.0f) {
+    const float w = d2 / (d2 - d6);
+    return skate::world::LengthSquared(point - (a + ac * w));
+  }
+
+  const float va = d3 * d6 - d5 * d4;
+  if (va <= 0.0f && d4 - d3 >= 0.0f &&
+      d5 - d6 >= 0.0f) {
+    const skate::world::Vec3 bc = c - b;
+    const float w =
+        (d4 - d3) / ((d4 - d3) + (d5 - d6));
+    return skate::world::LengthSquared(point - (b + bc * w));
+  }
+
+  const float inverse = 1.0f / (va + vb + vc);
+  const float v = vb * inverse;
+  const float w = vc * inverse;
+  return skate::world::LengthSquared(
+      point - (a + ab * v + ac * w));
+}
+
+bool IsTriangleVolumeFlags(std::uint32_t flags) {
+  // TriangleVolume initializes flags to 0x1E1 and then enables bit 1.
+  // Ignore that mutable bit while retaining every type/behavior bit.
+  return (flags & ~2u) == 0x1E1u;
+}
+
+bool SameContactTriangle(
+    const std::array<skate::world::Vec3, 3>& left,
+    const std::array<skate::world::Vec3, 3>& right) {
+  constexpr float kComponentTolerance = 0.0005f;
+  for (std::size_t vertex = 0; vertex < left.size(); ++vertex) {
+    if (std::abs(left[vertex].x - right[vertex].x) >
+            kComponentTolerance ||
+        std::abs(left[vertex].y - right[vertex].y) >
+            kComponentTolerance ||
+        std::abs(left[vertex].z - right[vertex].z) >
+            kComponentTolerance) {
+      return false;
+    }
+  }
+  return true;
+}
+
 const char* StateName(State state) {
   switch (state) {
     case State::Disabled:
@@ -307,6 +538,8 @@ const char* StateName(State state) {
       return "installed_additive";
     case State::InstalledExclusive:
       return "installed_exclusive";
+    case State::RetailOnly:
+      return "retail_only";
     case State::ReplacementFailed:
       return "replacement_failed";
   }
@@ -372,6 +605,7 @@ bool IsTerminal(State state) {
          state == State::RegistrationFailed ||
          state == State::InstalledAdditive ||
          state == State::InstalledExclusive ||
+         state == State::RetailOnly ||
          state == State::ReplacementFailed;
 }
 
@@ -616,8 +850,120 @@ struct OwnedCollisionBuildSet {
   std::string error;
 };
 
+const char* RetailCollisionArchivePath() {
+  const char* path = std::getenv("SKATE3_NATIVE_COLLISION_ARCHIVE");
+  return path != nullptr && path[0] != '\0' ? path : nullptr;
+}
+
+OwnedCollisionBuildSet LoadRetailCollisionArchive(const char* path) {
+  OwnedCollisionBuildSet result;
+  std::ifstream stream(path, std::ios::binary | std::ios::ate);
+  if (!stream) {
+    result.error = std::string("could not open retail collision archive '") +
+                   path + "'";
+    return result;
+  }
+  const std::streamoff end = stream.tellg();
+  if (end < 12 || end > std::numeric_limits<std::uint32_t>::max()) {
+    result.error = "retail collision archive size is invalid";
+    return result;
+  }
+  stream.seekg(0);
+  std::vector<std::uint8_t> bytes(static_cast<std::size_t>(end));
+  stream.read(reinterpret_cast<char*>(bytes.data()), end);
+  if (!stream) {
+    result.error = "could not read the complete retail collision archive";
+    return result;
+  }
+  constexpr std::array<std::uint8_t, 8> kMagic{
+      'R', 'W', 'C', 'M', 'S', 'E', 'T', '1'};
+  if (!std::equal(kMagic.begin(), kMagic.end(), bytes.begin())) {
+    result.error = "retail collision archive magic is invalid";
+    return result;
+  }
+  std::size_t cursor = kMagic.size();
+  auto read_u32 = [&]() -> std::optional<std::uint32_t> {
+    if (cursor > bytes.size() || bytes.size() - cursor < 4) {
+      return std::nullopt;
+    }
+    const std::uint32_t value =
+        static_cast<std::uint32_t>(bytes[cursor]) |
+        (static_cast<std::uint32_t>(bytes[cursor + 1]) << 8u) |
+        (static_cast<std::uint32_t>(bytes[cursor + 2]) << 16u) |
+        (static_cast<std::uint32_t>(bytes[cursor + 3]) << 24u);
+    cursor += 4;
+    return value;
+  };
+  const std::optional<std::uint32_t> count = read_u32();
+  if (!count || *count == 0 || *count > kMaximumOwnedStaticChunks) {
+    result.error = "retail collision archive mesh count is invalid";
+    return result;
+  }
+  result.chunks.reserve(*count);
+  std::uint64_t total_triangles = 0;
+  std::uint64_t total_vertices = 0;
+  std::uint64_t total_clusters = 0;
+  std::uint64_t total_mesh_bytes = 0;
+  for (std::uint32_t index = 0; index < *count; ++index) {
+    const std::optional<std::uint32_t> name_size = read_u32();
+    if (!name_size || *name_size > 4096u ||
+        *name_size > bytes.size() - cursor) {
+      result.error = "retail collision archive mesh name is invalid";
+      result.chunks.clear();
+      return result;
+    }
+    const std::string name(
+        reinterpret_cast<const char*>(bytes.data() + cursor), *name_size);
+    cursor += *name_size;
+    const std::optional<std::uint32_t> mesh_size = read_u32();
+    if (!mesh_size || *mesh_size < 96u ||
+        *mesh_size > bytes.size() - cursor) {
+      result.error = "retail collision archive mesh payload is invalid";
+      result.chunks.clear();
+      return result;
+    }
+    skate::world::RwCollisionBuildResult mesh =
+        skate::world::LoadSerializedRwCollisionMesh(
+            std::span<const std::uint8_t>(
+                bytes.data() + cursor, *mesh_size));
+    cursor += *mesh_size;
+    if (!mesh.ok) {
+      result.error = name + ": " + mesh.error;
+      result.chunks.clear();
+      return result;
+    }
+    total_triangles += mesh.mesh.triangle_count;
+    total_vertices += mesh.mesh.vertex_count;
+    total_clusters += mesh.mesh.cluster_count;
+    total_mesh_bytes += mesh.mesh.bytes.size();
+    result.chunks.push_back(std::move(mesh));
+  }
+  if (cursor != bytes.size()) {
+    result.error = "retail collision archive has trailing bytes";
+    result.chunks.clear();
+  } else {
+    REXLOG_INFO(
+        "native-collision: adopted {} exact retail meshes "
+        "(triangles={} vertices={} clusters={} mesh_bytes={})",
+        result.chunks.size(), total_triangles, total_vertices,
+        total_clusters, total_mesh_bytes);
+  }
+  return result;
+}
+
 OwnedCollisionBuildSet CompileOwnedMapChunks(
     const float world_translation[3]) {
+  if (const char* archive = RetailCollisionArchivePath()) {
+    if (world_translation[0] != 0.0f ||
+        world_translation[1] != 0.0f ||
+        world_translation[2] != 0.0f) {
+      OwnedCollisionBuildSet result;
+      result.error =
+          "exact retail collision archive requires zero world translation";
+      return result;
+    }
+    return LoadRetailCollisionArchive(archive);
+  }
   OwnedCollisionBuildSet result;
   skate::world::RwCollisionBuildOptions options;
   options.translation = {
@@ -842,6 +1188,80 @@ std::uint32_t OwnedStaticEntryIndex(std::uint32_t volume,
   return UINT32_MAX;
 }
 
+bool OwnedStaticDesired(std::uint32_t index) {
+  return index < kMaximumOwnedStaticChunks &&
+         g_static_mesh_desired[index].load(std::memory_order_acquire);
+}
+
+bool SelectRetailCollisionMeshes(float x, float z, bool force) {
+  if (!std::isfinite(x) || !std::isfinite(z)) {
+    return false;
+  }
+  if (!force &&
+      g_static_stream_center_valid.load(std::memory_order_acquire)) {
+    const float previous_x = std::bit_cast<float>(
+        g_static_stream_center_x_bits.load(std::memory_order_relaxed));
+    const float previous_z = std::bit_cast<float>(
+        g_static_stream_center_z_bits.load(std::memory_order_relaxed));
+    const float dx = x - previous_x;
+    const float dz = z - previous_z;
+    if (dx * dx + dz * dz <
+        kRetailCollisionStreamRefreshDistance *
+            kRetailCollisionStreamRefreshDistance) {
+      return false;
+    }
+  }
+
+  const std::uint32_t count = std::min<std::uint32_t>(
+      g_static_mesh_count.load(std::memory_order_acquire),
+      static_cast<std::uint32_t>(kMaximumOwnedStaticChunks));
+  if (count == 0) {
+    return false;
+  }
+  std::vector<std::pair<float, std::uint32_t>> ranked;
+  ranked.reserve(count);
+  for (std::uint32_t index = 0; index < count; ++index) {
+    const float minimum_x = std::bit_cast<float>(
+        g_static_bounds_min_x_bits[index].load(std::memory_order_relaxed));
+    const float minimum_z = std::bit_cast<float>(
+        g_static_bounds_min_z_bits[index].load(std::memory_order_relaxed));
+    const float maximum_x = std::bit_cast<float>(
+        g_static_bounds_max_x_bits[index].load(std::memory_order_relaxed));
+    const float maximum_z = std::bit_cast<float>(
+        g_static_bounds_max_z_bits[index].load(std::memory_order_relaxed));
+    const float dx =
+        x < minimum_x ? minimum_x - x : (x > maximum_x ? x - maximum_x : 0.0f);
+    const float dz =
+        z < minimum_z ? minimum_z - z : (z > maximum_z ? z - maximum_z : 0.0f);
+    ranked.emplace_back(dx * dx + dz * dz, index);
+  }
+  std::sort(
+      ranked.begin(), ranked.end(),
+      [](const auto& left, const auto& right) {
+        return left.first == right.first ? left.second < right.second
+                                         : left.first < right.first;
+      });
+  const std::uint32_t desired_count = std::min<std::uint32_t>(
+      count, static_cast<std::uint32_t>(kRetailCollisionActiveMeshes));
+  std::vector<bool> desired(count, false);
+  for (std::uint32_t rank = 0; rank < desired_count; ++rank) {
+    desired[ranked[rank].second] = true;
+  }
+  bool changed = false;
+  for (std::uint32_t index = 0; index < count; ++index) {
+    changed |= OwnedStaticDesired(index) != desired[index];
+    g_static_mesh_desired[index].store(
+        desired[index], std::memory_order_release);
+  }
+  g_static_active_mesh_count.store(desired_count, std::memory_order_release);
+  g_static_stream_center_x_bits.store(
+      std::bit_cast<std::uint32_t>(x), std::memory_order_relaxed);
+  g_static_stream_center_z_bits.store(
+      std::bit_cast<std::uint32_t>(z), std::memory_order_relaxed);
+  g_static_stream_center_valid.store(true, std::memory_order_release);
+  return changed;
+}
+
 bool IsOwnedKinematicEntry(std::uint32_t volume, std::uint32_t mesh) {
   return volume != 0 && mesh != 0 &&
          volume ==
@@ -884,7 +1304,11 @@ bool ExclusiveCollectionDrifted(std::uint8_t* base,
     const std::uint32_t owned_index =
         OwnedStaticEntryIndex(volume, mesh);
     if (owned_index != UINT32_MAX) {
-      seen[owned_index] = true;
+      if (OwnedStaticDesired(owned_index)) {
+        seen[owned_index] = true;
+      } else {
+        unexpected = true;
+      }
     } else if (!IsOwnedKinematicEntry(volume, mesh) &&
                !IsOwnedDoorEntry(volume, mesh)) {
       unexpected = true;
@@ -894,7 +1318,7 @@ bool ExclusiveCollectionDrifted(std::uint8_t* base,
     return true;
   }
   for (std::uint32_t index = 0; index < owned_count; ++index) {
-    if (!seen[index]) {
+    if (OwnedStaticDesired(index) && !seen[index]) {
       return true;
     }
   }
@@ -923,36 +1347,52 @@ bool ReconcileExclusiveCollection(PPCContext& source,
     return false;
   }
 
-  std::vector<std::uint32_t> unexpected_volumes;
+  struct Removal {
+    std::uint32_t volume = 0;
+    bool owned_static = false;
+  };
+  std::vector<Removal> unexpected_volumes;
   unexpected_volumes.reserve(count);
   for (std::uint32_t index = 0; index < count; ++index) {
     const std::uint32_t entry =
         read_entries + index * kCollectionEntrySize;
     const std::uint32_t volume = LoadU32(base, entry);
     const std::uint32_t mesh = LoadU32(base, entry + 4);
-    if (OwnedStaticEntryIndex(volume, mesh) == UINT32_MAX &&
+    const std::uint32_t owned_index =
+        OwnedStaticEntryIndex(volume, mesh);
+    const bool inactive_owned =
+        owned_index != UINT32_MAX && !OwnedStaticDesired(owned_index);
+    const bool unexpected_retail =
+        owned_index == UINT32_MAX &&
         !IsOwnedKinematicEntry(volume, mesh) &&
-        !IsOwnedDoorEntry(volume, mesh)) {
+        !IsOwnedDoorEntry(volume, mesh);
+    if (inactive_owned || unexpected_retail) {
       if (!IsGuestDataAddress(volume)) {
         return false;
       }
-      unexpected_volumes.push_back(volume);
+      unexpected_volumes.push_back(
+          Removal{volume, inactive_owned});
     }
   }
 
-  std::uint32_t removed = 0;
-  for (std::uint32_t volume : unexpected_volumes) {
+  std::uint32_t removed_retail = 0;
+  std::uint32_t removed_inactive = 0;
+  for (const Removal& removal : unexpected_volumes) {
     const std::uint32_t before = LoadU32(base, collection + 20);
     PPCContext remove = source;
     remove.r3.u64 = collection;
-    remove.r4.u64 = volume;
+    remove.r4.u64 = removal.volume;
     sub_82775FC8(remove, base);
     const std::uint32_t after = LoadU32(base, collection + 20);
     if (after + 1 != before) {
       return false;
     }
     PublishWriteEntries(base, read_entries, write_entries, after);
-    ++removed;
+    if (removal.owned_static) {
+      ++removed_inactive;
+    } else {
+      ++removed_retail;
+    }
   }
 
   count = LoadU32(base, collection + 20);
@@ -961,6 +1401,9 @@ bool ReconcileExclusiveCollection(PPCContext& source,
       static_cast<std::uint32_t>(kMaximumOwnedStaticChunks));
   std::uint32_t readded = 0;
   for (std::uint32_t index = 0; index < owned_count; ++index) {
+    if (!OwnedStaticDesired(index)) {
+      continue;
+    }
     const std::uint32_t volume =
         g_static_volume_addresses[index].load(std::memory_order_acquire);
     const std::uint32_t mesh =
@@ -998,15 +1441,20 @@ bool ReconcileExclusiveCollection(PPCContext& source,
   }
 
   g_collection_count_after.store(count, std::memory_order_release);
-  g_removed_retail_volumes.fetch_add(removed, std::memory_order_relaxed);
+  g_removed_retail_volumes.fetch_add(
+      removed_retail, std::memory_order_relaxed);
   g_reintroduced_retail_removed.fetch_add(
-      removed, std::memory_order_relaxed);
+      removed_retail, std::memory_order_relaxed);
   g_owned_static_readded.fetch_add(readded, std::memory_order_relaxed);
+  g_static_stream_removed.fetch_add(
+      removed_inactive, std::memory_order_relaxed);
+  g_static_stream_added.fetch_add(readded, std::memory_order_relaxed);
   g_exclusive_reconciliations.fetch_add(1, std::memory_order_relaxed);
   REXLOG_INFO(
       "native-collision: reconciled exclusive collection "
-      "(removed_reintroduced={} readded_owned={} count={})",
-      removed, readded, count);
+      "(removed_reintroduced={} removed_inactive={} "
+      "added_active={} count={})",
+      removed_retail, removed_inactive, readded, count);
   return true;
 }
 
@@ -1069,6 +1517,7 @@ void ObserveNativeQueryMesh(std::uint32_t mesh) noexcept {
   g_querying_kinematic_mesh =
       kinematic_mesh != 0 && mesh == kinematic_mesh;
   g_querying_door_index = OwnedDoorIndex(mesh);
+  g_querying_mesh = mesh;
   g_querying_owned_mesh =
       IsOwnedStaticMesh(mesh) ||
       g_querying_kinematic_mesh ||
@@ -1184,7 +1633,7 @@ void PrepareNativeBoxQueryBatch(std::uint32_t batch,
 
 void ObserveNativeClusterDecode(
     std::uint32_t triangle_count) noexcept {
-  if (!g_querying_owned_mesh) {
+  if (!ObserveCurrentTriangleQuery()) {
     return;
   }
   g_native_cluster_decodes.fetch_add(1, std::memory_order_relaxed);
@@ -1192,8 +1641,34 @@ void ObserveNativeClusterDecode(
                                        std::memory_order_relaxed);
 }
 
-void ObserveNativeTriangleResult(std::uint32_t hit) noexcept {
-  if (!g_querying_owned_mesh) {
+void PrepareNativeTriangleTest(std::uint32_t result,
+                               std::uint32_t line_start,
+                               std::uint32_t line_delta,
+                               std::uint8_t* base) noexcept {
+  g_pending_native_triangle_test = {};
+  if (!base || !IsGuestDataAddress(result) ||
+      !IsGuestDataAddress(line_start) ||
+      !IsGuestDataAddress(line_start + 8) ||
+      !IsGuestDataAddress(line_delta) ||
+      !IsGuestDataAddress(line_delta + 8)) {
+    return;
+  }
+  const skate::world::Vec3 start =
+      LoadVec3(base, line_start);
+  const skate::world::Vec3 delta = LoadVec3(base, line_delta);
+  if (!IsFiniteVec3(start) || !IsFiniteVec3(delta)) {
+    return;
+  }
+  g_pending_native_triangle_test.valid = true;
+  g_pending_native_triangle_test.result = result;
+  g_pending_native_triangle_test.line_start = start;
+  g_pending_native_triangle_test.line_delta = delta;
+}
+
+void ObserveNativeTriangleResult(std::uint32_t hit,
+                                 std::uint32_t decoded_triangle,
+                                 std::uint8_t* base) noexcept {
+  if (!ObserveCurrentTriangleQuery()) {
     return;
   }
   g_native_triangle_tests.fetch_add(1, std::memory_order_relaxed);
@@ -1203,6 +1678,129 @@ void ObserveNativeTriangleResult(std::uint32_t hit) noexcept {
   }
   if (hit != 0) {
     g_native_triangle_hits.fetch_add(1, std::memory_order_relaxed);
+    g_native_last_hit_mesh.store(g_querying_mesh,
+                                 std::memory_order_relaxed);
+    if (g_native_player_position_valid.load(
+            std::memory_order_acquire) &&
+        decoded_triangle >= 136 &&
+        IsGuestDataAddress(decoded_triangle - 136)) {
+      const skate::world::Vec3 a =
+          LoadVec3(base, decoded_triangle - 104);
+      const skate::world::Vec3 b =
+          LoadVec3(base, decoded_triangle - 88);
+      const skate::world::Vec3 c =
+          LoadVec3(base, decoded_triangle - 136);
+      const skate::world::Vec3 player{
+          std::bit_cast<float>(
+              g_native_player_position_bits[0].load(
+                  std::memory_order_relaxed)),
+          std::bit_cast<float>(
+              g_native_player_position_bits[1].load(
+                  std::memory_order_relaxed)),
+          std::bit_cast<float>(
+              g_native_player_position_bits[2].load(
+                  std::memory_order_relaxed)),
+      };
+      if (IsFiniteVec3(a) && IsFiniteVec3(b) &&
+          IsFiniteVec3(c) && IsFiniteVec3(player)) {
+        const float distance_squared =
+            PointTriangleDistanceSquared(player, a, b, c);
+        constexpr float kNearPlayerDistance = 4.0f;
+        if (std::isfinite(distance_squared) &&
+            distance_squared <=
+                kNearPlayerDistance * kNearPlayerDistance) {
+          const std::array<skate::world::Vec3, 3> vertices{
+              a, b, c};
+          for (std::size_t vertex = 0; vertex < vertices.size();
+               ++vertex) {
+            g_native_near_triangle_vertex_bits[vertex * 3].store(
+                std::bit_cast<std::uint32_t>(vertices[vertex].x),
+                std::memory_order_relaxed);
+            g_native_near_triangle_vertex_bits[vertex * 3 + 1].store(
+                std::bit_cast<std::uint32_t>(vertices[vertex].y),
+                std::memory_order_relaxed);
+            g_native_near_triangle_vertex_bits[vertex * 3 + 2].store(
+                std::bit_cast<std::uint32_t>(vertices[vertex].z),
+                std::memory_order_relaxed);
+          }
+          const skate::world::Vec3 normal =
+              skate::world::Normalize(
+                  skate::world::Cross(b - a, c - a));
+          g_native_near_triangle_normal_bits[0].store(
+              std::bit_cast<std::uint32_t>(normal.x),
+              std::memory_order_relaxed);
+          g_native_near_triangle_normal_bits[1].store(
+              std::bit_cast<std::uint32_t>(normal.y),
+              std::memory_order_relaxed);
+          g_native_near_triangle_normal_bits[2].store(
+              std::bit_cast<std::uint32_t>(normal.z),
+              std::memory_order_relaxed);
+          g_native_near_triangle_distance_bits.store(
+              std::bit_cast<std::uint32_t>(
+                  std::sqrt(distance_squared)),
+              std::memory_order_release);
+          g_native_near_triangle_hits.fetch_add(
+              1, std::memory_order_relaxed);
+
+          const PendingNativeTriangleTest query =
+              g_pending_native_triangle_test;
+          const bool query_result_valid =
+              query.valid && query.result != 0 &&
+              IsGuestDataAddress(query.result + 64);
+          const skate::world::Vec3 hit_position =
+              query_result_valid
+                  ? LoadVec3(base, query.result + 16)
+                  : skate::world::Vec3{};
+          const skate::world::Vec3 hit_normal =
+              query_result_valid
+                  ? LoadVec3(base, query.result + 32)
+                  : skate::world::Vec3{};
+          const float hit_fraction =
+              query_result_valid
+                  ? LoadF32(base, query.result + 64)
+                  : 0.0f;
+          NativeLineContact sample{
+              .count = 1,
+              .player_distance = std::sqrt(distance_squared),
+              .hit_fraction = hit_fraction,
+              .line_start = query.line_start,
+              .line_delta = query.line_delta,
+              .hit_position = hit_position,
+              .hit_normal = hit_normal,
+              .vertices = vertices,
+          };
+          std::scoped_lock lock(g_native_line_contact_mutex);
+          bool merged = false;
+          for (NativeLineContact& contact :
+               g_native_line_contacts) {
+            if (!SameContactTriangle(contact.vertices,
+                                     sample.vertices)) {
+              continue;
+            }
+            ++contact.count;
+            if (sample.player_distance <
+                contact.player_distance) {
+              contact.player_distance =
+                  sample.player_distance;
+              if (query.valid) {
+                contact.line_start = sample.line_start;
+                contact.line_delta = sample.line_delta;
+                contact.hit_fraction = sample.hit_fraction;
+                contact.hit_position = sample.hit_position;
+                contact.hit_normal = sample.hit_normal;
+              }
+            }
+            merged = true;
+            break;
+          }
+          if (!merged &&
+              g_native_line_contacts.size() <
+                  kMaximumNativeLineContacts) {
+            g_native_line_contacts.push_back(sample);
+          }
+        }
+      }
+    }
     if (g_querying_kinematic_mesh) {
       g_kinematic_triangle_hits.fetch_add(1,
                                           std::memory_order_relaxed);
@@ -1217,6 +1815,227 @@ void ObserveNativeTriangleResult(std::uint32_t hit) noexcept {
       }
     }
   }
+}
+
+void ObserveNativeTriangleAccepted(std::uint32_t decoded_triangle,
+                                   std::uint32_t worker,
+                                   std::uint8_t* base) noexcept {
+  if (!ObserveCurrentTriangleQuery() || base == nullptr ||
+      decoded_triangle < 136 ||
+      !IsGuestDataAddress(decoded_triangle - 136)) {
+    return;
+  }
+  g_native_accepted_triangle_hits.fetch_add(
+      1, std::memory_order_relaxed);
+  if (!g_native_player_position_valid.load(
+          std::memory_order_acquire)) {
+    return;
+  }
+
+  const std::array<skate::world::Vec3, 3> vertices{
+      LoadVec3(base, decoded_triangle - 104),
+      LoadVec3(base, decoded_triangle - 88),
+      LoadVec3(base, decoded_triangle - 136),
+  };
+  if (!IsFiniteVec3(vertices[0]) ||
+      !IsFiniteVec3(vertices[1]) ||
+      !IsFiniteVec3(vertices[2])) {
+    return;
+  }
+
+  std::scoped_lock lock(g_native_line_contact_mutex);
+  for (NativeLineContact& contact : g_native_line_contacts) {
+    if (!SameContactTriangle(contact.vertices, vertices)) {
+      continue;
+    }
+    ++contact.accepted_count;
+    contact.accepted_worker = worker;
+    contact.surface = REX_LOAD_U16(decoded_triangle);
+    return;
+  }
+}
+
+void ObserveNativeTriangleSelected(std::uint32_t decoded_triangle,
+                                   std::uint32_t result,
+                                   std::uint32_t candidate,
+                                   std::uint32_t worker,
+                                   std::uint8_t* base) noexcept {
+  if (!ObserveCurrentTriangleQuery() || base == nullptr ||
+      decoded_triangle < 136 ||
+      !IsGuestDataAddress(decoded_triangle - 136) ||
+      !IsGuestDataAddress(result) ||
+      !IsGuestDataAddress(candidate)) {
+    return;
+  }
+
+  // sub_8276D510 copies these exact result fields only when the candidate
+  // becomes the collector's closest hit. Worker 2 reaches this observer only
+  // from its equivalent closer-hit update branch, where result == candidate.
+  constexpr std::array<std::uint32_t, 11> kComparedOffsets{
+      0, 4, 8, 12, 32, 36, 40, 44, 96, 100, 104};
+  for (const std::uint32_t offset : kComparedOffsets) {
+    if (!IsGuestDataAddress(result + offset) ||
+        !IsGuestDataAddress(candidate + offset) ||
+        LoadU32(base, result + offset) !=
+            LoadU32(base, candidate + offset)) {
+      return;
+    }
+  }
+
+  const std::array<skate::world::Vec3, 3> vertices{
+      LoadVec3(base, decoded_triangle - 104),
+      LoadVec3(base, decoded_triangle - 88),
+      LoadVec3(base, decoded_triangle - 136),
+  };
+  if (!IsFiniteVec3(vertices[0]) ||
+      !IsFiniteVec3(vertices[1]) ||
+      !IsFiniteVec3(vertices[2])) {
+    return;
+  }
+
+  std::scoped_lock lock(g_native_line_contact_mutex);
+  for (NativeLineContact& contact : g_native_line_contacts) {
+    if (!SameContactTriangle(contact.vertices, vertices)) {
+      continue;
+    }
+    ++contact.selected_count;
+    contact.selected_worker = worker;
+    contact.surface = REX_LOAD_U16(decoded_triangle);
+    const PendingNativeTriangleTest query =
+        g_pending_native_triangle_test;
+    if (query.valid &&
+        IsGuestDataAddress(query.result + 64)) {
+      contact.line_start = query.line_start;
+      contact.line_delta = query.line_delta;
+      contact.hit_position = LoadVec3(base, query.result + 16);
+      contact.hit_normal = LoadVec3(base, query.result + 32);
+      contact.hit_fraction = LoadF32(base, query.result + 64);
+    }
+    return;
+  }
+}
+
+void BeginNativePrimitivePair(std::uint32_t result,
+                              std::uint32_t volume_a,
+                              std::uint32_t transform_a,
+                              std::uint32_t volume_b,
+                              std::uint32_t transform_b,
+                              std::uint8_t* base) noexcept {
+  g_pending_primitive_pair = {};
+  g_native_primitive_pair_tests.fetch_add(1,
+                                          std::memory_order_relaxed);
+  if (!base ||
+      !g_native_player_position_valid.load(
+          std::memory_order_acquire) ||
+      !IsGuestDataAddress(volume_a) ||
+      !IsGuestDataAddress(volume_a + 92) ||
+      !IsGuestDataAddress(volume_b) ||
+      !IsGuestDataAddress(volume_b + 92)) {
+    return;
+  }
+
+  const std::uint32_t flags_a = LoadU32(base, volume_a + 92);
+  const std::uint32_t flags_b = LoadU32(base, volume_b + 92);
+  const bool triangle_a = IsTriangleVolumeFlags(flags_a);
+  const bool triangle_b = IsTriangleVolumeFlags(flags_b);
+  if (triangle_a == triangle_b) {
+    return;
+  }
+
+  const std::uint32_t triangle_volume =
+      triangle_a ? volume_a : volume_b;
+  const std::uint32_t triangle_transform =
+      triangle_a ? transform_a : transform_b;
+  const std::uint32_t other_volume =
+      triangle_a ? volume_b : volume_a;
+  const std::uint32_t triangle_flags =
+      triangle_a ? flags_a : flags_b;
+  const std::uint32_t other_flags =
+      triangle_a ? flags_b : flags_a;
+  const std::array<skate::world::Vec3, 3> vertices{
+      TransformPoint(base, triangle_transform,
+                     LoadVec3(base, triangle_volume)),
+      TransformPoint(base, triangle_transform,
+                     LoadVec3(base, triangle_volume + 16)),
+      TransformPoint(base, triangle_transform,
+                     LoadVec3(base, triangle_volume + 32)),
+  };
+  const skate::world::Vec3 player{
+      std::bit_cast<float>(
+          g_native_player_position_bits[0].load(
+              std::memory_order_relaxed)),
+      std::bit_cast<float>(
+          g_native_player_position_bits[1].load(
+              std::memory_order_relaxed)),
+      std::bit_cast<float>(
+          g_native_player_position_bits[2].load(
+              std::memory_order_relaxed)),
+  };
+  if (!IsFiniteVec3(vertices[0]) || !IsFiniteVec3(vertices[1]) ||
+      !IsFiniteVec3(vertices[2]) || !IsFiniteVec3(player)) {
+    return;
+  }
+  const float distance_squared = PointTriangleDistanceSquared(
+      player, vertices[0], vertices[1], vertices[2]);
+  constexpr float kNearPlayerDistance = 4.0f;
+  if (!std::isfinite(distance_squared) ||
+      distance_squared >
+          kNearPlayerDistance * kNearPlayerDistance) {
+    return;
+  }
+
+  g_pending_primitive_pair.active = true;
+  g_pending_primitive_pair.result = result;
+  g_pending_primitive_pair.triangle_volume = triangle_volume;
+  g_pending_primitive_pair.other_volume = other_volume;
+  g_pending_primitive_pair.triangle_flags = triangle_flags;
+  g_pending_primitive_pair.other_flags = other_flags;
+  g_pending_primitive_pair.other_radius =
+      LoadF32(base, other_volume + 80);
+  g_pending_primitive_pair.player_distance =
+      std::sqrt(distance_squared);
+  g_pending_primitive_pair.vertices = vertices;
+}
+
+void EndNativePrimitivePair(std::uint32_t hit,
+                            std::uint8_t* base) noexcept {
+  (void)base;
+  PendingPrimitivePair pending = g_pending_primitive_pair;
+  g_pending_primitive_pair = {};
+  if (hit == 0) {
+    return;
+  }
+  g_native_primitive_pair_hits.fetch_add(1,
+                                         std::memory_order_relaxed);
+  if (!pending.active) {
+    return;
+  }
+  g_native_near_primitive_pair_hits.fetch_add(
+      1, std::memory_order_relaxed);
+
+  std::scoped_lock lock(g_primitive_pair_contact_mutex);
+  for (PrimitivePairContact& contact :
+       g_primitive_pair_contacts) {
+    if (contact.other_flags == pending.other_flags &&
+        SameContactTriangle(contact.vertices, pending.vertices)) {
+      ++contact.count;
+      contact.player_distance = std::min(
+          contact.player_distance, pending.player_distance);
+      return;
+    }
+  }
+  if (g_primitive_pair_contacts.size() >=
+      kMaximumPrimitivePairContacts) {
+    return;
+  }
+  g_primitive_pair_contacts.push_back({
+      .count = 1,
+      .triangle_flags = pending.triangle_flags,
+      .other_flags = pending.other_flags,
+      .other_radius = pending.other_radius,
+      .player_distance = pending.player_distance,
+      .vertices = pending.vertices,
+  });
 }
 
 bool MapWorldOrigin(float out_origin[3]) noexcept {
@@ -1314,10 +2133,10 @@ bool HingedDoorPose(std::size_t index, float* out_angle_radians,
   return true;
 }
 
-void ObserveWorldStreamerAddVolume(const PPCContext& ctx,
-                                   std::uint8_t* base) noexcept {
+bool ShouldSuppressWorldStreamerAddVolume(const PPCContext& ctx,
+                                          std::uint8_t* base) noexcept {
   if (!base) {
-    return;
+    return false;
   }
   if (!Enabled()) {
     g_state.store(State::Disabled, std::memory_order_release);
@@ -1330,7 +2149,7 @@ void ObserveWorldStreamerAddVolume(const PPCContext& ctx,
   const std::uint32_t collection = LoadU32(base, view_state + 44);
   if (!IsGuestDataAddress(view) || !IsGuestDataAddress(view_state) ||
       !IsGuestDataAddress(collection)) {
-    return;
+    return false;
   }
 
   const std::uint32_t capacity = LoadU32(base, collection + 8);
@@ -1339,7 +2158,7 @@ void ObserveWorldStreamerAddVolume(const PPCContext& ctx,
   if (capacity == 0 || capacity > kMaximumReasonableCollectionCapacity ||
       !IsGuestDataAddress(read_entries) ||
       !IsGuestDataAddress(entries)) {
-    return;
+    return false;
   }
 
   g_world_streamer_view.store(view, std::memory_order_release);
@@ -1354,6 +2173,419 @@ void ObserveWorldStreamerAddVolume(const PPCContext& ctx,
           State::WaitingForCollection) {
     g_state.store(State::WaitingForPlacement, std::memory_order_release);
   }
+
+  if (!REXCVAR_GET(
+          skate3_mechanics_sandbox_native_collision_replace_retail) ||
+      g_state.load(std::memory_order_acquire) !=
+          State::InstalledExclusive) {
+    return false;
+  }
+
+  // WorldStreamerView publishes a batch one function call after this seam.
+  // Reconciliation from the later mechanics update was too late: a newly
+  // streamed retail volume could participate in one physics step while its
+  // matching retail visuals were hidden. Reject the whole retail batch before
+  // AddVolume mutates either collection buffer. Owned static/kinematic
+  // registration calls the collection function directly and never crosses
+  // this retail streamer boundary.
+  const std::uint32_t streamer_item = ctx.r4.u32;
+  if (!IsGuestDataAddress(streamer_item)) {
+    return false;
+  }
+  const std::uint32_t descriptor =
+      LoadU32(base, streamer_item + 132);
+  if (!IsGuestDataAddress(descriptor)) {
+    return false;
+  }
+  const std::uint32_t volume_count = LoadU32(base, descriptor + 4);
+  const std::uint32_t volume_entries = LoadU32(base, descriptor + 8);
+  if (volume_count == 0 ||
+      volume_count > kMaximumReasonableCollectionCapacity ||
+      !IsGuestDataAddress(volume_entries)) {
+    return false;
+  }
+
+  const std::uint64_t batch =
+      g_suppressed_retail_batches.fetch_add(
+          1, std::memory_order_relaxed) +
+      1;
+  g_suppressed_retail_volumes.fetch_add(
+      volume_count, std::memory_order_relaxed);
+  if (batch <= 16 || (batch & 255u) == 0) {
+    REXLOG_INFO(
+        "native-collision: suppressed retail streamer batch before publish "
+        "(batch={} volumes={} collection_count={})",
+        batch, volume_count, LoadU32(base, collection + 20));
+  }
+  return true;
+}
+
+void ObservePlayerCollisionTelemetry(const float world_position[3],
+                                     std::uint64_t frame) noexcept {
+  const State state = g_state.load(std::memory_order_acquire);
+  if (world_position == nullptr ||
+      (state != State::InstalledExclusive &&
+       state != State::RetailOnly)) {
+    return;
+  }
+  float translation[3] = {};
+  if (!MapWorldOrigin(translation)) {
+    return;
+  }
+  const float local[3] = {
+      world_position[0] - translation[0],
+      world_position[1] - translation[1],
+      world_position[2] - translation[2],
+  };
+  if (!std::isfinite(local[0]) || !std::isfinite(local[1]) ||
+      !std::isfinite(local[2])) {
+    return;
+  }
+  for (std::size_t axis = 0; axis < 3; ++axis) {
+    g_native_player_position_bits[axis].store(
+        std::bit_cast<std::uint32_t>(world_position[axis]),
+        std::memory_order_relaxed);
+  }
+  g_native_player_position_valid.store(true,
+                                       std::memory_order_release);
+
+  thread_local std::uint64_t previous_frame = 0;
+  thread_local std::uint64_t previous_hits = 0;
+  thread_local std::uint64_t previous_accepted_hits = 0;
+  thread_local std::uint64_t previous_pair_tests = 0;
+  thread_local std::uint64_t previous_pair_hits = 0;
+  thread_local float previous_position[3] = {};
+  thread_local bool previous_valid = false;
+  if (previous_frame != 0 && frame > previous_frame &&
+      frame - previous_frame < 60) {
+    return;
+  }
+
+  const std::uint64_t hits =
+      g_native_triangle_hits.load(std::memory_order_relaxed);
+  const std::uint64_t accepted_hits =
+      g_native_accepted_triangle_hits.load(
+          std::memory_order_relaxed);
+  const std::uint64_t pair_tests =
+      g_native_primitive_pair_tests.load(
+          std::memory_order_relaxed);
+  const std::uint64_t pair_hits =
+      g_native_primitive_pair_hits.load(
+          std::memory_order_relaxed);
+  const float displacement =
+      previous_valid
+          ? std::sqrt(
+                (local[0] - previous_position[0]) *
+                    (local[0] - previous_position[0]) +
+                (local[1] - previous_position[1]) *
+                    (local[1] - previous_position[1]) +
+                (local[2] - previous_position[2]) *
+                    (local[2] - previous_position[2]))
+          : 0.0f;
+  const std::int32_t cell_x = static_cast<std::int32_t>(
+      std::floor(local[0] / kOwnedCollisionCellSize));
+  const std::int32_t cell_z = static_cast<std::int32_t>(
+      std::floor(local[2] / kOwnedCollisionCellSize));
+  const float within_x =
+      local[0] - static_cast<float>(cell_x) * kOwnedCollisionCellSize;
+  const float within_z =
+      local[2] - static_cast<float>(cell_z) * kOwnedCollisionCellSize;
+  const float seam_distance = std::min(
+      {within_x, kOwnedCollisionCellSize - within_x,
+       within_z, kOwnedCollisionCellSize - within_z});
+
+  mechanics_sandbox::map::GroundHit ground;
+  // Start just above the board, not at the top of the whole diagnostic
+  // column. QueryGround returns the first downward hit; a 64 m start selected
+  // ceilings and bridge undersides before the actual support beneath the
+  // skater, which made underpass telemetry look like floor penetration.
+  const bool ground_hit =
+      mechanics_sandbox::map::QueryGround(local, 0.75f, 192.0f, ground);
+  const float ground_delta =
+      ground_hit ? local[1] - ground.point[1] : 0.0f;
+  const std::uint64_t near_hits =
+      g_native_near_triangle_hits.exchange(
+          0, std::memory_order_relaxed);
+  std::array<float, 9> near_vertices{};
+  for (std::size_t component = 0;
+       component < near_vertices.size(); ++component) {
+    near_vertices[component] =
+        std::bit_cast<float>(
+            g_native_near_triangle_vertex_bits[component].load(
+                std::memory_order_relaxed));
+  }
+  std::array<float, 3> near_normal{};
+  for (std::size_t axis = 0; axis < near_normal.size(); ++axis) {
+    near_normal[axis] =
+        std::bit_cast<float>(
+            g_native_near_triangle_normal_bits[axis].load(
+                std::memory_order_relaxed));
+  }
+  const float near_distance =
+      std::bit_cast<float>(
+          g_native_near_triangle_distance_bits.load(
+              std::memory_order_acquire));
+  std::vector<PrimitivePairContact> physical_contacts;
+  {
+    std::scoped_lock lock(g_primitive_pair_contact_mutex);
+    physical_contacts.swap(g_primitive_pair_contacts);
+  }
+  std::sort(
+      physical_contacts.begin(), physical_contacts.end(),
+      [](const PrimitivePairContact& left,
+         const PrimitivePairContact& right) {
+        if (left.count != right.count) {
+          return left.count > right.count;
+        }
+        return left.player_distance < right.player_distance;
+      });
+  std::vector<NativeLineContact> line_contacts;
+  {
+    std::scoped_lock lock(g_native_line_contact_mutex);
+    line_contacts.swap(g_native_line_contacts);
+  }
+  std::sort(
+      line_contacts.begin(), line_contacts.end(),
+      [](const NativeLineContact& left,
+         const NativeLineContact& right) {
+        if (left.selected_count != right.selected_count) {
+          return left.selected_count > right.selected_count;
+        }
+        if (left.accepted_count != right.accepted_count) {
+          return left.accepted_count > right.accepted_count;
+        }
+        if (left.count != right.count) {
+          return left.count > right.count;
+        }
+        return left.player_distance < right.player_distance;
+      });
+  for (std::size_t vertex = 0; vertex < 3; ++vertex) {
+    near_vertices[vertex * 3] -= translation[0];
+    near_vertices[vertex * 3 + 1] -= translation[1];
+    near_vertices[vertex * 3 + 2] -= translation[2];
+  }
+  REXLOG_INFO(
+      "native-collision-telemetry: frame={} local=({:.3f},{:.3f},{:.3f}) "
+      "move={:.3f} package_support={} support_y={:.3f} "
+      "support_delta={:.3f} "
+      "normal_y={:.3f} legacy_cell=({}, {}) seam_distance={:.3f} "
+      "native_line_hits_delta={} accepted_line_hits_delta={} "
+      "last_line_hit_mesh=0x{:08X} "
+      "primitive_tests_delta={} primitive_hits_delta={} "
+      "near_physical_hits={} collection_count={} "
+      "retail_suppressed={} retail_reconciled={}",
+      frame, local[0], local[1], local[2], displacement,
+      ground_hit ? 1 : 0, ground_hit ? ground.point[1] : 0.0f,
+      ground_delta, ground_hit ? ground.normal[1] : 0.0f,
+      cell_x, cell_z, seam_distance, hits - previous_hits,
+      accepted_hits - previous_accepted_hits,
+      g_native_last_hit_mesh.load(std::memory_order_relaxed),
+      pair_tests - previous_pair_tests,
+      pair_hits - previous_pair_hits,
+      g_native_near_primitive_pair_hits.exchange(
+          0, std::memory_order_relaxed),
+      g_live_collection_count.load(std::memory_order_acquire),
+      g_suppressed_retail_volumes.load(std::memory_order_relaxed),
+      g_reintroduced_retail_removed.load(std::memory_order_relaxed));
+  if (near_hits != 0) {
+    REXLOG_INFO(
+        "native-collision-line-hit: frame={} near_hits={} "
+        "distance={:.4f} normal=({:.4f},{:.4f},{:.4f}) "
+        "local_triangle=(({:.4f},{:.4f},{:.4f}),"
+        "({:.4f},{:.4f},{:.4f}),({:.4f},{:.4f},{:.4f}))",
+        frame, near_hits, near_distance,
+        near_normal[0], near_normal[1], near_normal[2],
+        near_vertices[0], near_vertices[1], near_vertices[2],
+        near_vertices[3], near_vertices[4], near_vertices[5],
+        near_vertices[6], near_vertices[7], near_vertices[8]);
+  }
+  constexpr std::size_t kMaximumLoggedLineContacts = 16;
+  const std::size_t logged_line_contact_count = std::min(
+      line_contacts.size(), kMaximumLoggedLineContacts);
+  std::size_t shadow_comparison_count = 0;
+  for (std::size_t index = 0;
+       index < logged_line_contact_count; ++index) {
+    const NativeLineContact& contact = line_contacts[index];
+    const skate::world::Vec3 normal = skate::world::Normalize(
+        skate::world::Cross(
+            contact.vertices[1] - contact.vertices[0],
+            contact.vertices[2] - contact.vertices[0]));
+    const float segment_length = std::sqrt(
+        skate::world::LengthSquared(contact.line_delta));
+    const skate::world::Vec3 direction =
+        segment_length > 1.0e-6f
+            ? contact.line_delta * (1.0f / segment_length)
+            : skate::world::Vec3{};
+    std::array<skate::world::Vec3, 3> local_vertices =
+        contact.vertices;
+    for (skate::world::Vec3& vertex : local_vertices) {
+      vertex.x -= translation[0];
+      vertex.y -= translation[1];
+      vertex.z -= translation[2];
+    }
+    skate::world::Vec3 local_line_start = contact.line_start;
+    skate::world::Vec3 local_hit_position = contact.hit_position;
+    local_line_start.x -= translation[0];
+    local_line_start.y -= translation[1];
+    local_line_start.z -= translation[2];
+    local_hit_position.x -= translation[0];
+    local_hit_position.y -= translation[1];
+    local_hit_position.z -= translation[2];
+    REXLOG_INFO(
+        "native-collision-line-contact: frame={} rank={} count={} "
+        "accepted={} worker={} selected={} selected_worker={} "
+        "surface=0x{:04X} "
+        "player_distance={:.4f} delta_length={:.4f} "
+        "hit_fraction={:.6f} delta=({:.4f},{:.4f},{:.4f}) "
+        "direction=({:.4f},{:.4f},{:.4f}) "
+        "triangle_normal=({:.4f},{:.4f},{:.4f}) "
+        "result_normal=({:.4f},{:.4f},{:.4f}) "
+        "local_start=({:.4f},{:.4f},{:.4f}) "
+        "local_hit=({:.4f},{:.4f},{:.4f}) "
+        "local_triangle=(({:.4f},{:.4f},{:.4f}),"
+        "({:.4f},{:.4f},{:.4f}),({:.4f},{:.4f},{:.4f}))",
+        frame, index + 1, contact.count,
+        contact.accepted_count, contact.accepted_worker,
+        contact.selected_count, contact.selected_worker,
+        contact.surface,
+        contact.player_distance, segment_length,
+        contact.hit_fraction,
+        contact.line_delta.x, contact.line_delta.y,
+        contact.line_delta.z,
+        direction.x, direction.y, direction.z,
+        normal.x, normal.y, normal.z,
+        contact.hit_normal.x, contact.hit_normal.y,
+        contact.hit_normal.z,
+        local_line_start.x, local_line_start.y,
+        local_line_start.z, local_hit_position.x,
+        local_hit_position.y, local_hit_position.z,
+        local_vertices[0].x, local_vertices[0].y,
+        local_vertices[0].z, local_vertices[1].x,
+        local_vertices[1].y, local_vertices[1].z,
+        local_vertices[2].x, local_vertices[2].y,
+        local_vertices[2].z);
+    constexpr std::size_t kMaximumShadowComparisons = 1;
+    if (state != State::RetailOnly ||
+        contact.selected_count == 0 ||
+        shadow_comparison_count >= kMaximumShadowComparisons) {
+      continue;
+    }
+    ++shadow_comparison_count;
+    const float shadow_start[3] = {
+        local_line_start.x, local_line_start.y, local_line_start.z};
+    const float shadow_delta[3] = {
+        contact.line_delta.x, contact.line_delta.y, contact.line_delta.z};
+    mechanics_sandbox::map::RayHit shadow_hit;
+    const bool package_hit =
+        mechanics_sandbox::map::QueryRaySegment(
+            shadow_start, shadow_delta, shadow_hit);
+    const skate::world::Vec3 package_point{
+        shadow_hit.point[0], shadow_hit.point[1], shadow_hit.point[2]};
+    const skate::world::Vec3 package_normal =
+        skate::world::Normalize(
+            {shadow_hit.normal[0], shadow_hit.normal[1],
+             shadow_hit.normal[2]});
+    const float point_error =
+        package_hit
+            ? std::sqrt(skate::world::LengthSquared(
+                  package_point - local_hit_position))
+            : std::numeric_limits<float>::infinity();
+    const float retail_distance = std::sqrt(
+        skate::world::LengthSquared(
+            local_hit_position - local_line_start));
+    const float distance_error =
+        package_hit ? std::fabs(shadow_hit.distance - retail_distance)
+                    : std::numeric_limits<float>::infinity();
+    const float normal_dot =
+        package_hit ? skate::world::Dot(
+                          package_normal,
+                          skate::world::Normalize(contact.hit_normal))
+                    : 0.0f;
+    std::uint16_t package_native_surface = 0;
+    if (package_hit) {
+      const skate::world::MapDefinition& definition =
+          mechanics_sandbox::map::ActiveDefinition();
+      const auto material = std::find_if(
+          definition.materials.begin(), definition.materials.end(),
+          [&](const skate::world::SurfaceMaterial& candidate) {
+            return candidate.id == shadow_hit.material;
+          });
+      if (material != definition.materials.end()) {
+        package_native_surface = skate::world::EncodeRwSurfaceId(
+            material->skate_audio_surface,
+            material->skate_physics_surface,
+            material->skate_surface_pattern);
+      }
+    }
+    const bool surface_match =
+        package_hit &&
+        package_native_surface ==
+            static_cast<std::uint16_t>(contact.surface);
+    const bool geometry_match =
+        package_hit && point_error <= 0.002f &&
+        distance_error <= 0.002f && normal_dot >= 0.999f;
+    REXLOG_INFO(
+        "native-collision-shadow-compare: frame={} rank={} "
+        "retail_selected={} package_hit={} geometry_match={} "
+        "surface_match={} retail_surface=0x{:04X} "
+        "package_surface=0x{:04X} package_internal_surface={} "
+        "package_material={} point_error={:.6f} "
+        "distance_error={:.6f} normal_dot={:.6f} "
+        "package_hit_position=({:.4f},{:.4f},{:.4f})",
+        frame, index + 1, contact.selected_count,
+        package_hit ? 1 : 0, geometry_match ? 1 : 0,
+        surface_match ? 1 : 0, contact.surface,
+        package_hit ? package_native_surface : 0u,
+        package_hit ? shadow_hit.id : 0u,
+        package_hit ? shadow_hit.material : 0u, point_error,
+        distance_error, normal_dot,
+        package_hit ? shadow_hit.point[0] : 0.0f,
+        package_hit ? shadow_hit.point[1] : 0.0f,
+        package_hit ? shadow_hit.point[2] : 0.0f);
+  }
+  constexpr std::size_t kMaximumLoggedPhysicalContacts = 12;
+  const std::size_t logged_contact_count = std::min(
+      physical_contacts.size(), kMaximumLoggedPhysicalContacts);
+  for (std::size_t index = 0; index < logged_contact_count;
+       ++index) {
+    const PrimitivePairContact& contact =
+        physical_contacts[index];
+    const skate::world::Vec3 normal = skate::world::Normalize(
+        skate::world::Cross(
+            contact.vertices[1] - contact.vertices[0],
+            contact.vertices[2] - contact.vertices[0]));
+    std::array<skate::world::Vec3, 3> local_vertices =
+        contact.vertices;
+    for (skate::world::Vec3& vertex : local_vertices) {
+      vertex.x -= translation[0];
+      vertex.y -= translation[1];
+      vertex.z -= translation[2];
+    }
+    REXLOG_INFO(
+        "native-collision-physical-contact: frame={} rank={} "
+        "count={} player_distance={:.4f} triangle_flags=0x{:08X} "
+        "other_flags=0x{:08X} other_radius={:.4f} "
+        "normal=({:.4f},{:.4f},{:.4f}) "
+        "local_triangle=(({:.4f},{:.4f},{:.4f}),"
+        "({:.4f},{:.4f},{:.4f}),({:.4f},{:.4f},{:.4f}))",
+        frame, index + 1, contact.count,
+        contact.player_distance, contact.triangle_flags,
+        contact.other_flags, contact.other_radius,
+        normal.x, normal.y, normal.z,
+        local_vertices[0].x, local_vertices[0].y,
+        local_vertices[0].z, local_vertices[1].x,
+        local_vertices[1].y, local_vertices[1].z,
+        local_vertices[2].x, local_vertices[2].y,
+        local_vertices[2].z);
+  }
+
+  previous_frame = frame;
+  previous_hits = hits;
+  previous_accepted_hits = accepted_hits;
+  previous_pair_tests = pair_tests;
+  previous_pair_hits = pair_hits;
+  std::copy(std::begin(local), std::end(local), previous_position);
+  previous_valid = true;
 }
 
 void EnsureInstalled(PPCContext& ctx,
@@ -1385,11 +2617,26 @@ void EnsureInstalled(PPCContext& ctx,
                replace_retail) {
       const std::uint32_t collection =
           g_collection.load(std::memory_order_acquire);
-      if (ExclusiveCollectionDrifted(base, collection)) {
+      bool stream_selection_changed = false;
+      if (RetailCollisionArchivePath() != nullptr &&
+          g_native_player_position_valid.load(
+              std::memory_order_acquire)) {
+        const float player_x = std::bit_cast<float>(
+            g_native_player_position_bits[0].load(
+                std::memory_order_relaxed));
+        const float player_z = std::bit_cast<float>(
+            g_native_player_position_bits[2].load(
+                std::memory_order_relaxed));
+        stream_selection_changed =
+            SelectRetailCollisionMeshes(player_x, player_z, false);
+      }
+      if (stream_selection_changed ||
+          ExclusiveCollectionDrifted(base, collection)) {
         std::scoped_lock lock(g_install_mutex);
         if (g_state.load(std::memory_order_acquire) ==
                 State::InstalledExclusive &&
-            ExclusiveCollectionDrifted(base, collection)) {
+            (stream_selection_changed ||
+             ExclusiveCollectionDrifted(base, collection))) {
           if (!ReconcileExclusiveCollection(
                   ctx, base, collection)) {
             const std::uint64_t failures =
@@ -1403,6 +2650,24 @@ void EnsureInstalled(PPCContext& ctx,
                   failures);
             }
           } else {
+            if (stream_selection_changed) {
+              const std::uint64_t update =
+                  g_static_stream_updates.fetch_add(
+                      1, std::memory_order_relaxed) +
+                  1;
+              REXLOG_INFO(
+                  "native-collision: streamed exact retail resources "
+                  "around player=({:.3f},{:.3f}) active={} update={}",
+                  std::bit_cast<float>(
+                      g_static_stream_center_x_bits.load(
+                          std::memory_order_relaxed)),
+                  std::bit_cast<float>(
+                      g_static_stream_center_z_bits.load(
+                          std::memory_order_relaxed)),
+                  g_static_active_mesh_count.load(
+                      std::memory_order_acquire),
+                  update);
+            }
             ObserveLiveCollection(base);
           }
         }
@@ -1476,10 +2741,47 @@ void EnsureInstalled(PPCContext& ctx,
   // translation for its authored local-space draw data.
   const skate::world::SpawnPoint& spawn =
       mechanics_sandbox::map::ActiveDefinition().spawn;
-  const float translation[3] = {
+  float translation[3] = {
       map_origin[0] - spawn.position.x,
       ground[1] - spawn.position.y,
       map_origin[2] - spawn.position.z};
+  if (RetailCollisionArchivePath() != nullptr) {
+    // The archived retail ClusteredMesh resources already use University
+    // world coordinates and retain their original KD/cluster organization.
+    translation[0] = 0.0f;
+    translation[1] = 0.0f;
+    translation[2] = 0.0f;
+  }
+  if (REXCVAR_GET(
+          skate3_mechanics_sandbox_native_collision_retail_only)) {
+    // University extraction preserves retail world coordinates. Anchoring
+    // its authored spawn to the current skater position shifts the owned
+    // presentation away from the streamed retail collision and invalidates
+    // an A/B comparison. Keep every extracted subsystem in the original
+    // coordinate frame while retail collision remains authoritative.
+    constexpr float retail_coordinate_origin[3] = {
+        0.0f, 0.0f, 0.0f};
+    g_world_origin_x_bits.store(
+        std::bit_cast<std::uint32_t>(retail_coordinate_origin[0]),
+        std::memory_order_relaxed);
+    g_world_origin_y_bits.store(
+        std::bit_cast<std::uint32_t>(retail_coordinate_origin[1]),
+        std::memory_order_relaxed);
+    g_world_origin_z_bits.store(
+        std::bit_cast<std::uint32_t>(retail_coordinate_origin[2]),
+        std::memory_order_relaxed);
+    g_collection_count_before.store(count, std::memory_order_release);
+    g_collection_count_after.store(count, std::memory_order_release);
+    g_world_origin_valid.store(true, std::memory_order_release);
+    REX_KERNEL_MEMORY()->SystemHeapFree(auxiliary);
+    g_state.store(State::RetailOnly, std::memory_order_release);
+    REXLOG_INFO(
+        "native-collision: retail-only coordinate-locked A/B mode active "
+        "(collection_count={} origin=({:.3f},{:.3f},{:.3f}))",
+        count, retail_coordinate_origin[0], retail_coordinate_origin[1],
+        retail_coordinate_origin[2]);
+    return;
+  }
   OwnedCollisionBuildSet builds;
   try {
     builds = CompileOwnedMapChunks(translation);
@@ -1505,12 +2807,19 @@ void EnsureInstalled(PPCContext& ctx,
     g_state.store(State::BuildFailed, std::memory_order_release);
     return;
   }
+  const bool exact_retail_archive =
+      RetailCollisionArchivePath() != nullptr;
+  const std::size_t initially_active_chunks =
+      exact_retail_archive
+          ? std::min(builds.chunks.size(),
+                     kRetailCollisionActiveMeshes)
+          : builds.chunks.size();
   if (builds.chunks.size() > kMaximumOwnedStaticChunks ||
-      count + builds.chunks.size() > capacity) {
+      count + initially_active_chunks > capacity) {
     REXLOG_ERROR(
-        "native-collision: {} owned chunks do not fit collection "
-        "(count={} capacity={})",
-        builds.chunks.size(), count, capacity);
+        "native-collision: {} active owned chunks from {} resources "
+        "do not fit collection (count={} capacity={})",
+        initially_active_chunks, builds.chunks.size(), count, capacity);
     REX_KERNEL_MEMORY()->SystemHeapFree(auxiliary);
     g_state.store(State::CollectionFull, std::memory_order_release);
     return;
@@ -1614,6 +2923,47 @@ void EnsureInstalled(PPCContext& ctx,
       std::bit_cast<std::uint32_t>(translation[2]),
       std::memory_order_relaxed);
 
+  std::uint64_t total_bytes = 0;
+  std::uint64_t total_triangles = 0;
+  std::uint64_t total_vertices = 0;
+  for (std::size_t index = 0; index < guest_chunks.size(); ++index) {
+    g_static_mesh_addresses[index].store(
+        guest_chunks[index].mesh, std::memory_order_relaxed);
+    g_static_volume_addresses[index].store(
+        guest_chunks[index].volume, std::memory_order_relaxed);
+    const skate::world::RwCollisionMeshBlob& mesh =
+        builds.chunks[index].mesh;
+    g_static_bounds_min_x_bits[index].store(
+        std::bit_cast<std::uint32_t>(mesh.bounds_min.x),
+        std::memory_order_relaxed);
+    g_static_bounds_min_z_bits[index].store(
+        std::bit_cast<std::uint32_t>(mesh.bounds_min.z),
+        std::memory_order_relaxed);
+    g_static_bounds_max_x_bits[index].store(
+        std::bit_cast<std::uint32_t>(mesh.bounds_max.x),
+        std::memory_order_relaxed);
+    g_static_bounds_max_z_bits[index].store(
+        std::bit_cast<std::uint32_t>(mesh.bounds_max.z),
+        std::memory_order_relaxed);
+    g_static_mesh_desired[index].store(
+        !exact_retail_archive, std::memory_order_relaxed);
+    total_bytes += mesh.bytes.size();
+    total_triangles += mesh.triangle_count;
+    total_vertices += mesh.vertex_count;
+  }
+  g_static_mesh_count.store(
+      static_cast<std::uint32_t>(guest_chunks.size()),
+      std::memory_order_release);
+  if (exact_retail_archive) {
+    SelectRetailCollisionMeshes(ground[0], ground[2], true);
+  } else {
+    g_static_active_mesh_count.store(
+        static_cast<std::uint32_t>(guest_chunks.size()),
+        std::memory_order_release);
+    g_static_stream_center_valid.store(false,
+                                       std::memory_order_release);
+  }
+
   g_original_volumes.clear();
   g_original_volumes.reserve(count);
   for (std::uint32_t index = 0; index < count; ++index) {
@@ -1627,6 +2977,9 @@ void EnsureInstalled(PPCContext& ctx,
   g_collection_count_before.store(count, std::memory_order_release);
   std::uint32_t current_count = count;
   for (std::size_t index = 0; index < guest_chunks.size(); ++index) {
+    if (!OwnedStaticDesired(static_cast<std::uint32_t>(index))) {
+      continue;
+    }
     const GuestChunk& guest = guest_chunks[index];
     PPCContext add = ctx;
     add.r3.u64 = collection;
@@ -1676,22 +3029,23 @@ void EnsureInstalled(PPCContext& ctx,
   g_collection_count_after.store(current_count,
                                  std::memory_order_release);
 
-  std::uint64_t total_bytes = 0;
-  std::uint64_t total_triangles = 0;
-  std::uint64_t total_vertices = 0;
-  for (std::size_t index = 0; index < guest_chunks.size(); ++index) {
-    g_static_mesh_addresses[index].store(
-        guest_chunks[index].mesh, std::memory_order_relaxed);
-    g_static_volume_addresses[index].store(
-        guest_chunks[index].volume, std::memory_order_relaxed);
-    total_bytes += builds.chunks[index].mesh.bytes.size();
-    total_triangles += builds.chunks[index].mesh.triangle_count;
-    total_vertices += builds.chunks[index].mesh.vertex_count;
+  std::size_t first_active = 0;
+  while (first_active < guest_chunks.size() &&
+         !OwnedStaticDesired(
+             static_cast<std::uint32_t>(first_active))) {
+    ++first_active;
+  }
+  if (first_active == guest_chunks.size()) {
+    REXLOG_ERROR(
+        "native-collision: no static collision resources were selected");
+    g_state.store(State::RegistrationFailed,
+                  std::memory_order_release);
+    return;
   }
   g_mesh_address.store(
-      guest_chunks.front().mesh, std::memory_order_release);
+      guest_chunks[first_active].mesh, std::memory_order_release);
   g_volume_address.store(
-      guest_chunks.front().volume, std::memory_order_release);
+      guest_chunks[first_active].volume, std::memory_order_release);
   g_mesh_bytes.store(
       static_cast<std::uint32_t>(total_bytes),
       std::memory_order_release);
@@ -1701,12 +3055,10 @@ void EnsureInstalled(PPCContext& ctx,
   g_mesh_vertices.store(
       static_cast<std::uint32_t>(total_vertices),
       std::memory_order_release);
-  g_static_mesh_count.store(
-      static_cast<std::uint32_t>(guest_chunks.size()),
-      std::memory_order_release);
   REXLOG_INFO(
-      "native-collision: installed {} spatial chunks "
+      "native-collision: installed {} of {} spatial resources "
       "(triangles={} vertices={} bytes={})",
+      g_static_active_mesh_count.load(std::memory_order_acquire),
       guest_chunks.size(), total_triangles, total_vertices, total_bytes);
   g_world_origin_valid.store(true, std::memory_order_release);
   g_state.store(State::InstalledAdditive, std::memory_order_release);
@@ -1715,7 +3067,8 @@ void EnsureInstalled(PPCContext& ctx,
           skate3_mechanics_sandbox_native_collision_replace_retail)) {
     const bool removed =
         RemoveOriginalVolumes(
-            ctx, base, collection, guest_chunks.front().volume);
+            ctx, base, collection,
+            guest_chunks[first_active].volume);
     g_state.store(removed ? State::InstalledExclusive
                           : State::ReplacementFailed,
                   std::memory_order_release);
@@ -2483,6 +3836,11 @@ void AppendTelemetry(std::ostream& out) {
               skate3_mechanics_sandbox_native_collision_replace_retail)
               ? 1
               : 0)
+      << " sandbox_native_collision_retail_only="
+      << (REXCVAR_GET(
+              skate3_mechanics_sandbox_native_collision_retail_only)
+              ? 1
+              : 0)
       << " sandbox_native_collision_state="
       << StateName(g_state.load(std::memory_order_acquire))
       << " sandbox_native_collision_view="
@@ -2511,6 +3869,18 @@ void AppendTelemetry(std::ostream& out) {
       << g_mesh_vertices.load(std::memory_order_acquire)
       << " sandbox_native_collision_chunks="
       << g_static_mesh_count.load(std::memory_order_acquire)
+      << " sandbox_native_collision_active_chunks="
+      << g_static_active_mesh_count.load(std::memory_order_acquire)
+      << " sandbox_native_collision_stream_updates="
+      << g_static_stream_updates.load(std::memory_order_relaxed)
+      << " sandbox_native_collision_stream_added="
+      << g_static_stream_added.load(std::memory_order_relaxed)
+      << " sandbox_native_collision_stream_removed="
+      << g_static_stream_removed.load(std::memory_order_relaxed)
+      << " sandbox_native_collision_stream_center_x_bits="
+      << g_static_stream_center_x_bits.load(std::memory_order_acquire)
+      << " sandbox_native_collision_stream_center_z_bits="
+      << g_static_stream_center_z_bits.load(std::memory_order_acquire)
       << " sandbox_native_collision_removed_retail="
       << g_removed_retail_volumes.load(std::memory_order_acquire)
       << " sandbox_native_collision_reconciliations="
@@ -2521,6 +3891,10 @@ void AppendTelemetry(std::ostream& out) {
       << g_owned_static_readded.load(std::memory_order_relaxed)
       << " sandbox_native_collision_reconcile_failures="
       << g_exclusive_reconcile_failures.load(std::memory_order_relaxed)
+      << " sandbox_native_collision_suppressed_retail_batches="
+      << g_suppressed_retail_batches.load(std::memory_order_relaxed)
+      << " sandbox_native_collision_suppressed_retail_volumes="
+      << g_suppressed_retail_volumes.load(std::memory_order_relaxed)
       << " sandbox_native_collision_ground_y_bits="
       << g_ground_y_bits.load(std::memory_order_acquire)
       << " sandbox_native_collision_attempts="
@@ -2569,6 +3943,8 @@ void AppendTelemetry(std::ostream& out) {
       << g_native_triangle_tests.load(std::memory_order_relaxed)
       << " sandbox_native_triangle_hits="
       << g_native_triangle_hits.load(std::memory_order_relaxed)
+      << " sandbox_native_last_hit_mesh="
+      << g_native_last_hit_mesh.load(std::memory_order_relaxed)
       << " sandbox_kinematic_count="
       << mechanics_sandbox::map::ActiveKinematicObjectCount()
       << " sandbox_kinematic_state="

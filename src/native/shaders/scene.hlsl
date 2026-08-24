@@ -108,10 +108,14 @@ VSOut vs_main(float3 p : POSITION, float2 uv : TEXCOORD0, float2 uv2 : TEXCOORD1
   VSOut o;
   float4 mp = float4(p, 1.0);
   float3 n = nrm;
-  // tint.g > 0 marks a skinned item: the bone palette (row-vector matrices)
-  // maps model space to world space; mvp is then just view*proj.
+  // tint.g > 0 marks a retained-scene skinned item. Owned static worlds use
+  // negative cam_pos.w material-family sentinels and may carry an authored
+  // tangent frame in bw, so they must never enter the bone-palette path.
+  // The palette (row-vector matrices) maps model space to world space; mvp is
+  // then just view*proj.
   float wsum = dot(bw, float4(1, 1, 1, 1));
-  if (tint.g > 0.0 && wsum > 0.001) {
+  bool is_skinned = cam_pos.w >= 0.0 && tint.g > 0.0 && wsum > 0.001;
+  if (is_skinned) {
     float3 skinned = float3(0, 0, 0);
     float3 sn = float3(0, 0, 0);
     // Guest blend indices are plain bone numbers (verified live: byte
@@ -139,8 +143,8 @@ VSOut vs_main(float3 p : POSITION, float2 uv : TEXCOORD0, float2 uv2 : TEXCOORD1
   // RAW: ~0 = no stored frame, ~0.39 = negative handedness, ~0.78 =
   // positive (the DecodeMesh sentinel bytes 0/100/200).
   float3 sb = bw.xyz * 2.0 - 1.0;
-  o.tanb = tint.g > 0.0 ? float4(0.0, 0.0, 0.0, 0.0)
-                        : float4(mul(sb, (float3x3)world), bw.w);
+  o.tanb = is_skinned ? float4(0.0, 0.0, 0.0, 0.0)
+                      : float4(mul(sb, (float3x3)world), bw.w);
   return o;
 }
 // ---- Graphics build-up showcase -------------------------------------------
@@ -435,8 +439,63 @@ float4 ShadePixel(VSOut i) {
     float sky_amount = saturate(normal.y * 0.5 + 0.5);
     float3 sky_fill = lerp(float3(0.16, 0.17, 0.19),
                            float3(0.35, 0.47, 0.64), sky_amount);
+    bool dynamic_lighting = mat_tint.w >= 0.0;
+    float celestial_ambient = max(mat_tint.w, 0.0);
+    if (imported_material && !dynamic_lighting) {
+      // "Dynamic Lighting: Off" is the retail-baked presentation mode,
+      // not an unlit/debug isolation. Imported albedo pages are uploaded
+      // scene-linear, while the retail lightmap pages retain their encoded
+      // sqrt energy. Reconstruct the retail diffuse body and then use the
+      // same captured fog, exposure and ToneOut chain as Alex's exact
+      // environment-family renderer. Sending this linear value through
+      // PassGamma made correctly decoded University lightmaps look far too
+      // dark because it marked them as already display-ready.
+      float3 retail_linear;
+      if (has_indirect_lightmap) {
+        float3 retail_lm =
+            lightmap.SampleLevel(smp_clamp, i.uv2, 0.0).rgb;
+        retail_linear =
+            albedo * (retail_lm * retail_lm) *
+            (4.0 * max(misc.y, 0.0)) * 0.93429;
+      } else {
+        // Water and a small number of non-lightmapped imported surfaces
+        // still need a stable neutral body until their original shader
+        // families are preserved by the interchange format.
+        retail_linear = albedo * 0.25;
+      }
+
+      retail_linear += OwnedMovingLightContribution(
+          world_pos, normal, view_dir, albedo, roughness);
+      float3 retail_emissive =
+          has_emissive_map
+              ? decal_art.Sample(smp, i.uv).rgb
+              : albedo;
+      retail_linear += retail_emissive * emissive_intensity;
+
+      if (sh_sun.w > 0.01) {
+        float fdist = length(i.rpos);
+        float f1 = saturate(fdist * sh_fogp.x + sh_fogp.y);
+        if (sh_fogp.z != 1.0) {
+          f1 = pow(max(f1, 1e-6), sh_fogp.z);
+        }
+        float material_multiplier =
+            sh_env.x > 0.0 ? sh_env.x : 1.0;
+        float3 retail_xe =
+            (retail_linear *
+                 ((1.0 + sh_fogc.a * f1) * material_multiplier) +
+             sh_fogc.rgb * f1) *
+            sh_sun.w;
+        return ToneOut(retail_xe, output_alpha, false);
+      }
+      // Keep standalone imported maps readable when no retained retail
+      // environment frame has supplied exact exposure/fog rows.
+      return ToneOut(retail_linear, output_alpha, false);
+    }
     float3 ambient_light =
-        sky_fill * (mat_tint.w * lerp(0.72, 1.12, sky_amount));
+        dynamic_lighting
+            ? sky_fill *
+                  (celestial_ambient * lerp(0.72, 1.12, sky_amount))
+            : float3(0.0, 0.0, 0.0);
     if (imported_material && has_indirect_lightmap) {
       // UV1 holds static indirect illumination baked in Blender. It remains
       // stable as the sun/moon move, while a restrained exposure response
@@ -449,7 +508,11 @@ float4 ShadePixel(VSOut i) {
       float3 baked_indirect =
           baked_encoded * baked_encoded * 4.0;
       float baked_exposure =
-          lerp(0.28, 1.0, saturate((mat_tint.w - 0.08) / 0.24));
+          dynamic_lighting
+              ? lerp(
+                    0.28, 1.0,
+                    saturate((celestial_ambient - 0.08) / 0.24))
+              : 1.0;
       // The bake is static indirect, not a replacement for the changing
       // sky hemisphere. Keeping both terms is the actual hybrid model:
       // runtime sky ambient remains readable through the cycle while the
@@ -458,7 +521,10 @@ float4 ShadePixel(VSOut i) {
           baked_indirect * max(misc.y, 0.0) * baked_exposure;
     }
     float3 diffuse_light =
-        overlay.rgb * overlay.w * lerp(wrap * 0.24, ndotl, 0.84);
+        dynamic_lighting
+            ? overlay.rgb * overlay.w *
+                  lerp(wrap * 0.24, ndotl, 0.84)
+            : float3(0.0, 0.0, 0.0);
     float dynamic_visibility =
         SampleCsmShadowSoft(world_pos, 0.0, normal, i.pos.xy);
     float static_visibility =
@@ -471,7 +537,8 @@ float4 ShadePixel(VSOut i) {
     float spec_power = lerp(128.0, 8.0, roughness);
     float specular = pow(saturate(dot(normal, halfway)), spec_power) *
                      ndotl * lerp(0.34, 0.035, roughness) *
-                     sun_visibility;
+                     sun_visibility *
+                     (dynamic_lighting ? 1.0 : 0.0);
     float3 f0 = lerp(float3(0.04, 0.04, 0.04), albedo, metallic);
     float fresnel = pow(1.0 - saturate(dot(normal, view_dir)), 4.0);
     float edge_fill = fresnel * (1.0 - roughness) * 0.08;
@@ -481,7 +548,8 @@ float4 ShadePixel(VSOut i) {
         diffuse_color * (ambient_light + diffuse_light) *
             orientation_ao * ao +
         overlay.rgb * f0 * specular +
-        sky_fill * f0 * edge_fill;
+        sky_fill * f0 * edge_fill *
+            (dynamic_lighting ? 1.0 : 0.0);
     lit += OwnedMovingLightContribution(
         world_pos, normal, view_dir, albedo, roughness);
     float3 emissive_color =
@@ -566,7 +634,23 @@ float4 ShadePixel(VSOut i) {
   // rendered rigid (sim-active player tees, clipping their gloss alpha
   // discarded every pixel: the invisible-shirt bug; their decode writes
   // zero blend weights, so the VS skinning branch stays off).
-  if (tint.g == 0.0 && overlay.w < 0.5 && cam_pos.w > -20.5) {
+  // Owned retail draws use tint.rgb for the authored material colour, so
+  // tint.g is normally 1. That made the character-protection gate below
+  // suppress alpha testing for every SKATE-owned tree/foliage card and for
+  // environmentsimple.alphatest geometry. Some of those meshes intentionally
+  // bind a fully transparent black placeholder; without the retail-family
+  // cutout they become the enormous black rectangles seen around University.
+  // The exact retail family is authoritative here, just as it is in the
+  // original shaders: family 7 and tree families 9/10 use ALPHAREF 30.
+  float exact_world_family = -cam_pos.w;
+  bool exact_world_cutout =
+      cam_pos.w < -0.5 && cam_pos.w > -20.5 &&
+      ((exact_world_family > 6.5 && exact_world_family < 7.5) ||
+       (exact_world_family > 8.5 && exact_world_family < 10.5));
+  if (exact_world_cutout) {
+    clip(albedo.a - 0.1176);
+  } else if (
+      tint.g == 0.0 && overlay.w < 0.5 && cam_pos.w > -20.5) {
     // environment.transparent alpha-tests its SQUARED alpha at ref 16/255
     // (transparentenvironment.xml: ALPHAREF 16, PS outputs a = diffuse.a^2).
     // Exact env families (cam_pos.w < 0) use the game's world ALPHAREF 30.

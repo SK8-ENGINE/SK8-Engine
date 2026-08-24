@@ -13,6 +13,7 @@
 #include <optional>
 #include <stdexcept>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -123,6 +124,7 @@ QuantizedVertex Quantize(Vec3 value, float epsilon) {
 struct Triangle {
   std::array<std::uint32_t, 3> vertices{};
   std::array<std::uint8_t, 3> edge_codes{};
+  bool has_native_edge_codes = false;
   std::uint16_t surface = 0;
   Vec3 normal;
 };
@@ -147,7 +149,44 @@ struct KdNode {
   }
 };
 
-constexpr std::size_t kMaximumKdLeafTriangles = 8;
+constexpr std::size_t kMaximumClusterVertices = 255;
+// Cluster sizes are stored in a big-endian uint16 and each serialized cluster
+// is 16-byte aligned. 65520 is therefore the largest representable aligned
+// cluster span.
+constexpr std::size_t kMaximumClusterBytes =
+    std::numeric_limits<std::uint16_t>::max() & ~std::size_t{15};
+
+bool RangeFitsCluster(
+    const std::vector<std::size_t>& order,
+    std::size_t first,
+    std::size_t count,
+    const std::vector<Triangle>& triangles) {
+  // Reject ranges that cannot fit even before accounting for vertices. This
+  // avoids building large temporary sets near the root of a map-sized KD tree.
+  if (count >
+      (kMaximumClusterBytes - kClusterHeaderSize) /
+          kBytesPerTriangleUnit) {
+    return false;
+  }
+
+  std::unordered_set<std::uint32_t> unique_vertices;
+  unique_vertices.reserve(
+      std::min(kMaximumClusterVertices + 1, count * 3));
+  for (std::size_t index = first; index < first + count; ++index) {
+    for (std::uint32_t vertex : triangles[order[index]].vertices) {
+      unique_vertices.insert(vertex);
+      if (unique_vertices.size() > kMaximumClusterVertices) {
+        return false;
+      }
+    }
+  }
+
+  const std::size_t serialized_bytes = Align16(
+      kClusterHeaderSize +
+      unique_vertices.size() * sizeof(float) * 4 +
+      count * kBytesPerTriangleUnit);
+  return serialized_bytes <= kMaximumClusterBytes;
+}
 
 Bounds TriangleBounds(const Triangle& triangle,
                       const std::vector<Vec3>& vertices) {
@@ -206,7 +245,10 @@ std::unique_ptr<KdNode> BuildKdTree(
       RangeBounds(order, first, count, triangles, vertices);
   node->first = first;
   node->count = count;
-  if (count <= kMaximumKdLeafTriangles) {
+  // Retail ClusteredMesh leaves are bounded by the format, not an arbitrary
+  // triangle count. Keeping connected, vertex-sharing strips together avoids
+  // introducing unnecessary internal partitions in ramps and curved floors.
+  if (RangeFitsCluster(order, first, count, triangles)) {
     return node;
   }
 
@@ -436,7 +478,8 @@ RwCollisionBuildResult BuildRwCollisionMesh(
     }
     triangles.push_back(
         {{{*a, *b, *c}},
-         {},
+         source.native_edge_codes,
+         source.has_native_edge_codes,
          ResolveSurface(source, options),
          Normalize(cross)});
   }
@@ -484,6 +527,9 @@ RwCollisionBuildResult BuildRwCollisionMesh(
   for (std::size_t triangle_index = 0;
        triangle_index < triangles.size(); ++triangle_index) {
     for (std::size_t edge = 0; edge < 3; ++edge) {
+      if (triangles[triangle_index].has_native_edge_codes) {
+        continue;
+      }
       triangles[triangle_index].edge_codes[edge] =
           MakeEdgeCode(has_neighbor[triangle_index][edge],
                        edge_cosines[triangle_index][edge]);
@@ -515,6 +561,9 @@ RwCollisionBuildResult BuildRwCollisionMesh(
     }
     for (std::size_t triangle_index : adjacent) {
       Triangle& triangle = triangles[triangle_index];
+      if (triangle.has_native_edge_codes) {
+        continue;
+      }
       for (std::size_t corner = 0; corner < 3; ++corner) {
         if (triangle.vertices[corner] == vertex) {
           triangle.edge_codes[corner] |= 0x40u;
@@ -570,7 +619,7 @@ RwCollisionBuildResult BuildRwCollisionMesh(
           output.vertices[corner] = found->second;
           continue;
         }
-        if (cluster.vertices.size() >= 255u) {
+        if (cluster.vertices.size() >= kMaximumClusterVertices) {
           result.error =
               "KD leaf exceeds the native 255-vertex cluster limit";
           return result;
@@ -763,6 +812,78 @@ RwCollisionBuildResult BuildRwCollisionMesh(
   return result;
 }
 
+RwCollisionBuildResult LoadSerializedRwCollisionMesh(
+    std::span<const std::uint8_t> source) {
+  RwCollisionBuildResult result;
+  if (source.size() < kMeshHeaderSize) {
+    result.error = "serialized retail collision mesh is smaller than its header";
+    return result;
+  }
+  const std::uint32_t mesh_bytes = ReadBeU32(source, 80);
+  const std::uint32_t kd_offset = ReadBeU32(source, 48);
+  const std::uint32_t cluster_table_offset = ReadBeU32(source, 52);
+  const std::uint32_t cluster_count = ReadBeU32(source, 64);
+  if (mesh_bytes != source.size() ||
+      (kd_offset & 0x0fu) != 0 ||
+      kd_offset > source.size() - kKdHeaderSize ||
+      (cluster_table_offset & 0x0fu) != 0 ||
+      cluster_table_offset > source.size() ||
+      cluster_count >
+          (source.size() - cluster_table_offset) / sizeof(std::uint32_t)) {
+    result.error = "serialized retail collision mesh header is invalid";
+    return result;
+  }
+
+  std::uint64_t vertex_count = 0;
+  std::uint32_t maximum_cluster_vertices = 0;
+  for (std::uint32_t cluster = 0; cluster < cluster_count; ++cluster) {
+    const std::uint32_t cluster_offset =
+        ReadBeU32(source, cluster_table_offset +
+                             cluster * sizeof(std::uint32_t));
+    if (cluster_offset > source.size() - kClusterHeaderSize) {
+      result.error = "serialized retail collision cluster offset is invalid";
+      return result;
+    }
+    const std::uint32_t cluster_bytes =
+        (static_cast<std::uint32_t>(source[cluster_offset + 8]) << 8u) |
+        source[cluster_offset + 9];
+    if (cluster_bytes < kClusterHeaderSize ||
+        cluster_bytes > source.size() - cluster_offset) {
+      result.error = "serialized retail collision cluster size is invalid";
+      return result;
+    }
+    const std::uint32_t vertices = source[cluster_offset + 10];
+    vertex_count += vertices;
+    maximum_cluster_vertices =
+        std::max(maximum_cluster_vertices, vertices);
+  }
+  if (vertex_count > std::numeric_limits<std::uint32_t>::max()) {
+    result.error = "serialized retail collision vertex count is invalid";
+    return result;
+  }
+
+  auto read_vec3 = [&](std::size_t offset) {
+    return Vec3{
+        std::bit_cast<float>(ReadBeU32(source, offset)),
+        std::bit_cast<float>(ReadBeU32(source, offset + 4)),
+        std::bit_cast<float>(ReadBeU32(source, offset + 8))};
+  };
+  result.mesh.bounds_min = read_vec3(0);
+  result.mesh.bounds_max = read_vec3(16);
+  if (!IsFinite(result.mesh.bounds_min) ||
+      !IsFinite(result.mesh.bounds_max)) {
+    result.error = "serialized retail collision bounds are invalid";
+    return result;
+  }
+  result.mesh.bytes.assign(source.begin(), source.end());
+  result.mesh.triangle_count = ReadBeU32(source, 40);
+  result.mesh.vertex_count = static_cast<std::uint32_t>(vertex_count);
+  result.mesh.cluster_count = cluster_count;
+  result.mesh.maximum_cluster_vertex_count = maximum_cluster_vertices;
+  result.ok = true;
+  return result;
+}
+
 bool FixupRwCollisionMeshForGuest(std::span<std::uint8_t> bytes,
                                   std::uint32_t guest_address) {
   if (bytes.size() < kMeshHeaderSize || guest_address == 0 ||
@@ -784,14 +905,15 @@ bool FixupRwCollisionMeshForGuest(std::span<std::uint8_t> bytes,
 
   const std::uint32_t branch_offset = ReadBeU32(bytes, kd_offset);
   const std::uint32_t branch_count = ReadBeU32(bytes, kd_offset + 4);
-  if (branch_count == 0) {
-    if (branch_offset != 0) {
-      return false;
-    }
-  } else if ((branch_offset & 0x0fu) != 0 ||
-             branch_offset > bytes.size() ||
-             branch_count >
-                 (bytes.size() - branch_offset) / 32u) {
+  // Retail branchless trees retain an unused serialized pointer value in
+  // the branch-record field. Native traversal never dereferences that field
+  // when branch_count is zero, so preserve it exactly instead of requiring
+  // a value that only our rebuilt meshes initialize to zero.
+  if (branch_count != 0 &&
+      ((branch_offset & 0x0fu) != 0 ||
+       branch_offset > bytes.size() ||
+       branch_count >
+           (bytes.size() - branch_offset) / 32u)) {
     return false;
   }
 

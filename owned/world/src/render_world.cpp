@@ -43,6 +43,18 @@ RenderVertex Interpolate(const RenderVertex& a,
       a.lightmap_uv.y +
           (b.lightmap_uv.y - a.lightmap_uv.y) * amount,
   };
+  result.decal_uv = {
+      a.decal_uv.x + (b.decal_uv.x - a.decal_uv.x) * amount,
+      a.decal_uv.y + (b.decal_uv.y - a.decal_uv.y) * amount,
+  };
+  result.tangent_binormal = Normalize(
+      a.tangent_binormal +
+      (b.tangent_binormal - a.tangent_binormal) * amount);
+  result.tangent_handedness =
+      std::abs(a.tangent_handedness) >=
+              std::abs(b.tangent_handedness)
+          ? a.tangent_handedness
+          : b.tangent_handedness;
   return result;
 }
 

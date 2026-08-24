@@ -8,6 +8,8 @@
 /tools/*
 !/tools/blender_owned_map/
 !/tools/blender_owned_map/**
+!/tools/vanilla_map_extraction/
+!/tools/vanilla_map_extraction/**
 **/__pycache__/
 *.pyc
 

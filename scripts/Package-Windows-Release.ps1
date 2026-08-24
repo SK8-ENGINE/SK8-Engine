@@ -111,6 +111,9 @@ New-Item -ItemType Directory -Path (Join-Path $stageRoot 'maps') -Force |
 New-Item -ItemType Directory -Path (
     Join-Path $stageRoot 'Blender Map Tools'
 ) -Force | Out-Null
+New-Item -ItemType Directory -Path (
+    Join-Path $stageRoot 'Vanilla Map Extraction Tools'
+) -Force | Out-Null
 
 Copy-Item -LiteralPath $executable -Destination (
     Join-Path $stageRoot 'skate3.exe'
@@ -169,6 +172,32 @@ Copy-Item -LiteralPath (
 ) -Destination (
     Join-Path $stageRoot 'Blender Map Tools\SKATE_FORMAT.md'
 )
+
+$extractionSource = Join-Path $repoRoot 'tools\vanilla_map_extraction'
+$extractionStage = Join-Path $stageRoot 'Vanilla Map Extraction Tools'
+foreach ($document in @('README.md', 'UNIVERSITY_INTEGRATION.md')) {
+    Copy-Item -LiteralPath (
+        Join-Path $extractionSource $document
+    ) -Destination (
+        Join-Path $extractionStage $document
+    )
+}
+foreach ($directory in @('blender', 'schemas', 'tests', 'tools')) {
+    $sourceDirectory = Join-Path $extractionSource $directory
+    $stageDirectory = Join-Path $extractionStage $directory
+    New-Item -ItemType Directory -Path $stageDirectory -Force | Out-Null
+    Get-ChildItem -LiteralPath $sourceDirectory -File |
+        Where-Object {
+            $_.Extension.ToLowerInvariant() -in @(
+                '.py', '.ps1', '.json', '.md'
+            )
+        } |
+        ForEach-Object {
+            Copy-Item -LiteralPath $_.FullName -Destination (
+                Join-Path $stageDirectory $_.Name
+            )
+        }
+}
 
 $forbiddenExtensions = @(
     '.iso', '.xex', '.xexp', '.skate', '.blend', '.blend1', '.big',

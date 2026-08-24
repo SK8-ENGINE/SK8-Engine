@@ -794,7 +794,10 @@ struct RendererState {
   // package. They are intentionally separate from the guest texture store:
   // no Xbox fetch constants, streaming routes, or proprietary asset
   // lifetime rules are involved.
-  std::unordered_map<uint32_t, GuestTexture> owned_map_textures;
+  // The same embedded image may legally serve different material roles.
+  // Role is part of the cache key because generated mip filtering differs
+  // for color, decal, normal, and data textures.
+  std::unordered_map<uint64_t, GuestTexture> owned_map_textures;
   // (The old D3D12 bookkeeping, the retired-resource vector, the CPU SRV
   // staging heap and its slot allocator/recycling lists, is gone: resource
   // destruction is deferred inside the RHI (Device::DestroyDeferred) and

@@ -605,6 +605,12 @@ void ApplyOwnedWorldCollisionAfterPhysOut(PPCContext& ctx, uint8_t* base,
   native_collision::UpdateKinematicObjects(ctx, base);
   native_collision::UpdateHingedDoors(ctx, base);
   native_grind::EnsureInstalled(ctx, base);
+  trick_pipeline::LiveSpatialSnapshot collision_snapshot;
+  if (trick_pipeline::CurrentLiveSpatialSnapshot(collision_snapshot) &&
+      collision_snapshot.phys_out == phys_out) {
+    native_collision::ObservePlayerCollisionTelemetry(
+        position, collision_snapshot.frame);
+  }
 
   if (!OwnedWorldCollisionEnabled()) {
     return;
@@ -1191,6 +1197,8 @@ void AppendTelemetry(std::ostream& out) {
       << weather.thunder_count
       << " sandbox_day_night_elapsed_bits="
       << std::bit_cast<uint32_t>(celestial.elapsed_seconds)
+      << " sandbox_dynamic_world_lighting="
+      << (map::DynamicWorldLightingEnabled() ? 1 : 0)
       << " sandbox_day_night_phase_bits="
       << std::bit_cast<uint32_t>(celestial.phase)
       << " sandbox_time_of_day_hours_bits="

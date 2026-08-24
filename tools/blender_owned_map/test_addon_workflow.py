@@ -2,6 +2,7 @@
 
 from pathlib import Path
 import math
+import struct
 import sys
 import tempfile
 
@@ -13,6 +14,7 @@ if str(TOOL_ROOT) not in sys.path:
     sys.path.insert(0, str(TOOL_ROOT))
 
 import owned_world_material_addon as addon
+from analyze_skate import VERTEX_BYTES_V12, analyze_package
 
 
 def require(condition: bool, message: str) -> None:
@@ -69,6 +71,48 @@ def main() -> None:
             "UV layer helper failed",
         )
 
+        # Retail imports carry their authored frame as hidden point
+        # attributes. Verify that it takes precedence over Blender tangent
+        # generation while the ordinary TestFloor above still exercises the
+        # custom-map fallback.
+        retail_mesh = bpy.data.meshes.new("RetailFrameMesh")
+        retail_mesh.from_pydata(
+            [(100.0, 0.0, 0.0), (101.0, 0.0, 0.0), (100.0, 1.0, 0.0)],
+            [],
+            [(0, 1, 2)],
+        )
+        retail_mesh.update()
+        retail_mesh.materials.append(material)
+        retail_mesh.uv_layers.new(name="UVMap")
+        retail_mesh.uv_layers.new(name="Lightmap")
+        retail_normal = retail_mesh.attributes.new(
+            addon.exporter.RETAIL_NORMAL_ATTRIBUTE,
+            type="FLOAT_VECTOR",
+            domain="POINT",
+        )
+        retail_normal.data.foreach_set(
+            "vector", (0.0, 0.0, 1.0) * 3
+        )
+        retail_tangent = retail_mesh.attributes.new(
+            addon.exporter.RETAIL_TANGENT_ATTRIBUTE,
+            type="FLOAT_VECTOR",
+            domain="POINT",
+        )
+        retail_tangent.data.foreach_set(
+            "vector", (1.0, 0.0, 0.0) * 3
+        )
+        retail_handedness = retail_mesh.attributes.new(
+            addon.exporter.RETAIL_HANDEDNESS_ATTRIBUTE,
+            type="FLOAT",
+            domain="POINT",
+        )
+        retail_handedness.data.foreach_set("value", (-1.0,) * 3)
+        retail_frame = bpy.data.objects.new("RetailFrame", retail_mesh)
+        retail_frame["ow_physics_type"] = "PRESENTATION_ONLY"
+        bpy.data.collections[
+            addon.exporter.VISUAL_COLLECTION
+        ].objects.link(retail_frame)
+
         # Old add-on versions could leave imported scale-reference meshes in
         # both export collections. Existing scenes must ignore them without
         # requiring the author to repair collection membership manually.
@@ -106,6 +150,47 @@ def main() -> None:
             ],
             [(0, 1, 2), (3, 4, 5), (6, 7, 8)],
             material.name,
+        )
+
+        retail_two_sided = collision_object(
+            "RetailTwoSidedRegression",
+            [
+                (50.0, 0.0, 0.0),
+                (51.0, 0.0, 0.0),
+                (50.0, 1.0, 0.0),
+            ],
+            [(0, 1, 2), (2, 1, 0)],
+            material.name,
+        )
+        retail_two_sided["ow_preserve_opposite_wound_collision"] = True
+        retail_two_sided["ow_preserve_retail_edge_codes"] = True
+        expected_retail_codes = (
+            (26, 90, 98),
+            (34, 88, 122),
+        )
+        for corner, attribute_name in enumerate(
+            addon.exporter.RETAIL_EDGE_CODE_ATTRIBUTES
+        ):
+            attribute = retail_two_sided.data.attributes.new(
+                attribute_name,
+                type="INT",
+                domain="FACE",
+            )
+            attribute.data.foreach_set(
+                "value",
+                [codes[corner] for codes in expected_retail_codes],
+            )
+        retail_triangles, retail_audit = (
+            addon.exporter.audit_collision_geometry([retail_two_sided])
+        )
+        require(
+            len(retail_triangles) == 2
+            and retail_audit.skipped_duplicates == 0
+            and tuple(
+                triangle[-1] for triangle in retail_triangles
+            )
+            == expected_retail_codes,
+            "Retail reverse-wound collision metadata was discarded",
         )
 
         downward_a = collision_object(
@@ -234,17 +319,53 @@ def main() -> None:
         require(output.is_file(), "Quick Export did not create an SKATE")
         require(cache.is_file(), "Quick Export did not create its cache")
         require(
-            output.read_bytes()[:8] == b"SKATE08\0",
+            output.read_bytes()[:8] == b"SKATE12\0",
             "Exported package has the wrong magic",
+        )
+        analysis = analyze_package(output, include_payloads=True)
+        retail_frame_records = []
+        vertex_bytes = analysis["_vertex_bytes"]
+        for offset in range(
+            0,
+            len(vertex_bytes),
+            VERTEX_BYTES_V12,
+        ):
+            position = struct.unpack_from("<3f", vertex_bytes, offset)
+            if position[0] < 90.0:
+                continue
+            retail_frame_records.append(
+                (
+                    struct.unpack_from("<3f", vertex_bytes, offset + 12),
+                    struct.unpack_from("<4b", vertex_bytes, offset + 52),
+                )
+            )
+        require(
+            retail_frame_records
+            and all(
+                normal == (0.0, 1.0, 0.0)
+                and frame == (0, 0, 127, -127)
+                for normal, frame in retail_frame_records
+            ),
+            "Retail tangent did not reconstruct the expected runtime binormal",
+        )
+        collision_bytes = analysis["_collision_bytes"]
+        native_codes = []
+        for offset in range(0, len(collision_bytes), 48):
+            record = struct.unpack_from("<9fII4B", collision_bytes, offset)
+            if record[14] == 1:
+                native_codes.append(tuple(record[11:14]))
+        require(
+            tuple(native_codes) == expected_retail_codes,
+            "SKATE package changed native retail collision edge codes",
         )
         _, _, counts = addon.exporter._read_package_header(output)
         collision_triangle_count = counts[4]
         local_light_count = counts[-2]
         npc_route_count = counts[-1]
         require(
-            collision_triangle_count == 3,
+            collision_triangle_count == 6,
             "Degenerate or duplicate collision reached the package "
-            f"(got {collision_triangle_count}, expected 3)",
+            f"(got {collision_triangle_count}, expected 6)",
         )
         require(
             local_light_count == 3,

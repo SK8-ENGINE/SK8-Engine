@@ -309,9 +309,25 @@ endif()
 set(_native_collision_streamer_observer_patched FALSE)
 foreach(_file IN LISTS _skate3_recomp_files)
   file(READ "${_file}" _contents)
-  if(_contents MATCHES "ObserveWorldStreamerAddVolume\\(ctx, base\\)")
+  if(_contents MATCHES
+      "ShouldSuppressWorldStreamerAddVolume\\(ctx, base\\)")
     set(_native_collision_streamer_observer_patched TRUE)
     break()
+  endif()
+  if(_contents MATCHES "ObserveWorldStreamerAddVolume\\(ctx, base\\)")
+    string(REPLACE
+      "skate3::native_collision::ObserveWorldStreamerAddVolume(ctx, base);"
+      "if (skate3::native_collision::ShouldSuppressWorldStreamerAddVolume(ctx, base)) {
+		return;
+	}"
+      _patched_contents "${_contents}")
+    if(NOT _patched_contents STREQUAL _contents)
+      file(WRITE "${_file}" "${_patched_contents}")
+      set(_native_collision_streamer_observer_patched TRUE)
+      message(STATUS
+        "Upgraded owned native-collision streamer observer in ${_file}")
+      break()
+    endif()
   endif()
   if(NOT _contents MATCHES "DEFINE_REX_FUNC\\(sub_82776B58\\)")
     continue()
@@ -322,7 +338,9 @@ foreach(_file IN LISTS _skate3_recomp_files)
   set(_native_collision_streamer_patch
 "DEFINE_REX_FUNC(sub_82776B58) {
 	REX_FUNC_PROLOGUE();
-	skate3::native_collision::ObserveWorldStreamerAddVolume(ctx, base);")
+	if (skate3::native_collision::ShouldSuppressWorldStreamerAddVolume(ctx, base)) {
+		return;
+	}")
   string(REPLACE "${_native_collision_streamer_site}"
     "${_native_collision_streamer_patch}" _patched_contents "${_contents}")
   if(_patched_contents STREQUAL _contents)
@@ -345,8 +363,20 @@ set(_native_collision_query_observer_patched FALSE)
 foreach(_file IN LISTS _skate3_recomp_files)
   file(READ "${_file}" _contents)
   if(_contents MATCHES
-      "ObserveNativeTriangleResult\\(ctx\\.r3\\.u32\\)")
+      "ctx\\.r31\\.u32, base\\)")
     set(_native_collision_query_observer_patched TRUE)
+    break()
+  endif()
+  if(_contents MATCHES
+      "ObserveNativeTriangleResult\\(ctx\\.r3\\.u32\\)")
+    string(REPLACE
+      "ObserveNativeTriangleResult(ctx.r3.u32);"
+      "ObserveNativeTriangleResult(ctx.r3.u32, ctx.r31.u32, base);"
+      _contents "${_contents}")
+    file(WRITE "${_file}" "${_contents}")
+    set(_native_collision_query_observer_patched TRUE)
+    message(STATUS
+      "Upgraded owned native-collision contact observers in ${_file}")
     break()
   endif()
   if(NOT _contents MATCHES "DEFINE_REX_FUNC\\(sub_827719B8\\)")
@@ -433,7 +463,8 @@ foreach(_file IN LISTS _skate3_recomp_files)
     set(_triangle_patch
 "	ctx.lr = 0x${_return_address};
 	sub_82ADF5D8(ctx, base);
-	skate3::native_collision::ObserveNativeTriangleResult(ctx.r3.u32);")
+	skate3::native_collision::ObserveNativeTriangleResult(
+		ctx.r3.u32, ctx.r31.u32, base);")
     string(REPLACE "${_triangle_site}" "${_triangle_patch}"
       _patched "${_contents}")
     if(_patched STREQUAL _contents)
@@ -453,6 +484,256 @@ endforeach()
 if(NOT _native_collision_query_observer_patched)
   message(FATAL_ERROR
     "Failed to apply owned native-collision query observers")
+endif()
+
+set(_native_collision_triangle_context_patched FALSE)
+foreach(_file IN LISTS _skate3_recomp_files)
+  file(READ "${_file}" _contents)
+  if(_contents MATCHES "PrepareNativeTriangleTest")
+    set(_native_collision_triangle_context_patched TRUE)
+    break()
+  endif()
+  if(NOT _contents MATCHES "DEFINE_REX_FUNC\\(sub_827719B8\\)")
+    continue()
+  endif()
+
+  foreach(_return_address IN ITEMS 82771B58 82771EAC)
+    set(_triangle_context_site
+"	ctx.lr = 0x${_return_address};
+	sub_82ADF5D8(ctx, base);")
+    set(_triangle_context_patch
+"	skate3::native_collision::PrepareNativeTriangleTest(
+		ctx.r3.u32, ctx.r4.u32, ctx.r5.u32, base);
+	ctx.lr = 0x${_return_address};
+	sub_82ADF5D8(ctx, base);")
+    string(REPLACE "${_triangle_context_site}"
+      "${_triangle_context_patch}" _patched "${_contents}")
+    if(_patched STREQUAL _contents)
+      message(FATAL_ERROR
+        "Failed to patch native triangle test context at "
+        "${_return_address}")
+    endif()
+    set(_contents "${_patched}")
+  endforeach()
+
+  _skate3_add_include(_contents "skate3_native_collision.h")
+  file(WRITE "${_file}" "${_contents}")
+  set(_native_collision_triangle_context_patched TRUE)
+  message(STATUS
+    "Applied native triangle-test context observers in ${_file}")
+  break()
+endforeach()
+if(NOT _native_collision_triangle_context_patched)
+  message(FATAL_ERROR
+    "Failed to apply native triangle-test context observers")
+endif()
+
+set(_native_collision_triangle_acceptance_patched FALSE)
+foreach(_file IN LISTS _skate3_recomp_files)
+  file(READ "${_file}" _contents)
+  if(_contents MATCHES "ctx\\.r31\\.u32, 1u, base\\)" AND
+      _contents MATCHES "ctx\\.r31\\.u32, 2u, base\\)")
+    set(_native_collision_triangle_acceptance_patched TRUE)
+    break()
+  endif()
+  if(_contents MATCHES "ObserveNativeTriangleAccepted")
+    message(FATAL_ERROR
+      "Found a partial native triangle-acceptance observer patch")
+  endif()
+  if(NOT _contents MATCHES "DEFINE_REX_FUNC\\(sub_827719B8\\)")
+    continue()
+  endif()
+
+  set(_accepted_one_site
+"	// bne cr6,0x82771c58
+	if (!ctx.cr6.eq) goto loc_82771C58;
+	// lfs f0,960(r1)")
+  set(_accepted_one_patch
+"	// bne cr6,0x82771c58
+	if (!ctx.cr6.eq) goto loc_82771C58;
+	skate3::native_collision::ObserveNativeTriangleAccepted(
+		ctx.r31.u32, 1u, base);
+	// lfs f0,960(r1)")
+  string(REPLACE "${_accepted_one_site}" "${_accepted_one_patch}"
+    _patched "${_contents}")
+  if(_patched STREQUAL _contents)
+    message(FATAL_ERROR
+      "Failed to patch first native triangle-acceptance observer")
+  endif()
+  set(_contents "${_patched}")
+
+  set(_accepted_two_site
+"	// bne cr6,0x82771f94
+	if (!ctx.cr6.eq) goto loc_82771F94;
+	// lfs f0,848(r1)")
+  set(_accepted_two_patch
+"	// bne cr6,0x82771f94
+	if (!ctx.cr6.eq) goto loc_82771F94;
+	skate3::native_collision::ObserveNativeTriangleAccepted(
+		ctx.r31.u32, 2u, base);
+	// lfs f0,848(r1)")
+  string(REPLACE "${_accepted_two_site}" "${_accepted_two_patch}"
+    _patched "${_contents}")
+  if(_patched STREQUAL _contents)
+    message(FATAL_ERROR
+      "Failed to patch second native triangle-acceptance observer")
+  endif()
+  set(_contents "${_patched}")
+
+  _skate3_add_include(_contents "skate3_native_collision.h")
+  file(WRITE "${_file}" "${_contents}")
+  set(_native_collision_triangle_acceptance_patched TRUE)
+  message(STATUS
+    "Applied native triangle-acceptance observers in ${_file}")
+  break()
+endforeach()
+if(NOT _native_collision_triangle_acceptance_patched)
+  message(FATAL_ERROR
+    "Failed to apply native triangle-acceptance observers")
+endif()
+
+set(_native_collision_triangle_selection_patched FALSE)
+foreach(_file IN LISTS _skate3_recomp_files)
+  file(READ "${_file}" _contents)
+  if(_contents MATCHES "ObserveNativeTriangleSelected")
+    if(_contents MATCHES
+        "ctx\\.r31\\.u32, ctx\\.r14\\.u32, ctx\\.r1\\.u32 \\+ 144u, 1u, base" AND
+       _contents MATCHES
+        "ctx\\.r31\\.u32, ctx\\.r30\\.u32, ctx\\.r30\\.u32, 2u, base")
+      set(_native_collision_triangle_selection_patched TRUE)
+      break()
+    endif()
+    message(FATAL_ERROR
+      "Found a partial native triangle-selection observer patch")
+  endif()
+  if(NOT _contents MATCHES "DEFINE_REX_FUNC\\(sub_827719B8\\)")
+    continue()
+  endif()
+
+  set(_selected_one_site
+"	ctx.lr = 0x82771C4C;
+	sub_8276D510(ctx, base);
+	// clrlwi r7,r3,24")
+  set(_selected_one_patch
+"	ctx.lr = 0x82771C4C;
+	sub_8276D510(ctx, base);
+	skate3::native_collision::ObserveNativeTriangleSelected(
+		ctx.r31.u32, ctx.r14.u32, ctx.r1.u32 + 144u, 1u, base);
+	// clrlwi r7,r3,24")
+  string(REPLACE "${_selected_one_site}" "${_selected_one_patch}"
+    _patched "${_contents}")
+  if(_patched STREQUAL _contents)
+    message(FATAL_ERROR
+      "Failed to patch first native triangle-selection observer")
+  endif()
+  set(_contents "${_patched}")
+
+  set(_selected_two_site
+"	// stw r9,104(r30)
+	REX_STORE_U32(ctx.r30.u32 + 104, ctx.r9.u32);
+loc_82771F88:")
+  set(_selected_two_patch
+"	// stw r9,104(r30)
+	REX_STORE_U32(ctx.r30.u32 + 104, ctx.r9.u32);
+	skate3::native_collision::ObserveNativeTriangleSelected(
+		ctx.r31.u32, ctx.r30.u32, ctx.r30.u32, 2u, base);
+loc_82771F88:")
+  string(REPLACE "${_selected_two_site}" "${_selected_two_patch}"
+    _patched "${_contents}")
+  if(_patched STREQUAL _contents)
+    message(FATAL_ERROR
+      "Failed to patch second native triangle-selection observer")
+  endif()
+  set(_contents "${_patched}")
+
+  _skate3_add_include(_contents "skate3_native_collision.h")
+  file(WRITE "${_file}" "${_contents}")
+  set(_native_collision_triangle_selection_patched TRUE)
+  message(STATUS
+    "Applied native triangle-selection observers in ${_file}")
+  break()
+endforeach()
+if(NOT _native_collision_triangle_selection_patched)
+  message(FATAL_ERROR
+    "Failed to apply native triangle-selection observers")
+endif()
+
+set(_native_collision_primitive_pair_observer_patched FALSE)
+foreach(_file IN LISTS _skate3_recomp_files)
+  file(READ "${_file}" _contents)
+  if(_contents MATCHES "BeginNativePrimitivePair" AND
+      _contents MATCHES "EndNativePrimitivePair")
+    set(_native_collision_primitive_pair_observer_patched TRUE)
+    break()
+  endif()
+  if(_contents MATCHES "BeginNativePrimitivePair" OR
+      _contents MATCHES "EndNativePrimitivePair")
+    message(FATAL_ERROR
+      "Found a partial native primitive-pair observer patch")
+  endif()
+  if(NOT _contents MATCHES "DEFINE_REX_FUNC\\(sub_82AD3CD8\\)")
+    continue()
+  endif()
+
+  set(_primitive_pair_entry_site
+"DEFINE_REX_FUNC(sub_82AD3CD8) {
+	REX_FUNC_PROLOGUE();
+	PPCRegister temp{};
+	uint32_t ea{};")
+  set(_primitive_pair_entry_patch
+"DEFINE_REX_FUNC(sub_82AD3CD8) {
+	REX_FUNC_PROLOGUE();
+	PPCRegister temp{};
+	uint32_t ea{};
+	skate3::native_collision::BeginNativePrimitivePair(
+		ctx.r3.u32, ctx.r4.u32, ctx.r5.u32,
+		ctx.r6.u32, ctx.r7.u32, base);")
+  string(REPLACE "${_primitive_pair_entry_site}"
+    "${_primitive_pair_entry_patch}" _patched "${_contents}")
+  if(_patched STREQUAL _contents)
+    message(FATAL_ERROR
+      "Failed to patch native primitive-pair observer entry")
+  endif()
+  set(_contents "${_patched}")
+
+  set(_primitive_pair_exit_site
+"loc_82AD3E38:
+	skate3::function_coverage::MaybeRecordAddress(0x82AD3E38);
+	// addi r1,r1,2528")
+  set(_primitive_pair_exit_patch
+"loc_82AD3E38:
+	skate3::function_coverage::MaybeRecordAddress(0x82AD3E38);
+	skate3::native_collision::EndNativePrimitivePair(ctx.r3.u32, base);
+	// addi r1,r1,2528")
+  string(REPLACE "${_primitive_pair_exit_site}"
+    "${_primitive_pair_exit_patch}" _patched "${_contents}")
+  if(_patched STREQUAL _contents)
+    set(_primitive_pair_fresh_exit_site
+"loc_82AD3E38:
+	// addi r1,r1,2528")
+    set(_primitive_pair_fresh_exit_patch
+"loc_82AD3E38:
+	skate3::native_collision::EndNativePrimitivePair(ctx.r3.u32, base);
+	// addi r1,r1,2528")
+    string(REPLACE "${_primitive_pair_fresh_exit_site}"
+      "${_primitive_pair_fresh_exit_patch}" _patched "${_contents}")
+  endif()
+  if(_patched STREQUAL _contents)
+    message(FATAL_ERROR
+      "Failed to patch native primitive-pair observer exit")
+  endif()
+  set(_contents "${_patched}")
+
+  _skate3_add_include(_contents "skate3_native_collision.h")
+  file(WRITE "${_file}" "${_contents}")
+  set(_native_collision_primitive_pair_observer_patched TRUE)
+  message(STATUS
+    "Applied native primitive-pair contact observer in ${_file}")
+  break()
+endforeach()
+if(NOT _native_collision_primitive_pair_observer_patched)
+  message(FATAL_ERROR
+    "Failed to apply native primitive-pair contact observer")
 endif()
 
 function(_skate3_patch_native_collision_entry

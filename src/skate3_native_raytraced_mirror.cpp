@@ -1248,6 +1248,8 @@ void FillReflectorConstants(
           : 0.0f;
   const skate::world::DayNightState celestial =
       mechanics_sandbox::map::ActiveDayNightState();
+  const bool dynamic_lighting =
+      mechanics_sandbox::map::DynamicWorldLightingEnabled();
   constants[32] = celestial.sky_zenith.x;
   constants[33] = celestial.sky_zenith.y;
   constants[34] = celestial.sky_zenith.z;
@@ -1262,11 +1264,12 @@ void FillReflectorConstants(
   constants[40] = light_direction[0];
   constants[41] = light_direction[1];
   constants[42] = light_direction[2];
-  constants[43] = celestial.ambient;
+  constants[43] = dynamic_lighting ? celestial.ambient : 0.0f;
   constants[44] = celestial.light_color.x;
   constants[45] = celestial.light_color.y;
   constants[46] = celestial.light_color.z;
-  constants[47] = celestial.light_intensity;
+  constants[47] =
+      dynamic_lighting ? celestial.light_intensity : 0.0f;
 }
 
 struct ReflectorPlane {

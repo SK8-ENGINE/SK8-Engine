@@ -7,7 +7,8 @@ The exporter treats the Blender file as authoring data and writes one
 renderer-neutral package containing:
 
 - visual triangles with base-texture UVs and independent lightmap UVs;
-- embedded RGBA8 base textures and baked indirect-light textures;
+- losslessly compressed RGBA8 base textures and baked indirect-light
+  textures;
 - normal, packed ORM, emissive, cutout, and blended-transparent materials;
 - native Skate 3 audio, physics, and contact-pattern channels per material;
 - independent authoritative collision triangles;
@@ -126,7 +127,28 @@ byte-checked against the scalar fallback; it does not simplify meshes, reduce
 texture resolution, or remove materials. GPU compute is not used because this
 work is Blender data extraction and binary file packing, where avoiding Python
 scalar overhead is substantially more useful than transferring the data to a
-graphics device.
+graphics device. Complete float32 vertex records are indexed exactly, so
+shared corners no longer duplicate position, normal, UV, lightmap UV, and
+material data. SKATE v12 then applies bounded lossless DEFLATE to RGBA8
+textures, vertices, indices, and collision. The loader reconstructs and
+validates the original runtime records; export does not simplify meshes,
+reduce texture resolution, omit maps, quantize attributes, or merge UV/hard
+normal seams. V12 adds a third decal UV, a compact SNORM8 tangent frame,
+complete named retail shader bindings/parameters, and an extensible world
+metadata table. Extracted retail collision can additionally carry exact
+per-triangle RenderWare edge/corner feature codes as face attributes; ordinary
+authored maps continue to generate those codes automatically.
+
+Retail-imported meshes may carry the hidden point attributes
+`skate3_retail_normal`, `skate3_retail_tangent`, and
+`skate3_retail_tangent_handedness`. When the complete validated set is
+present, the exporter uses the authored tangent rather than recalculating it
+from Blender UVs, then reconstructs the compact runtime binormal expected by
+SKATE v12. This preserves the game's authored per-island lighting
+orientation. Existing University working files whose tangent was stored under
+the old `skate3_retail_binormal` name remain supported as a migration path.
+Ordinary custom maps do not need these attributes and continue to use
+Blender's generated tangent frame.
 
 Maps can contain any number of local lights. The renderer dynamically keeps
 the lights relevant to the current view active instead of evaluating every
@@ -147,7 +169,12 @@ geometry and the skater.
 The result can be copied into the game's `maps` folder and selected through
 **Settings > Maps**. Every lighting value is the map's load-time default;
 players can experiment non-destructively through **Settings > World** and
-restore the authored values at any time.
+restore the authored values at any time. **Dynamic Lighting** independently
+disables the moving sun, moon, ambient fill, and their world shadows while
+leaving the clock, sky, baked lightmaps, emissive materials, and local lights
+active. Imported lightmapped surfaces use the retained retail
+fog/exposure/tonemap chain in this mode, providing the vanilla baked-lighting
+baseline rather than an unlit debug view.
 
 ## Material and physics UI
 
@@ -185,6 +212,10 @@ Create these exclusive collections:
 - `OW_GROUP_3_NO_COLLISION`: rendered decals, vegetation, support railings,
   and phase-through meshes.
 - `OW_GROUP_4_GRINDS`: curve objects whose splines become grind centerlines.
+  Normal curves export as authored point paths. Extracted retail curves carry
+  protected `skate3_retail_grind_*` provenance and exact native cubic
+  payloads; moving their points or handles causes export to fail instead of
+  silently replacing the original spline.
 - `OW_GROUP_5_PATHING`: optional/experimental route records for native AI
   skaters. Object
   properties `ow_npc_skater_count`, `ow_npc_speed`, and
@@ -203,6 +234,13 @@ Scene property `ow_cycle_seconds` controls the day/night duration; set it to
 zero to freeze lighting at `ow_start_hour`. Set `ow_cycle_ping_pong` with
 `ow_end_hour` to animate from the start hour to the end hour and back without
 traversing the unused part of the 24-hour clock.
+
+Imported Skate 3 lightmaps must set `ow_lightmap_encoding` to
+`skate3_retail_sqrt_linear_over_4`. The addon then preserves their RGBA8
+pages byte-for-byte and applies the console's `encoded²` energy scale in the
+exported material. Ordinary Blender bakes retain the authored
+`encoded² * 4` decode, so the two sources do not accidentally differ by
+four times their lighting energy.
 
 To author a door, keep its mesh in Group 1, choose **Hinged Door** in
 **Object Properties > Physics > Owned World Physics**, place the 3D cursor
@@ -253,13 +291,15 @@ intersecting solid boxes to form stairs or leave bottom faces coplanar with a
 floor. Set `ow_upward_surface=true` on floor/ramp-only proxies.
 
 The exporter safely omits zero-area and exact/opposite-wound duplicate
-collision triangles from the generated `.skate` package and reports every
-affected object together. It does not edit the Blender mesh. Do not dissolve
-or re-UV a visual mesh to satisfy collision cleanup; create a separate,
-simpler collision proxy when imported art is messy. Non-finite coordinates
-and downward/vertical triangles on an object marked **Rideable Top Surface**
-remain blocking errors because they can create invalid contacts, instant
-bails, or inverted ramps.
+collision triangles from ordinary authored maps and reports every affected
+object together. It does not edit the Blender mesh. An imported retail
+collision object may opt into
+`ow_preserve_opposite_wound_collision=true`; in that mode cyclic
+same-wound copies are still removed, but reverse-wound partners are retained
+for intentional two-sided collision. Do not enable this globally to mask
+messy authored proxies. Non-finite coordinates and downward/vertical
+triangles on an object marked **Rideable Top Surface** remain blocking errors
+because they can create invalid contacts, instant bails, or inverted ramps.
 
 At runtime, an ordinary map is compiled into one continuous native
 RenderWare collision mesh with its own KD tree. This preserves shared-edge

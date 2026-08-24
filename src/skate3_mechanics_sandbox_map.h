@@ -32,6 +32,19 @@ struct VisualDraw {
   skate::world::TextureId normal_texture = 0;
   skate::world::TextureId orm_texture = 0;
   skate::world::TextureId emissive_texture = 0;
+  skate::world::TextureId retail_macro_texture = 0;
+  skate::world::TextureId retail_decal_texture = 0;
+  skate::world::TextureId retail_specular_texture = 0;
+  skate::world::TextureId retail_detail_texture = 0;
+  skate::world::TextureId retail_environment_texture = 0;
+  skate::world::TextureId retail_normal2_texture = 0;
+  uint32_t retail_shader_family = 0;
+  uint32_t retail_render_flags = 0;
+  float retail_macro_scale = 1.0f;
+  float retail_macro_opacity = 1.0f;
+  float retail_detail_scale = 0.0f;
+  float retail_scroll_u = 0.0f;
+  float retail_scroll_v = 0.0f;
   float baked_indirect_strength = 0.0f;
   skate::world::SurfaceMaterial::AlphaMode alpha_mode =
       skate::world::SurfaceMaterial::AlphaMode::Opaque;
@@ -76,6 +89,14 @@ struct Contact {
 
 struct GroundHit {
   uint32_t id = 0;
+  float point[3] = {};
+  float normal[3] = {};
+  float distance = 0.0f;
+};
+
+struct RayHit {
+  uint32_t id = 0;
+  uint32_t material = 0;
   float point[3] = {};
   float normal[3] = {};
   float distance = 0.0f;
@@ -150,6 +171,7 @@ bool ActiveMovingLightSnapshot(std::size_t index,
 // published state.
 void AdvanceDayNightCycle(float frame_seconds);
 skate::world::DayNightState ActiveDayNightState();
+bool DynamicWorldLightingEnabled();
 
 enum class WorldLightingSetting {
   kPaused,
@@ -169,12 +191,14 @@ enum class WorldLightingSetting {
   kMoonIntensity,
   kDayAmbient,
   kNightAmbient,
+  kDynamicLightingEnabled,
 };
 
 struct WorldLightingSettings {
   bool available = false;
   bool paused = false;
   bool ping_pong = false;
+  bool dynamic_lighting_enabled = true;
   float time_of_day_hours = 0.0f;
   float cycle_duration_seconds = 0.0f;
   float start_hour = 0.0f;
@@ -212,6 +236,7 @@ bool ActiveWaterPusherPose(float out_position[3]);
 WaterTelemetry ActiveWaterTelemetry();
 
 bool QueryContact(const float position[3], float radius, Contact& out);
+bool QueryRaySegment(const float start[3], const float delta[3], RayHit& out);
 bool QueryGround(const float position[3], float probe_above,
                  float probe_below, GroundHit& out);
 bool QueryLowestGround(const float position[3], float probe_above,

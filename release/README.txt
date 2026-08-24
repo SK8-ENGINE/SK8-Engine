@@ -71,6 +71,15 @@ without running scripts.
 Only distribute maps and assets that you have permission to distribute.
 See CUSTOM_MAPS.md for the complete map workflow.
 
+VANILLA MAP EXTRACTION
+----------------------
+
+The "Vanilla Map Extraction Tools" folder contains the preservation-first
+University extraction, Blender conversion, validation, and format research
+tools. It contains no retail game assets or generated maps. Read its README
+before use; you must provide your own legally obtained retail files, Python
+dependencies, Blender, and the external UTT parser.
+
 LICENSING
 ---------
 

@@ -1,4 +1,4 @@
-"""Human-friendly Blender authoring and export tools for SKATE v8.
+"""Human-friendly Blender authoring and export tools for SKATE v12.
 
 This addon and exporter are original project code. They do not import,
 invoke, redistribute, or depend on ArenaBuilder.
@@ -44,7 +44,7 @@ exporter = importlib.reload(_exporter)
 bl_info = {
     "name": "Owned World Authoring",
     "author": "Skate 3 Custom Engine Layer contributors",
-    "version": (1, 8, 4),
+    "version": (1, 10, 1),
     "blender": (5, 0, 0),
     "location": "3D View > Sidebar > Skate 3 Map",
     "description": "Create, validate, and export Skate 3 Custom Engine maps",
@@ -100,6 +100,7 @@ PHYSICS_ITEMS = [
     ("10", "SlipperyRagdoll", "Low-friction bail behavior"),
     ("11", "BouncyRagdoll", "Bouncy bail behavior"),
     ("12", "Water", "Native water/swimming behavior"),
+    ("13", "Retail13", "Retail collision behavior 13"),
 ]
 
 PATTERN_ITEMS = [
@@ -3255,7 +3256,7 @@ def _hydrate_material(material: Material) -> None:
         max(0, min(93, int(material.get("ow_audio_surface", 3))))
     )
     settings.physics_surface = str(
-        max(0, min(12, int(material.get("ow_physics_surface", 1))))
+        max(0, min(13, int(material.get("ow_physics_surface", 1))))
     )
     settings.surface_pattern = str(
         max(0, min(15, int(material.get("ow_surface_pattern", 0))))

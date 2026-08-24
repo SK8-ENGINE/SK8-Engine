@@ -76,7 +76,7 @@ int main() {
         std::filesystem::temp_directory_path() /
         "skate_owned_world_future_format_test.skate";
     const std::array<std::uint8_t, 12> header = {
-        'S', 'K', 'A', 'T', 'E', '0', '9', '\0',
+        'S', 'K', 'A', 'T', 'E', '1', '3', '\0',
         0x78, 0x56, 0x34, 0x12};
     {
       std::ofstream output(
@@ -608,6 +608,98 @@ int main() {
               fixed_grind, grind_guest_base),
           "repeated grind spline fixup was not rejected");
 
+  MapDefinition native_grind_definition;
+  GrindRail native_rail;
+  native_rail.id = 1;
+  native_rail.name = "retail_cubic";
+  native_rail.retail_spline_id = 0x1122334455667788ull;
+  native_rail.retail_type_signature = 0x8877665544332211ull;
+  native_rail.retail_flags = 0x12345678u;
+  native_rail.retail_trailing_word = 0x13572468u;
+  native_rail.native_segments.resize(1);
+  NativeGrindSegment& native_segment =
+      native_rail.native_segments.front();
+  const auto FloatWord = [](float value) {
+    return std::bit_cast<std::uint32_t>(value);
+  };
+  native_segment.words[0] = FloatWord(3.5f);
+  native_segment.words[12] = FloatWord(1.0f);
+  native_segment.words[13] = FloatWord(2.0f);
+  native_segment.words[14] = FloatWord(3.0f);
+  native_segment.words[15] = FloatWord(1.0f);
+  native_segment.words[16] = FloatWord(0.25f);
+  native_segment.words[20] = FloatWord(-4.0f);
+  native_segment.words[21] = FloatWord(-5.0f);
+  native_segment.words[22] = FloatWord(-6.0f);
+  native_segment.words[24] = FloatWord(7.0f);
+  native_segment.words[25] = FloatWord(8.0f);
+  native_segment.words[26] = FloatWord(9.0f);
+  native_grind_definition.grind_rails.push_back(
+      std::move(native_rail));
+
+  GrindSplineBuildResult native_grind = BuildGrindSplineData(
+      native_grind_definition, {10.0f, 20.0f, 30.0f});
+  Require(native_grind.ok, native_grind.error);
+  Require(native_grind.blob.rail_count == 1 &&
+              native_grind.blob.segment_count == 1 &&
+              native_grind.blob.bytes.size() == 16 + 32 + 144,
+          "native grind spline accounting is wrong");
+  Require(ReadBeU64(native_grind.blob.bytes, 16) ==
+                  0x1122334455667788ull &&
+              ReadBeU64(native_grind.blob.bytes, 24) ==
+                  0x8877665544332211ull &&
+              ReadBeU32(native_grind.blob.bytes, 32) == 0x12345678u &&
+              ReadBeU32(native_grind.blob.bytes, 44) == 0x13572468u,
+          "native grind rail metadata was not preserved");
+  const std::size_t native_segment_offset = 16 + 32;
+  Require(
+      NearlyEqual(
+          ReadBeF32(native_grind.blob.bytes, native_segment_offset),
+          3.5f) &&
+          NearlyEqual(
+              ReadBeF32(
+                  native_grind.blob.bytes,
+                  native_segment_offset + 48),
+              11.0f) &&
+          NearlyEqual(
+              ReadBeF32(
+                  native_grind.blob.bytes,
+                  native_segment_offset + 52),
+              22.0f) &&
+          NearlyEqual(
+              ReadBeF32(
+                  native_grind.blob.bytes,
+                  native_segment_offset + 56),
+              33.0f) &&
+          NearlyEqual(
+              ReadBeF32(
+                  native_grind.blob.bytes,
+                  native_segment_offset + 64),
+              0.25f) &&
+          NearlyEqual(
+              ReadBeF32(
+                  native_grind.blob.bytes,
+                  native_segment_offset + 80),
+              6.0f) &&
+          NearlyEqual(
+              ReadBeF32(
+                  native_grind.blob.bytes,
+                  native_segment_offset + 96),
+              17.0f),
+      "native grind payload did not preserve coefficients and translate "
+      "positions/bounds");
+  Require(
+      ReadBeU32(
+          native_grind.blob.bytes,
+          native_segment_offset + 120) == 16 &&
+          ReadBeU32(
+              native_grind.blob.bytes,
+              native_segment_offset + 124) == 0 &&
+          ReadBeU32(
+              native_grind.blob.bytes,
+              native_segment_offset + 128) == 0,
+      "native grind links were not regenerated");
+
   RwCollisionBuildOptions rw_options;
   rw_options.default_surface_id = EncodeRwSurfaceId(0, 1, 0);
   rw_options.material_surface_ids.emplace(
@@ -670,9 +762,13 @@ int main() {
         ReadBeU16(rw.mesh.bytes, cluster_offset + 2);
     const std::uint16_t vertex_count =
         ReadBeU16(rw.mesh.bytes, cluster_offset + 4);
-    Require(unit_count > 0 && unit_count <= 8 &&
+    const std::uint16_t cluster_bytes =
+        ReadBeU16(rw.mesh.bytes, cluster_offset + 8);
+    Require(unit_count > 0 &&
                 unit_bytes == unit_count * 9 &&
-                vertex_count <= 255,
+                vertex_count <= 255 &&
+                cluster_bytes > 0 &&
+                cluster_offset + cluster_bytes <= rw.mesh.bytes.size(),
             "RenderWare cluster header is invalid");
     cluster_units[cluster] = unit_count;
     serialized_units += unit_count;
@@ -695,6 +791,63 @@ int main() {
   Require(found_concrete_surface,
           "RenderWare material surface ID is wrong");
 
+  MapDefinition retail_edge_definition;
+  CollisionTriangle retail_edge_triangle;
+  retail_edge_triangle.a = {0.0f, 0.0f, 0.0f};
+  retail_edge_triangle.b = {1.0f, 0.0f, 0.0f};
+  retail_edge_triangle.c = {0.0f, 0.0f, 1.0f};
+  retail_edge_triangle.native_edge_codes = {0x1a, 0x5a, 0x62};
+  retail_edge_triangle.has_native_edge_codes = true;
+  retail_edge_definition.collision_triangles.push_back(retail_edge_triangle);
+  const RwCollisionBuildResult retail_edge_mesh =
+      BuildRwCollisionMesh(retail_edge_definition);
+  Require(retail_edge_mesh.ok, retail_edge_mesh.error);
+  const std::uint32_t retail_cluster_table =
+      ReadBeU32(retail_edge_mesh.mesh.bytes, 52);
+  const std::uint32_t retail_cluster =
+      ReadBeU32(retail_edge_mesh.mesh.bytes, retail_cluster_table);
+  const std::uint16_t retail_vertices =
+      ReadBeU16(retail_edge_mesh.mesh.bytes, retail_cluster + 4);
+  const std::size_t retail_unit =
+      retail_cluster + 16 + static_cast<std::size_t>(retail_vertices) * 16;
+  Require(retail_edge_mesh.mesh.bytes.at(retail_unit + 4) == 0x1a &&
+              retail_edge_mesh.mesh.bytes.at(retail_unit + 5) == 0x5a &&
+              retail_edge_mesh.mesh.bytes.at(retail_unit + 6) == 0x62,
+          "native retail collision edge codes were regenerated");
+  const RwCollisionBuildResult adopted_retail_mesh =
+      LoadSerializedRwCollisionMesh(retail_edge_mesh.mesh.bytes);
+  Require(adopted_retail_mesh.ok, adopted_retail_mesh.error);
+  Require(
+      adopted_retail_mesh.mesh.bytes == retail_edge_mesh.mesh.bytes &&
+          adopted_retail_mesh.mesh.triangle_count ==
+              retail_edge_mesh.mesh.triangle_count &&
+          adopted_retail_mesh.mesh.cluster_count ==
+              retail_edge_mesh.mesh.cluster_count,
+      "serialized retail collision mesh adoption changed the resource");
+  std::vector<std::uint8_t> branchless_retail =
+      adopted_retail_mesh.mesh.bytes;
+  const std::uint32_t branchless_kd =
+      ReadBeU32(branchless_retail, 48);
+  Require(ReadBeU32(branchless_retail, branchless_kd + 4) == 0,
+          "single-triangle retail test mesh unexpectedly has KD branches");
+  constexpr std::uint32_t kUnusedRetailBranchPointer = 0xfe720db0u;
+  branchless_retail.at(branchless_kd) =
+      static_cast<std::uint8_t>(kUnusedRetailBranchPointer >> 24u);
+  branchless_retail.at(branchless_kd + 1) =
+      static_cast<std::uint8_t>(kUnusedRetailBranchPointer >> 16u);
+  branchless_retail.at(branchless_kd + 2) =
+      static_cast<std::uint8_t>(kUnusedRetailBranchPointer >> 8u);
+  branchless_retail.at(branchless_kd + 3) =
+      static_cast<std::uint8_t>(kUnusedRetailBranchPointer);
+  Require(FixupRwCollisionMeshForGuest(branchless_retail, 0x51000000u),
+          "retail branchless KD tree guest fixup failed");
+  Require(ReadBeU32(branchless_retail, branchless_kd) ==
+              kUnusedRetailBranchPointer,
+          "unused retail branchless pointer was modified");
+  Require(ReadBeU32(branchless_retail, 48) ==
+              0x51000000u + branchless_kd,
+          "retail branchless KD header pointer was not fixed up");
+
   std::uint32_t kd_leaf_triangles = 0;
   for (std::uint32_t branch = 0; branch < kd_branch_count; ++branch) {
     const std::size_t record =
@@ -710,7 +863,7 @@ int main() {
       } else {
         const std::uint32_t cluster = index >> 16u;
         const std::uint32_t unit_offset = index & 0xffffu;
-        Require(content > 0 && content <= 8 &&
+        Require(content > 0 &&
                     cluster < cluster_count &&
                     unit_offset % 9 == 0 &&
                     unit_offset / 9 + content <= cluster_units[cluster],

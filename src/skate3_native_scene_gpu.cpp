@@ -4329,6 +4329,7 @@ bool EnsureFallbackTextures(const NativeGuestOutputRenderContext& context) {
 
 enum class OwnedTextureRole : uint8_t {
   Color,
+  Decal,
   Normal,
   Data,
 };
@@ -4340,7 +4341,10 @@ nrhi::TextureView* ResolveOwnedMapTexture(
   if (texture_id == 0) {
     return g_r.white.srv;
   }
-  const auto cached = g_r.owned_map_textures.find(texture_id);
+  const std::uint64_t cache_key =
+      (std::uint64_t(texture_id) << 8u) |
+      static_cast<std::uint8_t>(role);
+  const auto cached = g_r.owned_map_textures.find(cache_key);
   if (cached != g_r.owned_map_textures.end()) {
     return cached->second.valid ? cached->second.srv : g_r.white.srv;
   }
@@ -4353,7 +4357,7 @@ nrhi::TextureView* ResolveOwnedMapTexture(
     REXLOG_ERROR(
         "native-scene: owned map texture {} is missing or malformed",
         texture_id);
-    g_r.owned_map_textures.emplace(texture_id, GuestTexture{});
+    g_r.owned_map_textures.emplace(cache_key, GuestTexture{});
     return g_r.white.srv;
   }
 
@@ -4409,6 +4413,32 @@ nrhi::TextureView* ResolveOwnedMapTexture(
             output[destination + channel] = std::uint8_t(std::clamp(
                 std::lround((normal[channel] * 0.5f + 0.5f) * 255.0f),
                 0l, 255l));
+          }
+        } else if (role == OwnedTextureRole::Decal) {
+          // Retail decal assets ship authored mip chains. SKATE currently
+          // carries their decoded top level, so generated mips must filter
+          // straight-alpha art without allowing RGB from transparent texels
+          // to bleed into visible grime. Independent RGB/alpha box filters
+          // turned low-frequency tiled decals into broad black bands.
+          std::uint32_t alpha_weight = 0;
+          for (const std::size_t pixel : source_pixels) {
+            alpha_weight += input[pixel + 3];
+          }
+          for (int channel = 0; channel < 3; ++channel) {
+            if (alpha_weight == 0) {
+              // White is neutral if hardware bilinear filtering reaches a
+              // fully transparent texel at the next level.
+              output[destination + channel] = 255;
+              continue;
+            }
+            std::uint32_t weighted_color = 0;
+            for (const std::size_t pixel : source_pixels) {
+              weighted_color +=
+                  std::uint32_t(input[pixel + channel]) *
+                  input[pixel + 3];
+            }
+            output[destination + channel] = std::uint8_t(
+                (weighted_color + alpha_weight / 2u) / alpha_weight);
           }
         } else {
           for (int channel = 0; channel < 3; ++channel) {
@@ -4471,7 +4501,7 @@ nrhi::TextureView* ResolveOwnedMapTexture(
         "native-scene: GPU allocation failed for owned map texture {} "
         "({}x{})",
         source->name, source->width, source->height);
-    g_r.owned_map_textures.emplace(texture_id, GuestTexture{});
+    g_r.owned_map_textures.emplace(cache_key, GuestTexture{});
     return g_r.white.srv;
   }
 
@@ -4480,7 +4510,7 @@ nrhi::TextureView* ResolveOwnedMapTexture(
   if (destination == nullptr) {
     context.device->DestroyDeferred(texture.texture);
     context.device->DestroyDeferred(texture.upload);
-    g_r.owned_map_textures.emplace(texture_id, GuestTexture{});
+    g_r.owned_map_textures.emplace(cache_key, GuestTexture{});
     return g_r.white.srv;
   }
   for (std::size_t mip = 0; mip < mips.size(); ++mip) {
@@ -4517,7 +4547,7 @@ nrhi::TextureView* ResolveOwnedMapTexture(
   }
   nrhi::TextureView* resolved =
       texture.valid ? texture.srv : g_r.white.srv;
-  g_r.owned_map_textures.emplace(texture_id, std::move(texture));
+  g_r.owned_map_textures.emplace(cache_key, std::move(texture));
   REXLOG_INFO(
       "native-scene: uploaded owned map texture {} '{}' ({}x{}, {} mips)",
       texture_id, source->name, source->width, source->height, mips.size());
@@ -6613,7 +6643,8 @@ static nrhi::TextureView* LookupResolvedTexture(uint32_t tex_ptr) {
 // a stable camera-centered light basis. Static SKATE casters and retained
 // dynamic skater/board casters can therefore share one physical sun axis.
 bool BuildOwnedShadowRows(const FrameScene& scene, float out[36]) {
-  if (!mechanics_sandbox::VisualMapEnabled()) {
+  if (!mechanics_sandbox::VisualMapEnabled() ||
+      !mechanics_sandbox::map::DynamicWorldLightingEnabled()) {
     return false;
   }
   float origin[3] = {};
@@ -13100,14 +13131,21 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
   constants[39] = -41.0f;
   const skate::world::DayNightState celestial =
       mechanics_sandbox::map::ActiveDayNightState();
+  const bool dynamic_lighting =
+      mechanics_sandbox::map::DynamicWorldLightingEnabled();
   constants[40] = celestial.light_direction_to_light.x;
   constants[41] = celestial.light_direction_to_light.y;
   constants[42] = celestial.light_direction_to_light.z;
-  constants[43] = celestial.ambient;
+  // A negative ambient is an owned-world-only sentinel: preserve the
+  // clock/sky state but remove its ambient, direct and shadow lighting.
+  // Imported maps then use their baked lightmaps through the captured
+  // retail fog/exposure/tonemap chain instead of the custom hybrid path.
+  constants[43] = dynamic_lighting ? celestial.ambient : -1.0f;
   constants[44] = celestial.light_color.x;
   constants[45] = celestial.light_color.y;
   constants[46] = celestial.light_color.z;
-  constants[47] = celestial.light_intensity;
+  constants[47] =
+      dynamic_lighting ? celestial.light_intensity : 0.0f;
 
   cmd->SetBindingLayout(g_r.layout);
   cmd->SetPipeline(use_depth ? g_r.pso : g_r.pso_nodepth);
@@ -13184,13 +13222,27 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
     // Material colours remain authored beside collision properties, while
     // spatial submission is now independent per visible chunk.
     for (const mechanics_sandbox::map::VisualDraw& draw : chunk.draws) {
+      constants[39] = -41.0f;
+      constants[40] = celestial.light_direction_to_light.x;
+      constants[41] = celestial.light_direction_to_light.y;
+      constants[42] = celestial.light_direction_to_light.z;
+      constants[43] = dynamic_lighting ? celestial.ambient : -1.0f;
+      constants[44] = celestial.light_color.x;
+      constants[45] = celestial.light_color.y;
+      constants[46] = celestial.light_color.z;
+      constants[47] =
+          dynamic_lighting ? celestial.light_intensity : 0.0f;
+      const bool retail_exact =
+          draw.retail_shader_family != 0 && scene.shadow_valid;
       const bool imported =
           draw.albedo_texture != 0 || draw.indirect_lightmap != 0 ||
           draw.normal_texture != 0 || draw.orm_texture != 0 ||
           draw.emissive_texture != 0;
       const bool alpha_blend =
           draw.alpha_mode ==
-          skate::world::SurfaceMaterial::AlphaMode::Blend;
+              skate::world::SurfaceMaterial::AlphaMode::Blend ||
+          (draw.retail_render_flags & 2u) != 0 ||
+          draw.retail_shader_family == 13;
       cmd->SetPipeline(
           alpha_blend && g_r.pso_transparent != nullptr
               ? g_r.pso_transparent
@@ -13206,9 +13258,18 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
           ResolveOwnedMapTexture(
               context, draw.normal_texture, OwnedTextureRole::Normal));
       nrhi::TextureView* owned_material_maps[5] = {
-          g_r.white.srv,
-          ResolveOwnedMapTexture(
-              context, draw.orm_texture, OwnedTextureRole::Data),
+          retail_exact
+              ? ResolveOwnedMapTexture(
+                    context, draw.retail_detail_texture,
+                    OwnedTextureRole::Normal)
+              : g_r.white.srv,
+          retail_exact && draw.retail_shader_family >= 3 &&
+                  draw.retail_shader_family <= 4
+              ? ResolveOwnedMapTexture(
+                    context, draw.retail_specular_texture,
+                    OwnedTextureRole::Data)
+              : ResolveOwnedMapTexture(
+                    context, draw.orm_texture, OwnedTextureRole::Data),
           g_r.owned_nsm_active ? g_r.owned_static_sun_srv[0]
                                : g_r.white.srv,
           g_r.owned_nsm_active ? g_r.owned_static_sun_srv[1]
@@ -13216,6 +13277,35 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
           g_r.owned_nsm_active ? g_r.owned_static_sun_srv[2]
                                : g_r.white.srv};
       cmd->SetTextures(8, owned_material_maps, 5);
+      if (retail_exact) {
+        nrhi::TextureView* macro_texture = ResolveOwnedMapTexture(
+            context,
+            draw.retail_shader_family == 30
+                ? draw.normal_texture
+                : draw.retail_macro_texture,
+            draw.retail_shader_family == 30
+                ? OwnedTextureRole::Normal
+                : OwnedTextureRole::Color);
+        const bool decal_family =
+            draw.retail_shader_family == 3 ||
+            draw.retail_shader_family == 4;
+        const skate::world::TextureId mask_id =
+            decal_family ? draw.retail_decal_texture
+                         : draw.retail_specular_texture;
+        cmd->SetTexture(4, macro_texture);
+        cmd->SetTexturePair(
+            5,
+            ResolveOwnedMapTexture(
+                context, mask_id,
+                decal_family ? OwnedTextureRole::Decal
+                             : OwnedTextureRole::Data),
+            ResolveOwnedMapTexture(
+                context, draw.normal_texture,
+                OwnedTextureRole::Normal));
+        cmd->SetTexturePair(
+            7, g_r.white_cube.srv,
+            shadow_ready ? g_r.shadow_srv_final : g_r.white.srv);
+      }
       constants[32] = draw.color[0];
       constants[33] = draw.color[1];
       constants[34] = draw.color[2];
@@ -13236,6 +13326,64 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
           imported
               ? (draw.material[2] < 0.0f ? -draw.material[2] : 0.0f)
               : draw.material[3];
+      if (retail_exact) {
+        const std::uint32_t family = draw.retail_shader_family;
+        const bool decal_family = family == 3 || family == 4;
+        const bool has_macro = draw.retail_macro_texture != 0;
+        const bool has_masks = draw.retail_specular_texture != 0;
+        const bool has_normal = draw.normal_texture != 0;
+        const bool has_detail =
+            draw.retail_detail_texture != 0 &&
+            draw.retail_detail_scale > 0.0f;
+        std::uint32_t v2_flags = 0;
+        if (family >= 1 && family <= 4) {
+          v2_flags |= has_normal ? 1u : 0u;
+          v2_flags |= has_detail && family != 2 ? 2u : 0u;
+          v2_flags |=
+              decal_family && has_masks ? 4u : 0u;
+        }
+        constants[39] = -static_cast<float>(family);
+        constants[40] =
+            draw.indirect_lightmap != 0 ? 1.0f : 0.0f;
+        constants[41] = 0.0f;
+        constants[42] = 0.0f;
+        constants[43] = 0.0f;
+        constants[44] = draw.retail_macro_scale;
+        constants[45] = draw.retail_macro_opacity;
+        constants[46] = has_macro ? 1.0f : 0.0f;
+        constants[47] =
+            decal_family && draw.retail_decal_texture != 0
+                ? (family == 4 ? 2.0f : 1.0f)
+                : (has_masks
+                       ? ((has_normal && family >= 5 && family <= 6)
+                              ? 4.0f
+                              : 3.0f)
+                       : 0.0f);
+        constants[48] = 0.0f;
+        constants[49] =
+            (family >= 5 && family <= 6) || family == 13
+                ? std::log2(std::max(
+                      1.0f,
+                      static_cast<float>(
+                          context.guest_output_height) /
+                          640.0f))
+                : 0.0f;
+        constants[50] = static_cast<float>(v2_flags);
+        constants[51] = draw.retail_detail_scale;
+        if (family == 14) {
+          const float animation_time =
+              scene.scroll_valid ? scene.scroll_rows[0] : 0.0f;
+          const float scroll_u =
+              animation_time * draw.retail_scroll_u;
+          const float scroll_v =
+              animation_time * draw.retail_scroll_v;
+          constants[48] = scroll_u - std::floor(scroll_u);
+          constants[49] = scroll_v - std::floor(scroll_v);
+          constants[50] =
+              scene.scroll_valid ? scene.scroll_rows[1] : 1.0f;
+          constants[51] = 0.0f;
+        }
+      }
       cmd->SetRootConstants(0, 52, constants, 0);
       cmd->DrawIndexed(draw.index_count, draw.first_index, 0);
       ++draw_calls;
@@ -16269,8 +16417,7 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
       const skate::world::DayNightState celestial =
           mechanics_sandbox::map::ActiveDayNightState();
       cb[201] =
-          mechanics_sandbox::map::ActiveDefinition()
-                  .day_night_cycle.enabled
+          mechanics_sandbox::map::DynamicWorldLightingEnabled()
               ? 1.0f
               : 0.0f;
       cb[202] = celestial.night_amount;

@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.1.0-preview.14 - 2026-08-24
+
+- Added the preservation-first vanilla-map extraction and Blender conversion
+  toolkit developed against the retail University district, including exact
+  texture-role bindings, lightmap/decal UVs, packed tangent frames, collision,
+  grind splines, material metadata, and integrity validators.
+- Extended the owned `.skate` package to v12 with bounded lossless texture and
+  geometry compression while retaining full retail-map material, transform,
+  collision, grind, lighting, transparency, and streaming metadata.
+- Added runtime loading and rendering for v12 packages, including retail
+  lightmaps, alpha-tested vegetation, static tangent-space normal maps,
+  environment/decal channels, packed B5G6R5 textures, and retail collision.
+- Fixed University texture mismatches, black striping from packed texture
+  padding/byte order, generated-map persistence across Blender save/reopen,
+  vegetation alpha cutouts, lightmap composition, and native collision
+  alignment.
+- Added the merged Owned World Authoring 1.10.1 addon and source-only vanilla
+  extraction tools to the Windows release. Retail archives, extracted assets,
+  generated textures, `.blend` scenes, and University `.skate` packages are
+  not distributed.
+
 ## 0.1.0-preview.13 - 2026-08-24
 
 - Fixed clean release installations failing to discover the vanilla

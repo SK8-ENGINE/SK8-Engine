@@ -66,6 +66,31 @@ bool IsFinite(Vec3 value) {
          std::isfinite(value.z);
 }
 
+float WordFloat(std::uint32_t value) {
+  return std::bit_cast<float>(value);
+}
+
+void WriteNativeSegment(
+    std::vector<std::uint8_t>& bytes,
+    std::size_t offset,
+    const NativeGrindSegment& segment,
+    Vec3 translation) {
+  for (std::size_t word = 0; word < segment.words.size(); ++word) {
+    WriteU32(bytes, offset + word * 4, segment.words[word]);
+  }
+  for (const std::size_t vector_word : {12u, 20u, 24u}) {
+    WriteF32(
+        bytes, offset + (vector_word + 0) * 4,
+        WordFloat(segment.words[vector_word + 0]) + translation.x);
+    WriteF32(
+        bytes, offset + (vector_word + 1) * 4,
+        WordFloat(segment.words[vector_word + 1]) + translation.y);
+    WriteF32(
+        bytes, offset + (vector_word + 2) * 4,
+        WordFloat(segment.words[vector_word + 2]) + translation.z);
+  }
+}
+
 std::uint64_t HashRail(const GrindRail& rail) {
   // Stable project-owned identity. Skate only requires a durable unique
   // 64-bit value here; ArenaBuilder derives the same field from point text.
@@ -140,9 +165,28 @@ GrindSplineBuildResult BuildGrindSplineData(
   rail_points.reserve(map.grind_rails.size());
   std::size_t segment_count = 0;
   for (const GrindRail& rail : map.grind_rails) {
-    if (rail.id == 0 || rail.name.empty() || rail.points.size() < 2) {
+    const bool native = !rail.native_segments.empty();
+    if (rail.id == 0 || rail.name.empty() ||
+        (native && (rail.retail_spline_id == 0 ||
+                    rail.retail_type_signature == 0)) ||
+        (!native && rail.points.size() < 2)) {
       result.error = "grind rail definition is invalid";
       return result;
+    }
+    if (native) {
+      for (const NativeGrindSegment& segment : rail.native_segments) {
+        if (!std::all_of(
+                segment.words.begin(), segment.words.end(),
+                [](std::uint32_t word) {
+                  return std::isfinite(WordFloat(word));
+                })) {
+          result.error = "native grind segment contains non-finite data";
+          return result;
+        }
+      }
+      segment_count += rail.native_segments.size();
+      rail_points.emplace_back();
+      continue;
     }
     std::vector<Vec3> points = ExpandedPoints(rail);
     for (Vec3& point : points) {
@@ -198,11 +242,19 @@ GrindSplineBuildResult BuildGrindSplineData(
     const std::vector<Vec3>& points = rail_points[rail_index];
     const std::size_t rail_offset =
         kHeaderSize + rail_index * kRailSize;
-    const std::size_t rail_segment_count = points.size() - 1;
+    const bool native = !rail.native_segments.empty();
+    const std::size_t rail_segment_count =
+        native ? rail.native_segments.size() : points.size() - 1;
 
-    WriteU64(bytes, rail_offset, HashRail(rail));
-    WriteU64(bytes, rail_offset + 8, kSplineTypeSignature);
-    WriteU32(bytes, rail_offset + 16, 0);
+    WriteU64(
+        bytes, rail_offset,
+        native ? rail.retail_spline_id : HashRail(rail));
+    WriteU64(
+        bytes, rail_offset + 8,
+        native ? rail.retail_type_signature : kSplineTypeSignature);
+    WriteU32(
+        bytes, rail_offset + 16,
+        native ? rail.retail_flags : 0);
     WriteU32(
         bytes, rail_offset + 20,
         static_cast<std::uint32_t>(
@@ -212,6 +264,9 @@ GrindSplineBuildResult BuildGrindSplineData(
         static_cast<std::uint32_t>(
             segment_table +
             (global_segment + rail_segment_count - 1) * kSegmentSize));
+    WriteU32(
+        bytes, rail_offset + 28,
+        native ? rail.retail_trailing_word : 0);
 
     float cumulative_length = 0.0f;
     for (std::size_t local_segment = 0;
@@ -220,27 +275,34 @@ GrindSplineBuildResult BuildGrindSplineData(
           global_segment + local_segment;
       const std::size_t segment_offset =
           segment_table + segment_index * kSegmentSize;
-      const Vec3 start = points[local_segment];
-      const Vec3 end = points[local_segment + 1];
-      const Vec3 delta = end - start;
-      const float length = Length(delta);
-      const Vec3 minimum{
-          std::min(start.x, end.x),
-          std::min(start.y, end.y),
-          std::min(start.z, end.z)};
-      const Vec3 maximum{
-          std::max(start.x, end.x),
-          std::max(start.y, end.y),
-          std::max(start.z, end.z)};
+      if (native) {
+        WriteNativeSegment(
+            bytes, segment_offset,
+            rail.native_segments[local_segment], translation);
+      } else {
+        const Vec3 start = points[local_segment];
+        const Vec3 end = points[local_segment + 1];
+        const Vec3 delta = end - start;
+        const float length = Length(delta);
+        const Vec3 minimum{
+            std::min(start.x, end.x),
+            std::min(start.y, end.y),
+            std::min(start.z, end.z)};
+        const Vec3 maximum{
+            std::max(start.x, end.x),
+            std::max(start.y, end.y),
+            std::max(start.z, end.z)};
 
-      WriteVec4(bytes, segment_offset, delta, 0.0f);
-      WriteVec4(bytes, segment_offset + 48, start, 1.0f);
-      WriteVec4(bytes, segment_offset + 64,
-                {1.0f / length, 0.0f, 0.0f}, 0.0f);
-      WriteVec4(bytes, segment_offset + 80, minimum, 0.0f);
-      WriteVec4(bytes, segment_offset + 96, maximum, 0.0f);
-      WriteF32(bytes, segment_offset + 112, length);
-      WriteF32(bytes, segment_offset + 116, cumulative_length);
+        WriteVec4(bytes, segment_offset, delta, 0.0f);
+        WriteVec4(bytes, segment_offset + 48, start, 1.0f);
+        WriteVec4(bytes, segment_offset + 64,
+                  {1.0f / length, 0.0f, 0.0f}, 0.0f);
+        WriteVec4(bytes, segment_offset + 80, minimum, 0.0f);
+        WriteVec4(bytes, segment_offset + 96, maximum, 0.0f);
+        WriteF32(bytes, segment_offset + 112, length);
+        WriteF32(bytes, segment_offset + 116, cumulative_length);
+        cumulative_length += length;
+      }
       WriteU32(bytes, segment_offset + 120,
                static_cast<std::uint32_t>(rail_offset));
       if (local_segment > 0) {
@@ -255,7 +317,6 @@ GrindSplineBuildResult BuildGrindSplineData(
             static_cast<std::uint32_t>(
                 segment_offset + kSegmentSize));
       }
-      cumulative_length += length;
     }
     global_segment += rail_segment_count;
   }

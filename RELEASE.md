@@ -66,6 +66,8 @@ The packager creates a zip containing only:
   editable `.blend` source;
 - project licensing, notices, changelog, and known issues;
 - the Blender addon and format documentation;
+- the source-only vanilla-map extraction, Blender conversion, validation,
+  schemas, and tests, without retail inputs or generated outputs;
 - a release-facing `maps` folder for additional packages; and
 - SHA-256 checksums.
 
