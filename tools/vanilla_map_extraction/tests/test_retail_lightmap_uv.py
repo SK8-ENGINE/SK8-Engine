@@ -210,7 +210,7 @@ class RetailLightmapUvTests(unittest.TestCase):
             atol=5.0e-5,
         )
         numpy.testing.assert_allclose(
-            result.binormals,
+            result.tangents,
             (
                 (1.0, -512 / 1023, 255 / 511),
                 (-1.0, 512 / 1023, -255 / 511),
@@ -223,7 +223,7 @@ class RetailLightmapUvTests(unittest.TestCase):
             (1.0, -1.0),
         )
         self.assertEqual(result.lightmap_format_code, 0x001A215A)
-        self.assertEqual(result.binormal_format_code, 0x002A2190)
+        self.assertEqual(result.tangent_format_code, 0x002A2190)
 
 
 if __name__ == "__main__":

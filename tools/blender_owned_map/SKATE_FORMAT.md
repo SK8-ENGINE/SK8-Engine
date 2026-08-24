@@ -176,10 +176,13 @@ per vertex.
 
 For ordinary authored meshes the frame is generated from Blender's `UVMap`.
 Retail extraction can instead provide the complete validated point-attribute
-set `skate3_retail_normal`, `skate3_retail_binormal`, and
-`skate3_retail_tangent_handedness`; those values take precedence and are
-transported through the same compact vertex record. Partial or malformed
-retail frame metadata is an export error rather than a silent fallback.
+set `skate3_retail_normal`, `skate3_retail_tangent`, and
+`skate3_retail_tangent_handedness`. The exporter reconstructs
+`cross(normal, tangent) * handedness` because the compact SKATE vertex record
+stores a binormal for the engine loader. Existing extracted scenes may expose
+the tangent under the legacy `skate3_retail_binormal` name; that name is read
+only as a compatibility path. Partial or malformed retail frame metadata is
+an export error rather than a silent fallback.
 
 Retail material definitions are additive to the renderer-neutral material
 fields, so authored maps remain simple while extracted maps can retain their

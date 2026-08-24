@@ -448,7 +448,7 @@ try {
         '--expected',
         $expectedPath
     ) -Description (
-        'Verify exact retail normal, binormal, and handedness transport'
+        'Verify retail normal/tangent reconstruction and handedness transport'
     )
     Invoke-Checked -FilePath 'python' -Arguments @(
         $collisionProbeBuilder,

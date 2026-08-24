@@ -93,13 +93,13 @@ def main() -> None:
         retail_normal.data.foreach_set(
             "vector", (0.0, 0.0, 1.0) * 3
         )
-        retail_binormal = retail_mesh.attributes.new(
-            addon.exporter.RETAIL_BINORMAL_ATTRIBUTE,
+        retail_tangent = retail_mesh.attributes.new(
+            addon.exporter.RETAIL_TANGENT_ATTRIBUTE,
             type="FLOAT_VECTOR",
             domain="POINT",
         )
-        retail_binormal.data.foreach_set(
-            "vector", (0.0, 1.0, 0.0) * 3
+        retail_tangent.data.foreach_set(
+            "vector", (1.0, 0.0, 0.0) * 3
         )
         retail_handedness = retail_mesh.attributes.new(
             addon.exporter.RETAIL_HANDEDNESS_ATTRIBUTE,
@@ -343,10 +343,10 @@ def main() -> None:
             retail_frame_records
             and all(
                 normal == (0.0, 1.0, 0.0)
-                and frame == (0, 0, -127, -127)
+                and frame == (0, 0, 127, -127)
                 for normal, frame in retail_frame_records
             ),
-            "Retail point attributes did not override generated tangents",
+            "Retail tangent did not reconstruct the expected runtime binormal",
         )
         collision_bytes = analysis["_collision_bytes"]
         native_codes = []

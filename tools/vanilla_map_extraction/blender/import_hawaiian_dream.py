@@ -17,7 +17,7 @@ from retail_collision_mesh import decode_rx2_clustered_meshes
 
 
 RETAIL_NORMAL_ATTRIBUTE = "skate3_retail_normal"
-RETAIL_BINORMAL_ATTRIBUTE = "skate3_retail_binormal"
+RETAIL_TANGENT_ATTRIBUTE = "skate3_retail_tangent"
 RETAIL_HANDEDNESS_ATTRIBUTE = "skate3_retail_tangent_handedness"
 
 
@@ -597,7 +597,7 @@ def build_scene(manifest_path: Path) -> dict[str, int]:
                     name in arrays
                     for name in (
                         f"retail_normals_{mesh_index}",
-                        f"retail_binormals_{mesh_index}",
+                        f"retail_tangents_{mesh_index}",
                         f"retail_tangent_handedness_{mesh_index}",
                     )
                 )
@@ -605,8 +605,8 @@ def build_scene(manifest_path: Path) -> dict[str, int]:
                     normals = _runtime_to_blender(
                         arrays[f"retail_normals_{mesh_index}"]
                     )
-                    retail_binormals = _runtime_to_blender(
-                        arrays[f"retail_binormals_{mesh_index}"]
+                    retail_tangents = _runtime_to_blender(
+                        arrays[f"retail_tangents_{mesh_index}"]
                     )
                     retail_handedness = numpy.asarray(
                         arrays[
@@ -622,7 +622,7 @@ def build_scene(manifest_path: Path) -> dict[str, int]:
                         if f"normals_{mesh_index}" in arrays
                         else None
                     )
-                    retail_binormals = None
+                    retail_tangents = None
                     retail_handedness = None
 
                 object_name = _safe_name(
@@ -640,8 +640,8 @@ def build_scene(manifest_path: Path) -> dict[str, int]:
                     )
                     _set_point_vector_attribute(
                         mesh_data,
-                        RETAIL_BINORMAL_ATTRIBUTE,
-                        retail_binormals,
+                        RETAIL_TANGENT_ATTRIBUTE,
+                        retail_tangents,
                     )
                     _set_point_float_attribute(
                         mesh_data,
@@ -934,7 +934,7 @@ def build_scene(manifest_path: Path) -> dict[str, int]:
     )
     scene["skate3_retail_world_frame_status"] = (
         f"{retail_world_frame_object_count} mesh parts preserve exact retail "
-        "normal, binormal, and tangent-handedness data"
+        "normal, tangent, and handedness data"
     )
     return {
         "objects": object_count,

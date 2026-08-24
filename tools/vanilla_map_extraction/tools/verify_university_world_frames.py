@@ -53,14 +53,34 @@ def _source_frame_digests(
                 # changing the represented vector. Canonicalize signed zero
                 # before the byte-level comparison.
                 normals[normals == 0.0] = 0.0
-                binormals = numpy.asarray(
-                    arrays[f"retail_binormals_{mesh_index}"],
+                tangent_key = (
+                    f"retail_tangents_{mesh_index}"
+                    if f"retail_tangents_{mesh_index}" in arrays
+                    else f"retail_binormals_{mesh_index}"
+                )
+                tangents = numpy.asarray(
+                    arrays[tangent_key],
                     dtype=numpy.float32,
-                )[corners]
+                )[corners].astype(numpy.float64)
                 handedness = numpy.asarray(
                     arrays[f"retail_tangent_handedness_{mesh_index}"],
                     dtype=numpy.float32,
                 )[corners]
+                tangent_lengths = numpy.linalg.norm(tangents, axis=1)
+                tangents -= normals * numpy.sum(
+                    tangents * normals, axis=1
+                )[:, None]
+                projected_lengths = numpy.linalg.norm(tangents, axis=1)
+                valid = projected_lengths > numpy.maximum(
+                    1.0e-12, tangent_lengths * 1.0e-6
+                )
+                tangents[valid] /= projected_lengths[valid, None]
+                handedness = handedness.copy()
+                handedness[~valid] = 0.0
+                binormals = (
+                    numpy.cross(normals, tangents)
+                    * handedness[:, None]
+                )
                 packed_binormals = numpy.rint(
                     numpy.clip(binormals, -1.0, 1.0) * 127.0
                 ).astype(numpy.int8)
@@ -178,7 +198,7 @@ def main() -> int:
         )
 
     result = {
-        "status": "UNIVERSITY_RETAIL_WORLD_FRAMES_EXACT",
+        "status": "UNIVERSITY_RETAIL_WORLD_FRAMES_RECONSTRUCTED",
         "mesh_parts": len(source),
         "source_vertices": source_vertices,
         "triangle_corners": sum(count for count, _digest in source.values()),

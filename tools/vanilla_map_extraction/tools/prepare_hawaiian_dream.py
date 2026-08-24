@@ -525,8 +525,8 @@ def prepare(
                     arrays[f"retail_normals_{mesh_index}"] = (
                         retail_world_frame.normals
                     )
-                    arrays[f"retail_binormals_{mesh_index}"] = (
-                        retail_world_frame.binormals
+                    arrays[f"retail_tangents_{mesh_index}"] = (
+                        retail_world_frame.tangents
                     )
                     arrays[f"retail_tangent_handedness_{mesh_index}"] = (
                         retail_world_frame.tangent_handedness
@@ -595,11 +595,11 @@ def prepare(
                                 "normal_source": (
                                     "secondary_texcoord_zw_and_y_sign"
                                 ),
-                                "binormal_format_code": (
-                                    f"0x{retail_world_frame.binormal_format_code:08X}"
+                                "tangent_format_code": (
+                                    f"0x{retail_world_frame.tangent_format_code:08X}"
                                 ),
-                                "binormal_offset": (
-                                    retail_world_frame.binormal_offset
+                                "tangent_offset": (
+                                    retail_world_frame.tangent_offset
                                 ),
                                 "tangent_handedness_source": (
                                     "secondary_texcoord_x_sign"

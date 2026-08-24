@@ -140,10 +140,13 @@ per-triangle RenderWare edge/corner feature codes as face attributes; ordinary
 authored maps continue to generate those codes automatically.
 
 Retail-imported meshes may carry the hidden point attributes
-`skate3_retail_normal`, `skate3_retail_binormal`, and
+`skate3_retail_normal`, `skate3_retail_tangent`, and
 `skate3_retail_tangent_handedness`. When the complete validated set is
-present, the exporter uses it instead of recalculating tangents from Blender
-UVs. This preserves the game's authored per-island lighting orientation.
+present, the exporter uses the authored tangent rather than recalculating it
+from Blender UVs, then reconstructs the compact runtime binormal expected by
+SKATE v12. This preserves the game's authored per-island lighting
+orientation. Existing University working files whose tangent was stored under
+the old `skate3_retail_binormal` name remain supported as a migration path.
 Ordinary custom maps do not need these attributes and continue to use
 Blender's generated tangent frame.
 

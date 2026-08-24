@@ -24,10 +24,21 @@ EXPECTED_LIGHTMAPPED_OBJECTS = 8_489
 EXPECTED_LIGHTMAP_TEXTURES = 1_270
 EXPECTED_LIGHTMAP_EXCLUSIONS = 33
 EXPECTED_RETAIL_WORLD_FRAMES = 3_121
-RETAIL_WORLD_FRAME_ATTRIBUTES = (
-    ("skate3_retail_normal", "FLOAT_VECTOR", "vector", 3),
-    ("skate3_retail_binormal", "FLOAT_VECTOR", "vector", 3),
-    ("skate3_retail_tangent_handedness", "FLOAT", "value", 1),
+RETAIL_NORMAL_ATTRIBUTE = (
+    "skate3_retail_normal",
+    "FLOAT_VECTOR",
+    "vector",
+    3,
+)
+RETAIL_TANGENT_ATTRIBUTES = (
+    "skate3_retail_tangent",
+    "skate3_retail_binormal",
+)
+RETAIL_HANDEDNESS_ATTRIBUTE = (
+    "skate3_retail_tangent_handedness",
+    "FLOAT",
+    "value",
+    1,
 )
 REGRESSION_BINDINGS = {
     ("0xF6CC7BFCC2C45F8C", 40): (
@@ -122,13 +133,39 @@ def main() -> int:
         has_retail_world_frame = bool(
             obj.get("skate3_retail_world_frame", False)
         )
+        tangent_attributes = [
+            obj.data.attributes.get(name)
+            for name in RETAIL_TANGENT_ATTRIBUTES
+        ]
+        if sum(attribute is not None for attribute in tangent_attributes) > 1:
+            raise RuntimeError(
+                f"{obj.name!r} has both current and legacy retail tangent "
+                "attributes"
+            )
+        selected_tangent_name = (
+            RETAIL_TANGENT_ATTRIBUTES[
+                next(
+                    (
+                        index
+                        for index, attribute in enumerate(tangent_attributes)
+                        if attribute is not None
+                    ),
+                    0,
+                )
+            ]
+        )
+        frame_schema = (
+            RETAIL_NORMAL_ATTRIBUTE,
+            (selected_tangent_name, "FLOAT_VECTOR", "vector", 3),
+            RETAIL_HANDEDNESS_ATTRIBUTE,
+        )
         frame_attributes = []
         for (
             attribute_name,
             data_type,
             _property_name,
             _components,
-        ) in RETAIL_WORLD_FRAME_ATTRIBUTES:
+        ) in frame_schema:
             attribute = obj.data.attributes.get(attribute_name)
             if has_retail_world_frame:
                 if (
@@ -156,7 +193,7 @@ def main() -> int:
                 components,
             ) in zip(
                 frame_attributes,
-                RETAIL_WORLD_FRAME_ATTRIBUTES,
+                frame_schema,
                 strict=True,
             ):
                 values = numpy.empty(

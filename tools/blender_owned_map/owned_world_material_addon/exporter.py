@@ -60,11 +60,15 @@ _HELPER_OBJECT_MARKERS = (
     "scale_reference",
     "scale reference",
 )
-CACHE_SCHEMA = 15
+CACHE_SCHEMA = 16
 METADATA_FLOAT_COUNT = 49
 METADATA_BYTE_COUNT = METADATA_FLOAT_COUNT * 4
 RETAIL_NORMAL_ATTRIBUTE = "skate3_retail_normal"
-RETAIL_BINORMAL_ATTRIBUTE = "skate3_retail_binormal"
+RETAIL_TANGENT_ATTRIBUTE = "skate3_retail_tangent"
+# University files created before the usage-6 semantic was verified contain
+# the retail tangent under this incorrect name. Read it as a tangent so those
+# large working files remain exportable without a destructive migration.
+LEGACY_RETAIL_TANGENT_ATTRIBUTE = "skate3_retail_binormal"
 RETAIL_HANDEDNESS_ATTRIBUTE = "skate3_retail_tangent_handedness"
 RETAIL_EDGE_CODE_ATTRIBUTES = tuple(
     f"skate3_retail_edge_code_{corner}" for corner in range(3)
@@ -365,14 +369,29 @@ def _mesh_for_export(
 
 
 def _retail_world_frame_attributes(mesh):
+    normal = mesh.attributes.get(RETAIL_NORMAL_ATTRIBUTE)
+    tangent = mesh.attributes.get(RETAIL_TANGENT_ATTRIBUTE)
+    legacy_tangent = mesh.attributes.get(LEGACY_RETAIL_TANGENT_ATTRIBUTE)
+    handedness = mesh.attributes.get(RETAIL_HANDEDNESS_ATTRIBUTE)
+    if all(
+        attribute is None
+        for attribute in (normal, tangent, legacy_tangent, handedness)
+    ):
+        return None
+    if tangent is not None and legacy_tangent is not None:
+        raise ValueError(
+            f"mesh {mesh.name!r} has both "
+            f"{RETAIL_TANGENT_ATTRIBUTE!r} and the legacy "
+            f"{LEGACY_RETAIL_TANGENT_ATTRIBUTE!r}; remove the legacy "
+            "attribute"
+        )
+    tangent = tangent if tangent is not None else legacy_tangent
     names = (
         RETAIL_NORMAL_ATTRIBUTE,
-        RETAIL_BINORMAL_ATTRIBUTE,
+        RETAIL_TANGENT_ATTRIBUTE,
         RETAIL_HANDEDNESS_ATTRIBUTE,
     )
-    attributes = tuple(mesh.attributes.get(name) for name in names)
-    if all(attribute is None for attribute in attributes):
-        return None
+    attributes = (normal, tangent, handedness)
     if any(attribute is None for attribute in attributes):
         missing = [
             name
@@ -383,10 +402,9 @@ def _retail_world_frame_attributes(mesh):
             f"mesh {mesh.name!r} has an incomplete retail world frame; "
             f"missing {', '.join(missing)}"
         )
-    normal, binormal, handedness = attributes
     expected = (
         (normal, "POINT", "FLOAT_VECTOR"),
-        (binormal, "POINT", "FLOAT_VECTOR"),
+        (tangent, "POINT", "FLOAT_VECTOR"),
         (handedness, "POINT", "FLOAT"),
     )
     for attribute, domain, data_type in expected:
@@ -399,7 +417,7 @@ def _retail_world_frame_attributes(mesh):
                 f"mesh {mesh.name!r} retail attribute {attribute.name!r} "
                 f"must be {domain}/{data_type} with one value per vertex"
             )
-    return normal, binormal, handedness
+    return normal, tangent, handedness
 
 
 def _hash_mesh(
@@ -472,10 +490,10 @@ def _hash_mesh(
                 _hash_foreach(digest, decal_uv.data, "uv", 2, "f")
             retail_frame = _retail_world_frame_attributes(mesh)
             if retail_frame is not None:
-                normal, binormal, handedness = retail_frame
+                normal, tangent, handedness = retail_frame
                 _hash_text(digest, "RETAIL_WORLD_FRAME")
                 _hash_foreach(digest, normal.data, "vector", 3, "f")
-                _hash_foreach(digest, binormal.data, "vector", 3, "f")
+                _hash_foreach(digest, tangent.data, "vector", 3, "f")
                 _hash_foreach(digest, handedness.data, "value", 1, "f")
         else:
             _hash_text(digest, source_object.get("ow_material", ""))
@@ -1649,10 +1667,10 @@ def _export_visual_geometry(
                 if retail_frame_attributes is not None:
                     (
                         _retail_normal_attribute,
-                        retail_binormal_attribute,
+                        retail_tangent_attribute,
                         retail_handedness_attribute,
                     ) = retail_frame_attributes
-                    retail_point_binormals = numpy.empty(
+                    retail_point_tangents = numpy.empty(
                         len(mesh.vertices) * 3,
                         dtype=numpy.float32,
                     )
@@ -1660,26 +1678,47 @@ def _export_visual_geometry(
                         len(mesh.vertices),
                         dtype=numpy.float32,
                     )
-                    retail_binormal_attribute.data.foreach_get(
-                        "vector", retail_point_binormals
+                    retail_tangent_attribute.data.foreach_get(
+                        "vector", retail_point_tangents
                     )
                     retail_handedness_attribute.data.foreach_get(
                         "value", retail_point_handedness
                     )
-                    retail_point_binormals = (
-                        retail_point_binormals.reshape((-1, 3))
+                    retail_point_tangents = (
+                        retail_point_tangents.reshape((-1, 3))
                     )
-                    binormals = (
-                        retail_point_binormals[corner_vertices].astype(
+                    tangents = (
+                        retail_point_tangents[corner_vertices].astype(
                             numpy.float64
                         )
                         @ world_matrix[:3, :3].T
                     )
-                    runtime_binormals = binormals[:, (0, 2, 1)].copy()
-                    runtime_binormals[:, 2] *= -1.0
+                    runtime_tangents = tangents[:, (0, 2, 1)].copy()
+                    runtime_tangents[:, 2] *= -1.0
                     runtime_handedness = (
                         retail_point_handedness[corner_vertices] * orientation
                     ).astype(numpy.float32)
+                    source_tangent_lengths = numpy.linalg.norm(
+                        runtime_tangents, axis=1
+                    )
+                    runtime_tangents -= runtime_normals * numpy.sum(
+                        runtime_tangents * runtime_normals,
+                        axis=1,
+                    )[:, None]
+                    tangent_lengths = numpy.linalg.norm(
+                        runtime_tangents, axis=1
+                    )
+                    valid_tangents = tangent_lengths > numpy.maximum(
+                        1.0e-12,
+                        source_tangent_lengths * 1.0e-6,
+                    )
+                    runtime_tangents[valid_tangents] /= tangent_lengths[
+                        valid_tangents, None
+                    ]
+                    runtime_handedness[~valid_tangents] = 0.0
+                    runtime_binormals = numpy.cross(
+                        runtime_normals, runtime_tangents
+                    ) * runtime_handedness[:, None]
                 elif tangents_available:
                     loop_tangents = numpy.empty(
                         loop_count * 3, dtype=numpy.float32

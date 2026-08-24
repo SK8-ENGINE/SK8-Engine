@@ -1,13 +1,13 @@
 {
   "format_version": 12,
   "map_name": "University District",
-  "file_bytes": 252301943,
+  "file_bytes": 252350320,
   "texture_decoded_bytes": 760748032,
-  "maximum_visual_index": 2113179,
+  "maximum_visual_index": 2113178,
   "counts": {
     "materials": 8729,
     "textures": 2046,
-    "vertices": 2113180,
+    "vertices": 2113179,
     "indices": 4936851,
     "collision_triangles": 1133642,
     "grind_rails": 4201,
@@ -72,8 +72,8 @@
     "package_lightmap_strength": 0.25,
     "exact_payloads": 1270,
     "exact_payload_bytes": 393134080,
-    "package_lightmap_vertices": 2111953,
-    "package_distinct_uv_vertices": 2111953,
+    "package_lightmap_vertices": 2111952,
+    "package_distinct_uv_vertices": 2111952,
     "package_lightmap_triangle_corners": 4934604,
     "package_lightmap_uv_min": [
       0.0,
@@ -86,19 +86,19 @@
   },
   "integrity": {
     "semantic_metadata_sha256": "01b3b1150bb715c9bec7078723a8cef81f53b7ee6868adda7839417fd17e5093",
-    "materials_sha256": "3580853275695f26cd4f58ae228ba404865997ee79762fcc62e7cfc88d8dbce2",
+    "materials_sha256": "2f3ae562b3204b0a771c39d7e05cf73157049abab5fec3b1856f701037ed4824",
     "decoded_textures_sha256": "ac95b60409efabd2404c5d2f1d866e48dac0b6d2ac02a691c8047c19820c173f",
-    "expanded_visual_triangles_sha256": "4e423c265a0f8e049bdc73d6b325e7e12aae93d23c587231eb39249e530cbae4",
-    "expanded_visual_triangles_1e6_sha256": "54d32310424a7f447b7553454934f9b9bc28ec0f823ed1e4c30444dae8ed7c0a",
+    "expanded_visual_triangles_sha256": "35c0838546805838fa36ed7cfc41b47693f0b08b0a27c9914fd051e706c4a798",
+    "expanded_visual_triangles_1e6_sha256": "fdc0cac496b4bddb4e6e3347b3bfee19c61a722474a9e92c0c8d7a191152c59e",
     "collision_sha256": "42f551e8035e9248d1a044e47f05d0ae8e506f510813ad44c66f0d181b3f66df",
     "grind_rails_sha256": "0cc406dd4f68b0dad57215cec3f9cbe9e93be52fe124197ec5bb62c092d63501",
-    "authored_features_sha256": "b735953bf156855b3103c2f0e4b0e262b7ec860987a801f84c7ba8c5d820b29a"
+    "authored_features_sha256": "ee6ffd77008a793f700b6be59bf226a965261030fd50cecaff87638066937177"
   },
   "retail_world_frames": {
     "mesh_parts": 3121,
     "source_vertices": 549245,
     "triangle_corners": 1579005,
-    "expanded_frame_sha256": "da85ab2dcd41302dc7efa0ea3e7179464bb3033ae05511dcfea94abcc66276cb"
+    "expanded_frame_sha256": "1e38d98000d14332ae81ecf900741a31d3b83083475ad62d6ab9ebc9d9f10e33"
   },
   "compiled_world": {
     "render_source_triangles": 1645617,

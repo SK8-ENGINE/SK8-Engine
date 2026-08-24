@@ -32,12 +32,12 @@ class DecalUvDecode:
 @dataclass(frozen=True)
 class RetailWorldFrameDecode:
     normals: numpy.ndarray
-    binormals: numpy.ndarray
+    tangents: numpy.ndarray
     tangent_handedness: numpy.ndarray
     lightmap_format_code: int
     lightmap_offset: int
-    binormal_format_code: int
-    binormal_offset: int
+    tangent_format_code: int
+    tangent_offset: int
 
 
 def _texture_coordinates(
@@ -208,13 +208,13 @@ def decode_retail_world_frame(
     vertex_stride: int,
     attributes: Iterable[VertexAttribute],
 ) -> RetailWorldFrameDecode | None:
-    """Decode the exact static-world normal, binormal, and handedness.
+    """Decode the exact static-world normal, tangent, and handedness.
 
     Skate 3's environment vertex layouts do not store a conventional normal
     attribute. Their signed SHORT4 secondary TEXCOORD stores the lightmap
     unwrap in ``xy`` and the normal's ``xy`` in ``zw``. The sign of unwrap
     ``y`` reconstructs normal ``z``; unwrap ``x`` is the tangent handedness.
-    The usage-6 PACKED11_11_10N attribute is the authored binormal.
+    The usage-6 PACKED11_11_10N attribute is the authored tangent.
     """
 
     attributes = tuple(attributes)
@@ -229,31 +229,31 @@ def decode_retail_world_frame(
     if (lightmap_format_code & 0x3F) != 26:
         return None
 
-    binormal_attribute = None
+    tangent_attribute = None
     for attribute in attributes:
         descriptor = bytes(attribute.descriptor)
         if len(descriptor) != 16:
             raise ValueError("Xenos vertex descriptors must contain 16 bytes")
         format_code = int.from_bytes(descriptor[4:8], "big")
         if descriptor[9] == 6 and (format_code & 0x3F) == 16:
-            binormal_attribute = attribute
+            tangent_attribute = attribute
             break
-    if binormal_attribute is None:
+    if tangent_attribute is None:
         return None
 
     lightmap_offset = int(lightmap_attribute.offset)
-    binormal_offset = int(binormal_attribute.offset)
+    tangent_offset = int(tangent_attribute.offset)
     if (
         vertex_count < 0
         or vertex_stride <= 0
         or lightmap_offset < 0
-        or binormal_offset < 0
+        or tangent_offset < 0
     ):
         raise ValueError("invalid retail vertex-buffer dimensions")
     required_end = (
         vertex_buffer_offset
         + max(0, vertex_count - 1) * vertex_stride
-        + max(lightmap_offset + 8, binormal_offset + 4)
+        + max(lightmap_offset + 8, tangent_offset + 4)
     )
     if required_end > len(data):
         raise ValueError(
@@ -276,7 +276,7 @@ def decode_retail_world_frame(
             shape=(vertex_count,),
             dtype=numpy.dtype(">u4"),
             buffer=data,
-            offset=vertex_buffer_offset + binormal_offset,
+            offset=vertex_buffer_offset + tangent_offset,
             strides=(vertex_stride,),
         ).astype(numpy.uint32, copy=True)
 
@@ -308,12 +308,12 @@ def decode_retail_world_frame(
         decoded[decoded >= sign_bit] -= 1 << bits
         return decoded
 
-    binormals = numpy.empty((vertex_count, 3), dtype=numpy.float32)
-    binormals[:, 0] = signed_component(words, 0, 11).astype(numpy.float32)
-    binormals[:, 1] = signed_component(words, 11, 11).astype(numpy.float32)
-    binormals[:, 2] = signed_component(words, 22, 10).astype(numpy.float32)
-    binormals[:, 0:2] /= numpy.float32(1023.0)
-    binormals[:, 2] /= numpy.float32(511.0)
+    tangents = numpy.empty((vertex_count, 3), dtype=numpy.float32)
+    tangents[:, 0] = signed_component(words, 0, 11).astype(numpy.float32)
+    tangents[:, 1] = signed_component(words, 11, 11).astype(numpy.float32)
+    tangents[:, 2] = signed_component(words, 22, 10).astype(numpy.float32)
+    tangents[:, 0:2] /= numpy.float32(1023.0)
+    tangents[:, 2] /= numpy.float32(511.0)
 
     tangent_handedness = numpy.where(
         short4[:, 0] > 0,
@@ -322,22 +322,22 @@ def decode_retail_world_frame(
     )
     if not (
         numpy.isfinite(normals).all()
-        and numpy.isfinite(binormals).all()
+        and numpy.isfinite(tangents).all()
         and numpy.isfinite(tangent_handedness).all()
     ):
         raise ValueError("retail world tangent frame contains non-finite data")
 
-    binormal_descriptor = bytes(binormal_attribute.descriptor)
+    tangent_descriptor = bytes(tangent_attribute.descriptor)
     return RetailWorldFrameDecode(
         normals=numpy.ascontiguousarray(normals, dtype=numpy.float32),
-        binormals=numpy.ascontiguousarray(binormals, dtype=numpy.float32),
+        tangents=numpy.ascontiguousarray(tangents, dtype=numpy.float32),
         tangent_handedness=numpy.ascontiguousarray(
             tangent_handedness, dtype=numpy.float32
         ),
         lightmap_format_code=lightmap_format_code,
         lightmap_offset=lightmap_offset,
-        binormal_format_code=int.from_bytes(
-            binormal_descriptor[4:8], "big"
+        tangent_format_code=int.from_bytes(
+            tangent_descriptor[4:8], "big"
         ),
-        binormal_offset=binormal_offset,
+        tangent_offset=tangent_offset,
     )

@@ -43,13 +43,15 @@ texture resolution or geometry. All 1,270 selected lightmap pages remain
 byte-equal to the decoded source images after Blender's documented
 bottom-row-first storage conversion.
 
-The exact retail-frame pass further reduced the current package to
-252,301,943 bytes by restoring the source normal/binormal/handedness on 3,121
-mesh parts, which also allows more truly identical corners to share an index.
-The expanded 1,579,005 affected triangle corners are checked against the RX2
-source by a dedicated package verifier. This fixes geometry-shaped black
-lighting masks caused by applying Blender-regenerated tangent orientation to
-the retail normal maps.
+The retail-frame pass restores the source normal/tangent/handedness on 3,121
+mesh parts. The addon reconstructs the binormal carried by the compact SKATE
+runtime record, allowing the loader to recover the original tangent instead
+of treating the retail usage-6 tangent as though it were already a binormal.
+The expanded 1,579,005 affected triangle corners are checked against the
+source-derived frame by a dedicated package verifier. This fixes
+geometry-shaped black lighting masks on full environment materials while
+leaving simple diffuse materials and ordinary custom-map tangent generation
+unchanged.
 
 Retail vertex declarations contain a second TEXCOORD on 8,541 mesh parts.
 The extraction now decodes both explicit `SHORT2N` declarations and the
