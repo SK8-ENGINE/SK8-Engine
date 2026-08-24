@@ -44,7 +44,7 @@ exporter = importlib.reload(_exporter)
 bl_info = {
     "name": "Owned World Authoring",
     "author": "Skate 3 Custom Engine Layer contributors",
-    "version": (1, 8, 3),
+    "version": (1, 8, 4),
     "blender": (5, 0, 0),
     "location": "3D View > Sidebar > Skate 3 Map",
     "description": "Create, validate, and export Skate 3 Custom Engine maps",
@@ -1348,6 +1348,18 @@ def _infer_contact_preset(material: bpy.types.Material) -> str:
     return "CONCRETE"
 
 
+def _is_generated_material_map(
+    image: bpy.types.Image | None,
+    kind: str | None = None,
+) -> bool:
+    if image is None:
+        return False
+    generated_kind = str(image.get("ow_generated_map", "")).upper()
+    return bool(generated_kind) and (
+        kind is None or generated_kind == kind.upper()
+    )
+
+
 def _generated_image(
     material: bpy.types.Material,
     kind: str,
@@ -1365,6 +1377,10 @@ def _generated_image(
         image.scale(size, size)
     image["ow_generated_map"] = kind
     image["ow_generated_for"] = material.name
+    # Material image slots are stored as names in custom properties, which do
+    # not count as Blender datablock users. Keep generated maps alive even
+    # when no shader node references them directly.
+    image.use_fake_user = True
     if non_color:
         try:
             image.colorspace_settings.name = "Non-Color"
@@ -1372,6 +1388,11 @@ def _generated_image(
             pass
     image.pixels.foreach_set(pixels)
     image.update()
+    # Generated-image pixel buffers are transient unless packed. Without this
+    # step Blender reloads the datablock at its default black generated colour,
+    # causing the exporter to reject a normal or ORM map after reopening the
+    # .blend.
+    image.pack()
     return image
 
 
@@ -1398,7 +1419,11 @@ def _generate_material_maps(
             ),
         ),
     )
-    normal_image = normal_source
+    normal_image = (
+        None
+        if _is_generated_material_map(normal_source, "NORMAL")
+        else normal_source
+    )
     if normal_image is None and strength > 0.0:
         size = 32
         pixels: list[float] = []
@@ -1417,7 +1442,11 @@ def _generate_material_maps(
             material, "NORMAL", pixels, size, non_color=True
         )
 
-    orm_image = orm_source
+    orm_image = (
+        None
+        if _is_generated_material_map(orm_source, "ORM")
+        else orm_source
+    )
     if orm_image is None:
         orm_image = _generated_image(
             material,
@@ -1427,7 +1456,11 @@ def _generate_material_maps(
             non_color=True,
         )
 
-    emissive_image = emissive_source
+    emissive_image = (
+        None
+        if _is_generated_material_map(emissive_source, "EMISSIVE")
+        else emissive_source
+    )
     if emissive_image is None and emissive_strength > 0.0:
         maximum = max(1.0, *emissive_color)
         color = tuple(max(0.0, value / maximum) for value in emissive_color)
@@ -1550,7 +1583,13 @@ def _auto_configure_material(
         ("ow_emissive_image", emissive_image),
     ):
         image_name = image.name if image is not None else ""
-        if preserve_authored and str(material.get(property_name, "")):
+        existing_name = str(material.get(property_name, ""))
+        existing_image = bpy.data.images.get(existing_name)
+        if (
+            preserve_authored
+            and existing_name
+            and not _is_generated_material_map(existing_image)
+        ):
             continue
         if str(material.get(property_name, "")) != image_name:
             material[property_name] = image_name

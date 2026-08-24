@@ -166,7 +166,8 @@ The panel contains:
 tab from selected meshes' Principled shaders. It also overwrites maps created
 by Auto Prepare, so changing shader roughness, metallic, emission, alpha, or
 the small **Generated Normal Strength** value can be propagated later without
-touching authored texture maps.
+touching authored texture maps. Add-on-generated maps are packed into the
+blend file so their pixels survive saving and reopening.
 
 For a physical door, select the complete door-leaf mesh and open **Physics
 Properties > Owned World Physics**. Choose **Hinged Door**, place the 3D

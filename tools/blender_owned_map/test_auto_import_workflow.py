@@ -259,12 +259,20 @@ def main() -> None:
             bool(material.get("ow_auto_imported", False)),
             "Automatically imported material was not marked refreshable",
         )
+        normal = bpy.data.images.get(
+            str(material.get("ow_normal_image", ""))
+        )
+        orm = bpy.data.images.get(str(material.get("ow_orm_image", "")))
         require(
-            bpy.data.images.get(str(material.get("ow_normal_image", "")))
-            is not None
-            and bpy.data.images.get(str(material.get("ow_orm_image", "")))
-            is not None,
+            normal is not None and orm is not None,
             "Auto Prepare did not generate normal and ORM maps",
+        )
+        require(
+            normal.packed_file is not None
+            and orm.packed_file is not None
+            and normal.use_fake_user
+            and orm.use_fake_user,
+            "Generated material maps were not made persistent",
         )
         require(
             scene.owned_world.day_ambient == 0.0
@@ -325,6 +333,59 @@ def main() -> None:
             "Auto Prepare did not fill a missing authored albedo while "
             "preserving manual scalar settings",
         )
+
+        # Older add-on builds saved generated images as transient datablocks.
+        # On reload Blender retained their names and metadata but restored
+        # black pixels. Authored materials preserve deliberate source maps,
+        # but add-on-owned maps must still be regenerated and packed.
+        generated_names = (
+            str(material["ow_normal_image"]),
+            str(material["ow_orm_image"]),
+        )
+        for name, kind, size in zip(
+            generated_names,
+            ("NORMAL", "ORM"),
+            (32, 4),
+            strict=True,
+        ):
+            previous = bpy.data.images.get(name)
+            require(previous is not None, f"Missing generated {kind} setup")
+            bpy.data.images.remove(previous)
+            broken = bpy.data.images.new(
+                name, width=size, height=size, alpha=True
+            )
+            broken["ow_generated_map"] = kind
+            broken["ow_generated_for"] = material.name
+            broken.use_fake_user = True
+        _stats, repair_warnings = addon._auto_prepare_scene(bpy.context)
+        require(not repair_warnings, "Legacy generated-map repair warned")
+        repaired_normal = bpy.data.images[generated_names[0]]
+        repaired_orm = bpy.data.images[generated_names[1]]
+        repaired_normal_pixels = list(repaired_normal.pixels[:])
+        repaired_orm_pixels = list(repaired_orm.pixels[:])
+        require(
+            any(
+                repaired_normal_pixels[index]
+                or repaired_normal_pixels[index + 1]
+                or repaired_normal_pixels[index + 2]
+                for index in range(0, len(repaired_normal_pixels), 4)
+            )
+            and any(
+                repaired_orm_pixels[index]
+                or repaired_orm_pixels[index + 1]
+                or repaired_orm_pixels[index + 2]
+                for index in range(0, len(repaired_orm_pixels), 4)
+            )
+            and repaired_normal.packed_file is not None
+            and repaired_orm.packed_file is not None,
+            "Auto Prepare did not repair black legacy generated maps",
+        )
+        require(
+            abs(float(material.get("ow_roughness", 0.0)) - 0.51) < 1.0e-5
+            and not bool(material.get("ow_auto_imported", True)),
+            "Generated-map repair overwrote authored material settings",
+        )
+
         shader.inputs["Roughness"].default_value = 0.41
         bpy.ops.object.select_all(action="DESELECT")
         floor.select_set(True)
@@ -429,11 +490,57 @@ def main() -> None:
             "Bulk and scalar geometry paths produced different package "
             "structure",
         )
+
+        persistence_blend = Path(tempfile.gettempdir()) / (
+            "auto_import_generated_map_persistence.blend"
+        )
+        persistence_blend.unlink(missing_ok=True)
+        persisted_material_name = material.name
+        require(
+            bpy.ops.wm.save_as_mainfile(filepath=str(persistence_blend))
+            == {"FINISHED"},
+            "Could not save generated-map persistence fixture",
+        )
+        require(
+            bpy.ops.wm.open_mainfile(
+                filepath=str(persistence_blend), load_ui=False
+            )
+            == {"FINISHED"},
+            "Could not reopen generated-map persistence fixture",
+        )
+        reloaded_material = bpy.data.materials[persisted_material_name]
+        reloaded_normal = bpy.data.images[
+            str(reloaded_material["ow_normal_image"])
+        ]
+        reloaded_orm = bpy.data.images[
+            str(reloaded_material["ow_orm_image"])
+        ]
+        for reloaded, label in (
+            (reloaded_normal, "normal"),
+            (reloaded_orm, "ORM"),
+        ):
+            pixels = list(reloaded.pixels[:])
+            require(
+                reloaded.packed_file is not None
+                and any(
+                    pixels[index]
+                    or pixels[index + 1]
+                    or pixels[index + 2]
+                    for index in range(0, len(pixels), 4)
+                ),
+                f"Generated {label} map became black after save/reopen",
+            )
+        reloaded_scene = bpy.context.scene
+        require(
+            bpy.ops.skate_map.quick_export() == {"FINISHED"},
+            reloaded_scene.owned_world.validation_details
+            or "Export failed after generated-map save/reopen",
+        )
         print(
             "AUTO_IMPORT_WORKFLOW_OK",
             output,
             output.stat().st_size,
-            scene.owned_world.last_status,
+            reloaded_scene.owned_world.last_status,
         )
     finally:
         addon.unregister()
