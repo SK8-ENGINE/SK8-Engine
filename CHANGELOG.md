@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.1.0-preview.12 - 2026-08-24
+
+- Rebuilt multiplayer replication around a transport-neutral protocol-v12
+  path shared by localhost and Steam, with authenticated capability
+  negotiation, explicit root snapshots, fragmented complete-pose groups,
+  receiver-confirmed baselines, bounded recovery, and lossless Snappy
+  compression.
+- Moved replication scheduling, packet processing, reassembly, interpolation,
+  and remote reconstruction onto a dedicated worker while retaining local
+  gameplay, input, and original skater rendering on their existing paths.
+- Added realtime traffic priority and latest-wins delivery for root and
+  animation packets so reliable appearance/control transfers cannot create a
+  stale movement backlog.
+- Made complete-pose fidelity universal for every active player: root and
+  board state use 60 Hz snapshots, complete 242-262-bone animation uses a
+  measured 20 Hz cadence, and no distance or player-count tier silently
+  removes tracks.
+- Reduced measured five-player steady traffic to 103.7-111.3 KiB/s per peer,
+  approximately 3.1-3.3 Mibit/s upload from each direct-mesh participant,
+  while preserving exact outfits, attachments, boards, tricks, and bails.
+- Hardened late joins, wardrobe changes, appearance resends, role reuse,
+  renderer resource retirement, off-board capture ownership, hair alpha, and
+  loose ROPA shirt bindings to prevent teal fallback, stale outfits, missing
+  pieces, and stretched garments.
+- Added extensive protocol, codec, lifecycle, worker, routing, impairment,
+  scale, telemetry, synthetic-soak, and user-run visual-check coverage.
+
 ## 0.1.0-preview.11 - 2026-08-22
 
 - Replaced multi-megabyte remote appearance transfers with compact
