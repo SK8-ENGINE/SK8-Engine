@@ -4321,6 +4321,7 @@ bool EnsureFallbackTextures(const NativeGuestOutputRenderContext& context) {
 
 enum class OwnedTextureRole : uint8_t {
   Color,
+  Decal,
   Normal,
   Data,
 };
@@ -4332,7 +4333,10 @@ nrhi::TextureView* ResolveOwnedMapTexture(
   if (texture_id == 0) {
     return g_r.white.srv;
   }
-  const auto cached = g_r.owned_map_textures.find(texture_id);
+  const std::uint64_t cache_key =
+      (std::uint64_t(texture_id) << 8u) |
+      static_cast<std::uint8_t>(role);
+  const auto cached = g_r.owned_map_textures.find(cache_key);
   if (cached != g_r.owned_map_textures.end()) {
     return cached->second.valid ? cached->second.srv : g_r.white.srv;
   }
@@ -4345,7 +4349,7 @@ nrhi::TextureView* ResolveOwnedMapTexture(
     REXLOG_ERROR(
         "native-scene: owned map texture {} is missing or malformed",
         texture_id);
-    g_r.owned_map_textures.emplace(texture_id, GuestTexture{});
+    g_r.owned_map_textures.emplace(cache_key, GuestTexture{});
     return g_r.white.srv;
   }
 
@@ -4401,6 +4405,32 @@ nrhi::TextureView* ResolveOwnedMapTexture(
             output[destination + channel] = std::uint8_t(std::clamp(
                 std::lround((normal[channel] * 0.5f + 0.5f) * 255.0f),
                 0l, 255l));
+          }
+        } else if (role == OwnedTextureRole::Decal) {
+          // Retail decal assets ship authored mip chains. SKATE currently
+          // carries their decoded top level, so generated mips must filter
+          // straight-alpha art without allowing RGB from transparent texels
+          // to bleed into visible grime. Independent RGB/alpha box filters
+          // turned low-frequency tiled decals into broad black bands.
+          std::uint32_t alpha_weight = 0;
+          for (const std::size_t pixel : source_pixels) {
+            alpha_weight += input[pixel + 3];
+          }
+          for (int channel = 0; channel < 3; ++channel) {
+            if (alpha_weight == 0) {
+              // White is neutral if hardware bilinear filtering reaches a
+              // fully transparent texel at the next level.
+              output[destination + channel] = 255;
+              continue;
+            }
+            std::uint32_t weighted_color = 0;
+            for (const std::size_t pixel : source_pixels) {
+              weighted_color +=
+                  std::uint32_t(input[pixel + channel]) *
+                  input[pixel + 3];
+            }
+            output[destination + channel] = std::uint8_t(
+                (weighted_color + alpha_weight / 2u) / alpha_weight);
           }
         } else {
           for (int channel = 0; channel < 3; ++channel) {
@@ -4463,7 +4493,7 @@ nrhi::TextureView* ResolveOwnedMapTexture(
         "native-scene: GPU allocation failed for owned map texture {} "
         "({}x{})",
         source->name, source->width, source->height);
-    g_r.owned_map_textures.emplace(texture_id, GuestTexture{});
+    g_r.owned_map_textures.emplace(cache_key, GuestTexture{});
     return g_r.white.srv;
   }
 
@@ -4472,7 +4502,7 @@ nrhi::TextureView* ResolveOwnedMapTexture(
   if (destination == nullptr) {
     context.device->DestroyDeferred(texture.texture);
     context.device->DestroyDeferred(texture.upload);
-    g_r.owned_map_textures.emplace(texture_id, GuestTexture{});
+    g_r.owned_map_textures.emplace(cache_key, GuestTexture{});
     return g_r.white.srv;
   }
   for (std::size_t mip = 0; mip < mips.size(); ++mip) {
@@ -4509,7 +4539,7 @@ nrhi::TextureView* ResolveOwnedMapTexture(
   }
   nrhi::TextureView* resolved =
       texture.valid ? texture.srv : g_r.white.srv;
-  g_r.owned_map_textures.emplace(texture_id, std::move(texture));
+  g_r.owned_map_textures.emplace(cache_key, std::move(texture));
   REXLOG_INFO(
       "native-scene: uploaded owned map texture {} '{}' ({}x{}, {} mips)",
       texture_id, source->name, source->width, source->height, mips.size());
@@ -11501,7 +11531,7 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
             5,
             ResolveOwnedMapTexture(
                 context, mask_id,
-                decal_family ? OwnedTextureRole::Color
+                decal_family ? OwnedTextureRole::Decal
                              : OwnedTextureRole::Data),
             ResolveOwnedMapTexture(
                 context, draw.normal_texture,
