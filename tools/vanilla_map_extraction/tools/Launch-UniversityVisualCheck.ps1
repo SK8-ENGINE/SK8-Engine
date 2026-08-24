@@ -85,9 +85,10 @@ try {
     $replaceRetail = if ($RetailCollisionOnly) { 'false' } else { 'true' }
     $retailOnly = if ($RetailCollisionOnly) { 'true' } else { 'false' }
     $arguments = @(
-        '--fullscreen=false',
-        '--window_width=1280',
-        '--window_height=720',
+        # Borderless fullscreen uses the active monitor's native dimensions.
+        # Do not force a window size here; that previously capped this visual
+        # check at 1280x720 regardless of the user's display.
+        '--fullscreen=true',
         '--draw_resolution_scale_x=1',
         '--draw_resolution_scale_y=1',
         '--skate3_direct_boot=true',
