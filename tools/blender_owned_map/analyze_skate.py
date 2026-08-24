@@ -149,6 +149,8 @@ def analyze_package(
                 "normal_texture": struct.unpack_from("<I", fields, 44)[0],
                 "orm_texture": struct.unpack_from("<I", fields, 48)[0],
                 "emissive_texture": struct.unpack_from("<I", fields, 52)[0],
+                "alpha_mode": alpha_mode,
+                "alpha_cutoff": struct.unpack_from("<f", fields, 60)[0],
                 "audio_surface": struct.unpack_from("<I", fields, 64)[0],
                 "physics_surface": struct.unpack_from("<I", fields, 68)[0],
                 "surface_pattern": struct.unpack_from("<I", fields, 72)[0],
@@ -269,6 +271,7 @@ def analyze_package(
         texture_digest.update(struct.pack("<3I", width, height, color_space))
         texture_digest.update(rgba8)
         texture_decoded_bytes += len(rgba8)
+        alpha = rgba8[3::4]
         texture_dimensions.append(
             {
                 "id": index + 1,
@@ -277,6 +280,10 @@ def analyze_package(
                 "height": height,
                 "color_space": color_space,
                 "decoded_bytes": len(rgba8),
+                "alpha_min": min(alpha),
+                "alpha_max": max(alpha),
+                "transparent_texels": alpha.count(0),
+                "opaque_texels": alpha.count(255),
             }
         )
     _section(sections, reader, "textures", start)

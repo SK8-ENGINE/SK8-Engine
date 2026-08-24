@@ -634,7 +634,23 @@ float4 ShadePixel(VSOut i) {
   // rendered rigid (sim-active player tees, clipping their gloss alpha
   // discarded every pixel: the invisible-shirt bug; their decode writes
   // zero blend weights, so the VS skinning branch stays off).
-  if (tint.g == 0.0 && overlay.w < 0.5 && cam_pos.w > -20.5) {
+  // Owned retail draws use tint.rgb for the authored material colour, so
+  // tint.g is normally 1. That made the character-protection gate below
+  // suppress alpha testing for every SKATE-owned tree/foliage card and for
+  // environmentsimple.alphatest geometry. Some of those meshes intentionally
+  // bind a fully transparent black placeholder; without the retail-family
+  // cutout they become the enormous black rectangles seen around University.
+  // The exact retail family is authoritative here, just as it is in the
+  // original shaders: family 7 and tree families 9/10 use ALPHAREF 30.
+  float exact_world_family = -cam_pos.w;
+  bool exact_world_cutout =
+      cam_pos.w < -0.5 && cam_pos.w > -20.5 &&
+      ((exact_world_family > 6.5 && exact_world_family < 7.5) ||
+       (exact_world_family > 8.5 && exact_world_family < 10.5));
+  if (exact_world_cutout) {
+    clip(albedo.a - 0.1176);
+  } else if (
+      tint.g == 0.0 && overlay.w < 0.5 && cam_pos.w > -20.5) {
     // environment.transparent alpha-tests its SQUARED alpha at ref 16/255
     // (transparentenvironment.xml: ALPHAREF 16, PS outputs a = diffuse.a^2).
     // Exact env families (cam_pos.w < 0) use the game's world ALPHAREF 30.
