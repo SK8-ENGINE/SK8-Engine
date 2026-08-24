@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.1.0-preview.13 - 2026-08-24
+
+- Fixed clean release installations failing to discover the vanilla
+  Create-a-Skater catalogue, which forced multi-megabyte legacy appearance
+  transfers and left remote players as teal fallback skaters while the
+  transfer completed.
+- Added an independent reader for Skate 3's `createacharacter.big` archive,
+  including chunked RefPack decompression and strict archive-path validation.
+- Build and reuse a private local cache of all 962 vanilla CAC models in the
+  background, then extract required textures lazily when resolving a remote
+  outfit.
+- Keep compact recipe-driven outfit transfers working without a manually
+  configured extracted-asset directory. Every participant must use
+  preview.13 or newer to send this compact format reliably; older clients
+  remain supported through the slower legacy fallback.
+
 ## 0.1.0-preview.12 - 2026-08-24
 
 - Rebuilt multiplayer replication around a transport-neutral protocol-v12
