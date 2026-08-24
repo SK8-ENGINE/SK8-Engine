@@ -19,6 +19,11 @@ from retail_lightmap_uv import (
     decode_lightmap_uvs,
     decode_retail_world_frame,
 )
+from retail_texture_decode import (
+    B5G6R5_DECODER_NAME,
+    B5G6R5_FORMAT_ID,
+    decode_b5g6r5,
+)
 from skate3_streams import (
     ASSET_TYPE_MODEL,
     ASSET_TYPE_TEXTURE,
@@ -397,6 +402,18 @@ def prepare(
                     f"texture asset 0x{asset_id:016X} contains no decoded texture"
                 )
             for texture_index, texture in enumerate(parsed.textures):
+                texture_decoder = None
+                if texture.fmt_id == B5G6R5_FORMAT_ID:
+                    raw_texture = parsed.data[
+                        texture.data_offset :
+                        texture.data_offset + texture.buffer_size
+                    ]
+                    texture.rgba = decode_b5g6r5(
+                        raw_texture,
+                        texture.width,
+                        texture.height,
+                    )
+                    texture_decoder = B5G6R5_DECODER_NAME
                 texture_id = (
                     base_texture_id
                     if texture_index == 0
@@ -421,6 +438,8 @@ def prepare(
                     "format": texture.fmt_name,
                     "warnings": list(parsed.warnings),
                 }
+                if texture_decoder is not None:
+                    new_entry["decoder"] = texture_decoder
                 texture_digest = hashlib.sha256(texture.rgba).digest()
                 known_digests = texture_digests.setdefault(texture_id, set())
                 if texture_id in textures:

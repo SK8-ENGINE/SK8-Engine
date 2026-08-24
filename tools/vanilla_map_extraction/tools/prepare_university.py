@@ -11,11 +11,12 @@ from prepare_hawaiian_dream import prepare
 
 DISTRICT_NAME = "DIST_University"
 EXCLUDED_NORMAL_TEXTURE_IDS = (
-    # The retail shaders treat these resources specially. The two defaults
-    # are not neutral after generic RGBA decode, the water pair uses a
-    # shader-specific/PCA path, and the palm textures are not conventional
-    # tangent-space normal maps. Retain all IDs in the manifest, but do not
-    # bind them to the generic owned-world normal slot.
+    # The retail shaders treat these resources specially. The two decoded
+    # neutral defaults do not promote a retail simple material to the normal
+    # mapped path. The water pair uses a shader-specific/PCA path, and the palm
+    # textures are not conventional tangent-space normal maps. Retain all IDs
+    # in the manifest, but do not bind them to the generic owned-world normal
+    # slot.
     "0x0000043d03e3870a",
     "0x0000475d03e3870a",
     "0x2c70170a00171210",

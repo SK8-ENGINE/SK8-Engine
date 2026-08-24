@@ -275,6 +275,9 @@ try {
     $worldFrameVerifier = Join-Path (
         $workspace
     ) 'tools\verify_university_world_frames.py'
+    $b5g6r5Verifier = Join-Path (
+        $workspace
+    ) 'tools\verify_university_b5g6r5.py'
     $collisionProbeBuilder = Join-Path (
         $workspace
     ) 'tools\build_university_collision_probe.py'
@@ -319,6 +322,9 @@ try {
         ))
         (Get-Item -LiteralPath (
             Join-Path $workspace 'tools\retail_lightmap_uv.py'
+        ))
+        (Get-Item -LiteralPath (
+            Join-Path $workspace 'tools\retail_texture_decode.py'
         ))
     )
     if ($ForceExport -or (
@@ -449,6 +455,12 @@ try {
         $expectedPath
     ) -Description (
         'Verify retail normal/tangent reconstruction and handedness transport'
+    )
+    Invoke-Checked -FilePath 'python' -Arguments @(
+        $b5g6r5Verifier,
+        $extractionManifest
+    ) -Description (
+        'Verify packed B5G6R5 maps and retail constant-map semantics'
     )
     Invoke-Checked -FilePath 'python' -Arguments @(
         $collisionProbeBuilder,
