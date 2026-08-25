@@ -40,6 +40,39 @@ bool RayTriangle(const EditorRay& ray, Vec3 a, Vec3 b, Vec3 c,
   return true;
 }
 
+bool RayBounds(const EditorRay& ray, Vec3 minimum, Vec3 maximum,
+               float maximum_distance) {
+  float entry = 0.0f;
+  float exit = maximum_distance;
+  const float origins[3] = {
+      ray.origin.x, ray.origin.y, ray.origin.z};
+  const float directions[3] = {
+      ray.direction.x, ray.direction.y, ray.direction.z};
+  const float minima[3] = {minimum.x, minimum.y, minimum.z};
+  const float maxima[3] = {maximum.x, maximum.y, maximum.z};
+  for (std::size_t axis = 0; axis < 3; ++axis) {
+    if (std::abs(directions[axis]) <= kEpsilon) {
+      if (origins[axis] < minima[axis] ||
+          origins[axis] > maxima[axis]) {
+        return false;
+      }
+      continue;
+    }
+    const float inverse = 1.0f / directions[axis];
+    float first = (minima[axis] - origins[axis]) * inverse;
+    float second = (maxima[axis] - origins[axis]) * inverse;
+    if (first > second) {
+      std::swap(first, second);
+    }
+    entry = std::max(entry, first);
+    exit = std::min(exit, second);
+    if (entry > exit) {
+      return false;
+    }
+  }
+  return exit >= 0.0f;
+}
+
 }  // namespace
 
 EditorRay BuildEditorCameraRay(const float view[16],
@@ -100,6 +133,12 @@ MapObjectHit PickMapObject(
         },
     };
     local_ray.direction = Normalize(local_ray.direction);
+    if (!RayBounds(
+            local_ray, object.local_bounds_min,
+            object.local_bounds_max,
+            std::min(maximum_distance, result.distance))) {
+      continue;
+    }
     for (std::size_t index = 0;
          index + 2 < object.render_mesh.indices.size(); index += 3) {
       const Vec3 a =

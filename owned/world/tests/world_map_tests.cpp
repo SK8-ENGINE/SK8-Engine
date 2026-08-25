@@ -213,6 +213,8 @@ int main() {
         {{0.0f, 1.0f, 0.0f}},
     };
     farther.render_mesh.indices = {0, 1, 2};
+    farther.local_bounds_min = {-1.0f, -1.0f, 0.0f};
+    farther.local_bounds_max = {1.0f, 1.0f, 0.0f};
     MapObject nearer = farther;
     nearer.id = 12;
     nearer.name = "Nearer";

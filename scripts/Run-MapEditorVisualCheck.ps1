@@ -3,6 +3,8 @@ param(
     [string]$CodegenGameDataRoot = $env:SKATE3_CODEGEN_GAME_DATA_ROOT,
     [string]$TrustedGeneratedRoot = $env:SKATE3_TRUSTED_GENERATED_ROOT,
     [switch]$UseGeneratedEditorMap,
+    [ValidateSet('None', 'Editable', 'Static')]
+    [string]$UniversityPerformanceMode = 'None',
     [switch]$VerifyOnly,
     [switch]$FullRebuild
 )
@@ -13,8 +15,18 @@ $repoRoot = [System.IO.Path]::GetFullPath(
 )
 $buildRoot = Join-Path $repoRoot 'out\build\map-editor-release-clang'
 $worldBuildRoot = Join-Path $repoRoot 'out\build\map-editor-world-release'
+if ($UseGeneratedEditorMap -and $UniversityPerformanceMode -ne 'None') {
+    throw (
+        '-UseGeneratedEditorMap and -UniversityPerformanceMode cannot ' +
+        'be used together.'
+    )
+}
 $mapFileName = if ($UseGeneratedEditorMap) {
     'map_editor_mvp.skate'
+} elseif ($UniversityPerformanceMode -eq 'Editable') {
+    'university_editable_props.skate'
+} elseif ($UniversityPerformanceMode -eq 'Static') {
+    'university_full.skate'
 } else {
     'blender_bake_showcase.skate'
 }
@@ -439,7 +451,28 @@ try {
     Write-Host 'drag the matching coloured rings to rotate; release LMB to commit; G exits.'
     Write-Host 'F6 screenshot; Alt+F6 draw-distance marker.'
     Write-Host ''
-    if ($UseGeneratedEditorMap) {
+    if ($UniversityPerformanceMode -ne 'None') {
+        if ($UniversityPerformanceMode -eq 'Editable') {
+            Write-Host 'University performance profile: EDITABLE.'
+            Write-Host 'The map keeps terrain, buildings, roads, pavements, foliage, decals,'
+            Write-Host 'and other large world shell pieces static. It exposes 1,475'
+            Write-Host 'collision-backed prop objects and attaches 1,178 nearby grind splines.'
+            Write-Host 'Enter G and fly through several districts. Select representative rails,'
+            Write-Host 'benches, barriers, lights, and props. Move/rotate several, then G-exit.'
+            Write-Host 'Skate into each at its new pose and confirm the old pose is empty. Grind'
+            Write-Host 'at least two moved rails and confirm their splines moved with them.'
+            Write-Host 'Watch for baseline hitching while merely skating without selecting anything,'
+            Write-Host 'then compare that feel and the perf telemetry with the STATIC launcher.'
+        } else {
+            Write-Host 'University performance profile: STATIC CONTROL.'
+            Write-Host 'This is the same full University package without editable object records.'
+            Write-Host 'Skate and free-fly through the same districts and route used in the editable'
+            Write-Host 'run. Selection is intentionally unavailable in this control profile.'
+            Write-Host 'Compare ordinary traversal smoothness and perf telemetry against EDITABLE.'
+        }
+        Write-Host 'In both profiles, verify normal ground collision and controller-Y on-foot'
+        Write-Host 'walking before entering G, and verify the skater remains visible in G mode.'
+    } elseif ($UseGeneratedEditorMap) {
         Write-Host 'Check: the skater must stand on EditorGround immediately; do not move'
         Write-Host 'anything to activate collision. Enter G, confirm the skater stays visible,'
         Write-Host 'hold RMB and move the mouse, then release RMB and confirm the cursor returns.'

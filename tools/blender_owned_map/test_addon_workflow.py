@@ -226,7 +226,19 @@ def main() -> None:
             [(0, 1, 2)],
             proxy_material.name,
         )
-        proxy_collision["ow_map_object_owner"] = proxy_visual.name
+        proxy_owner = proxy_collision.data.attributes.new(
+            addon.exporter.EDITOR_COLLISION_OWNER_ATTRIBUTE,
+            type="INT",
+            domain="FACE",
+        )
+        proxy_owner_id = int(
+            addon.exporter._stable_object_id(proxy_visual.name_full)
+        )
+        proxy_owner.data[0].value = (
+            proxy_owner_id
+            if proxy_owner_id < 0x80000000
+            else proxy_owner_id - 0x100000000
+        )
 
         # Retail imports carry their authored frame as hidden point
         # attributes. Verify that it takes precedence over Blender tangent
@@ -266,6 +278,7 @@ def main() -> None:
         retail_handedness.data.foreach_set("value", (-1.0,) * 3)
         retail_frame = bpy.data.objects.new("RetailFrame", retail_mesh)
         retail_frame["ow_physics_type"] = "PRESENTATION_ONLY"
+        retail_frame["ow_editor_editable"] = False
         bpy.data.collections[
             addon.exporter.VISUAL_COLLECTION
         ].objects.link(retail_frame)
@@ -487,11 +500,11 @@ def main() -> None:
         object_records = analysis["map_objects"]
         require(
             [record["name"] for record in object_records]
-            == ["TestFloor", "RetailFrame", "ProxyOwnedVisual"],
-            "Blender object names or stable ordering were not preserved",
+            == ["TestFloor", "ProxyOwnedVisual"],
+            "Static Blender objects leaked into editable object records",
         )
         require(
-            len({record["id"] for record in object_records}) == 3
+            len({record["id"] for record in object_records}) == 2
             and all(record["id"] != 0 for record in object_records),
             "Blender object IDs are zero or not unique",
         )
@@ -508,8 +521,8 @@ def main() -> None:
         require(
             proxy_record["index_count"] == 3
             and proxy_record["collision_count"] == 1,
-            "Separate collision proxy was not associated with its visual "
-            "MOBJ owner",
+            "Face-level collision ownership was not associated with its "
+            "visual MOBJ owner",
         )
         retail_frame_records = []
         vertex_bytes = analysis["_vertex_bytes"]

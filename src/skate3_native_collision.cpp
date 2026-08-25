@@ -119,7 +119,11 @@ constexpr std::size_t kOwnedCollisionActiveMeshes = 32;
 constexpr std::size_t kOwnedCollisionHysteresisMeshes = 16;
 constexpr float kOwnedCollisionStreamRefreshDistance = 40.0f;
 constexpr std::size_t kMaximumHingedDoors = 32;
-constexpr std::size_t kMaximumEditableObjects = 2048;
+// University-style retail maps contain thousands of independently retained
+// presentation parts. Collision-bearing records are still constrained by the
+// native collection's 4096-entry capacity, but render-only/static-collision
+// records must not consume that much lower logical-object ceiling.
+constexpr std::size_t kMaximumEditableObjects = 16384;
 // University occupies 140 non-empty cells at 128 m, which exceeds the fixed
 // collection capacity. At 256 m it occupies 44 cells, and its largest cell
 // remains below kMaximumTrianglesPerOwnedChunk without dropping triangles.

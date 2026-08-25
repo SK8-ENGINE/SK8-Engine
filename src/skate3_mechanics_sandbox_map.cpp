@@ -398,7 +398,7 @@ skate::world::WorldMap& ActiveWorld() {
           std::chrono::steady_clock::now() - load_started);
       imported.materials.reserve(4096);
       imported.textures.reserve(4096);
-      imported.editable_objects.reserve(2048);
+      imported.editable_objects.reserve(16384);
       imported.grind_rails.reserve(4096);
       REXLOG_INFO(
           "mechanics-sandbox: loaded owned Blender map package '{}' from '{}' "

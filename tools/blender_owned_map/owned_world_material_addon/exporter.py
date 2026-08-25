@@ -74,6 +74,7 @@ RETAIL_HANDEDNESS_ATTRIBUTE = "skate3_retail_tangent_handedness"
 RETAIL_EDGE_CODE_ATTRIBUTES = tuple(
     f"skate3_retail_edge_code_{corner}" for corner in range(3)
 )
+EDITOR_COLLISION_OWNER_ATTRIBUTE = "ow_editor_collision_owner"
 
 
 @dataclass
@@ -138,6 +139,7 @@ class ExportMapObject:
     origin: tuple[float, float, float]
     first_index: int
     index_count: int
+    editor_editable: bool
 
 
 @dataclass
@@ -284,8 +286,11 @@ def _map_object_extension(
     rails: list[ExportGrindRail],
 ) -> bytes:
     payload = io.BytesIO()
-    _write_u32(payload, len(geometry.objects))
-    for record in geometry.objects:
+    editable_objects = [
+        record for record in geometry.objects if record.editor_editable
+    ]
+    _write_u32(payload, len(editable_objects))
+    for record in editable_objects:
         first_collision, collision_count = collision_ranges.get(
             record.source_identity, (0, 0)
         )
@@ -511,6 +516,7 @@ def _hash_mesh(
         if visual:
             for property_name in (
                 "ow_export_visual",
+                "ow_editor_editable",
                 "ow_physics_type",
                 "ow_hinge_position",
                 "ow_hinge_axis",
@@ -683,6 +689,22 @@ def _scene_content_fingerprint(
             obj.get("ow_preserve_retail_edge_codes", False)
         )
         _hash_text(digest, int(preserve_retail_codes))
+        editor_owner = obj.data.attributes.get(
+            EDITOR_COLLISION_OWNER_ATTRIBUTE
+        )
+        _hash_text(digest, EDITOR_COLLISION_OWNER_ATTRIBUTE)
+        if editor_owner is None:
+            _hash_text(digest, "MISSING")
+        else:
+            _hash_text(digest, editor_owner.domain)
+            _hash_text(digest, editor_owner.data_type)
+            _hash_foreach(
+                digest,
+                editor_owner.data,
+                "value",
+                1,
+                "i",
+            )
         if preserve_retail_codes:
             for attribute_name in RETAIL_EDGE_CODE_ATTRIBUTES:
                 attribute = obj.data.attributes.get(attribute_name)
@@ -2303,6 +2325,9 @@ def _export_visual_geometry(
                     ),
                     first_index=object_first_index,
                     index_count=object_index_count,
+                    editor_editable=bool(
+                        source_object.get("ow_editor_editable", True)
+                    ),
                 )
             )
         completed_weight += object_weight
@@ -2338,6 +2363,14 @@ def audit_collision_geometry(
 ) -> tuple[list[tuple], CollisionGeometryAudit]:
     depsgraph = bpy.context.evaluated_depsgraph_get()
     triangles: list[tuple] = []
+    partitioned_triangles: dict[int, list[tuple]] = {}
+    partitioned_owners: dict[int, bpy.types.Object] = {}
+    editable_owner_ids = {
+        _stable_object_id(obj.name_full): obj
+        for obj in bpy.data.objects
+        if obj.type == "MESH"
+        and bool(obj.get("ow_editor_editable", True))
+    }
     triangle_owners: dict[tuple, str] = {}
     issues: list[str] = []
     warnings: list[str] = []
@@ -2390,6 +2423,18 @@ def audit_collision_geometry(
             preserve_all_data_layers=preserve_retail_codes,
         )
         edge_attributes = []
+        editor_owner_attribute = mesh.attributes.get(
+            EDITOR_COLLISION_OWNER_ATTRIBUTE
+        )
+        if editor_owner_attribute is not None and (
+            editor_owner_attribute.domain != "FACE"
+            or editor_owner_attribute.data_type != "INT"
+        ):
+            issues.append(
+                f"{source_object.name}: editor collision owner attribute "
+                f"{EDITOR_COLLISION_OWNER_ATTRIBUTE!r} must be a FACE INT."
+            )
+            editor_owner_attribute = None
         if preserve_retail_codes:
             for attribute_name in RETAIL_EDGE_CODE_ATTRIBUTES:
                 attribute = mesh.attributes.get(attribute_name)
@@ -2536,16 +2581,40 @@ def audit_collision_geometry(
                         polygon_codes[(rotation + corner) % 3]
                         for corner in range(3)
                     )
-                triangles.append(
-                    (
-                        points[0],
-                        points[1],
-                        points[2],
-                        surface_id,
-                        material_id,
-                        native_edge_codes,
-                    )
+                exported_triangle = (
+                    points[0],
+                    points[1],
+                    points[2],
+                    surface_id,
+                    material_id,
+                    native_edge_codes,
                 )
+                editor_owner = None
+                if editor_owner_attribute is not None:
+                    owner_id = (
+                        int(
+                            editor_owner_attribute.data[
+                                triangle.polygon_index
+                            ].value
+                        )
+                        & 0xFFFFFFFF
+                    )
+                    if owner_id != 0:
+                        editor_owner = editable_owner_ids.get(owner_id)
+                        if editor_owner is None:
+                            issues.append(
+                                f"{source_object.name}: collision face "
+                                f"references missing editable object ID "
+                                f"0x{owner_id:08X}."
+                            )
+                if editor_owner is None:
+                    triangles.append(exported_triangle)
+                else:
+                    owner_identity = editor_owner.as_pointer()
+                    partitioned_owners[owner_identity] = editor_owner
+                    partitioned_triangles.setdefault(
+                        owner_identity, []
+                    ).append(exported_triangle)
         finally:
             if evaluated is not None:
                 evaluated.to_mesh_clear()
@@ -2583,7 +2652,7 @@ def audit_collision_geometry(
                 "face downward or vertically, but this object is marked "
                 "Rideable Top Surface."
             )
-        if object_ranges is not None:
+        if object_ranges is not None and editor_owner_attribute is None:
             owner_identity = source_object.as_pointer()
             owner_name = str(
                 source_object.get("ow_map_object_owner", "")
@@ -2619,6 +2688,26 @@ def audit_collision_geometry(
                     "contiguous in OW_COLLISION."
                 )
         surface_id += 1
+    for owner_identity in sorted(
+        partitioned_triangles,
+        key=lambda identity: partitioned_owners[identity].name_full,
+    ):
+        owned = partitioned_triangles[owner_identity]
+        if not owned:
+            continue
+        if object_ranges is not None and owner_identity in object_ranges:
+            issues.append(
+                f"{partitioned_owners[owner_identity].name}: collision is "
+                "owned by both a proxy object and face-level partitions."
+            )
+            continue
+        first_triangle = len(triangles)
+        triangles.extend(owned)
+        if object_ranges is not None:
+            object_ranges[owner_identity] = (
+                first_triangle,
+                len(owned),
+            )
     if not triangles:
         issues.append("collision groups contain no usable collision triangles.")
     audit = CollisionGeometryAudit(

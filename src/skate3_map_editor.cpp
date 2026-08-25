@@ -94,6 +94,7 @@ std::atomic<std::uint64_t> g_spawn_requests{0};
 std::atomic<std::uint64_t> g_spawn_successes{0};
 std::atomic<std::uint64_t> g_spawn_failures{0};
 std::atomic<std::uint64_t> g_spawn_library_refreshes{0};
+bool g_spawn_position_dirty = true;
 
 void EnsureObjectsLocked() {
   const std::size_t count =
@@ -331,6 +332,7 @@ void ToggleSpawnMenu() {
     ReleaseCursor();
     g_dragging = false;
     g_drag_handle = skate::world::EditorGizmoHandle::None;
+    g_spawn_position_dirty = true;
   }
   g_spawn_menu_toggles.fetch_add(1, std::memory_order_relaxed);
   REXLOG_INFO("map-editor: spawn menu {} assets={}",
@@ -623,6 +625,12 @@ void UpdateInteraction(const float view[16],
   }
   const bool left_down =
       (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
+  const bool spawn_menu_visible =
+      g_spawn_menu_visible.load(std::memory_order_acquire);
+  if (!spawn_menu_visible && !left_down && !g_left_was_down) {
+    RecordInteractionTime(started);
+    return;
+  }
   const auto& definition =
       mechanics_sandbox::map::ActiveDefinition();
   float map_origin_values[3] = {};
@@ -635,18 +643,6 @@ void UpdateInteraction(const float view[16],
       map_origin_values[1],
       map_origin_values[2],
   };
-  skate::world::EditorRay center_ray;
-  bool center_ray_valid = false;
-  try {
-    center_ray = skate::world::BuildEditorCameraRay(
-        view, projection, camera_position, 0.0f, 0.0f);
-    center_ray_valid = true;
-    g_spawn_position =
-        center_ray.origin + center_ray.direction * 8.0f - map_origin;
-    g_spawn_position_valid = true;
-  } catch (...) {
-    g_spawn_position_valid = false;
-  }
   std::vector<skate::world::EditorObjectTransform> transforms;
   transforms.reserve(definition.editable_objects.size());
   for (std::size_t index = 0;
@@ -660,16 +656,29 @@ void UpdateInteraction(const float view[16],
         .z_axis = g_objects[index].z_axis,
     });
   }
-  if (center_ray_valid) {
-    const skate::world::MapObjectHit placement =
-        skate::world::PickMapObject(
-            definition, transforms, center_ray, 200.0f);
-    if (placement.hit) {
+  if (spawn_menu_visible && g_spawn_position_dirty) {
+    try {
+      const skate::world::EditorRay center_ray =
+          skate::world::BuildEditorCameraRay(
+              view, projection, camera_position, 0.0f, 0.0f);
       g_spawn_position =
-          placement.point - map_origin + placement.normal * 0.02f;
+          center_ray.origin + center_ray.direction * 8.0f -
+          map_origin;
+      g_spawn_position_valid = true;
+      const skate::world::MapObjectHit placement =
+          skate::world::PickMapObject(
+              definition, transforms, center_ray, 200.0f);
+      if (placement.hit) {
+        g_spawn_position =
+            placement.point - map_origin +
+            placement.normal * 0.02f;
+      }
+    } catch (...) {
+      g_spawn_position_valid = false;
     }
+    g_spawn_position_dirty = false;
   }
-  if (g_spawn_menu_visible.load(std::memory_order_acquire)) {
+  if (spawn_menu_visible) {
     g_dragging = false;
     g_left_was_down = false;
     RecordInteractionTime(started);
