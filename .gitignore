@@ -58,6 +58,11 @@ steam_api64.dll
 *.exe
 *.map
 
+# User-specific launchers are generated under ignored out/local-tools.
+/RUN_MULTIPLAYER_*.bat
+/RELAUNCH_MULTIPLAYER_*.bat
+/Run-University-*.bat
+
 # Editor and CMake scratch
 /.vs/
 /.vscode/
@@ -73,3 +78,9 @@ steam_api64.dll
 !/scripts/Run-MultiplayerVisualCheck.ps1
 !/scripts/Relaunch-MultiplayerVisualClient.ps1
 !/scripts/Analyze-MultiplayerVisualCheck.ps1
+!/scripts/Run-MultiplayerMixedVersionCheck.ps1
+!/scripts/Run-MultiplayerSyntheticSoak.ps1
+!/scripts/Test-RepositoryHygiene.ps1
+
+# Rebuilt from reviewed Blender add-on source when needed.
+/tools/blender_owned_map/owned_world_material_addon.zip

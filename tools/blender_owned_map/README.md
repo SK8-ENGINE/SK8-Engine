@@ -22,9 +22,19 @@ renderer-neutral package containing:
 
 ## Install the addon
 
-The single installable file is:
+Release archives include the installable file at:
 
-`tools/blender_owned_map/owned_world_material_addon.zip`
+`Blender Map Tools/owned_world_material_addon.zip`
+
+From a source checkout, generate the same file from the reviewed Python source
+before installing it:
+
+```powershell
+.\tools\blender_owned_map\Build-Addon.ps1
+```
+
+The generated `tools/blender_owned_map/owned_world_material_addon.zip` is
+ignored and must not be committed.
 
 In Blender 5:
 

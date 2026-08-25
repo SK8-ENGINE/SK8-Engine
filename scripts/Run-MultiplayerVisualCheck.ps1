@@ -941,10 +941,10 @@ Visual scenario:
 7. Confirm the focused local client keeps normal input response and has no
    obvious new frame stalls.
 8. Close client 3 while the other clients remain running. Wait 7 seconds, then
-   run RELAUNCH_MULTIPLAYER_VISUAL_CLIENT_3.bat from the repository root.
-   Client 3 should rejoin in the same role and outfit. Every other client should
-   show one proxy-to-complete transition without stale pieces, duplicated
-   clothing, missing boards, or disruption to the players who stayed connected.
+   run clients\client3\relaunch-client3.bat from this run folder. Client 3
+   should rejoin in the same role and outfit. Every other client should show
+   one proxy-to-complete transition without stale pieces, duplicated clothing,
+   missing boards, or disruption to the players who stayed connected.
 9. Continue for 30 seconds after client 3 has recovered, then close all clients.
 
 Success:
@@ -1156,7 +1156,8 @@ separately, then ask the agent to analyze this run directory.
         -not $MinimumInterpolationCheck) {
         Write-Host (
             'After closing client 3, wait 7 seconds and run ' +
-            'RELAUNCH_MULTIPLAYER_VISUAL_CLIENT_3.bat.'
+            (Join-Path $runRoot 'clients\client3\relaunch-client3.bat') +
+            '.'
         )
     }
     Write-Host (

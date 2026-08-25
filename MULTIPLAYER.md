@@ -220,11 +220,12 @@ Launch more real local clients with:
 ```
 
 For implementation acceptance checks, automated agents do not launch the
-game. The user runs the fail-closed visual-check wrapper from the dedicated
-multiplayer worktree:
+game. The user runs the fail-closed visual-check script from the dedicated
+multiplayer worktree, either directly or through an ignored local `.bat`
+prepared under `out\local-tools`:
 
-```text
-RUN_MULTIPLAYER_VISUAL_CHECK.bat
+```powershell
+.\scripts\Run-MultiplayerVisualCheck.ps1
 ```
 
 It incrementally builds that worktree, stages fresh portable clients under a
@@ -235,11 +236,12 @@ checkout. Each numbered role has separate persistent profile storage under
 `out\visual-check-profiles/clientN`; a role's saved outfit therefore survives
 later launcher runs while logs and binaries remain isolated by timestamp.
 The first persistent profiles are seeded from the latest visual run when one
-exists, preserving outfits already edited there.
-`RELAUNCH_MULTIPLAYER_VISUAL_CLIENT_3.bat` restarts role 3 in the same evidence
-directory after the user closes that client for a role-reuse check. Visual
-correctness is the user's decision; the generated logs support a separate
-telemetry review.
+exists, preserving outfits already edited there. The generated
+`clients\client3\relaunch-client3.bat`, or
+`scripts\Relaunch-MultiplayerVisualClient.ps1 -Role 3`, restarts role 3 in the
+same evidence directory after the user closes that client for a role-reuse
+check. Visual correctness is the user's decision; the generated logs support
+a separate telemetry review.
 
 The script uses the sibling `Skate3CustomEngineLayer-Player` install by
 default. Pass another clean install when required:

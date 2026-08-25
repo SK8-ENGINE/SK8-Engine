@@ -73,8 +73,11 @@ guest heap cannot leave a second multi-gigabyte process running.
 
 ## Blender exporter
 
-Install `tools/blender_owned_map/owned_world_material_addon.zip` through
-Blender's **Edit > Preferences > Get Extensions > Install from Disk**.
+Release users install `Blender Map Tools/owned_world_material_addon.zip`
+through Blender's **Edit > Preferences > Get Extensions > Install from
+Disk**. From a source checkout, run
+`tools/blender_owned_map/Build-Addon.ps1` first; its generated ZIP is ignored
+and must not be committed.
 The addon contains the complete exporter. Open **3D View > Sidebar >
 Skate 3 Map**, place the player spawn, and export. An ordinary unconfigured
 `.blend` is prepared automatically: visible meshes, Principled materials and

@@ -1,0 +1,22 @@
+name: Repository hygiene
+
+on:
+  pull_request:
+  push:
+
+permissions:
+  contents: read
+
+jobs:
+  repository-hygiene:
+    runs-on: windows-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          submodules: false
+          fetch-depth: 1
+
+      - name: Reject local and generated artifacts
+        shell: pwsh
+        run: ./scripts/Test-RepositoryHygiene.ps1

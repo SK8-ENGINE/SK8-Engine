@@ -224,17 +224,19 @@ contact results.
 
 ## User-run University visual check
 
-From the root of the dedicated University worktree, run:
+From the root of the dedicated University worktree, the user runs the
+launch-only script directly or through an ignored local `.bat` prepared under
+`out\local-tools`:
 
 ```powershell
-.\Run-University-Visual-Check.bat
+.\tools\vanilla_map_extraction\tools\Launch-UniversityVisualCheck.ps1
 ```
 
-The BAT only launches the build previously prepared and validated offline by
-the map agent. It never builds, exports, copies, or deploys content. Before
+The script only launches the build previously prepared and validated offline
+by the map agent. It never builds, exports, copies, or deploys content. Before
 launch it verifies SHA-256 hashes for the prepared executable, runtime, and
-University package plus the exact-retail collision archive, then enables
-owned collision, map-loader telemetry, and renderer performance telemetry.
+University package plus the exact-retail collision archive, then enables owned
+collision, map-loader telemetry, and renderer performance telemetry.
 
 The owned-collision check packages all 301 untouched retail `ClusteredMesh`
 resources from the University district. Their original compressed vertices,
@@ -254,7 +256,8 @@ contains the exact launch arguments, prepared hashes/commit metadata, and
 `skate3_university.log`. The launcher prints the exact path before starting
 the game and reports failures clearly.
 
-`Run-University-Retail-Collision-Check.bat` is a diagnostic A/B launcher. It
+Passing `-RetailCollisionOnly` to the launch-only script performs the
+diagnostic A/B check. It
 places the extracted University presentation and grinds at their preserved
 original retail world coordinates, but does not register the rebuilt owned
 collision mesh or suppress streamed retail collision. Movement telemetry from
@@ -268,7 +271,8 @@ reporting position, normal, and packed-surface agreement. Package material IDs
 are converted back to packed RenderWare surfaces before comparison; the
 internal package surface ID is logged separately.
 
-Agents must never execute this `.bat` file or launch `skate3.exe`. Offline
+Agents must never execute the launch-only script or launch `skate3.exe`.
+Offline
 preparation is performed separately with:
 
 ```powershell

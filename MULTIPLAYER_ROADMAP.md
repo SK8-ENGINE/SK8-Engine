@@ -429,10 +429,11 @@ Current checkpoint:
   class bandwidth and reliable/unreliable bandwidth.
 - The telemetry analyzer reports the policy marker, cumulative class-policy
   counters, and policy errors per client. The dedicated
-  `RUN_MULTIPLAYER_REALTIME_PRIORITY_CHECK.bat` incrementally builds the exact
-  worktree revision, runs all nine offline suites, stages five isolated
-  persistent-profile clients, enables existing performance diagnostics, and
-  writes a timestamped run with a policy-specific three-minute visual script.
+  `Run-MultiplayerVisualCheck.ps1 -Clients 5 -RealtimePriorityCheck`
+  invocation incrementally builds the exact worktree revision, runs all nine
+  offline suites, stages five isolated persistent-profile clients, enables
+  existing performance diagnostics, and writes a timestamped run with a
+  policy-specific three-minute visual script.
 - Full Release compilation and all nine offline multiplayer suites pass. The
   live checkpoint was exercised by the user in run
   `20260823-153038-086c02cc`. The user reported correct multiplayer
@@ -478,9 +479,9 @@ Current checkpoint:
   catch-up burst after a stall.
 - Deadline tests cover 60 Hz pacing on a 4 ms worker and a 500 ms stall with
   no burst. All nine offline multiplayer suites and a full Release build pass.
-  `RUN_MULTIPLAYER_SMOOTHNESS_CHECK.bat` stages five persistent-profile
-  clients and records the per-pair diagnostics. Its first visual result is
-  recorded below.
+  `Run-MultiplayerVisualCheck.ps1 -Clients 5 -SmoothnessCheck` stages five
+  persistent-profile clients and records the per-pair diagnostics. Its first
+  visual result is recorded below.
 - The user ran `20260823-154251-e50cf311` and reported that all remote skaters
   still jittered. The sender deadline change did raise complete animation
   delivery from the previous approximately 48-50 fps to approximately
