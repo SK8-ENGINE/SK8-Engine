@@ -1781,6 +1781,122 @@ void ApplyHdrPost(const NativeGuestOutputRenderContext& context,
 }
 
 
+// ---- Rewritten vanilla-UI backdrop (shared native + emulated paths) ----
+//
+// The settled Career-menu capture is exact:
+//   blur kernel c0.x = 8
+//   blur colour c1.rgb = (90, 85, 81) / 255
+// Both retail blur shaders multiply by c1, so the modulation is deliberately
+// applied in both the horizontal and vertical passes. This is the subtle warm
+// darkness visible behind Career > Main. It replaces the incorrect neutral
+// host Gaussian + black ImGui quad approximation.
+bool ApplyVanillaUiBackdropPass(
+    const NativeGuestOutputRenderContext& context, nrhi::Cmd* cmd,
+    bool output_in_guest_output_state) {
+  if (g_r.pso_blur == nullptr || g_r.pso_blur_blit == nullptr ||
+      g_r.pso_blur_down == nullptr || g_r.blur_tex[0] == nullptr ||
+      g_r.blur_tex[1] == nullptr || g_r.output_srv_slot == nullptr) {
+    return false;
+  }
+
+  constexpr float kKernel = 8.0f;
+  constexpr float kTintR = 90.0f / 255.0f;
+  constexpr float kTintG = 85.0f / 255.0f;
+  constexpr float kTintB = 81.0f / 255.0f;
+  const nrhi::Viewport blur_vp{
+      0.0f, 0.0f, float(RendererState::kBlurWidth),
+      float(RendererState::kBlurHeight), 0.0f, 1.0f};
+  const nrhi::Rect blur_sc{0, 0, int32_t(RendererState::kBlurWidth),
+                           int32_t(RendererState::kBlurHeight)};
+  const nrhi::Viewport full_vp{0.0f,
+                               0.0f,
+                               float(context.guest_output_width),
+                               float(context.guest_output_height),
+                               0.0f,
+                               1.0f};
+  const nrhi::Rect full_sc{0, 0, int32_t(context.guest_output_width),
+                           int32_t(context.guest_output_height)};
+  const nrhi::ResourceState output_entry_state =
+      output_in_guest_output_state ? nrhi::ResourceState::kGuestOutput
+                                   : nrhi::ResourceState::kRenderTarget;
+  const auto to_srv = [&](nrhi::Texture* resource,
+                          nrhi::ResourceState from) {
+    cmd->Barrier(resource, from, nrhi::ResourceState::kPixelShaderResource);
+  };
+  const auto to_rt = [&](nrhi::Texture* resource) {
+    cmd->Barrier(resource, nrhi::ResourceState::kPixelShaderResource,
+                 nrhi::ResourceState::kRenderTarget);
+  };
+
+  cmd->SetBindingLayout(g_r.layout);
+  cmd->SetPrimitiveTopology(nrhi::PrimitiveTopology::kTriangleList);
+
+  // Prefilter into the game's fixed 1152x640 blur raster.
+  to_srv(context.guest_output, output_entry_state);
+  cmd->FlushBarriers();
+  cmd->SetRenderTargets(g_r.blur_tex[0], nullptr);
+  cmd->SetViewport(blur_vp);
+  cmd->SetScissor(blur_sc);
+  cmd->SetPipeline(g_r.pso_blur_down);
+  const float downsample[8] = {
+      1.0f / float(context.guest_output_width),
+      1.0f / float(context.guest_output_height),
+      0.0f,
+      0.0f,
+      1.0f,
+      1.0f,
+      0.0f,
+      0.0f,
+  };
+  cmd->SetRootConstants(0, 8, downsample, 0);
+  cmd->SetTexture(1, g_r.output_srv_slot);
+  cmd->Draw(3, 0);
+
+  // Retail horizontal blur and its first c1 modulation.
+  to_srv(g_r.blur_tex[0], nrhi::ResourceState::kRenderTarget);
+  cmd->FlushBarriers();
+  cmd->SetRenderTargets(g_r.blur_tex[1], nullptr);
+  cmd->SetPipeline(g_r.pso_blur);
+  const float horizontal[8] = {
+      1.0f, 0.0f, kKernel, 0.0f, kTintR, kTintG, kTintB, 1.0f,
+  };
+  cmd->SetRootConstants(0, 8, horizontal, 0);
+  cmd->SetTexture(1, g_r.blur_srv[0]);
+  cmd->Draw(3, 0);
+
+  // Retail vertical blur and its second c1 modulation.
+  to_srv(g_r.blur_tex[1], nrhi::ResourceState::kRenderTarget);
+  to_rt(g_r.blur_tex[0]);
+  cmd->FlushBarriers();
+  cmd->SetRenderTargets(g_r.blur_tex[0], nullptr);
+  const float vertical[8] = {
+      0.0f, 1.0f, kKernel, 0.0f, kTintR, kTintG, kTintB, 1.0f,
+  };
+  cmd->SetRootConstants(0, 8, vertical, 0);
+  cmd->SetTexture(1, g_r.blur_srv[1]);
+  cmd->Draw(3, 0);
+
+  // Retail postfx_basictex replacement over the complete output.
+  to_srv(g_r.blur_tex[0], nrhi::ResourceState::kRenderTarget);
+  to_rt(context.guest_output);
+  cmd->FlushBarriers();
+  cmd->SetRenderTargets(context.guest_output, nullptr);
+  cmd->SetViewport(full_vp);
+  cmd->SetScissor(full_sc);
+  cmd->SetPipeline(g_r.pso_blur_blit);
+  cmd->SetTexture(1, g_r.blur_srv[0]);
+  cmd->Draw(3, 0);
+
+  to_rt(g_r.blur_tex[0]);
+  to_rt(g_r.blur_tex[1]);
+  if (output_in_guest_output_state) {
+    cmd->Barrier(context.guest_output, nrhi::ResourceState::kRenderTarget,
+                 nrhi::ResourceState::kGuestOutput);
+  }
+  cmd->FlushBarriers();
+  return true;
+}
+
 // ---- Settings-menu backdrop blur (shared native + emulated-post paths) ----
 // Clean separable gaussian over the finished guest output; deliberately
 // shares nothing with the game's
@@ -1852,7 +1968,8 @@ bool ApplyMenuBlurPass(const NativeGuestOutputRenderContext& context, nrhi::Cmd*
   cmd->FlushBarriers();
   cmd->SetRenderTargets(g_r.menu_blur_tex[1], nullptr);
   cmd->SetPipeline(g_r.pso_menu_gauss);
-  const float h_consts[8] = {1.0f / w, 0.0f, sigma_half, radius, 1.0f, 1.0f, 1.0f, 1.0f};
+  const float h_consts[8] = {1.0f / w, 0.0f, sigma_half, radius,
+                             1.0f, 1.0f, 1.0f, 1.0f};
   cmd->SetRootConstants(0, 8, h_consts, 0);
   cmd->SetTexture(1, g_r.menu_blur_srv[0]);
   cmd->Draw(3, 0);
@@ -1863,7 +1980,8 @@ bool ApplyMenuBlurPass(const NativeGuestOutputRenderContext& context, nrhi::Cmd*
                nrhi::ResourceState::kRenderTarget);
   cmd->FlushBarriers();
   cmd->SetRenderTargets(g_r.menu_blur_tex[0], nullptr);
-  const float v_consts[8] = {0.0f, 1.0f / h, sigma_half, radius, 1.0f, 1.0f, 1.0f, 1.0f};
+  const float v_consts[8] = {0.0f, 1.0f / h, sigma_half, radius,
+                             1.0f, 1.0f, 1.0f, 1.0f};
   cmd->SetRootConstants(0, 8, v_consts, 0);
   cmd->SetTexture(1, g_r.menu_blur_srv[1]);
   cmd->Draw(3, 0);
@@ -1938,9 +2056,12 @@ bool EnsureMenuBlurStandalone(const NativeGuestOutputRenderContext& context) {
 // RenderScene). Covers boot/startup frames before the native scene takes
 // over and manual emulated mode.
 void PostProcessGuestOutput(const NativeGuestOutputRenderContext& context, void* /*user_data*/) {
-  const float target = g_settings_menu_blur.load(std::memory_order_relaxed)
-                           ? float(REXCVAR_GET(skate3_menu_blur_sigma))
-                           : 0.0f;
+  const bool vanilla_backdrop =
+      g_vanilla_ui_backdrop.load(std::memory_order_relaxed);
+  const float target =
+      g_settings_menu_blur.load(std::memory_order_relaxed)
+          ? float(REXCVAR_GET(skate3_menu_blur_sigma))
+          : 0.0f;
   // Diagnostics (throttled): the emulated-path blur has several silent
   // early-outs; log which leg each invocation takes.
   const bool log_this = g_post_blur_log_count.load(std::memory_order_relaxed) < 8;
@@ -1959,8 +2080,14 @@ void PostProcessGuestOutput(const NativeGuestOutputRenderContext& context, void*
     }
     return;
   }
-  if (!ApplyMenuBlurPass(context, context.cmd, target,
-                         /*output_in_guest_output_state=*/true)) {
+  const bool active =
+      vanilla_backdrop
+          ? ApplyVanillaUiBackdropPass(
+                context, context.cmd,
+                /*output_in_guest_output_state=*/true)
+          : ApplyMenuBlurPass(context, context.cmd, target,
+                              /*output_in_guest_output_state=*/true);
+  if (!active) {
     // Fully eased out: stop the per-frame post-process invocations until the
     // menu opens again.
     rex::graphics::RequestNativeGuestOutputPostProcess(false);

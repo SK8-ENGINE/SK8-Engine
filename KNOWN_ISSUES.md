@@ -19,6 +19,10 @@ This is an experimental preview rather than a finished standalone game engine.
   and physics resources are rebuilt coherently.
 - The layer activates once normal Skate 3 gameplay reaches a stable local
   player. Frontend and loading screens still use the upstream runtime.
+- The F6 native vanilla-style menu is an experimental presentation prototype.
+  Its reconstructed Game Settings screen is display-only, most menu actions do
+  not yet invoke their retail outcomes, and menu sound mappings are unfinished.
+  The existing settings and retail frontend paths remain available.
 - No retail game files or retail maps are bundled. The included Feature Park
   is original project content. A legally obtained Skate 3 ISO is required on
   first start.

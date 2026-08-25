@@ -1133,6 +1133,7 @@ void ServerLoop() {
   REXLOG_INFO(
       "Skate 3 input lab: listening on \\\\.\\pipe\\Skate3InputLab "
       "(window focus is not required)");
+  bool waiting_for_previous_owner = false;
   while (true) {
     HANDLE pipe = CreateNamedPipeW(
         kPipeName, PIPE_ACCESS_DUPLEX,
@@ -1140,9 +1141,25 @@ void ServerLoop() {
             PIPE_REJECT_REMOTE_CLIENTS,
         1, 1024 * 1024, 65536, 0, nullptr);
     if (pipe == INVALID_HANDLE_VALUE) {
-      REXLOG_ERROR("Skate 3 input lab: CreateNamedPipe failed ({})",
-                   GetLastError());
+      const DWORD error = GetLastError();
+      if (error == ERROR_PIPE_BUSY) {
+        if (!waiting_for_previous_owner) {
+          REXLOG_WARN(
+              "Skate 3 input lab: another process still owns the telemetry "
+              "pipe; retrying until it is released");
+          waiting_for_previous_owner = true;
+        }
+        Sleep(250);
+        continue;
+      }
+      REXLOG_ERROR("Skate 3 input lab: CreateNamedPipe failed ({})", error);
       return;
+    }
+    if (waiting_for_previous_owner) {
+      REXLOG_INFO(
+          "Skate 3 input lab: telemetry pipe recovered after its previous "
+          "owner exited");
+      waiting_for_previous_owner = false;
     }
     const BOOL connected =
         ConnectNamedPipe(pipe, nullptr)

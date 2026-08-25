@@ -1138,6 +1138,9 @@ void ApplyHdrPost(const NativeGuestOutputRenderContext& context,
                   uint64_t frame_number);
 bool ApplyMenuBlurPass(const NativeGuestOutputRenderContext& context, nrhi::Cmd* cmd,
                        float target_sigma, bool output_in_guest_output_state);
+bool ApplyVanillaUiBackdropPass(
+    const NativeGuestOutputRenderContext& context, nrhi::Cmd* cmd,
+    bool output_in_guest_output_state);
 // Blur-over-emulated-frames post processor registered by Install().
 void PostProcessGuestOutput(const NativeGuestOutputRenderContext& context,
                             void* user_data);

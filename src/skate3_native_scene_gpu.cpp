@@ -20059,11 +20059,17 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
   // published FrameScene made the blur depend on fresh guest publishes,
   // which the startup flow doesn't reliably produce (stale scenes rendered
   // with a frozen sigma of 0).
-  const float menu_blur_target = g_settings_menu_blur.load(std::memory_order_relaxed)
-                                     ? float(REXCVAR_GET(skate3_menu_blur_sigma))
-                                     : 0.0f;
-  ApplyMenuBlurPass(context, cmd, menu_blur_target,
-                    /*output_in_guest_output_state=*/false);
+  if (g_vanilla_ui_backdrop.load(std::memory_order_relaxed)) {
+    ApplyVanillaUiBackdropPass(
+        context, cmd, /*output_in_guest_output_state=*/false);
+  } else {
+    const float menu_blur_target =
+        g_settings_menu_blur.load(std::memory_order_relaxed)
+            ? float(REXCVAR_GET(skate3_menu_blur_sigma))
+            : 0.0f;
+    ApplyMenuBlurPass(context, cmd, menu_blur_target,
+                      /*output_in_guest_output_state=*/false);
+  }
 
   cmd->Barrier(context.guest_output, nrhi::ResourceState::kRenderTarget,
                nrhi::ResourceState::kGuestOutput);

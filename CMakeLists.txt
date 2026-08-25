@@ -303,6 +303,10 @@ set(SKATE3_COMMON_SOURCES
     src/native/skate3_native_lw.cpp
     src/native/skate3_native_palette.cpp
     src/skate3_native_debug_dialog.cpp
+    src/skate3_vanilla_ui/skate3_ui_asset_cache.cpp
+    src/skate3_vanilla_ui/skate3_ui_audio.cpp
+    src/skate3_vanilla_ui/skate3_ui_scene.cpp
+    src/skate3_vanilla_ui/skate3_vanilla_ui_dialog.cpp
     src/skate3_scoring.cpp
     src/skate3_native_render.cpp
     src/skate3_native_scene.cpp
@@ -317,6 +321,12 @@ set(SKATE3_COMMON_SOURCES
     src/skate3_win_icon.cpp
     third_party/rexglue-sdk/thirdparty/crypto/sha256.cpp
 )
+
+add_executable(skate3_ui_asset_bootstrap EXCLUDE_FROM_ALL
+    tools/skate3_ui_extract/native_main.cpp
+    src/skate3_vanilla_ui/skate3_ui_asset_cache.cpp)
+target_include_directories(skate3_ui_asset_bootstrap PRIVATE src)
+target_compile_features(skate3_ui_asset_bootstrap PRIVATE cxx_std_23)
 if(APPLE)
     list(APPEND SKATE3_COMMON_SOURCES src/skate3_iso_installer_macos.mm)
 endif()
@@ -349,6 +359,7 @@ target_include_directories(skate3 PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${CMAKE_CURRENT_BINARY_DIR}/include
     ${REXSDK_DIR}/thirdparty/xxHash
+    ${REXSDK_DIR}/thirdparty/inja/third_party/include
 )
 
 set(SKATE3_NATIVE_SHADER_SOURCES
