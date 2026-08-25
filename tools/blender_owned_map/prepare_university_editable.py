@@ -1,8 +1,10 @@
-"""Prepare a broad props-editable University map from the extracted scene.
+"""Prepare a curated props-editable University map from the extracted scene.
 
 The University retail extraction contains material-batched presentation
-meshes and separately extracted exact collision. This tool deliberately keeps
-large/permanent world pieces static, recentres practical prop-sized meshes for
+meshes and separately extracted exact collision. A retail mesh part is not
+automatically an authored object: most ``sur_`` records are floor, wall, or
+material fragments. This tool keeps permanent world pieces static, exposes
+compact retail props and named skate features, recentres those meshes for
 editor transforms, and reports every classification decision before export.
 
 Usage:
@@ -80,6 +82,41 @@ PERMANENT_WORLD_MARKERS = (
     "window",
 )
 
+# Surface records are static by default. Only names that describe a coherent
+# skate obstacle or practical prop become independently editable.
+SKATE_FEATURE_SURFACE_MARKERS = (
+    "bank",
+    "barrier",
+    "bench",
+    "block",
+    "bowl",
+    "coping",
+    "curb",
+    "fence",
+    "hubba",
+    "kicker",
+    "ledge",
+    "manualpad",
+    "pipe",
+    "planter",
+    "quarter",
+    "rail",
+    "ramp",
+    "skate",
+    "stair",
+    "vent",
+)
+
+STANDALONE_PROP_PREFIXES = (
+    "fire_hydrant",
+    "sportscar",
+    "traffic_",
+    "traf4sedan",
+    "trafsuva",
+    "tmsag",
+    "woodenpalette",
+)
+
 MAX_HORIZONTAL_SPAN = 40.0
 MAX_VERTICAL_SPAN = 25.0
 MAX_FOOTPRINT_AREA = 650.0
@@ -117,15 +154,6 @@ def parse_arguments() -> argparse.Namespace:
     return parser.parse_args(arguments)
 
 
-def collection_objects(*names: str) -> set[bpy.types.Object]:
-    result: set[bpy.types.Object] = set()
-    for name in names:
-        collection = bpy.data.collections.get(name)
-        if collection is not None:
-            result.update(collection.all_objects)
-    return result
-
-
 def world_bounds(
     obj: bpy.types.Object,
 ) -> tuple[Vector, Vector]:
@@ -155,9 +183,21 @@ def semantic_identity(obj: bpy.types.Object) -> str:
     return " ".join(values).lower()
 
 
+def proper_object_kind(obj: bpy.types.Object) -> str | None:
+    name = obj.name_full.lower()
+    if name.startswith("obj_"):
+        return "retail_object"
+    if name.startswith("sur_"):
+        if any(marker in name for marker in SKATE_FEATURE_SURFACE_MARKERS):
+            return "skate_feature_surface"
+        return None
+    if name.startswith(STANDALONE_PROP_PREFIXES):
+        return "standalone_prop"
+    return None
+
+
 def classify(
     obj: bpy.types.Object,
-    presentation_only: set[bpy.types.Object],
 ) -> Classification:
     minimum, maximum = world_bounds(obj)
     dimensions_vector = maximum - minimum
@@ -165,11 +205,8 @@ def classify(
     obj.data.calc_loop_triangles()
     triangles = len(obj.data.loop_triangles)
 
-    reason = (
-        "presentation_only_prop_sized"
-        if obj in presentation_only
-        else "prop_sized_collidable"
-    )
+    object_kind = proper_object_kind(obj)
+    reason = f"proper_{object_kind}" if object_kind is not None else ""
     editable = True
     identity = semantic_identity(obj)
     marker = next(
@@ -180,7 +217,10 @@ def classify(
         ),
         None,
     )
-    if marker is not None:
+    if object_kind is None:
+        editable = False
+        reason = "not_proper_object"
+    elif marker is not None:
         editable = False
         reason = f"permanent_marker:{marker}"
     elif max(dimensions[0], dimensions[1]) > MAX_HORIZONTAL_SPAN:
@@ -219,11 +259,8 @@ def audit_scene() -> tuple[list[bpy.types.Object], list[Classification]]:
         and bool(obj.get("ow_export_visual", True))
         and not exporter._is_helper_object(obj)
     ]
-    presentation_only = collection_objects(
-        exporter.NO_COLLISION_COLLECTION,
-    )
     classifications = [
-        classify(obj, presentation_only) for obj in visual_objects
+        classify(obj) for obj in visual_objects
     ]
     return visual_objects, classifications
 
