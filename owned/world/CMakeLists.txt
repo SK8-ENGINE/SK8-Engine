@@ -19,9 +19,11 @@ endif()
 
 add_library(skate_owned_world STATIC
   src/grind_spline.cpp
+  src/map_editor.cpp
   src/owned_map_package.cpp
   src/render_world.cpp
   src/rw_collision_mesh.cpp
+  src/skate_object_package.cpp
   src/starter_flatground.cpp
   src/water_simulation.cpp
   src/world_map.cpp

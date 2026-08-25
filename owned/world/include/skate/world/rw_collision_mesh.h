@@ -22,6 +22,11 @@ constexpr std::uint16_t EncodeRwSurfaceId(std::uint8_t audio,
 }
 
 struct RwCollisionBuildOptions {
+  struct TriangleRange {
+    std::uint32_t first = 0;
+    std::uint32_t count = 0;
+  };
+
   // Vertices whose components quantize to the same cell are welded. Welding
   // is required for triangle adjacency and stable edge contacts.
   float weld_epsilon = 0.001f;
@@ -29,6 +34,9 @@ struct RwCollisionBuildOptions {
   Vec3 translation;
   std::uint16_t default_surface_id = 0;
   std::unordered_map<MaterialId, std::uint16_t> material_surface_ids;
+  // Sorted, disjoint source ranges omitted from the immutable map mesh
+  // because independently transformed MOBJ collision volumes own them.
+  std::vector<TriangleRange> excluded_triangle_ranges;
 };
 
 struct RwCollisionMeshBlob {

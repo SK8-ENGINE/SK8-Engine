@@ -5,6 +5,7 @@
 
 #include "skate3_native_debug_dialog.h"
 #include "skate3_demo_path.h"
+#include "skate3_map_editor.h"
 #include "skate3_native_scene.h"
 
 #include "generated/skate3_init.h"
@@ -772,6 +773,9 @@ constexpr uint32_t kSandboxKinematicMeshBase = 0xF2000000u;
 constexpr std::size_t kSandboxKinematicMeshCapacity = 0x0000FFFFu;
 constexpr uint32_t kSandboxHingedDoorMeshBase = 0xF2100000u;
 constexpr std::size_t kSandboxHingedDoorMeshCapacity = 0x0000FFFFu;
+constexpr uint32_t kSandboxEditorObjectMeshBase = 0xF2200000u;
+constexpr std::size_t kSandboxEditorObjectMeshCapacity = 0x0000FFFFu;
+constexpr uint32_t kSandboxEditorGizmoMesh = 0xF2210000u;
 constexpr uint32_t kSandboxWaterMesh = 0xF3000000u;
 constexpr uint32_t kSandboxWaterPusherMesh = 0xF3000001u;
 constexpr uint32_t kSandboxMovingLightMesh = 0xF4000000u;
@@ -889,6 +893,29 @@ bool EnsureSandboxHingedDoorMesh(nrhi::Device* device,
           static_cast<std::uint32_t>(door_index),
       mechanics_sandbox::map::ActiveHingedDoorVisualMesh(door_index),
       "hinged door");
+}
+
+bool EnsureSandboxEditorObjectMesh(nrhi::Device* device,
+                                   std::size_t object_index) {
+  if (object_index >=
+          mechanics_sandbox::map::ActiveEditableObjectCount() ||
+      object_index >= kSandboxEditorObjectMeshCapacity) {
+    return false;
+  }
+  return EnsureSandboxVisualMesh(
+      device,
+      kSandboxEditorObjectMeshBase +
+          static_cast<std::uint32_t>(object_index),
+      mechanics_sandbox::map::ActiveEditableObjectVisualMesh(
+          object_index),
+      "editable map object");
+}
+
+bool EnsureSandboxEditorGizmoMesh(nrhi::Device* device) {
+  return EnsureSandboxVisualMesh(
+      device, kSandboxEditorGizmoMesh,
+      mechanics_sandbox::map::ActiveEditorGizmoVisualMesh(),
+      "map editor transform gizmo");
 }
 
 bool EnsureSandboxSkyMesh(nrhi::Device* device) {
@@ -13514,6 +13541,262 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
     }
   }
 
+  // MOBJ records are immutable local meshes with one authoritative runtime
+  // translation shared with native collision. They are excluded from the
+  // static chunks above, so moving one never leaves a rendered copy behind
+  // and never rebuilds or reuploads the world mesh.
+  const skate::world::MapDefinition& definition =
+      mechanics_sandbox::map::ActiveDefinition();
+  for (std::size_t object_index = 0;
+       object_index < definition.editable_objects.size();
+       ++object_index) {
+    float translation[3] = {};
+    float basis[9] = {};
+    const skate::world::MapObject& object =
+        definition.editable_objects[object_index];
+    const bool has_collision =
+        !object.collision_triangles.empty();
+    const bool previewing_selected_drag =
+        map_editor::ActiveGizmoHandle() != 0 &&
+        map_editor::IsSelected(object_index);
+    if (has_collision) {
+      if (previewing_selected_drag
+              ? !map_editor::ObjectTransform(
+                    object_index, translation, basis, nullptr)
+              : !native_collision::EditableObjectPose(
+                    object_index, translation, basis, nullptr)) {
+        continue;
+      }
+    } else if (!map_editor::ObjectTransform(
+                   object_index, translation, basis, nullptr)) {
+      continue;
+    }
+    const skate::world::Vec3 x_axis{
+        basis[0], basis[1], basis[2]};
+    const skate::world::Vec3 y_axis{
+        basis[3], basis[4], basis[5]};
+    const skate::world::Vec3 z_axis{
+        basis[6], basis[7], basis[8]};
+    const float world_position[3] = {
+        origin[0] + translation[0],
+        origin[1] + translation[1],
+        origin[2] + translation[2],
+    };
+    float corners[8][3];
+    for (int corner = 0; corner < 8; ++corner) {
+      const skate::world::Vec3 local{
+          (corner & 1) ? object.local_bounds_max.x
+                       : object.local_bounds_min.x,
+          (corner & 2) ? object.local_bounds_max.y
+                       : object.local_bounds_min.y,
+          (corner & 4) ? object.local_bounds_max.z
+                       : object.local_bounds_min.z,
+      };
+      const skate::world::Vec3 transformed =
+          skate::world::Vec3{
+              world_position[0], world_position[1],
+              world_position[2]} +
+          x_axis * local.x + y_axis * local.y + z_axis * local.z;
+      corners[corner][0] = transformed.x;
+      corners[corner][1] = transformed.y;
+      corners[corner][2] = transformed.z;
+    }
+    if (CornersOutsideFrustum(corners, scene.view_proj, 1.05f) ||
+        !EnsureSandboxEditorObjectMesh(
+            context.device, object_index)) {
+      continue;
+    }
+    const auto mesh = g_r.meshes.find(
+        kSandboxEditorObjectMeshBase +
+        static_cast<std::uint32_t>(object_index));
+    if (mesh == g_r.meshes.end()) {
+      continue;
+    }
+    const auto& visual =
+        mechanics_sandbox::map::ActiveEditableObjectVisualMesh(
+            object_index);
+    set_world_basis(
+        x_axis, y_axis, z_axis,
+        {world_position[0], world_position[1], world_position[2]});
+    constants[39] = -41.25f;
+    mesh->second.last_used_frame = frame_number;
+    cmd->SetVertexBuffer(
+        mesh->second.vb_view.buffer, mesh->second.vb_view.offset,
+        mesh->second.vb_view.size_bytes, mesh->second.vb_view.stride);
+    cmd->SetIndexBuffer(
+        mesh->second.ib_view.buffer, mesh->second.ib_view.offset,
+        mesh->second.ib_view.size_bytes);
+    for (const mechanics_sandbox::map::VisualDraw& draw :
+         visual.draws) {
+      constants[40] = celestial.light_direction_to_light.x;
+      constants[41] = celestial.light_direction_to_light.y;
+      constants[42] = celestial.light_direction_to_light.z;
+      constants[43] = dynamic_lighting ? celestial.ambient : -1.0f;
+      constants[44] = celestial.light_color.x;
+      constants[45] = celestial.light_color.y;
+      constants[46] = celestial.light_color.z;
+      constants[47] =
+          dynamic_lighting ? celestial.light_intensity : 0.0f;
+      const bool imported =
+          draw.albedo_texture != 0 || draw.indirect_lightmap != 0 ||
+          draw.normal_texture != 0 || draw.orm_texture != 0 ||
+          draw.emissive_texture != 0;
+      const bool alpha_blend =
+          draw.alpha_mode ==
+              skate::world::SurfaceMaterial::AlphaMode::Blend ||
+          (draw.retail_render_flags & 2u) != 0 ||
+          draw.retail_shader_family == 13;
+      cmd->SetPipeline(
+          alpha_blend && g_r.pso_transparent != nullptr
+              ? g_r.pso_transparent
+              : (use_depth ? g_r.pso : g_r.pso_nodepth));
+      cmd->SetTexture(
+          1, ResolveOwnedMapTexture(context, draw.albedo_texture));
+      cmd->SetTexture(
+          2, ResolveOwnedMapTexture(
+                 context, draw.indirect_lightmap,
+                 OwnedTextureRole::Data));
+      cmd->SetTexturePair(
+          5,
+          ResolveOwnedMapTexture(context, draw.emissive_texture),
+          ResolveOwnedMapTexture(
+              context, draw.normal_texture,
+              OwnedTextureRole::Normal));
+      nrhi::TextureView* object_material_maps[5] = {
+          g_r.white.srv,
+          ResolveOwnedMapTexture(
+              context, draw.orm_texture, OwnedTextureRole::Data),
+          g_r.owned_nsm_active ? g_r.owned_static_sun_srv[0]
+                               : g_r.white.srv,
+          g_r.owned_nsm_active ? g_r.owned_static_sun_srv[1]
+                               : g_r.white.srv,
+          g_r.owned_nsm_active ? g_r.owned_static_sun_srv[2]
+                               : g_r.white.srv};
+      cmd->SetTextures(8, object_material_maps, 5);
+      constants[32] = draw.color[0];
+      constants[33] = draw.color[1];
+      constants[34] = draw.color[2];
+      constants[35] = imported ? -draw.alpha_cutoff : 0.0f;
+      std::uint32_t owned_flags = 1u;
+      owned_flags |=
+          static_cast<std::uint32_t>(draw.alpha_mode) << 1u;
+      owned_flags |= draw.normal_texture != 0 ? 8u : 0u;
+      owned_flags |= draw.orm_texture != 0 ? 16u : 0u;
+      owned_flags |= draw.emissive_texture != 0 ? 32u : 0u;
+      owned_flags |= draw.indirect_lightmap != 0 ? 64u : 0u;
+      constants[48] =
+          imported ? -static_cast<float>(owned_flags)
+                   : draw.material[0];
+      constants[49] =
+          imported ? draw.baked_indirect_strength
+                   : draw.material[1];
+      constants[50] = draw.material[2];
+      constants[51] =
+          imported
+              ? (draw.material[2] < 0.0f ? -draw.material[2] : 0.0f)
+              : draw.material[3];
+      cmd->SetRootConstants(0, 52, constants, 0);
+      cmd->DrawIndexed(draw.index_count, draw.first_index, 0);
+      ++draw_calls;
+    }
+
+    if (map_editor::Active() &&
+        map_editor::IsSelected(object_index)) {
+      // Inverted-hull outline: draw only the expanded mesh's back faces.
+      // Its interior stays hidden by the selected object's depth, leaving a
+      // restrained cyan contour instead of tinting or glowing every pixel.
+      if (use_depth && g_r.pso_cullback != nullptr) {
+        set_world_basis(
+            x_axis * 1.006f, y_axis * 1.006f,
+            z_axis * 1.006f,
+            {world_position[0], world_position[1], world_position[2]});
+        cmd->SetPipeline(g_r.pso_cullback);
+        cmd->SetTexture(1, g_r.white.srv);
+        cmd->SetTexture(2, g_r.white.srv);
+        cmd->SetTexturePair(5, g_r.white.srv, g_r.white.srv);
+        cmd->SetTextures(8, t8_default, 5);
+        constants[32] = 0.0f;
+        constants[33] = 0.055f;
+        constants[34] = 0.085f;
+        constants[35] = 0.0f;
+        constants[39] = -41.25f;
+        constants[48] = 0.0f;
+        constants[49] = 0.18f;
+        constants[50] = 0.0f;
+        constants[51] = 0.0f;
+        cmd->SetRootConstants(0, 52, constants, 0);
+        for (const mechanics_sandbox::map::VisualDraw& draw :
+             visual.draws) {
+          cmd->DrawIndexed(draw.index_count, draw.first_index, 0);
+          ++draw_calls;
+        }
+      }
+    }
+  }
+
+  if (map_editor::Active()) {
+    const std::size_t selected = map_editor::SelectedObject();
+    if (selected < definition.editable_objects.size() &&
+        EnsureSandboxEditorGizmoMesh(context.device)) {
+      float translation[3] = {};
+      float basis[9] = {};
+      const bool pose_ready =
+          map_editor::ActiveGizmoHandle() != 0
+              ? map_editor::ObjectTransform(
+                    selected, translation, basis, nullptr)
+              : native_collision::EditableObjectPose(
+                    selected, translation, basis, nullptr) ||
+                    map_editor::ObjectTransform(
+                        selected, translation, basis, nullptr);
+      const auto mesh = g_r.meshes.find(kSandboxEditorGizmoMesh);
+      if (pose_ready && mesh != g_r.meshes.end()) {
+        const skate::world::Vec3 pivot{
+            origin[0] + translation[0],
+            origin[1] + translation[1],
+            origin[2] + translation[2],
+        };
+        const skate::world::Vec3 camera{
+            scene.cam_pos[0], scene.cam_pos[1], scene.cam_pos[2]};
+        const float scale = std::clamp(
+            skate::world::Length(pivot - camera) * 0.12f,
+            0.3f, 8.0f);
+        set_world_translation(
+            pivot.x, pivot.y, pivot.z, scale);
+        constants[39] = -41.25f;
+        mesh->second.last_used_frame = frame_number;
+        cmd->SetVertexBuffer(
+            mesh->second.vb_view.buffer, mesh->second.vb_view.offset,
+            mesh->second.vb_view.size_bytes,
+            mesh->second.vb_view.stride);
+        cmd->SetIndexBuffer(
+            mesh->second.ib_view.buffer, mesh->second.ib_view.offset,
+            mesh->second.ib_view.size_bytes);
+        cmd->SetPipeline(g_r.pso_nodepth);
+        cmd->SetTexture(1, g_r.white.srv);
+        cmd->SetTexture(2, g_r.white.srv);
+        cmd->SetTexturePair(5, g_r.white.srv, g_r.white.srv);
+        cmd->SetTextures(8, t8_default, 5);
+        for (const mechanics_sandbox::map::VisualDraw& draw :
+             mechanics_sandbox::map::ActiveEditorGizmoVisualMesh().draws) {
+          constants[32] = draw.color[0];
+          constants[33] = draw.color[1];
+          constants[34] = draw.color[2];
+          constants[35] = 0.0f;
+          constants[48] = draw.material[0];
+          constants[49] = draw.material[1];
+          constants[50] = draw.material[2];
+          constants[51] = draw.material[3];
+          cmd->SetRootConstants(0, 52, constants, 0);
+          cmd->DrawIndexed(
+              draw.index_count, draw.first_index, 0);
+          ++draw_calls;
+        }
+      }
+    }
+  }
+  set_world_translation(origin[0], origin[1], origin[2]);
+  constants[39] = -41.0f;
+
   // Advance and upload the project-owned heightfield. The solver itself is
   // fixed-step and renderer-independent; wall-clock time is only accumulated
   // here because this is the single render-thread owner of its GPU snapshot.
@@ -13611,8 +13894,6 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
   // Kinematic objects use the pose most recently committed to both native
   // collision buffers. They are separate GPU meshes so their vertices never
   // need to be rebuilt or uploaded as they move.
-  const skate::world::MapDefinition& definition =
-      mechanics_sandbox::map::ActiveDefinition();
   for (std::size_t object_index = 0;
        object_index < definition.kinematic_boxes.size();
        ++object_index) {

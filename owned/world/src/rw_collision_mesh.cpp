@@ -457,6 +457,18 @@ RwCollisionBuildResult BuildRwCollisionMesh(
     result.error = "map has no collision triangles";
     return result;
   }
+  std::uint64_t previous_exclusion_end = 0;
+  for (const RwCollisionBuildOptions::TriangleRange& range :
+       options.excluded_triangle_ranges) {
+    const std::uint64_t end =
+        static_cast<std::uint64_t>(range.first) + range.count;
+    if (range.count == 0 || range.first < previous_exclusion_end ||
+        end > map.collision_triangles.size()) {
+      result.error = "excluded collision triangle ranges are invalid";
+      return result;
+    }
+    previous_exclusion_end = end;
+  }
 
   std::vector<Vec3> vertices;
   std::vector<Triangle> triangles;
@@ -481,7 +493,27 @@ RwCollisionBuildResult BuildRwCollisionMesh(
     return index;
   };
 
-  for (const CollisionTriangle& source : map.collision_triangles) {
+  std::size_t exclusion_index = 0;
+  for (std::size_t source_index = 0;
+       source_index < map.collision_triangles.size(); ++source_index) {
+    while (exclusion_index < options.excluded_triangle_ranges.size() &&
+           source_index >=
+               static_cast<std::uint64_t>(
+                   options.excluded_triangle_ranges[exclusion_index].first) +
+                   options.excluded_triangle_ranges[exclusion_index].count) {
+      ++exclusion_index;
+    }
+    if (exclusion_index < options.excluded_triangle_ranges.size()) {
+      const auto& range =
+          options.excluded_triangle_ranges[exclusion_index];
+      if (source_index >= range.first &&
+          source_index <
+              static_cast<std::uint64_t>(range.first) + range.count) {
+        continue;
+      }
+    }
+    const CollisionTriangle& source =
+        map.collision_triangles[source_index];
     if (!IsFinite(source.a) || !IsFinite(source.b) ||
         !IsFinite(source.c)) {
       result.error = "collision geometry contains a non-finite vertex";

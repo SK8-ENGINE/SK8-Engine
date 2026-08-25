@@ -1,8 +1,10 @@
 #include "skate3_native_collision.h"
 
 #include "generated/skate3_init.h"
+#include "skate/world/map_editor.h"
 #include "skate/world/rw_collision_mesh.h"
 #include "skate3_input_history_watch.h"
+#include "skate3_map_editor.h"
 #include "skate3_mechanics_sandbox_map.h"
 #include "skate3_trick_pipeline.h"
 
@@ -117,6 +119,7 @@ constexpr std::size_t kOwnedCollisionActiveMeshes = 32;
 constexpr std::size_t kOwnedCollisionHysteresisMeshes = 16;
 constexpr float kOwnedCollisionStreamRefreshDistance = 40.0f;
 constexpr std::size_t kMaximumHingedDoors = 32;
+constexpr std::size_t kMaximumEditableObjects = 2048;
 // University occupies 140 non-empty cells at 128 m, which exceeds the fixed
 // collection capacity. At 256 m it occupies 44 cells, and its largest cell
 // remains below kMaximumTrianglesPerOwnedChunk without dropping triangles.
@@ -290,6 +293,35 @@ std::atomic<std::uint64_t> g_door_triangle_hits{0};
 std::uint64_t g_door_last_update_frame = 0;
 float g_door_previous_player_position[3] = {};
 bool g_door_previous_player_valid = false;
+std::atomic<std::uint32_t> g_editor_collision_count{0};
+std::array<std::atomic<std::uint32_t>, kMaximumEditableObjects>
+    g_editor_mesh_addresses{};
+std::array<std::atomic<std::uint32_t>, kMaximumEditableObjects>
+    g_editor_volume_addresses{};
+std::array<std::atomic<std::uint32_t>, kMaximumEditableObjects>
+    g_editor_auxiliary_addresses{};
+std::array<std::atomic<std::uint32_t>, kMaximumEditableObjects>
+    g_editor_matrix_addresses{};
+std::array<std::atomic<std::uint64_t>, kMaximumEditableObjects>
+    g_editor_applied_revisions{};
+std::array<std::atomic<std::uint64_t>, kMaximumEditableObjects>
+    g_editor_translation_sequences{};
+std::array<std::atomic<std::uint32_t>, kMaximumEditableObjects>
+    g_editor_translation_x_bits{};
+std::array<std::atomic<std::uint32_t>, kMaximumEditableObjects>
+    g_editor_translation_y_bits{};
+std::array<std::atomic<std::uint32_t>, kMaximumEditableObjects>
+    g_editor_translation_z_bits{};
+std::array<
+    std::array<std::atomic<std::uint32_t>, kMaximumEditableObjects>, 9>
+    g_editor_basis_bits{};
+std::array<std::atomic<bool>, kMaximumEditableObjects>
+    g_editor_collision_active{};
+std::atomic<std::uint32_t> g_editor_collision_active_count{0};
+std::atomic<std::uint64_t> g_editor_collision_installs{0};
+std::atomic<std::uint64_t> g_editor_collision_updates{0};
+std::atomic<std::uint64_t> g_editor_broadphase_refreshes{0};
+std::atomic<std::uint64_t> g_editor_collision_failures{0};
 std::mutex g_install_mutex;
 std::vector<std::uint32_t> g_original_volumes;
 thread_local bool g_querying_owned_mesh = false;
@@ -368,6 +400,22 @@ bool IsOwnedStaticMesh(std::uint32_t mesh) {
       static_cast<std::uint32_t>(kMaximumOwnedStaticChunks));
   for (std::uint32_t index = 0; index < count; ++index) {
     if (g_static_mesh_addresses[index].load(
+            std::memory_order_acquire) == mesh) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool IsOwnedEditorMesh(std::uint32_t mesh) {
+  if (mesh == 0) {
+    return false;
+  }
+  const std::uint32_t count = std::min<std::uint32_t>(
+      g_editor_collision_count.load(std::memory_order_acquire),
+      static_cast<std::uint32_t>(kMaximumEditableObjects));
+  for (std::uint32_t index = 0; index < count; ++index) {
+    if (g_editor_mesh_addresses[index].load(
             std::memory_order_acquire) == mesh) {
       return true;
     }
@@ -797,6 +845,17 @@ void WriteEntryLocalBounds(
   StoreF32(base, entry + 168, door.local_max.z);
 }
 
+void WriteEntryLocalBounds(
+    std::uint8_t* base, std::uint32_t entry,
+    const skate::world::MapObject& object) {
+  StoreF32(base, entry + 144, object.local_bounds_min.x);
+  StoreF32(base, entry + 148, object.local_bounds_min.y);
+  StoreF32(base, entry + 152, object.local_bounds_min.z);
+  StoreF32(base, entry + 160, object.local_bounds_max.x);
+  StoreF32(base, entry + 164, object.local_bounds_max.y);
+  StoreF32(base, entry + 168, object.local_bounds_max.z);
+}
+
 void ObserveKinematicEntry(std::uint8_t* base,
                            std::uint32_t read_index,
                            std::uint32_t write_index,
@@ -1021,6 +1080,31 @@ OwnedCollisionBuildSet CompileOwnedMapChunks(
   options.default_surface_id = concrete;
   const skate::world::MapDefinition& source =
       mechanics_sandbox::map::ActiveDefinition();
+  options.excluded_triangle_ranges.reserve(
+      source.editable_objects.size());
+  for (const skate::world::MapObject& object :
+       source.editable_objects) {
+    if (object.source_collision_triangle_count != 0) {
+      options.excluded_triangle_ranges.push_back(
+          {object.source_first_collision_triangle,
+           object.source_collision_triangle_count});
+    }
+  }
+  std::sort(
+      options.excluded_triangle_ranges.begin(),
+      options.excluded_triangle_ranges.end(),
+      [](const auto& left, const auto& right) {
+        return left.first < right.first;
+      });
+  std::uint64_t excluded_triangle_count = 0;
+  for (const auto& range : options.excluded_triangle_ranges) {
+    excluded_triangle_count += range.count;
+  }
+  if (!source.collision_triangles.empty() &&
+      excluded_triangle_count == source.collision_triangles.size()) {
+    result.error = "editable_objects_own_all_collision";
+    return result;
+  }
   std::unordered_set<skate::world::MaterialId> used_materials;
   used_materials.reserve(source.collision_triangles.size() / 8 + 1);
   for (const skate::world::CollisionTriangle& triangle :
@@ -1080,8 +1164,28 @@ OwnedCollisionBuildSet CompileOwnedMapChunks(
 
   using Cell = std::pair<std::int32_t, std::int32_t>;
   std::map<Cell, std::vector<skate::world::CollisionTriangle>> cells;
-  for (const skate::world::CollisionTriangle& triangle :
-       source.collision_triangles) {
+  std::size_t exclusion_index = 0;
+  for (std::size_t source_index = 0;
+       source_index < source.collision_triangles.size();
+       ++source_index) {
+    while (exclusion_index < options.excluded_triangle_ranges.size() &&
+           source_index >=
+               static_cast<std::uint64_t>(
+                   options.excluded_triangle_ranges[exclusion_index].first) +
+                   options.excluded_triangle_ranges[exclusion_index].count) {
+      ++exclusion_index;
+    }
+    if (exclusion_index < options.excluded_triangle_ranges.size()) {
+      const auto& range =
+          options.excluded_triangle_ranges[exclusion_index];
+      if (source_index >= range.first &&
+          source_index <
+              static_cast<std::uint64_t>(range.first) + range.count) {
+        continue;
+      }
+    }
+    const skate::world::CollisionTriangle& triangle =
+        source.collision_triangles[source_index];
     const float center_x =
         (triangle.a.x + triangle.b.x + triangle.c.x) / 3.0f;
     const float center_z =
@@ -1111,6 +1215,8 @@ OwnedCollisionBuildSet CompileOwnedMapChunks(
     return result;
   }
   result.chunks.reserve(expected_chunks);
+  skate::world::RwCollisionBuildOptions chunk_options = options;
+  chunk_options.excluded_triangle_ranges.clear();
 
   for (auto& [cell, triangles] : cells) {
     for (std::size_t first = 0; first < triangles.size();
@@ -1129,7 +1235,7 @@ OwnedCollisionBuildSet CompileOwnedMapChunks(
           triangles.begin() +
               static_cast<std::ptrdiff_t>(first + count));
       skate::world::RwCollisionBuildResult build =
-          skate::world::BuildRwCollisionMesh(chunk, options);
+          skate::world::BuildRwCollisionMesh(chunk, chunk_options);
       if (!build.ok || build.mesh.bytes.empty()) {
         result.error =
             chunk.name + ": " +
@@ -1176,6 +1282,42 @@ skate::world::RwCollisionBuildResult CompileHingedDoor(
   skate::world::RwCollisionBuildOptions options;
   options.default_surface_id =
       skate::world::EncodeRwSurfaceId(42, 1, 0);
+  for (const skate::world::SurfaceMaterial& material :
+       source.materials) {
+    options.material_surface_ids.emplace(
+        material.id,
+        skate::world::EncodeRwSurfaceId(
+            material.skate_audio_surface,
+            material.skate_physics_surface,
+            material.skate_surface_pattern));
+  }
+  return skate::world::BuildRwCollisionMesh(local, options);
+}
+
+skate::world::RwCollisionBuildResult CompileEditableObject(
+    const skate::world::MapObject& object,
+    const skate::world::MapDefinition& source,
+    const float world_translation[3],
+    const float basis[9]) {
+  skate::world::MapDefinition local;
+  local.name = object.name + "_editor_collision";
+  local.collision_triangles = object.collision_triangles;
+  const skate::world::EditorObjectTransform transform{
+      .translation = {
+          world_translation[0], world_translation[1],
+          world_translation[2]},
+      .x_axis = {basis[0], basis[1], basis[2]},
+      .y_axis = {basis[3], basis[4], basis[5]},
+      .z_axis = {basis[6], basis[7], basis[8]},
+  };
+  for (skate::world::CollisionTriangle& triangle :
+       local.collision_triangles) {
+    triangle = skate::world::TransformEditorCollisionTriangle(
+        transform, triangle);
+  }
+  skate::world::RwCollisionBuildOptions options;
+  options.default_surface_id =
+      skate::world::EncodeRwSurfaceId(3, 1, 0);
   for (const skate::world::SurfaceMaterial& material :
        source.materials) {
     options.material_surface_ids.emplace(
@@ -1336,6 +1478,20 @@ bool SelectOwnedCollisionMeshes(float x, float z, bool force) {
   return changed;
 }
 
+std::vector<bool> EditableCollisionObjects(
+    const skate::world::MapDefinition& definition) {
+  const std::size_t object_count =
+      std::min<std::size_t>(
+          definition.editable_objects.size(),
+          kMaximumEditableObjects);
+  std::vector<bool> desired(object_count, false);
+  for (std::size_t index = 0; index < object_count; ++index) {
+    desired[index] = !definition.editable_objects[index]
+                          .collision_triangles.empty();
+  }
+  return desired;
+}
+
 bool IsOwnedKinematicEntry(std::uint32_t volume, std::uint32_t mesh) {
   return volume != 0 && mesh != 0 &&
          volume ==
@@ -1350,6 +1506,26 @@ bool IsOwnedDoorEntry(std::uint32_t volume, std::uint32_t mesh) {
              g_door_volume_addresses[
                  static_cast<std::size_t>(index)]
                  .load(std::memory_order_acquire);
+}
+
+bool IsOwnedEditorEntry(std::uint32_t volume, std::uint32_t mesh) {
+  if (volume == 0 || mesh == 0) {
+    return false;
+  }
+  const std::uint32_t count = std::min<std::uint32_t>(
+      g_editor_collision_count.load(std::memory_order_acquire),
+      static_cast<std::uint32_t>(kMaximumEditableObjects));
+  for (std::uint32_t index = 0; index < count; ++index) {
+    if (volume ==
+            g_editor_volume_addresses[index].load(
+                std::memory_order_acquire) &&
+        mesh ==
+            g_editor_mesh_addresses[index].load(
+                std::memory_order_acquire)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 bool ExclusiveCollectionDrifted(std::uint8_t* base,
@@ -1384,7 +1560,8 @@ bool ExclusiveCollectionDrifted(std::uint8_t* base,
         unexpected = true;
       }
     } else if (!IsOwnedKinematicEntry(volume, mesh) &&
-               !IsOwnedDoorEntry(volume, mesh)) {
+               !IsOwnedDoorEntry(volume, mesh) &&
+               !IsOwnedEditorEntry(volume, mesh)) {
       unexpected = true;
     }
   }
@@ -1544,7 +1721,8 @@ bool ReconcileExclusiveCollection(PPCContext& source,
     const bool unexpected_retail =
         owned_index == UINT32_MAX &&
         !IsOwnedKinematicEntry(volume, mesh) &&
-        !IsOwnedDoorEntry(volume, mesh);
+        !IsOwnedDoorEntry(volume, mesh) &&
+        !IsOwnedEditorEntry(volume, mesh);
     if (inactive_owned || unexpected_retail) {
       if (!IsGuestDataAddress(volume)) {
         return false;
@@ -1677,7 +1855,8 @@ void ObserveNativeLineWorker(std::uint32_t mesh) noexcept {
     return;
   }
   g_native_line_workers.fetch_add(1, std::memory_order_relaxed);
-  const bool owned_static = IsOwnedStaticMesh(mesh);
+  const bool owned_static =
+      IsOwnedStaticMesh(mesh) || IsOwnedEditorMesh(mesh);
   const bool owned_kinematic =
       mesh != 0 &&
       mesh == g_kinematic_mesh_address.load(std::memory_order_acquire);
@@ -1695,7 +1874,8 @@ void ObserveNativeBoxWorker(std::uint32_t mesh) noexcept {
     return;
   }
   g_native_box_workers.fetch_add(1, std::memory_order_relaxed);
-  const bool owned_static = IsOwnedStaticMesh(mesh);
+  const bool owned_static =
+      IsOwnedStaticMesh(mesh) || IsOwnedEditorMesh(mesh);
   const bool owned_kinematic =
       mesh != 0 &&
       mesh == g_kinematic_mesh_address.load(std::memory_order_acquire);
@@ -1713,7 +1893,8 @@ void ObserveNativeIteratorMesh(std::uint32_t mesh) noexcept {
     return;
   }
   g_native_iterators.fetch_add(1, std::memory_order_relaxed);
-  const bool owned_static = IsOwnedStaticMesh(mesh);
+  const bool owned_static =
+      IsOwnedStaticMesh(mesh) || IsOwnedEditorMesh(mesh);
   const bool owned_kinematic =
       mesh != 0 &&
       mesh == g_kinematic_mesh_address.load(std::memory_order_acquire);
@@ -1743,7 +1924,7 @@ void ObserveNativeQueryMesh(std::uint32_t mesh) noexcept {
   g_querying_door_index = OwnedDoorIndex(mesh);
   g_querying_mesh = mesh;
   g_querying_owned_mesh =
-      IsOwnedStaticMesh(mesh) ||
+      IsOwnedStaticMesh(mesh) || IsOwnedEditorMesh(mesh) ||
       g_querying_kinematic_mesh ||
       g_querying_door_index >= 0;
   if (g_querying_owned_mesh) {
@@ -2304,6 +2485,76 @@ bool MapWorldOrigin(float out_origin[3]) noexcept {
          std::isfinite(out_origin[2]);
 }
 
+bool EditableObjectTransform(
+    std::size_t index, float out_translation[3],
+    std::uint64_t* out_revision) noexcept {
+  return EditableObjectPose(
+      index, out_translation, nullptr, out_revision);
+}
+
+bool EditableObjectPose(
+    std::size_t index, float out_translation[3], float out_basis[9],
+    std::uint64_t* out_revision) noexcept {
+  const std::uint32_t count =
+      g_editor_collision_count.load(std::memory_order_acquire);
+  if (out_translation == nullptr || index >= count ||
+      index >= kMaximumEditableObjects ||
+      g_editor_mesh_addresses[index].load(
+          std::memory_order_acquire) == 0) {
+    return false;
+  }
+  for (int attempt = 0; attempt < 4; ++attempt) {
+    const std::uint64_t sequence_before =
+        g_editor_translation_sequences[index].load(
+            std::memory_order_acquire);
+    if ((sequence_before & 1u) != 0u) {
+      continue;
+    }
+    const float translation[3] = {
+        std::bit_cast<float>(
+            g_editor_translation_x_bits[index].load(
+                std::memory_order_relaxed)),
+        std::bit_cast<float>(
+            g_editor_translation_y_bits[index].load(
+                std::memory_order_relaxed)),
+        std::bit_cast<float>(
+            g_editor_translation_z_bits[index].load(
+                std::memory_order_relaxed)),
+    };
+    const std::uint64_t revision =
+        g_editor_applied_revisions[index].load(
+            std::memory_order_relaxed);
+    float basis[9] = {};
+    for (std::size_t component = 0; component < 9; ++component) {
+      basis[component] = std::bit_cast<float>(
+          g_editor_basis_bits[component][index].load(
+              std::memory_order_relaxed));
+    }
+    const std::uint64_t sequence_after =
+        g_editor_translation_sequences[index].load(
+            std::memory_order_acquire);
+    if (sequence_before != sequence_after ||
+        (sequence_after & 1u) != 0u) {
+      continue;
+    }
+    if (!std::isfinite(translation[0]) ||
+        !std::isfinite(translation[1]) ||
+        !std::isfinite(translation[2])) {
+      return false;
+    }
+    std::copy(std::begin(translation), std::end(translation),
+              out_translation);
+    if (out_basis != nullptr) {
+      std::copy(std::begin(basis), std::end(basis), out_basis);
+    }
+    if (out_revision != nullptr) {
+      *out_revision = revision;
+    }
+    return true;
+  }
+  return false;
+}
+
 bool KinematicObjectPose(std::size_t index, float out_position[3],
                          float out_velocity[3],
                          std::uint64_t* out_frame) noexcept {
@@ -2860,12 +3111,32 @@ void EnsureInstalled(PPCContext& ctx,
       std::scoped_lock lock(g_install_mutex);
       if (g_state.load(std::memory_order_acquire) ==
           State::InstalledAdditive) {
-        const bool removed = RemoveOriginalVolumes(
-            ctx, base, g_collection.load(std::memory_order_acquire),
-            g_volume_address.load(std::memory_order_acquire));
-        g_state.store(removed ? State::InstalledExclusive
-                              : State::ReplacementFailed,
-                      std::memory_order_release);
+        std::uint32_t replacement_volume =
+            g_volume_address.load(std::memory_order_acquire);
+        if (replacement_volume == 0) {
+          const std::uint32_t editor_count =
+              std::min<std::uint32_t>(
+                  g_editor_collision_count.load(
+                      std::memory_order_acquire),
+                  static_cast<std::uint32_t>(
+                      kMaximumEditableObjects));
+          for (std::uint32_t index = 0;
+               index < editor_count && replacement_volume == 0;
+               ++index) {
+            replacement_volume =
+                g_editor_volume_addresses[index].load(
+                    std::memory_order_acquire);
+          }
+        }
+        if (replacement_volume != 0) {
+          const bool removed = RemoveOriginalVolumes(
+              ctx, base,
+              g_collection.load(std::memory_order_acquire),
+              replacement_volume);
+          g_state.store(removed ? State::InstalledExclusive
+                                : State::ReplacementFailed,
+                        std::memory_order_release);
+        }
       }
     } else if (observed_state == State::InstalledExclusive &&
                replace_retail) {
@@ -3048,6 +3319,44 @@ void EnsureInstalled(PPCContext& ctx,
     return;
   }
   if (builds.chunks.empty()) {
+    if (builds.error == "editable_objects_own_all_collision") {
+      g_world_origin_x_bits.store(
+          std::bit_cast<std::uint32_t>(translation[0]),
+          std::memory_order_relaxed);
+      g_world_origin_y_bits.store(
+          std::bit_cast<std::uint32_t>(translation[1]),
+          std::memory_order_relaxed);
+      g_world_origin_z_bits.store(
+          std::bit_cast<std::uint32_t>(translation[2]),
+          std::memory_order_relaxed);
+      g_original_volumes.clear();
+      g_original_volumes.reserve(count);
+      for (std::uint32_t index = 0; index < count; ++index) {
+        const std::uint32_t volume_address =
+            LoadU32(base, read_entries +
+                              index * kCollectionEntrySize);
+        if (IsGuestDataAddress(volume_address)) {
+          g_original_volumes.push_back(volume_address);
+        }
+      }
+      g_collection_count_before.store(count,
+                                      std::memory_order_release);
+      g_collection_count_after.store(count,
+                                     std::memory_order_release);
+      g_static_mesh_count.store(0, std::memory_order_release);
+      g_static_active_mesh_count.store(0,
+                                       std::memory_order_release);
+      g_world_origin_valid.store(true, std::memory_order_release);
+      REX_KERNEL_MEMORY()->SystemHeapFree(auxiliary);
+      g_state.store(State::InstalledAdditive,
+                    std::memory_order_release);
+      REXLOG_INFO(
+          "native-collision: static bootstrap complete with all authored "
+          "collision delegated to {} editable object records",
+          mechanics_sandbox::map::ActiveDefinition()
+              .editable_objects.size());
+      return;
+    }
     REXLOG_ERROR(
         "native-collision: spatial build failed: {}",
         builds.error.empty() ? "no chunks produced" : builds.error);
@@ -3639,6 +3948,665 @@ void UpdateKinematicObjects(PPCContext& ctx,
   ObserveKinematicEntry(base, read_index, write_index, read_entry);
   PublishKinematicPose(pose, frame);
   g_kinematic_updates.fetch_add(1, std::memory_order_relaxed);
+}
+
+bool RebuildEditableObjectCollision(
+    PPCContext& ctx, std::uint8_t* base,
+    std::uint32_t collection,
+    const skate::world::MapDefinition& definition,
+    std::size_t index, const float map_origin[3],
+    const float local_translation[3],
+    const float local_basis[9],
+    std::uint64_t desired_revision) {
+  const skate::world::MapObject& object =
+      definition.editable_objects[index];
+  const float world_translation[3] = {
+      map_origin[0] + local_translation[0],
+      map_origin[1] + local_translation[1],
+      map_origin[2] + local_translation[2],
+  };
+
+  skate::world::RwCollisionBuildResult build;
+  try {
+    build = CompileEditableObject(
+        object, definition, world_translation, local_basis);
+  } catch (const std::exception& error) {
+    REXLOG_ERROR(
+        "map-editor: collision rebuild threw id={} name='{}': {}",
+        object.id, object.name, error.what());
+    return false;
+  } catch (...) {
+    REXLOG_ERROR(
+        "map-editor: collision rebuild threw id={} name='{}'",
+        object.id, object.name);
+    return false;
+  }
+  if (!build.ok || build.mesh.bytes.empty()) {
+    REXLOG_ERROR(
+        "map-editor: collision rebuild failed id={} name='{}': {}",
+        object.id, object.name,
+        build.error.empty() ? "empty mesh" : build.error);
+    return false;
+  }
+
+  const std::uint32_t new_auxiliary =
+      REX_KERNEL_MEMORY()->SystemHeapAlloc(
+          kAuxiliaryAllocationSize, 16);
+  const std::uint32_t new_mesh =
+      REX_KERNEL_MEMORY()->SystemHeapAlloc(
+          static_cast<std::uint32_t>(build.mesh.bytes.size()), 16);
+  if (new_auxiliary == 0 || new_mesh == 0) {
+    if (new_mesh != 0) {
+      REX_KERNEL_MEMORY()->SystemHeapFree(new_mesh);
+    }
+    if (new_auxiliary != 0) {
+      REX_KERNEL_MEMORY()->SystemHeapFree(new_auxiliary);
+    }
+    return false;
+  }
+  std::memset(base + new_auxiliary, 0, kAuxiliaryAllocationSize);
+  if (!skate::world::FixupRwCollisionMeshForGuest(
+          build.mesh.bytes, new_mesh)) {
+    REX_KERNEL_MEMORY()->SystemHeapFree(new_mesh);
+    REX_KERNEL_MEMORY()->SystemHeapFree(new_auxiliary);
+    return false;
+  }
+  std::memcpy(
+      base + new_mesh, build.mesh.bytes.data(),
+      build.mesh.bytes.size());
+
+  const std::uint32_t new_volume = new_auxiliary;
+  const std::uint32_t new_resource =
+      new_auxiliary + kResourceOffset;
+  const std::uint32_t new_matrix =
+      new_auxiliary + kMatrixOffset;
+  StoreU32(base, new_resource, new_volume);
+  PPCContext initialize = ctx;
+  initialize.r3.u64 = new_resource;
+  initialize.r4.u64 = new_mesh;
+  sub_82AD7740(initialize, base);
+  const float identity_translation[3] = {};
+  WriteMapTransform(base, new_matrix, identity_translation);
+  if (LoadU32(base, new_volume + 68) != new_mesh ||
+      LoadU32(base, new_volume + 92) != 1) {
+    REX_KERNEL_MEMORY()->SystemHeapFree(new_mesh);
+    REX_KERNEL_MEMORY()->SystemHeapFree(new_auxiliary);
+    return false;
+  }
+
+  const std::uint32_t old_auxiliary =
+      g_editor_auxiliary_addresses[index].load(
+          std::memory_order_acquire);
+  const std::uint32_t old_mesh =
+      g_editor_mesh_addresses[index].load(
+          std::memory_order_acquire);
+  const std::uint32_t old_volume =
+      g_editor_volume_addresses[index].load(
+          std::memory_order_acquire);
+  const std::uint32_t old_matrix =
+      g_editor_matrix_addresses[index].load(
+          std::memory_order_acquire);
+  const bool active =
+      g_editor_collision_active[index].load(
+          std::memory_order_acquire);
+  if (!IsGuestDataAddress(old_auxiliary) ||
+      !IsGuestDataAddress(old_mesh) ||
+      !IsGuestDataAddress(old_volume) ||
+      !IsGuestDataAddress(old_matrix)) {
+    REX_KERNEL_MEMORY()->SystemHeapFree(new_mesh);
+    REX_KERNEL_MEMORY()->SystemHeapFree(new_auxiliary);
+    return false;
+  }
+
+  if (active) {
+    const std::uint32_t read_entries =
+        LoadU32(base, collection + 16);
+    const std::uint32_t write_entries =
+        LoadU32(base, collection + 32);
+    const std::uint32_t count_before =
+        LoadU32(base, collection + 20);
+    if (!IsGuestDataAddress(read_entries) ||
+        !IsGuestDataAddress(write_entries) ||
+        FindOwnedEntry(
+            base, read_entries, count_before,
+            old_volume, old_mesh) == UINT32_MAX) {
+      REX_KERNEL_MEMORY()->SystemHeapFree(new_mesh);
+      REX_KERNEL_MEMORY()->SystemHeapFree(new_auxiliary);
+      return false;
+    }
+
+    PPCContext remove = ctx;
+    remove.r3.u64 = collection;
+    remove.r4.u64 = old_volume;
+    sub_82775FC8(remove, base);
+    const std::uint32_t count_removed =
+        LoadU32(base, collection + 20);
+    if (count_removed + 1 != count_before) {
+      REX_KERNEL_MEMORY()->SystemHeapFree(new_mesh);
+      REX_KERNEL_MEMORY()->SystemHeapFree(new_auxiliary);
+      return false;
+    }
+    PublishWriteEntries(
+        base, read_entries, write_entries, count_removed);
+
+    PPCContext add = ctx;
+    add.r3.u64 = collection;
+    add.r4.u64 = new_volume;
+    add.r5.u64 = new_matrix;
+    add.r6.u64 = 0;
+    add.r7.u64 = 0;
+    sub_82775F58(add, base);
+    const std::uint32_t count_after =
+        LoadU32(base, collection + 20);
+    const std::uint32_t write_entry =
+        write_entries +
+        count_removed * kCollectionEntrySize;
+    if (count_after != count_before ||
+        LoadU32(base, write_entry) != new_volume ||
+        LoadU32(base, write_entry + 4) != new_mesh) {
+      // Restore the prior object if native AddVolume unexpectedly rejects
+      // the replacement after the old entry was removed.
+      PPCContext rollback = ctx;
+      rollback.r3.u64 = collection;
+      rollback.r4.u64 = old_volume;
+      rollback.r5.u64 = old_matrix;
+      rollback.r6.u64 = 0;
+      rollback.r7.u64 = 0;
+      sub_82775F58(rollback, base);
+      PublishWriteEntries(
+          base, read_entries, write_entries,
+          LoadU32(base, collection + 20));
+      REX_KERNEL_MEMORY()->SystemHeapFree(new_mesh);
+      REX_KERNEL_MEMORY()->SystemHeapFree(new_auxiliary);
+      return false;
+    }
+    PublishWriteEntries(
+        base, read_entries, write_entries, count_after);
+    g_collection_count_after.store(
+        count_after, std::memory_order_release);
+  }
+
+  g_editor_translation_sequences[index].fetch_add(
+      1, std::memory_order_acq_rel);
+  g_editor_translation_x_bits[index].store(
+      std::bit_cast<std::uint32_t>(local_translation[0]),
+      std::memory_order_relaxed);
+  g_editor_translation_y_bits[index].store(
+      std::bit_cast<std::uint32_t>(local_translation[1]),
+      std::memory_order_relaxed);
+  g_editor_translation_z_bits[index].store(
+      std::bit_cast<std::uint32_t>(local_translation[2]),
+      std::memory_order_relaxed);
+  for (std::size_t component = 0; component < 9; ++component) {
+    g_editor_basis_bits[component][index].store(
+        std::bit_cast<std::uint32_t>(local_basis[component]),
+        std::memory_order_relaxed);
+  }
+  g_editor_applied_revisions[index].store(
+      desired_revision, std::memory_order_relaxed);
+  g_editor_auxiliary_addresses[index].store(
+      new_auxiliary, std::memory_order_relaxed);
+  g_editor_matrix_addresses[index].store(
+      new_matrix, std::memory_order_relaxed);
+  g_editor_volume_addresses[index].store(
+      new_volume, std::memory_order_relaxed);
+  g_editor_mesh_addresses[index].store(
+      new_mesh, std::memory_order_release);
+  g_editor_translation_sequences[index].fetch_add(
+      1, std::memory_order_release);
+
+  REX_KERNEL_MEMORY()->SystemHeapFree(old_mesh);
+  REX_KERNEL_MEMORY()->SystemHeapFree(old_auxiliary);
+  const std::uint64_t updates =
+      g_editor_collision_updates.fetch_add(
+          1, std::memory_order_relaxed) +
+      1;
+  if (active) {
+    g_editor_broadphase_refreshes.fetch_add(
+        1, std::memory_order_relaxed);
+  }
+  REXLOG_INFO(
+      "map-editor: collision object rebuilt id={} name='{}' "
+      "translation=({:.3f},{:.3f},{:.3f}) revision={} "
+      "active={} triangles={} mode=baked_identity update={}",
+      object.id, object.name, local_translation[0],
+      local_translation[1], local_translation[2],
+      desired_revision, active ? 1 : 0,
+      build.mesh.triangle_count, updates);
+  return true;
+}
+
+void UpdateEditableObjects(PPCContext& ctx,
+                           std::uint8_t* base) noexcept {
+  map_editor::ApplyPendingSpawn();
+  const skate::world::MapDefinition& definition =
+      mechanics_sandbox::map::ActiveDefinition();
+  if (!Enabled() || base == nullptr ||
+      definition.editable_objects.empty()) {
+    g_editor_collision_count.store(0, std::memory_order_release);
+    return;
+  }
+
+  const State static_state = g_state.load(std::memory_order_acquire);
+  const bool static_world_ready =
+      static_state == State::InstalledAdditive ||
+      static_state == State::InstalledExclusive ||
+      static_state == State::ReplacementFailed;
+  if (!static_world_ready) {
+    return;
+  }
+  if (definition.editable_objects.size() >
+      kMaximumEditableObjects) {
+    const std::uint64_t failures =
+        g_editor_collision_failures.fetch_add(
+            1, std::memory_order_relaxed) +
+        1;
+    if (failures == 1) {
+      REXLOG_ERROR(
+          "map-editor: {} object records exceed native collision limit {}",
+          definition.editable_objects.size(),
+          kMaximumEditableObjects);
+    }
+    return;
+  }
+
+  std::scoped_lock lock(g_install_mutex);
+  const std::uint32_t collection =
+      g_collection.load(std::memory_order_acquire);
+  float map_origin[3] = {};
+  if (!IsGuestDataAddress(collection) ||
+      !MapWorldOrigin(map_origin)) {
+    return;
+  }
+
+  const std::uint32_t object_count =
+      static_cast<std::uint32_t>(
+          definition.editable_objects.size());
+  const std::uint32_t installed_object_count =
+      g_editor_collision_count.load(std::memory_order_acquire);
+  const bool needs_install =
+      installed_object_count < object_count;
+  if (needs_install) {
+    WaitForCollectionJobs(ctx, base, collection);
+    const std::uint32_t capacity = LoadU32(base, collection + 8);
+    std::uint32_t count = LoadU32(base, collection + 20);
+    const std::uint32_t read_entries =
+        LoadU32(base, collection + 16);
+    const std::uint32_t write_entries =
+        LoadU32(base, collection + 32);
+    std::uint32_t collision_object_count = 0;
+    for (const skate::world::MapObject& object :
+         definition.editable_objects) {
+      collision_object_count +=
+          object.collision_triangles.empty() ? 0u : 1u;
+    }
+    const std::vector<bool> desired =
+        EditableCollisionObjects(definition);
+    const std::uint32_t desired_collision_count =
+        static_cast<std::uint32_t>(std::count(
+            desired.begin(), desired.end(), true));
+    const std::uint32_t new_collision_count =
+        static_cast<std::uint32_t>(std::count(
+            desired.begin() + installed_object_count,
+            desired.end(), true));
+    if (capacity == 0 ||
+        capacity > kMaximumReasonableCollectionCapacity ||
+        count > capacity ||
+        new_collision_count > capacity - count ||
+        !IsGuestDataAddress(read_entries) ||
+        !IsGuestDataAddress(write_entries)) {
+      g_editor_collision_failures.fetch_add(
+          1, std::memory_order_relaxed);
+      REXLOG_ERROR(
+          "map-editor: editable collision objects do not fit native "
+          "collection (objects={} active={} count={} capacity={})",
+          collision_object_count, new_collision_count,
+          count, capacity);
+      return;
+    }
+    // Publish the fixed object-table width before native registration starts.
+    // A mid-install failure must not retry already-registered aggregates on
+    // every frame and create duplicate collision at the same pose.
+    g_editor_collision_count.store(
+        object_count, std::memory_order_release);
+    if (installed_object_count == 0) {
+      g_editor_collision_active_count.store(
+          0, std::memory_order_release);
+    }
+    for (std::size_t index = installed_object_count;
+         index < object_count; ++index) {
+      g_editor_collision_active[index].store(
+          false, std::memory_order_release);
+    }
+
+    for (std::size_t index = installed_object_count;
+         index < object_count; ++index) {
+      const skate::world::MapObject& object =
+          definition.editable_objects[index];
+      if (object.collision_triangles.empty()) {
+        continue;
+      }
+
+      float local_translation[3] = {};
+      float local_basis[9] = {};
+      std::uint64_t revision = 0;
+      if (!map_editor::ObjectTransform(
+              index, local_translation, local_basis, &revision)) {
+        g_editor_collision_failures.fetch_add(
+            1, std::memory_order_relaxed);
+        return;
+      }
+      const float world_translation[3] = {
+          map_origin[0] + local_translation[0],
+          map_origin[1] + local_translation[1],
+          map_origin[2] + local_translation[2],
+      };
+
+      skate::world::RwCollisionBuildResult build;
+      try {
+        build = CompileEditableObject(
+            object, definition, world_translation, local_basis);
+      } catch (const std::exception& error) {
+        g_editor_collision_failures.fetch_add(
+            1, std::memory_order_relaxed);
+        REXLOG_ERROR(
+            "map-editor: collision build threw for id={} name='{}': {}",
+            object.id, object.name, error.what());
+        return;
+      } catch (...) {
+        g_editor_collision_failures.fetch_add(
+            1, std::memory_order_relaxed);
+        REXLOG_ERROR(
+            "map-editor: collision build threw for id={} name='{}'",
+            object.id, object.name);
+        return;
+      }
+      if (!build.ok || build.mesh.bytes.empty()) {
+        g_editor_collision_failures.fetch_add(
+            1, std::memory_order_relaxed);
+        REXLOG_ERROR(
+            "map-editor: collision build failed for id={} name='{}': {}",
+            object.id, object.name,
+            build.error.empty() ? "empty mesh" : build.error);
+        return;
+      }
+
+      const std::uint32_t auxiliary =
+          REX_KERNEL_MEMORY()->SystemHeapAlloc(
+              kAuxiliaryAllocationSize, 16);
+      const std::uint32_t mesh =
+          REX_KERNEL_MEMORY()->SystemHeapAlloc(
+              static_cast<std::uint32_t>(
+                  build.mesh.bytes.size()),
+              16);
+      if (auxiliary == 0 || mesh == 0) {
+        if (mesh != 0) {
+          REX_KERNEL_MEMORY()->SystemHeapFree(mesh);
+        }
+        if (auxiliary != 0) {
+          REX_KERNEL_MEMORY()->SystemHeapFree(auxiliary);
+        }
+        g_editor_collision_failures.fetch_add(
+            1, std::memory_order_relaxed);
+        REXLOG_ERROR(
+            "map-editor: collision allocation failed for id={} name='{}'",
+            object.id, object.name);
+        return;
+      }
+      std::memset(base + auxiliary, 0,
+                  kAuxiliaryAllocationSize);
+      if (!skate::world::FixupRwCollisionMeshForGuest(
+              build.mesh.bytes, mesh)) {
+        REX_KERNEL_MEMORY()->SystemHeapFree(mesh);
+        REX_KERNEL_MEMORY()->SystemHeapFree(auxiliary);
+        g_editor_collision_failures.fetch_add(
+            1, std::memory_order_relaxed);
+        REXLOG_ERROR(
+            "map-editor: collision pointer fixup failed for id={} "
+            "name='{}'",
+            object.id, object.name);
+        return;
+      }
+      std::memcpy(base + mesh, build.mesh.bytes.data(),
+                  build.mesh.bytes.size());
+
+      const std::uint32_t volume = auxiliary;
+      const std::uint32_t resource =
+          auxiliary + kResourceOffset;
+      const std::uint32_t matrix =
+          auxiliary + kMatrixOffset;
+      StoreU32(base, resource, volume);
+      PPCContext initialize = ctx;
+      initialize.r3.u64 = resource;
+      initialize.r4.u64 = mesh;
+      sub_82AD7740(initialize, base);
+      if (LoadU32(base, volume + 68) != mesh ||
+          LoadU32(base, volume + 92) != 1) {
+        REX_KERNEL_MEMORY()->SystemHeapFree(mesh);
+        REX_KERNEL_MEMORY()->SystemHeapFree(auxiliary);
+        g_editor_collision_failures.fetch_add(
+            1, std::memory_order_relaxed);
+        REXLOG_ERROR(
+            "map-editor: collision aggregate initialization failed "
+            "for id={} name='{}'",
+            object.id, object.name);
+        return;
+      }
+
+      const float identity_translation[3] = {};
+      WriteMapTransform(base, matrix, identity_translation);
+
+      std::uint32_t count_after = count;
+      if (desired[index]) {
+        PPCContext add = ctx;
+        add.r3.u64 = collection;
+        add.r4.u64 = volume;
+        add.r5.u64 = matrix;
+        add.r6.u64 = 0;
+        add.r7.u64 = 0;
+        sub_82775F58(add, base);
+        count_after = LoadU32(base, collection + 20);
+        const std::uint32_t write_entry =
+            write_entries + count * kCollectionEntrySize;
+        if (count_after == count + 1 &&
+            LoadU32(base, write_entry) == volume &&
+            LoadU32(base, write_entry + 4) == mesh) {
+          PublishWriteEntries(base, read_entries, write_entries,
+                              count_after);
+        }
+        const std::uint32_t read_entry =
+            read_entries + count * kCollectionEntrySize;
+        if (count_after != count + 1 ||
+            LoadU32(base, write_entry) != volume ||
+            LoadU32(base, write_entry + 4) != mesh ||
+            LoadU32(base, read_entry) != volume ||
+            LoadU32(base, read_entry + 4) != mesh) {
+          g_editor_collision_failures.fetch_add(
+              1, std::memory_order_relaxed);
+          REXLOG_ERROR(
+              "map-editor: collision registration failed for id={} "
+              "name='{}' before={} after={}",
+              object.id, object.name, count, count_after);
+          return;
+        }
+        g_editor_collision_active[index].store(
+            true, std::memory_order_release);
+      }
+
+      g_editor_auxiliary_addresses[index].store(
+          auxiliary, std::memory_order_relaxed);
+      g_editor_matrix_addresses[index].store(
+          matrix, std::memory_order_relaxed);
+      g_editor_volume_addresses[index].store(
+          volume, std::memory_order_relaxed);
+      g_editor_translation_x_bits[index].store(
+          std::bit_cast<std::uint32_t>(local_translation[0]),
+          std::memory_order_relaxed);
+      g_editor_translation_y_bits[index].store(
+          std::bit_cast<std::uint32_t>(local_translation[1]),
+          std::memory_order_relaxed);
+      g_editor_translation_z_bits[index].store(
+          std::bit_cast<std::uint32_t>(local_translation[2]),
+          std::memory_order_relaxed);
+      for (std::size_t component = 0; component < 9; ++component) {
+        g_editor_basis_bits[component][index].store(
+            std::bit_cast<std::uint32_t>(local_basis[component]),
+            std::memory_order_relaxed);
+      }
+      g_editor_applied_revisions[index].store(
+          revision, std::memory_order_relaxed);
+      // Publish the mesh address last. Readers that observe it are
+      // guaranteed to observe the complete initial transform above.
+      g_editor_mesh_addresses[index].store(
+          mesh, std::memory_order_release);
+      g_editor_collision_installs.fetch_add(
+          1, std::memory_order_relaxed);
+      count = count_after;
+      REXLOG_INFO(
+          "map-editor: collision allocated id={} name='{}' active={} "
+          "triangles={} translation=({:.3f},{:.3f},{:.3f}) "
+          "revision={} mode=baked_identity",
+          object.id, object.name, desired[index] ? 1 : 0,
+          build.mesh.triangle_count,
+          local_translation[0], local_translation[1],
+          local_translation[2], revision);
+    }
+    g_editor_collision_active_count.store(
+        desired_collision_count, std::memory_order_release);
+    g_collection_count_after.store(count,
+                                   std::memory_order_release);
+
+    if (g_state.load(std::memory_order_acquire) ==
+            State::InstalledAdditive &&
+        REXCVAR_GET(
+            skate3_mechanics_sandbox_native_collision_replace_retail)) {
+      std::uint32_t first_volume = 0;
+      for (std::size_t index = 0; index < object_count; ++index) {
+        first_volume = g_editor_volume_addresses[index].load(
+            std::memory_order_acquire);
+        if (first_volume != 0) {
+          break;
+        }
+      }
+      if (first_volume != 0) {
+        const bool removed = RemoveOriginalVolumes(
+            ctx, base, collection, first_volume);
+        g_state.store(removed ? State::InstalledExclusive
+                              : State::ReplacementFailed,
+                      std::memory_order_release);
+      }
+    }
+
+    // AddVolume initializes an entry, but removing the retail volumes
+    // immediately afterward compacts the collection. Rebuild every editable
+    // entry in its final slot so the inverse transform and linear broadphase
+    // data are published before the first physics query. Previously this only
+    // happened after the user moved an object, leaving the initial map
+    // non-collidable until the first drag.
+    WaitForCollectionJobs(ctx, base, collection);
+    const std::uint32_t final_count =
+        LoadU32(base, collection + 20);
+    const std::uint32_t final_read_entries =
+        LoadU32(base, collection + 16);
+    const std::uint32_t final_write_entries =
+        LoadU32(base, collection + 32);
+    for (std::size_t index = 0; index < object_count; ++index) {
+      const std::uint32_t volume =
+          g_editor_volume_addresses[index].load(
+              std::memory_order_acquire);
+      const std::uint32_t mesh =
+          g_editor_mesh_addresses[index].load(
+              std::memory_order_acquire);
+      const std::uint32_t matrix =
+          g_editor_matrix_addresses[index].load(
+              std::memory_order_acquire);
+      if (volume == 0 || mesh == 0 || matrix == 0 ||
+          !g_editor_collision_active[index].load(
+              std::memory_order_acquire)) {
+        continue;
+      }
+      const std::uint32_t read_index = FindOwnedEntry(
+          base, final_read_entries, final_count, volume, mesh);
+      const std::uint32_t write_index = FindOwnedEntry(
+          base, final_write_entries, final_count, volume, mesh);
+      if (read_index == UINT32_MAX || write_index == UINT32_MAX ||
+          read_index != write_index) {
+        g_editor_collision_failures.fetch_add(
+            1, std::memory_order_relaxed);
+        REXLOG_ERROR(
+            "map-editor: initial broadphase publication failed id={} "
+            "name='{}' read_index={} write_index={}",
+            definition.editable_objects[index].id,
+            definition.editable_objects[index].name,
+            read_index, write_index);
+        continue;
+      }
+      const std::uint32_t write_entry =
+          final_write_entries +
+          write_index * kCollectionEntrySize;
+      PPCContext rebuild = ctx;
+      rebuild.r3.u64 = write_entry;
+      rebuild.r4.u64 = volume;
+      rebuild.r5.u64 = mesh;
+      rebuild.r6.u64 = matrix;
+      rebuild.r7.u64 = 0;
+      rebuild.r8.u64 = UINT32_MAX;
+      rebuild.r9.u64 = 0;
+      sub_8276CB18(rebuild, base);
+      const std::uint32_t read_entry =
+          final_read_entries +
+          read_index * kCollectionEntrySize;
+      if (read_entry != write_entry) {
+        std::memcpy(base + read_entry, base + write_entry,
+                    kCollectionEntrySize);
+      }
+      g_editor_broadphase_refreshes.fetch_add(
+          1, std::memory_order_relaxed);
+    }
+    g_collection_count_after.store(
+        final_count, std::memory_order_release);
+    REXLOG_INFO(
+        "map-editor: collision broadphase published "
+        "objects={} active={} added={} collection_count={}",
+        collision_object_count, desired_collision_count,
+        new_collision_count, final_count);
+    return;
+  }
+
+  bool any_update = false;
+  const bool gizmo_dragging =
+      map_editor::ActiveGizmoHandle() != 0;
+  if (!gizmo_dragging) {
+    for (std::size_t index = 0; index < object_count; ++index) {
+      if (g_editor_mesh_addresses[index].load(
+              std::memory_order_acquire) == 0) {
+        continue;
+      }
+      float local_translation[3] = {};
+      float local_basis[9] = {};
+      std::uint64_t desired_revision = 0;
+      if (!map_editor::ObjectTransform(
+              index, local_translation, local_basis,
+              &desired_revision) ||
+          desired_revision ==
+              g_editor_applied_revisions[index].load(
+                  std::memory_order_acquire)) {
+        continue;
+      }
+      if (!any_update) {
+        WaitForCollectionJobs(ctx, base, collection);
+        any_update = true;
+      }
+      if (!RebuildEditableObjectCollision(
+              ctx, base, collection, definition, index,
+              map_origin, local_translation, local_basis,
+              desired_revision)) {
+        g_editor_collision_failures.fetch_add(
+            1, std::memory_order_relaxed);
+      }
+    }
+  }
+
 }
 
 void UpdateHingedDoors(PPCContext& ctx,
@@ -4351,7 +5319,22 @@ void AppendTelemetry(std::ostream& out) {
       << " sandbox_kinematic_triangle_tests="
       << g_kinematic_triangle_tests.load(std::memory_order_relaxed)
       << " sandbox_kinematic_triangle_hits="
-      << g_kinematic_triangle_hits.load(std::memory_order_relaxed);
+      << g_kinematic_triangle_hits.load(std::memory_order_relaxed)
+      << " map_editor_collision_objects="
+      << g_editor_collision_count.load(std::memory_order_acquire)
+      << " map_editor_collision_active="
+      << g_editor_collision_active_count.load(
+             std::memory_order_acquire)
+      << " map_editor_collision_installs="
+      << g_editor_collision_installs.load(std::memory_order_relaxed)
+      << " map_editor_collision_updates="
+      << g_editor_collision_updates.load(std::memory_order_relaxed)
+      << " map_editor_broadphase_refreshes="
+      << g_editor_broadphase_refreshes.load(
+             std::memory_order_relaxed)
+      << " map_editor_collision_failures="
+      << g_editor_collision_failures.load(
+             std::memory_order_relaxed);
 }
 
 }  // namespace skate3::native_collision

@@ -34,12 +34,16 @@
 *.con
 *.skate
 *.skate.export-cache.json
+*.skateobj.export-cache.json
 *.blend
 *.blend[0-9]
 
 # Reviewed first-party example map and its self-contained Blender source.
 !/maps/blender_bake_showcase.skate
 !/maps/blender_bake_showcase.blend
+!/maps/map_editor_mvp.skate
+!/maps/map_editor_mvp.blend
+/maps/blender_bake_showcase_textures/
 
 # Local runtime/config overrides
 skate3.toml
@@ -84,6 +88,7 @@ steam_api64.dll
 !/scripts/Run-MultiplayerMixedVersionCheck.ps1
 !/scripts/Run-MultiplayerSyntheticSoak.ps1
 !/scripts/Test-RepositoryHygiene.ps1
+!/scripts/Run-MapEditorVisualCheck.ps1
 
 # Rebuilt from reviewed Blender add-on source when needed.
 /tools/blender_owned_map/owned_world_material_addon.zip

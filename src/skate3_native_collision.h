@@ -81,6 +81,12 @@ bool KinematicObjectPose(std::size_t index, float out_position[3],
 bool HingedDoorPose(std::size_t index, float* out_angle_radians,
                     float* out_angular_velocity,
                     std::uint64_t* out_frame = nullptr) noexcept;
+bool EditableObjectTransform(
+    std::size_t index, float out_translation[3],
+    std::uint64_t* out_revision = nullptr) noexcept;
+bool EditableObjectPose(
+    std::size_t index, float out_translation[3], float out_basis[9],
+    std::uint64_t* out_revision = nullptr) noexcept;
 
 // Compiles and registers the project-owned map as a real RenderWare
 // ClusteredMesh/AggregateVolume. The native board ground point is used only
@@ -96,6 +102,8 @@ void EnsureInstalled(PPCContext& ctx,
 // updated with the game's own volume-entry constructor.
 void UpdateKinematicObjects(PPCContext& ctx,
                             std::uint8_t* base) noexcept;
+void UpdateEditableObjects(PPCContext& ctx,
+                           std::uint8_t* base) noexcept;
 void UpdateHingedDoors(PPCContext& ctx,
                        std::uint8_t* base) noexcept;
 

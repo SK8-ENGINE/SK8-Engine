@@ -1,4 +1,4 @@
-"""Build the large Blender-authored SKATE v8 feature park.
+"""Build the large Blender-authored SKATE v12 feature park.
 
 The park deliberately contains only features represented by the current
 Blender addon and SKATE package: static visuals/collision, PBR and alpha
@@ -17,7 +17,7 @@ from mathutils import Vector
 
 
 TOOL_ROOT = Path(__file__).resolve().parent
-ROOT = Path(__file__).resolve().parents[3]
+ROOT = Path(__file__).resolve().parents[2]
 if str(TOOL_ROOT) not in sys.path:
     sys.path.insert(0, str(TOOL_ROOT))
 
@@ -25,10 +25,10 @@ import create_bake_showcase as base  # noqa: E402
 from owned_world_material_addon.exporter import export_scene  # noqa: E402
 
 
-BLEND_PATH = ROOT / "owned" / "maps" / "source" / "blender_bake_showcase.blend"
-PACKAGE_PATH = ROOT / "owned" / "maps" / "blender_bake_showcase.skate"
+BLEND_PATH = ROOT / "maps" / "blender_bake_showcase.blend"
+PACKAGE_PATH = ROOT / "maps" / "blender_bake_showcase.skate"
 base.TEXTURE_DIR = (
-    ROOT / "owned" / "maps" / "source" / "blender_bake_showcase_textures"
+    ROOT / "maps" / "blender_bake_showcase_textures"
 )
 
 
@@ -161,6 +161,7 @@ def add_rail_polyline(
         collider.data = segment.data.copy()
         collider.name = f"{name}_Collision_{index:02d}"
         collider["ow_material"] = material.name
+        collider["ow_map_object_owner"] = name
         collider["ow_upward_surface"] = False
         collision.objects.link(collider)
     # Skate's native grind spline describes the contact line above the rail,
@@ -172,6 +173,58 @@ def add_rail_polyline(
         for point in points
     ]
     base.add_grind_curve(f"{name}_Grind", grind_points, grinds)
+
+
+def prepare_editable_objects(
+    visual: bpy.types.Collection,
+    collision: bpy.types.Collection,
+    grinds: bpy.types.Collection,
+) -> list[bpy.types.Object]:
+    """Associate each static feature's render, collision, and grind records."""
+    for rail_name in ("StraightRail", "DownRail", "ArcRail"):
+        segments = sorted(
+            (
+                obj
+                for obj in visual.objects
+                if obj.type == "MESH"
+                and obj.name.startswith(f"{rail_name}_Segment_")
+            ),
+            key=lambda obj: obj.name,
+        )
+        if not segments:
+            raise RuntimeError(f"{rail_name} has no visual segments")
+        bpy.ops.object.select_all(action="DESELECT")
+        for segment in segments:
+            segment.select_set(True)
+        bpy.context.view_layer.objects.active = segments[0]
+        if len(segments) > 1:
+            bpy.ops.object.join()
+        rail = segments[0]
+        rail.name = rail_name
+        grind = grinds.objects.get(f"{rail_name}_Grind")
+        if grind is None:
+            raise RuntimeError(f"{rail_name} has no grind spline")
+        world_matrix = grind.matrix_world.copy()
+        grind.parent = rail
+        grind.matrix_world = world_matrix
+
+    visual_names = {
+        obj.name for obj in visual.objects if obj.type == "MESH"
+    }
+    for collider in collision.objects:
+        if collider.type != "MESH":
+            continue
+        owner_name = str(collider.get("ow_map_object_owner", "")).strip()
+        if not owner_name and collider.name.startswith("COL_"):
+            owner_name = collider.name[4:]
+        if owner_name not in visual_names:
+            raise RuntimeError(
+                f"collision {collider.name!r} has no editable visual owner "
+                f"{owner_name!r}"
+            )
+        collider["ow_map_object_owner"] = owner_name
+
+    return base.prepare_shared_lightmap_uvs(visual)
 
 
 def add_npc_route(
@@ -712,7 +765,7 @@ def build_scene() -> None:
     materials, material_list = make_materials()
     build_static_park(materials, visual, collision, grinds, npc_paths)
 
-    joined = base.join_visuals(visual)
+    static_visuals = prepare_editable_objects(visual, collision, grinds)
     lightmap = bpy.data.images.new(
         "LM_BakedIndirect_Showcase", width=1024, height=1024, alpha=True
     )
@@ -775,7 +828,7 @@ def build_scene() -> None:
     scene["ow_night_ambient"] = 0.10
     scene["ow_sky_tint"] = (1.0, 1.0, 1.0)
 
-    base.configure_bake(joined)
+    base.configure_bake(static_visuals)
     print("Starting Feature Park indirect-light bake...")
     bpy.ops.object.bake(type="DIFFUSE")
     values = list(lightmap.pixels)
@@ -796,6 +849,7 @@ def build_scene() -> None:
     collision.hide_viewport = False
     grinds.hide_viewport = False
     npc_paths.hide_viewport = False
+    bpy.ops.file.pack_all()
     bpy.ops.wm.save_as_mainfile(filepath=str(BLEND_PATH), compress=True)
     export_scene(PACKAGE_PATH, force_rebuild=True)
 

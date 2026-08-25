@@ -2,6 +2,7 @@
 #include "skate/world/owned_map_package.h"
 #include "skate/world/render_world.h"
 #include "skate/world/rw_collision_mesh.h"
+#include "skate/world/skate_object_package.h"
 
 #include <algorithm>
 #include <array>
@@ -20,11 +21,14 @@
 
 int main(int argc, char** argv) {
   bool compile_world = false;
+  bool object_profile = false;
   std::optional<std::filesystem::path> collision_output;
   for (int argument = 2; argument < argc; ++argument) {
     const std::string_view option = argv[argument];
     if (option == "--compile-world") {
       compile_world = true;
+    } else if (option == "--object-profile") {
+      object_profile = true;
     } else if (option == "--collision-output" &&
                argument + 1 < argc) {
       collision_output = std::filesystem::path(argv[++argument]);
@@ -45,6 +49,32 @@ int main(int argc, char** argv) {
   try {
     const skate::world::MapDefinition map =
         skate::world::LoadOwnedMapPackage(std::filesystem::path(argv[1]));
+    if (object_profile) {
+      skate::world::SkateObjectAsset object =
+          skate::world::LoadSkateObjectPackage(
+              std::filesystem::path(argv[1]));
+      std::cout << "SKATEOBJ_PROFILE_OK"
+                << " name=" << object.name
+                << " vertices=" << object.object.render_mesh.vertices.size()
+                << " collision="
+                << object.object.collision_triangles.size()
+                << " rails=" << object.grind_rails.size()
+                << '\n';
+      for (const skate::world::GrindRail& rail : object.grind_rails) {
+        std::cout << "SKATEOBJ_GRIND"
+                  << " name=" << rail.name
+                  << " points=" << rail.points.size();
+        if (!rail.points.empty()) {
+          const skate::world::Vec3& first = rail.points.front();
+          const skate::world::Vec3& last = rail.points.back();
+          std::cout << " first=" << first.x << "," << first.y << ","
+                    << first.z
+                    << " last=" << last.x << "," << last.y << ","
+                    << last.z;
+        }
+        std::cout << '\n';
+      }
+    }
     skate::world::Vec3 minimum{
         std::numeric_limits<float>::max(),
         std::numeric_limits<float>::max(),
@@ -108,6 +138,7 @@ int main(int argc, char** argv) {
         << " indices=" << map.render_mesh.indices.size()
         << " triangles=" << map.render_mesh.indices.size() / 3
         << " collision=" << map.collision_triangles.size()
+        << " editable_objects=" << map.editable_objects.size()
         << " rails=" << map.grind_rails.size()
         << " doors=" << map.hinged_doors.size()
         << " lights=" << map.moving_light_orbs.size()

@@ -5,6 +5,7 @@
 #include "skate3_fov.h"
 #include "skate3_input_lab.h"
 #include "skate3_iso_installer.h"
+#include "skate3_map_editor.h"
 #include "skate3_mechanics_sandbox_map.h"
 #include "skate3_multiplayer_assets.h"
 #include "skate3_multiplayer_session.h"
@@ -1037,6 +1038,8 @@ void Skate3BaseApp::OnCreateDialogs(rex::ui::ImGuiDrawer *drawer) {
   // so it never affects cursor or focus handling.
   render_mode_indicator_ =
       std::make_unique<skate3::RenderModeIndicator>(drawer);
+  map_editor_spawn_dialog_ =
+      std::make_unique<skate3::MapEditorSpawnDialog>(drawer);
   auto poll_vanilla_ui_gamepad = [this]() {
     skate3::vanilla_ui::GamepadState pad;
     auto *rt = runtime();
@@ -1116,6 +1119,16 @@ void Skate3BaseApp::OnCreateDialogs(rex::ui::ImGuiDrawer *drawer) {
   // skate3_native_render.cpp) needs the window without an app pointer.
   skate3::screenshot::RememberWindow(
       window() ? window()->GetNativeWindowHandle() : nullptr);
+  skate3::map_editor::SetWindowHandle(
+      window() ? window()->GetNativeWindowHandle() : nullptr);
+  rex::ui::RegisterBind("bind_skate3_map_editor", "G",
+                        "Toggle in-game map editor", [] {
+                          skate3::map_editor::Toggle();
+                        });
+  rex::ui::RegisterBind("bind_skate3_map_editor_spawn", "E",
+                        "Toggle map-editor object list", [] {
+                          skate3::map_editor::ToggleSpawnMenu();
+                        });
   rex::ui::RegisterBind("bind_skate3_screenshot", "Shift+F6",
                         "Save screenshot to screenshots/", [this] {
                           skate3::screenshot::CaptureWindow(
@@ -1155,6 +1168,9 @@ void Skate3BaseApp::OnCreateDialogs(rex::ui::ImGuiDrawer *drawer) {
       });
   rex::ui::RegisterBind(
       "bind_skate3_freecam", "End", "Drone camera (free fly)", [] {
+        if (skate3::map_editor::Active()) {
+          return;
+        }
         REXCVAR_SET(skate3_native_render_scene_freecam,
                     !REXCVAR_GET(skate3_native_render_scene_freecam));
       });
@@ -1204,7 +1220,8 @@ void Skate3BaseApp::OnPostSetup() {
       const bool freecam_captures =
           REXCVAR_GET(skate3_native_render_scene_freecam) &&
           REXCVAR_GET(skate3_native_render_scene_freecam_capture_input);
-      return !settings_visible && !xam_ui_active && !freecam_captures;
+      return !settings_visible && !xam_ui_active &&
+             !freecam_captures && !skate3::map_editor::Active();
     });
     input_system->SetMenuChordCallback([this]() {
       app_context().CallInUIThreadDeferred(
@@ -1279,6 +1296,8 @@ void Skate3BaseApp::OnShutdown() {
   rex::ui::UnregisterBind("bind_skate3_log_debug_marker");
   rex::ui::UnregisterBind("bind_skate3_log_user_marker");
   rex::ui::UnregisterBind("bind_skate3_native_debug");
+  rex::ui::UnregisterBind("bind_skate3_map_editor");
+  rex::ui::UnregisterBind("bind_skate3_map_editor_spawn");
   ApplyGameplayCursorMode();
   skate3::native_scene::SetVanillaUiBackdrop(false);
   skate3::native_scene::SetSettingsMenuBlur(false);
@@ -1289,6 +1308,7 @@ void Skate3BaseApp::OnShutdown() {
   release_updater_.reset();
   native_debug_dialog_.reset();
   render_mode_indicator_.reset();
+  map_editor_spawn_dialog_.reset();
 }
 
 void Skate3BaseApp::ToggleSimpleSettings() {

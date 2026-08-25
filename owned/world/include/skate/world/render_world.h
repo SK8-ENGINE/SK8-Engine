@@ -40,12 +40,21 @@ struct RenderWorld {
 };
 
 struct RenderWorldBuildOptions {
+  struct IndexRange {
+    std::uint32_t first = 0;
+    std::uint32_t count = 0;
+  };
+
   float chunk_size = 64.0f;
   std::size_t maximum_vertices_per_chunk = 65535;
   std::size_t maximum_cells_per_source_triangle = 4096;
   // Optional coarse progress callback for very large authored worlds.
   // Invoked at most once per million source triangles and once at completion.
   std::function<void(std::size_t, std::size_t)> progress;
+  // Sorted, disjoint complete-triangle ranges omitted from the immutable
+  // static world because they are rendered as independently transformed
+  // MOBJ records.
+  std::vector<IndexRange> excluded_index_ranges;
 };
 
 // Compiles arbitrary authored triangles into bounded spatial chunks. Source

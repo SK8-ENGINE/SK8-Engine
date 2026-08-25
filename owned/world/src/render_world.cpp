@@ -232,11 +232,28 @@ RenderWorld BuildRenderWorld(
     throw std::invalid_argument(
         "render mesh indices must contain complete triangles");
   }
+  std::uint64_t previous_exclusion_end = 0;
+  for (const RenderWorldBuildOptions::IndexRange& range :
+       options.excluded_index_ranges) {
+    const std::uint64_t end =
+        static_cast<std::uint64_t>(range.first) + range.count;
+    if (range.count == 0 || range.first % 3u != 0 ||
+        range.count % 3u != 0 ||
+        range.first < previous_exclusion_end ||
+        end > definition.render_mesh.indices.size()) {
+      throw std::invalid_argument(
+          "render excluded index ranges are invalid");
+    }
+    previous_exclusion_end = end;
+  }
 
   RenderWorld world;
   world.chunk_size = options.chunk_size;
   world.source_triangle_count =
       definition.render_mesh.indices.size() / 3;
+  for (const auto& range : options.excluded_index_ranges) {
+    world.source_triangle_count -= range.count / 3;
+  }
   CellGeometry cells;
   std::vector<std::size_t> surface_parents(
       world.source_triangle_count);
@@ -369,9 +386,25 @@ RenderWorld BuildRenderWorld(
       oriented_triangles;
   oriented_triangles.reserve(world.source_triangle_count);
 
+  std::size_t exclusion_index = 0;
   for (std::size_t index = 0;
        index < definition.render_mesh.indices.size();
        index += 3) {
+    while (exclusion_index < options.excluded_index_ranges.size() &&
+           index >=
+               static_cast<std::uint64_t>(
+                   options.excluded_index_ranges[exclusion_index].first) +
+                   options.excluded_index_ranges[exclusion_index].count) {
+      ++exclusion_index;
+    }
+    if (exclusion_index < options.excluded_index_ranges.size()) {
+      const auto& range =
+          options.excluded_index_ranges[exclusion_index];
+      if (index >= range.first &&
+          index < static_cast<std::uint64_t>(range.first) + range.count) {
+        continue;
+      }
+    }
     RenderVertex triangle[3];
     for (std::size_t corner = 0; corner < 3; ++corner) {
       const std::uint32_t source_index =

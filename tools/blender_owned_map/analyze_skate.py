@@ -434,6 +434,7 @@ def analyze_package(
     _section(sections, reader, "npc_routes", start)
 
     extension_tags: list[str] = []
+    map_objects: list[dict[str, object]] = []
     if version >= 12:
         start = reader.offset
         extension_count = reader.u32("extension count")
@@ -441,14 +442,67 @@ def analyze_package(
             tag = reader.take(
                 4, f"extension {extension_index} tag"
             ).decode("ascii", errors="replace")
-            reader.u32(f"extension {extension_index} schema")
+            schema = reader.u32(f"extension {extension_index} schema")
             decoded_size = reader.u32(
                 f"extension {extension_index} decoded size"
             )
-            reader.stored(
+            payload = reader.stored(
                 decoded_size, f"extension {extension_index}"
             )
             extension_tags.append(tag)
+            if tag == "MOBJ" and schema in (1, 2):
+                object_reader = Reader(payload)
+                object_count = object_reader.u32("MOBJ object count")
+                for object_index in range(object_count):
+                    object_id = object_reader.u32(
+                        f"MOBJ object {object_index} id"
+                    )
+                    name = object_reader.string(
+                        f"MOBJ object {object_index} name"
+                    )
+                    origin = struct.unpack(
+                        "<3f",
+                        object_reader.take(
+                            12, f"MOBJ object {object_index} origin"
+                        ),
+                    )
+                    first_index = object_reader.u32(
+                        f"MOBJ object {object_index} first index"
+                    )
+                    index_count = object_reader.u32(
+                        f"MOBJ object {object_index} index count"
+                    )
+                    first_collision = object_reader.u32(
+                        f"MOBJ object {object_index} first collision"
+                    )
+                    collision_count = object_reader.u32(
+                        f"MOBJ object {object_index} collision count"
+                    )
+                    grind_indices = []
+                    if schema >= 2:
+                        grind_count = object_reader.u32(
+                            f"MOBJ object {object_index} grind count"
+                        )
+                        grind_indices = [
+                            object_reader.u32(
+                                f"MOBJ object {object_index} grind {grind}"
+                            )
+                            for grind in range(grind_count)
+                        ]
+                    map_objects.append(
+                        {
+                            "id": object_id,
+                            "name": name,
+                            "origin": origin,
+                            "first_index": first_index,
+                            "index_count": index_count,
+                            "first_collision": first_collision,
+                            "collision_count": collision_count,
+                            "grind_indices": grind_indices,
+                        }
+                    )
+                if object_reader.offset != len(payload):
+                    raise PackageError("MOBJ has trailing bytes")
         _section(sections, reader, "extensions", start)
 
     if reader.offset != len(reader.data):
@@ -530,6 +584,7 @@ def analyze_package(
         "material_depth_layers": material_depth_layers,
         "retail_shader_families": retail_family_counts,
         "extension_tags": extension_tags,
+        "map_objects": map_objects,
         "texture_decoded_bytes": texture_decoded_bytes,
         "texture_dimensions": texture_dimensions,
         "maximum_visual_index": maximum_index,

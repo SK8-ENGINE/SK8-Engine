@@ -14,6 +14,7 @@ namespace skate::world {
 using MaterialId = std::uint32_t;
 using TextureId = std::uint32_t;
 using SurfaceId = std::uint32_t;
+using MapObjectId = std::uint32_t;
 using GrindRailId = std::uint32_t;
 using NpcRouteId = std::uint32_t;
 using KinematicObjectId = std::uint32_t;
@@ -333,6 +334,29 @@ struct CollisionTriangle {
   bool has_native_edge_codes = false;
 };
 
+// One independently editable Blender object. Ordinary SKATE render and
+// collision records remain flattened for backward compatibility; the MOBJ
+// extension materializes the object's referenced ranges into this local-space
+// representation at load time. The authored origin plus one session pose is
+// the authoritative transform shared by rendering, native collision, picking,
+// and any associated grind rails.
+struct MapObject {
+  MapObjectId id = 0;
+  std::string name;
+  Vec3 origin;
+  Vec3 local_bounds_min;
+  Vec3 local_bounds_max;
+  std::uint32_t source_first_index = 0;
+  std::uint32_t source_index_count = 0;
+  std::uint32_t source_first_collision_triangle = 0;
+  std::uint32_t source_collision_triangle_count = 0;
+  // Indices into MapDefinition::grind_rails whose authored points are
+  // transformed with this object during an editor session.
+  std::vector<std::uint32_t> grind_rail_indices;
+  RenderMesh render_mesh;
+  std::vector<CollisionTriangle> collision_triangles;
+};
+
 // The first 120 bytes of one retail Pegasus tSplineData segment. Values are
 // stored as host-order IEEE-754 bit patterns so an extracted retail segment
 // can round-trip without changing a single coefficient or auxiliary field.
@@ -521,6 +545,7 @@ struct MapDefinition {
   std::vector<ImageTexture> textures;
   RenderMesh render_mesh;
   std::vector<CollisionTriangle> collision_triangles;
+  std::vector<MapObject> editable_objects;
   std::vector<GrindRail> grind_rails;
   std::vector<NpcRoute> npc_routes;
   std::vector<KinematicBox> kinematic_boxes;
@@ -637,6 +662,7 @@ class WorldMap {
   explicit WorldMap(MapDefinition definition);
 
   const MapDefinition& Definition() const;
+  MapDefinition& MutableDefinition();
   const SurfaceMaterial* FindMaterial(MaterialId id) const;
 
   RayHit RayCast(Vec3 origin,

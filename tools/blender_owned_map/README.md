@@ -334,8 +334,12 @@ From the canonical development workspace root:
 
 In the development workspace this creates:
 
-- `owned/maps/source/blender_bake_showcase.blend`
-- `owned/maps/blender_bake_showcase.skate`
+- `maps/blender_bake_showcase.blend`
+- `maps/blender_bake_showcase.skate`
+
+The current SKATE v12 build preserves the park's static Blender features as
+independent editor objects. Each collision proxy is associated with its
+visual owner, and each complete rail owns its matching grind spline.
 
 The generator performs a real 1024-square Cycles indirect-light bake and
 builds the 360 by 336 metre `blender_feature_park`. The feature zones remain
@@ -382,9 +386,9 @@ Example fast lighting-only update:
 
 ```powershell
 & 'C:\Program Files\Blender Foundation\Blender 5.0\blender.exe' `
-  --background owned\maps\source\blender_bake_showcase.blend `
+  --background maps\blender_bake_showcase.blend `
   --python tools\blender_owned_map\export_skate.py -- `
-  owned\maps\blender_bake_showcase.skate --metadata-only
+  maps\blender_bake_showcase.skate --metadata-only
 ```
 
 Cache manifests are generated and gitignored. If a package changes outside

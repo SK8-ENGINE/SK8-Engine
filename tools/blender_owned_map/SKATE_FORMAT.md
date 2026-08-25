@@ -201,6 +201,34 @@ provenance, and texture decode metadata that do not belong in hot render
 records. Unknown extension tags are safely skipped after their stored payload
 has been validated.
 
+The `MOBJ` extension uses schema version 2 and preserves independently
+editable Blender mesh objects without changing the SKATE12 base layout. Its
+decoded payload is:
+
+```text
+u32 object_count
+object[object_count]:
+  u32 stable_id                 # FNV-1a of the full Blender object name
+  string name
+  vec3 origin                  # authored map-space translation
+  u32 first_render_index
+  u32 render_index_count
+  u32 first_collision_triangle
+  u32 collision_triangle_count
+  u32 grind_rail_count
+  u32 grind_rail_indices[grind_rail_count]
+```
+
+Render and collision ranges refer to the unchanged flattened base arrays.
+The runtime extracts each range into object-local geometry by subtracting the
+same `origin`, then excludes those ranges from the immutable static render and
+collision worlds. A session transform therefore drives both the per-object
+draw and its native collision aggregate. Objects linked to both `OW_VISUAL`
+and `OW_COLLISION` retain collision ownership; render-only objects keep a
+zero collision count. Grind indices associate parented Blender grind curves
+with the same runtime object pose. Schema-1 MOBJ records and older SKATE12
+packages with no `MOBJ` extension continue to load unchanged.
+
 `day_night_duration_seconds == 0` freezes celestial lighting at
 `day_night_start_hour`. With a positive duration and
 `day_night_ping_pong == 0`, the duration describes one complete 24-hour

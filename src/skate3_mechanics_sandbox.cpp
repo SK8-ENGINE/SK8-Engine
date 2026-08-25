@@ -1,5 +1,6 @@
 #include "skate3_mechanics_sandbox.h"
 
+#include "skate3_map_editor.h"
 #include "generated/skate3_init.h"
 #include "native/skate3_native_entity.h"
 #include "skate3_mechanics_sandbox_map.h"
@@ -603,6 +604,8 @@ void ApplyOwnedWorldCollisionAfterPhysOut(PPCContext& ctx, uint8_t* base,
   }
 
   native_collision::EnsureInstalled(ctx, base, skateboard, origin);
+  map_editor::ObservePlayerState();
+  native_collision::UpdateEditableObjects(ctx, base);
   native_collision::UpdateKinematicObjects(ctx, base);
   native_collision::UpdateHingedDoors(ctx, base);
   native_grind::EnsureInstalled(ctx, base);
@@ -1287,6 +1290,7 @@ void AppendTelemetry(std::ostream& out) {
       << " sandbox_reset_failures="
       << g_reset_failures.load(std::memory_order_relaxed);
   native_collision::AppendTelemetry(out);
+  map_editor::AppendTelemetry(out);
   native_grind::AppendTelemetry(out);
   owned_world_boundary::AppendTelemetry(out);
   multiplayer::AppendTelemetry(out);

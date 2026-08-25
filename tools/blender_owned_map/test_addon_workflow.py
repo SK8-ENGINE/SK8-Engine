@@ -198,6 +198,36 @@ def main() -> None:
             "UV layer helper failed",
         )
 
+        # Independently editable maps commonly keep a low-detail collision
+        # proxy separate from the rendered Blender object. The explicit owner
+        # must associate that proxy's triangle range with the visual MOBJ
+        # record without requiring both roles to share one Blender object.
+        proxy_mesh = bpy.data.meshes.new("ProxyOwnedVisualMesh")
+        proxy_mesh.from_pydata(
+            [(20.0, 0.0, 0.0), (21.0, 0.0, 0.0), (20.0, 1.0, 0.0)],
+            [],
+            [(0, 1, 2)],
+        )
+        proxy_mesh.update()
+        proxy_material = material.copy()
+        proxy_material.name = "ProxyOwnedMaterial"
+        proxy_mesh.materials.append(proxy_material)
+        proxy_mesh.uv_layers.new(name="UVMap")
+        proxy_mesh.uv_layers.new(name="Lightmap")
+        proxy_visual = bpy.data.objects.new(
+            "ProxyOwnedVisual", proxy_mesh
+        )
+        bpy.data.collections[
+            addon.exporter.NO_COLLISION_COLLECTION
+        ].objects.link(proxy_visual)
+        proxy_collision = collision_object(
+            "ProxyOwnedCollision",
+            [(20.0, 0.0, 0.0), (21.0, 0.0, 0.0), (20.0, 1.0, 0.0)],
+            [(0, 1, 2)],
+            proxy_material.name,
+        )
+        proxy_collision["ow_map_object_owner"] = proxy_visual.name
+
         # Retail imports carry their authored frame as hidden point
         # attributes. Verify that it takes precedence over Blender tangent
         # generation while the ordinary TestFloor above still exercises the
@@ -450,6 +480,37 @@ def main() -> None:
             "Exported package has the wrong magic",
         )
         analysis = analyze_package(output, include_payloads=True)
+        require(
+            "MOBJ" in analysis["extension_tags"],
+            "Exported package did not preserve Blender object records",
+        )
+        object_records = analysis["map_objects"]
+        require(
+            [record["name"] for record in object_records]
+            == ["TestFloor", "RetailFrame", "ProxyOwnedVisual"],
+            "Blender object names or stable ordering were not preserved",
+        )
+        require(
+            len({record["id"] for record in object_records}) == 3
+            and all(record["id"] != 0 for record in object_records),
+            "Blender object IDs are zero or not unique",
+        )
+        require(
+            object_records[0]["index_count"] == 6
+            and object_records[0]["collision_count"] == 2,
+            "Visual/collision ownership was not associated with TestFloor",
+        )
+        proxy_record = next(
+            record
+            for record in object_records
+            if record["name"] == "ProxyOwnedVisual"
+        )
+        require(
+            proxy_record["index_count"] == 3
+            and proxy_record["collision_count"] == 1,
+            "Separate collision proxy was not associated with its visual "
+            "MOBJ owner",
+        )
         retail_frame_records = []
         vertex_bytes = analysis["_vertex_bytes"]
         for offset in range(
@@ -490,9 +551,9 @@ def main() -> None:
         local_light_count = counts[-2]
         npc_route_count = counts[-1]
         require(
-            collision_triangle_count == 6,
+            collision_triangle_count == 7,
             "Degenerate or duplicate collision reached the package "
-            f"(got {collision_triangle_count}, expected 6)",
+            f"(got {collision_triangle_count}, expected 7)",
         )
         require(
             local_light_count == 3,

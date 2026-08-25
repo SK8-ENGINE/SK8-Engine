@@ -1,6 +1,7 @@
 #include "skate3_custom_trick.h"
 #include "skate3_input_history_watch.h"
 #include "skate3_input_lab.h"
+#include "skate3_map_editor.h"
 #include "skate3_trick_pipeline.h"
 #include "skate3_trick_types.h"
 
@@ -533,7 +534,9 @@ public:
 private:
   void PollHotkey() {
 #if defined(_WIN32)
-    const bool enabled = REXCVAR_GET(skate3_custom_trick_g);
+    const bool enabled =
+        REXCVAR_GET(skate3_custom_trick_g) &&
+        !map_editor::Active();
     const bool down = enabled && (GetAsyncKeyState('G') & 0x8000) != 0;
     const bool gameplay =
         rex::kernel::guest_presence::GameplayContextValue() == 1;

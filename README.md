@@ -202,6 +202,42 @@ The builds include an experimental true ultrawide mode: the native renderer draw
 - Right stick press: MMB
 - Back/Start: Tab/Return
 
+### In-game map editor (MVP)
+
+Press G to enter or leave the runtime editor. The local skater remains
+visible, while normal gameplay input and the gameplay camera are suspended.
+Hold RMB to hide/capture mouse-look and release RMB to restore the cursor; use W/A/S/D
+to fly, Space to rise, Q or C to descend, Shift for fast movement, and
+Ctrl for slow movement. LMB selects an authored map object; drag a coloured
+world-space axis arrow to move it, or drag one of the three rings to rotate it. Releasing LMB
+commits the pose. The selected object has a subtle cyan outer contour. The
+E key opens the spawn-object list populated from top-level `objects/*.skateobj`;
+the list's **Refresh objects** button rescans that folder without restarting;
+select an entry and click **Spawn selected** or press Enter to place it on the
+surface under the camera aim. Spawned render geometry, collision, and attached
+grind splines use the same runtime transform as authored objects. The
+editor releases cursor capture and ignores all keyboard/mouse state whenever
+the game is not the foreground window. Changes affect rendering, native
+collision, and associated grind rails for the current run only and are not
+saved.
+
+The release F6 screenshot bind remains available on F6. The draw-distance
+debug marker is Alt+F6 (or LB+B), and the standalone drone camera remains on
+End outside editor mode.
+
+Use `Run-MapEditorVisualCheck.bat` for the dedicated three-object validation
+map. The script performs incremental Release/test builds, stages an isolated
+portable run, launches the game only when invoked by the user, and writes
+timestamped event and STATUS telemetry logs under `out/map-editor-runs`.
+`Run-MapEditorVisualCheck.bat -FullRebuild` is the optional troubleshooting
+path; ordinary checks should remain incremental.
+
+The visual-check build verifies the expanded retail codegen image separately
+from the packaged runtime `game` directory, and restores the reviewed
+preview.14 generated-source cache before compiling. Override their locations
+with `SKATE3_CODEGEN_GAME_DATA_ROOT` and `SKATE3_TRUSTED_GENERATED_ROOT` only
+when intentionally reproducing that exact release boundary.
+
 ## Building from Source
 
 All platforms build with CMake 3.25+, Ninja, and Clang 18 or newer - ReXGlue

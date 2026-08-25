@@ -661,6 +661,34 @@ def join_visuals(
     return joined
 
 
+def prepare_shared_lightmap_uvs(
+    visual_collection: bpy.types.Collection,
+) -> list[bpy.types.Object]:
+    """Pack one lightmap atlas while preserving independent mesh objects."""
+    visuals = [
+        obj for obj in visual_collection.objects if obj.type == "MESH"
+    ]
+    if not visuals:
+        raise RuntimeError("OW_VISUAL contains no mesh objects")
+    bpy.ops.object.select_all(action="DESELECT")
+    for obj in visuals:
+        layer = obj.data.uv_layers.get("Lightmap")
+        if layer is None:
+            layer = obj.data.uv_layers.new(name="Lightmap")
+        obj.data.uv_layers.active = layer
+        obj.select_set(True)
+    bpy.context.view_layer.objects.active = visuals[0]
+    bpy.ops.object.mode_set(mode="EDIT")
+    bpy.ops.mesh.select_all(action="SELECT")
+    # Blender's multi-object edit mode packs every selected object's islands
+    # into one shared atlas without collapsing authored object identity.
+    bpy.ops.uv.smart_project(
+        angle_limit=math.radians(66.0), island_margin=0.012
+    )
+    bpy.ops.object.mode_set(mode="OBJECT")
+    return visuals
+
+
 def add_bake_target(
     materials: list[bpy.types.Material],
     lightmap: bpy.types.Image,
@@ -709,7 +737,9 @@ def persist_lightmap(
     return loaded
 
 
-def configure_bake(joined: bpy.types.Object) -> None:
+def configure_bake(
+    targets: bpy.types.Object | list[bpy.types.Object],
+) -> None:
     scene = bpy.context.scene
     scene.render.engine = "BLENDER_EEVEE"
     # Blender 5 removed the old Cycles bake path. Eevee's light-probe bake is
@@ -729,8 +759,12 @@ def configure_bake(joined: bpy.types.Object) -> None:
     scene.render.bake.use_pass_indirect = True
     scene.render.bake.use_pass_color = False
     bpy.ops.object.select_all(action="DESELECT")
-    joined.select_set(True)
-    bpy.context.view_layer.objects.active = joined
+    objects = targets if isinstance(targets, list) else [targets]
+    if not objects:
+        raise RuntimeError("indirect bake has no target objects")
+    for obj in objects:
+        obj.select_set(True)
+    bpy.context.view_layer.objects.active = objects[0]
 
 
 def build_scene() -> None:

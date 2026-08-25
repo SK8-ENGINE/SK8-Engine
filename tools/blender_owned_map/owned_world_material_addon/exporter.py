@@ -10,6 +10,7 @@ from array import array
 from dataclasses import dataclass
 from pathlib import Path
 import hashlib
+import io
 import json
 import math
 import os
@@ -60,7 +61,7 @@ _HELPER_OBJECT_MARKERS = (
     "scale_reference",
     "scale reference",
 )
-CACHE_SCHEMA = 18
+CACHE_SCHEMA = 19
 METADATA_FLOAT_COUNT = 49
 METADATA_BYTE_COUNT = METADATA_FLOAT_COUNT * 4
 RETAIL_NORMAL_ATTRIBUTE = "skate3_retail_normal"
@@ -126,6 +127,17 @@ class PackedVisualGeometry:
     index_chunks: list[bytes]
     vertex_count: int
     index_count: int
+    objects: list["ExportMapObject"]
+
+
+@dataclass
+class ExportMapObject:
+    source_identity: int
+    object_id: int
+    name: str
+    origin: tuple[float, float, float]
+    first_index: int
+    index_count: int
 
 
 @dataclass
@@ -152,6 +164,7 @@ class ExportGrindRail:
     retail_flags: int = 0
     retail_trailing_word: int = 0
     native_segment_payload: bytes = b""
+    parent_source_identity: int = 0
 
 
 @dataclass
@@ -263,6 +276,35 @@ def _write_stored_chunks(
     _write_u32(stream, stored_size)
     stream.seek(end)
     return STORAGE_DEFLATE, stored_size
+
+
+def _map_object_extension(
+    geometry: PackedVisualGeometry,
+    collision_ranges: dict[int, tuple[int, int]],
+    rails: list[ExportGrindRail],
+) -> bytes:
+    payload = io.BytesIO()
+    _write_u32(payload, len(geometry.objects))
+    for record in geometry.objects:
+        first_collision, collision_count = collision_ranges.get(
+            record.source_identity, (0, 0)
+        )
+        _write_u32(payload, record.object_id)
+        _write_string(payload, record.name)
+        _write_vec(payload, record.origin)
+        _write_u32(payload, record.first_index)
+        _write_u32(payload, record.index_count)
+        _write_u32(payload, first_collision)
+        _write_u32(payload, collision_count)
+        grind_indices = [
+            index
+            for index, rail in enumerate(rails)
+            if rail.parent_source_identity == record.source_identity
+        ]
+        _write_u32(payload, len(grind_indices))
+        for grind_index in grind_indices:
+            _write_u32(payload, grind_index)
+    return payload.getvalue()
 
 
 def _cache_manifest_path(output: Path) -> Path:
@@ -695,6 +737,12 @@ def _scene_content_fingerprint(
             "skate3_retail_grind_segment_payload",
         ):
             _hash_text(digest, repr(obj.get(property_name, None)))
+        _hash_text(
+            digest,
+            obj.parent.name_full
+            if obj.parent is not None and obj.parent.type == "MESH"
+            else "",
+        )
         object_complete(f"Hashing grind paths: {obj.name}")
 
     npc_routes = 0
@@ -995,6 +1043,15 @@ def _manifest_matches_package(output: Path, manifest: dict) -> bool:
 
 def _to_runtime(value) -> tuple[float, float, float]:
     return float(value.x), float(value.z), float(-value.y)
+
+
+def _stable_object_id(name: str) -> int:
+    """Return a deterministic non-zero FNV-1a ID for one Blender object."""
+    value = 2166136261
+    for byte in name.encode("utf-8"):
+        value ^= byte
+        value = (value * 16777619) & 0xFFFFFFFF
+    return value or 1
 
 
 def _pack_snorm8(value: float) -> int:
@@ -1684,6 +1741,7 @@ def _export_visual_geometry(
     index_chunks: list[bytes] = []
     vertex_count = 0
     index_count = 0
+    objects: list[ExportMapObject] = []
     mesh_objects = [
         obj for obj in visual_objects if obj.type == "MESH"
     ]
@@ -1700,6 +1758,7 @@ def _export_visual_geometry(
     ):
         if source_object.type != "MESH":
             continue
+        object_first_index = index_count
         mesh, evaluated = _mesh_for_export(
             source_object,
             depsgraph,
@@ -2232,6 +2291,20 @@ def _export_visual_geometry(
             if evaluated is not None:
                 evaluated.to_mesh_clear()
 
+        object_index_count = index_count - object_first_index
+        if object_index_count:
+            objects.append(
+                ExportMapObject(
+                    source_identity=source_object.as_pointer(),
+                    object_id=_stable_object_id(source_object.name_full),
+                    name=source_object.name_full,
+                    origin=_to_runtime(
+                        source_object.matrix_world.translation
+                    ),
+                    first_index=object_first_index,
+                    index_count=object_index_count,
+                )
+            )
         completed_weight += object_weight
         _report_progress(
             progress,
@@ -2242,11 +2315,18 @@ def _export_visual_geometry(
 
     if not vertex_count:
         raise ValueError("presentation groups contain no exportable triangles")
+    object_ids = [record.object_id for record in objects]
+    if len(set(object_ids)) != len(object_ids):
+        raise ValueError(
+            "Blender object names produced a stable-ID collision; rename "
+            "one of the colliding objects"
+        )
     return PackedVisualGeometry(
         vertex_chunks,
         index_chunks,
         vertex_count,
         index_count,
+        objects,
     )
 
 
@@ -2254,6 +2334,7 @@ def audit_collision_geometry(
     collision_objects: list[bpy.types.Object],
     material_name_ids: dict[str, int] | None = None,
     progress: ProgressCallback | None = None,
+    object_ranges: dict[int, tuple[int, int]] | None = None,
 ) -> tuple[list[tuple], CollisionGeometryAudit]:
     depsgraph = bpy.context.evaluated_depsgraph_get()
     triangles: list[tuple] = []
@@ -2270,6 +2351,7 @@ def audit_collision_geometry(
     for object_index, source_object in enumerate(
         mesh_objects, start=1
     ):
+        object_first_triangle = len(triangles)
         _report_progress(
             progress,
             (object_index - 1) / max(1, len(mesh_objects)),
@@ -2501,6 +2583,41 @@ def audit_collision_geometry(
                 "face downward or vertically, but this object is marked "
                 "Rideable Top Surface."
             )
+        if object_ranges is not None:
+            owner_identity = source_object.as_pointer()
+            owner_name = str(
+                source_object.get("ow_map_object_owner", "")
+            ).strip()
+            if owner_name:
+                owner = bpy.data.objects.get(owner_name)
+                if owner is None or owner.type != "MESH":
+                    issues.append(
+                        f"{source_object.name}: editable collision owner "
+                        f"{owner_name!r} is missing or is not a mesh."
+                    )
+                else:
+                    owner_identity = owner.as_pointer()
+            object_triangle_count = len(triangles) - object_first_triangle
+            previous_range = object_ranges.get(owner_identity)
+            if previous_range is None:
+                object_ranges[owner_identity] = (
+                    object_first_triangle,
+                    object_triangle_count,
+                )
+            elif (
+                previous_range[0] + previous_range[1]
+                == object_first_triangle
+            ):
+                object_ranges[owner_identity] = (
+                    previous_range[0],
+                    previous_range[1] + object_triangle_count,
+                )
+            else:
+                issues.append(
+                    f"{source_object.name}: collision proxies for editable "
+                    f"owner {owner_name or source_object.name!r} are not "
+                    "contiguous in OW_COLLISION."
+                )
         surface_id += 1
     if not triangles:
         issues.append("collision groups contain no usable collision triangles.")
@@ -2520,17 +2637,25 @@ def _export_collision(
     collision_objects: list[bpy.types.Object],
     material_name_ids: dict[str, int],
     progress: ProgressCallback | None = None,
-) -> tuple[list[tuple], CollisionGeometryAudit]:
+) -> tuple[
+    list[tuple],
+    CollisionGeometryAudit,
+    dict[int, tuple[int, int]],
+]:
     global LAST_COLLISION_AUDIT
+    object_ranges: dict[int, tuple[int, int]] = {}
     triangles, audit = audit_collision_geometry(
-        collision_objects, material_name_ids, progress
+        collision_objects,
+        material_name_ids,
+        progress,
+        object_ranges,
     )
     LAST_COLLISION_AUDIT = audit
     if audit.issues:
         raise CollisionGeometryError(audit.issues, audit.warnings)
     for warning in audit.warnings:
         print(f"SKATE collision cleanup: {warning}", flush=True)
-    return triangles, audit
+    return triangles, audit, object_ranges
 
 
 def _retail_grind_controls(
@@ -2650,6 +2775,11 @@ def _export_retail_grind(
             obj["skate3_retail_grind_trailing_word"]
         ),
         native_segment_payload=payload,
+        parent_source_identity=(
+            obj.parent.as_pointer()
+            if obj.parent is not None and obj.parent.type == "MESH"
+            else 0
+        ),
     )
 
 
@@ -2685,6 +2815,12 @@ def _export_grinds(
                     name=name,
                     closed=bool(spline.use_cyclic_u),
                     points=points,
+                    parent_source_identity=(
+                        obj.parent.as_pointer()
+                        if obj.parent is not None
+                        and obj.parent.type == "MESH"
+                        else 0
+                    ),
                 )
             )
     return rails
@@ -3139,7 +3275,7 @@ def export_scene(
     # duplicate triangles are omitted from the package without modifying the
     # Blender mesh (or its visual UVs).
     _report_progress(progress, 0.05, "Auditing collision geometry")
-    collision, _collision_audit = _export_collision(
+    collision, _collision_audit, collision_object_ranges = _export_collision(
         collision_objects,
         material_name_ids,
         progress=lambda fraction, stage: _report_progress(
@@ -3617,11 +3753,16 @@ def export_scene(
             for point in points:
                 _write_vec(stream, point)
         retail_manifest = bpy.data.texts.get("SKATE3_RETAIL_MANIFEST")
-        if retail_manifest is None:
-            _write_u32(stream, 0)
-        else:
+        map_objects = _map_object_extension(
+            geometry, collision_object_ranges, rails
+        )
+        _write_u32(stream, 1 + (1 if retail_manifest is not None else 0))
+        stream.write(b"MOBJ")
+        _write_u32(stream, 2)
+        _write_u32(stream, len(map_objects))
+        _write_stored_bytes(stream, map_objects)
+        if retail_manifest is not None:
             metadata = retail_manifest.as_string().encode("utf-8")
-            _write_u32(stream, 1)
             stream.write(b"WMET")
             _write_u32(stream, 1)
             _write_u32(stream, len(metadata))

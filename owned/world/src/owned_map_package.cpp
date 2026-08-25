@@ -17,6 +17,7 @@
 #include <string>
 #include <thread>
 #include <type_traits>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -471,6 +472,160 @@ void RequireCount(std::uint32_t count,
   }
 }
 
+const SurfaceMaterial* FindMaterial(const MapDefinition& map,
+                                    MaterialId id) {
+  const auto found = std::find_if(
+      map.materials.begin(), map.materials.end(),
+      [id](const SurfaceMaterial& material) {
+        return material.id == id;
+      });
+  return found == map.materials.end() ? nullptr : &*found;
+}
+
+const ImageTexture* FindTexture(const MapDefinition& map, TextureId id) {
+  const auto found = std::find_if(
+      map.textures.begin(), map.textures.end(),
+      [id](const ImageTexture& texture) { return texture.id == id; });
+  return found == map.textures.end() ? nullptr : &*found;
+}
+
+void ReadMapObjects(std::vector<std::uint8_t> payload,
+                    std::uint32_t schema, MapDefinition& map) {
+  Reader reader(std::move(payload));
+  const std::uint32_t object_count = reader.Scalar<std::uint32_t>();
+  RequireCount(object_count, "map object");
+  std::unordered_set<MapObjectId> ids;
+  std::unordered_set<std::string> names;
+  std::vector<bool> claimed_indices(map.render_mesh.indices.size(), false);
+  std::vector<bool> claimed_collision(
+      map.collision_triangles.size(), false);
+  std::vector<bool> claimed_grinds(map.grind_rails.size(), false);
+  map.editable_objects.reserve(object_count);
+
+  for (std::uint32_t object_index = 0;
+       object_index < object_count; ++object_index) {
+    MapObject object;
+    object.id = reader.Scalar<MapObjectId>();
+    object.name = reader.String();
+    object.origin = reader.Vector3();
+    object.source_first_index = reader.Scalar<std::uint32_t>();
+    object.source_index_count = reader.Scalar<std::uint32_t>();
+    object.source_first_collision_triangle =
+        reader.Scalar<std::uint32_t>();
+    object.source_collision_triangle_count =
+        reader.Scalar<std::uint32_t>();
+    if (schema >= 2) {
+      const std::uint32_t grind_count =
+          reader.Scalar<std::uint32_t>();
+      RequireCount(grind_count, "map object grind rail");
+      object.grind_rail_indices.reserve(grind_count);
+      for (std::uint32_t grind = 0; grind < grind_count; ++grind) {
+        const std::uint32_t rail_index =
+            reader.Scalar<std::uint32_t>();
+        if (rail_index >= map.grind_rails.size() ||
+            claimed_grinds[rail_index]) {
+          throw std::runtime_error(
+              "SKATE map object grind association is invalid");
+        }
+        claimed_grinds[rail_index] = true;
+        object.grind_rail_indices.push_back(rail_index);
+      }
+    }
+
+    const std::uint64_t index_end =
+        static_cast<std::uint64_t>(object.source_first_index) +
+        object.source_index_count;
+    const std::uint64_t collision_end =
+        static_cast<std::uint64_t>(
+            object.source_first_collision_triangle) +
+        object.source_collision_triangle_count;
+    if (object.id == 0 || object.name.empty() ||
+        !Finite(object.origin) ||
+        object.source_index_count == 0 ||
+        object.source_index_count % 3u != 0 ||
+        index_end > map.render_mesh.indices.size() ||
+        collision_end > map.collision_triangles.size() ||
+        !ids.insert(object.id).second ||
+        !names.insert(object.name).second) {
+      throw std::runtime_error("SKATE map object record is invalid");
+    }
+
+    std::unordered_map<std::uint32_t, std::uint32_t> remap;
+    object.render_mesh.indices.reserve(object.source_index_count);
+    for (std::uint64_t source_offset = object.source_first_index;
+         source_offset < index_end; ++source_offset) {
+      if (claimed_indices[source_offset]) {
+        throw std::runtime_error(
+            "SKATE map object render ranges overlap");
+      }
+      claimed_indices[source_offset] = true;
+      const std::uint32_t source_index =
+          map.render_mesh.indices[source_offset];
+      if (source_index >= map.render_mesh.vertices.size()) {
+        throw std::runtime_error(
+            "SKATE map object references an invalid render vertex");
+      }
+      const auto [found, inserted] = remap.emplace(
+          source_index,
+          static_cast<std::uint32_t>(
+              object.render_mesh.vertices.size()));
+      if (inserted) {
+        RenderVertex vertex = map.render_mesh.vertices[source_index];
+        vertex.position = vertex.position - object.origin;
+        object.render_mesh.vertices.push_back(vertex);
+      }
+      object.render_mesh.indices.push_back(found->second);
+    }
+
+    object.collision_triangles.reserve(
+        object.source_collision_triangle_count);
+    for (std::uint64_t source_offset =
+             object.source_first_collision_triangle;
+         source_offset < collision_end; ++source_offset) {
+      if (claimed_collision[source_offset]) {
+        throw std::runtime_error(
+            "SKATE map object collision ranges overlap");
+      }
+      claimed_collision[source_offset] = true;
+      CollisionTriangle triangle =
+          map.collision_triangles[source_offset];
+      triangle.a = triangle.a - object.origin;
+      triangle.b = triangle.b - object.origin;
+      triangle.c = triangle.c - object.origin;
+      object.collision_triangles.push_back(triangle);
+    }
+
+    object.local_bounds_min =
+        object.render_mesh.vertices.front().position;
+    object.local_bounds_max = object.local_bounds_min;
+    const auto include = [&](Vec3 point) {
+      object.local_bounds_min.x =
+          std::min(object.local_bounds_min.x, point.x);
+      object.local_bounds_min.y =
+          std::min(object.local_bounds_min.y, point.y);
+      object.local_bounds_min.z =
+          std::min(object.local_bounds_min.z, point.z);
+      object.local_bounds_max.x =
+          std::max(object.local_bounds_max.x, point.x);
+      object.local_bounds_max.y =
+          std::max(object.local_bounds_max.y, point.y);
+      object.local_bounds_max.z =
+          std::max(object.local_bounds_max.z, point.z);
+    };
+    for (const RenderVertex& vertex : object.render_mesh.vertices) {
+      include(vertex.position);
+    }
+    for (const CollisionTriangle& triangle :
+         object.collision_triangles) {
+      include(triangle.a);
+      include(triangle.b);
+      include(triangle.c);
+    }
+    map.editable_objects.push_back(std::move(object));
+  }
+  reader.RequireEnd();
+}
+
 void Validate(MapDefinition& map) {
   if (map.name.empty() || !Finite(map.spawn.position) ||
       !std::isfinite(map.spawn.heading_radians)) {
@@ -678,6 +833,55 @@ void Validate(MapDefinition& map) {
       });
   if (invalid_collision.load(std::memory_order_relaxed)) {
     throw std::runtime_error("SKATE collision triangle is invalid");
+  }
+  std::unordered_set<MapObjectId> object_ids;
+  std::unordered_set<std::string> object_names;
+  for (MapObject& object : map.editable_objects) {
+    if (object.id == 0 || object.name.empty() ||
+        !object_ids.insert(object.id).second ||
+        !object_names.insert(object.name).second ||
+        !Finite(object.origin) ||
+        !Finite(object.local_bounds_min) ||
+        !Finite(object.local_bounds_max) ||
+        object.local_bounds_min.x > object.local_bounds_max.x ||
+        object.local_bounds_min.y > object.local_bounds_max.y ||
+        object.local_bounds_min.z > object.local_bounds_max.z ||
+        object.render_mesh.vertices.empty() ||
+        object.render_mesh.indices.empty() ||
+        object.render_mesh.indices.size() % 3u != 0) {
+      throw std::runtime_error("SKATE editable map object is invalid");
+    }
+    for (const RenderVertex& vertex : object.render_mesh.vertices) {
+      if (!Finite(vertex.position) || !Finite(vertex.normal) ||
+          !Finite(vertex.uv) || !Finite(vertex.lightmap_uv) ||
+          !Finite(vertex.decal_uv) ||
+          !Finite(vertex.tangent_binormal) ||
+          !std::isfinite(vertex.tangent_handedness) ||
+          FindMaterial(map, vertex.material) == nullptr) {
+        throw std::runtime_error(
+            "SKATE editable map object vertex is invalid");
+      }
+    }
+    for (std::uint32_t index : object.render_mesh.indices) {
+      if (index >= object.render_mesh.vertices.size()) {
+        throw std::runtime_error(
+            "SKATE editable map object index is out of range");
+      }
+    }
+    for (CollisionTriangle& triangle :
+         object.collision_triangles) {
+      const Vec3 cross =
+          Cross(triangle.b - triangle.a, triangle.c - triangle.a);
+      if (!Finite(triangle.a) || !Finite(triangle.b) ||
+          !Finite(triangle.c) ||
+          LengthSquared(cross) <= kAreaEpsilon ||
+          triangle.surface == 0 ||
+          FindMaterial(map, triangle.material) == nullptr) {
+        throw std::runtime_error(
+            "SKATE editable map object collision is invalid");
+      }
+      triangle.normal = Normalize(cross);
+    }
   }
   for (const GrindRail& rail : map.grind_rails) {
     const bool native = !rail.native_segments.empty();
@@ -1281,6 +1485,9 @@ MapDefinition LoadOwnedMapPackage(const std::filesystem::path& path) {
         map.retail_world_metadata_json.assign(
             reinterpret_cast<const char*>(payload.data()),
             payload.size());
+      } else if (tag == std::array<char, 4>{'M', 'O', 'B', 'J'} &&
+                 (schema == 1 || schema == 2)) {
+        ReadMapObjects(std::move(payload), schema, map);
       }
     }
   }

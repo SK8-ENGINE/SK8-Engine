@@ -1,6 +1,7 @@
 #pragma once
 
 #include "skate/world/world_map.h"
+#include "skate/world/skate_object_package.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -144,6 +145,8 @@ struct WeatherSnapshot {
 // collision geometry therefore share one handwritten source definition.
 const VisualWorld& ActiveVisualWorld();
 const VisualMesh& ActiveSkyMesh();
+const VisualMesh& ActiveEditorGizmoVisualMesh();
+const VisualMesh& ActiveEditableObjectVisualMesh(std::size_t index);
 const VisualMesh& ActiveKinematicVisualMesh(std::size_t index);
 const VisualMesh& ActiveHingedDoorVisualMesh(std::size_t index);
 const VisualMesh& ActiveWaterVisualMesh();
@@ -153,6 +156,9 @@ const VisualMesh& ActiveRemoteSkaterVisualMesh();
 const VisualMesh& ActiveRainVisualMesh();
 const VisualMesh& ActiveLightningVisualMesh();
 const skate::world::MapDefinition& ActiveDefinition();
+std::size_t AppendSpawnedObject(
+    skate::world::SkateObjectAsset asset,
+    skate::world::Vec3 map_position);
 const skate::world::ImageTexture* ActiveImageTexture(
     skate::world::TextureId id);
 const char* ActiveMapName();
@@ -161,6 +167,7 @@ const char* ActiveMapName();
 const char* ActiveMapPackagePath();
 std::size_t ActiveSurfaceCount();
 std::size_t ActiveRampCount();
+std::size_t ActiveEditableObjectCount();
 std::size_t ActiveKinematicObjectCount();
 std::size_t ActiveHingedDoorCount();
 std::size_t ActiveWaterBasinCount();

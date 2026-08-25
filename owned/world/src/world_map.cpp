@@ -864,6 +864,10 @@ const MapDefinition& WorldMap::Definition() const {
   return definition_;
 }
 
+MapDefinition& WorldMap::MutableDefinition() {
+  return definition_;
+}
+
 const SurfaceMaterial* WorldMap::FindMaterial(MaterialId id) const {
   const auto found = std::find_if(
       definition_.materials.begin(),

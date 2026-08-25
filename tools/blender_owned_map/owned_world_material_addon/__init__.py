@@ -1940,6 +1940,9 @@ def _validate_scene(
         issues.append("Groups 1 and 3 contain no presentation meshes.")
 
     material_groups: dict[str, set[str]] = {}
+    material_group_objects: dict[
+        str, list[tuple[bpy.types.Object, str]]
+    ] = {}
     for obj in scene.objects:
         if (
             obj.name == exporter.SPAWN_OBJECT
@@ -1970,8 +1973,35 @@ def _validate_scene(
                 material_groups.setdefault(slot.material.name, set()).add(
                     memberships[0]
                 )
+                material_group_objects.setdefault(
+                    slot.material.name, []
+                ).append((obj, memberships[0]))
     for material_name, groups in material_groups.items():
         if len(groups) > 1:
+            proxy_group_pair = groups == {
+                exporter.NO_COLLISION_COLLECTION,
+                exporter.NO_PRESENTATION_COLLECTION,
+            }
+            proxy_owners_are_valid = proxy_group_pair and all(
+                (
+                    group != exporter.NO_PRESENTATION_COLLECTION
+                    or (
+                        str(obj.get("ow_map_object_owner", "")).strip()
+                        in {
+                            visual.name
+                            for visual in visual_objects
+                            if any(
+                                slot.material is not None
+                                and slot.material.name == material_name
+                                for slot in visual.material_slots
+                            )
+                        }
+                    )
+                )
+                for obj, group in material_group_objects[material_name]
+            )
+            if proxy_owners_are_valid:
+                continue
             issues.append(
                 f"{material_name}: material is used across multiple map "
                 f"groups ({', '.join(sorted(groups))}); duplicate it or "
@@ -2012,6 +2042,14 @@ def _validate_scene(
             issues.append(
                 f"{obj.name}: collision material {material_name!r} is not "
                 "used by a presentation group."
+            )
+        owner_name = str(obj.get("ow_map_object_owner", "")).strip()
+        if owner_name and owner_name not in {
+            visual.name for visual in visual_objects
+        }:
+            issues.append(
+                f"{obj.name}: editable collision owner {owner_name!r} "
+                "is not an exported presentation mesh."
             )
     collision_audit = None
     if collision_objects and inspect_geometry:
