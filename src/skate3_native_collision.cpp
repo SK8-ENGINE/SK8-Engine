@@ -123,7 +123,7 @@ constexpr std::size_t kMaximumHingedDoors = 32;
 // presentation parts. Collision-bearing records are still constrained by the
 // native collection's 4096-entry capacity, but render-only/static-collision
 // records must not consume that much lower logical-object ceiling.
-constexpr std::size_t kMaximumEditableObjects = 16384;
+constexpr std::size_t kMaximumEditableObjects = 20000;
 // University occupies 140 non-empty cells at 128 m, which exceeds the fixed
 // collection capacity. At 256 m it occupies 44 cells, and its largest cell
 // remains below kMaximumTrianglesPerOwnedChunk without dropping triangles.

@@ -91,6 +91,12 @@ Full UI guidance, scene conventions, and optional command-line automation are
 documented in `tools/blender_owned_map/README.md`; the binary specification
 is in `SKATE_FORMAT.md`.
 
+The export panel enables **Editable Map Objects** by default. Disable that
+option when a map should keep all of its normal rendering, collision,
+materials, and grind paths but expose none of its existing geometry to the
+in-game editor. This avoids per-object editor records without changing the
+playable static map.
+
 The exporter and runtime are original code and do not invoke, bundle, or
 depend on ArenaBuilder.
 

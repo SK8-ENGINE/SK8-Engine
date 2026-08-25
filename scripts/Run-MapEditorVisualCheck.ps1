@@ -179,20 +179,23 @@ function Read-EditorStatus {
 try {
     Set-Location -LiteralPath $repoRoot
     if ([string]::IsNullOrWhiteSpace($GameDataRoot)) {
-        $GameDataRoot =
-            'C:\Users\Daddy\Documents\SK8 Engine - Latest Release\game'
+        throw (
+            'Game data is not configured. Pass -GameDataRoot or set ' +
+            'SKATE3_GAME_DATA_ROOT to the legal runtime game directory.'
+        )
     }
     $GameDataRoot = [System.IO.Path]::GetFullPath($GameDataRoot)
     if ([string]::IsNullOrWhiteSpace($CodegenGameDataRoot)) {
-        $CodegenGameDataRoot = 'C:\sk83_recomp\assets'
+        throw (
+            'Codegen game data is not configured. Pass ' +
+            '-CodegenGameDataRoot or set SKATE3_CODEGEN_GAME_DATA_ROOT to ' +
+            'the expanded preview.14 codegen input.'
+        )
     }
     $CodegenGameDataRoot =
         [System.IO.Path]::GetFullPath($CodegenGameDataRoot)
     if ([string]::IsNullOrWhiteSpace($TrustedGeneratedRoot)) {
-        $TrustedGeneratedRoot = (
-            'C:\Users\Daddy\Documents\' +
-            'Skate3CustomEngineLayer-Release-preview14\Source\generated'
-        )
+        $TrustedGeneratedRoot = Join-Path $repoRoot 'generated'
     }
     $TrustedGeneratedRoot =
         [System.IO.Path]::GetFullPath($TrustedGeneratedRoot)
@@ -544,6 +547,13 @@ try {
         Write-Host 'For spawning: enter G, aim at open ground, press E, select Test Grind Ledge,'
         Write-Host 'and click Spawn selected (or press Enter). It should appear where aimed, already'
         Write-Host 'selected. Move/rotate it, collide with it, then grind its blue top edge.'
+        if (Test-Path -LiteralPath (
+            Join-Path $objectRoot 'tony_hawk_skate_ramp.skateobj'
+        ) -PathType Leaf) {
+            Write-Host 'Optional local ramp test: press E, select Tony Hawk Skate Ramp, and spawn'
+            Write-Host 'it on broad open ground. Confirm its texture, collision, and three grind'
+            Write-Host 'splines follow the complete object through translation and rotation.'
+        }
         Write-Host 'Press E again to close the list without spawning.'
         Write-Host 'The hinged physics door remains simulation-controlled rather than editable.'
         Write-Host 'Do not use the clearly marked InstantBailHazard for the on-foot floor test.'

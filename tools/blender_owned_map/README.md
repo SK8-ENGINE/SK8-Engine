@@ -173,6 +173,11 @@ geometry and the skater.
 
 ### Export modes
 
+- **Editable Map Objects** is enabled by default and writes stable per-object
+  ownership used by the in-game editor. Disable it to export a fully static
+  map: rendering, collision, materials, and grind paths are unchanged, but
+  existing map geometry cannot be selected or moved. Spawned `.skateobj`
+  items remain available at runtime.
 - **Fast / Automatic** fingerprints the scene, reuses unchanged geometry,
   and performs a full rebuild only when content changed. This is the normal
   choice.

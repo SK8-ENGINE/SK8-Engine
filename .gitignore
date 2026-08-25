@@ -34,6 +34,7 @@
 *.con
 *.skate
 *.skate.export-cache.json
+*.skateobj
 *.skateobj.export-cache.json
 *.blend
 *.blend[0-9]
@@ -43,6 +44,7 @@
 !/maps/blender_bake_showcase.blend
 !/maps/map_editor_mvp.skate
 !/maps/map_editor_mvp.blend
+!/objects/test_grind_ledge.skateobj
 /maps/blender_bake_showcase_textures/
 
 # Local runtime/config overrides
