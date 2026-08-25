@@ -102,6 +102,7 @@ std::atomic<uint32_t> g_map_draws{0};
 std::atomic<uint32_t> g_map_chunk_count{0};
 std::atomic<uint32_t> g_map_candidate_chunks{0};
 std::atomic<uint32_t> g_map_visible_chunks{0};
+std::atomic<uint32_t> g_map_occluded_chunks{0};
 std::atomic<uint32_t> g_map_resident_chunks{0};
 std::atomic<uint32_t> g_map_chunk_draws{0};
 std::atomic<uint32_t> g_sky_draws{0};
@@ -1051,11 +1052,13 @@ void RecordMapDraw(bool submitted) {
 }
 
 void RecordMapChunks(uint32_t total, uint32_t candidates,
-                     uint32_t visible, uint32_t resident,
+                     uint32_t visible, uint32_t occluded,
+                     uint32_t resident,
                      uint32_t draw_calls) {
   g_map_chunk_count.store(total, std::memory_order_relaxed);
   g_map_candidate_chunks.store(candidates, std::memory_order_relaxed);
   g_map_visible_chunks.store(visible, std::memory_order_relaxed);
+  g_map_occluded_chunks.store(occluded, std::memory_order_relaxed);
   g_map_resident_chunks.store(resident, std::memory_order_relaxed);
   g_map_chunk_draws.store(draw_calls, std::memory_order_relaxed);
 }
@@ -1147,6 +1150,8 @@ void AppendTelemetry(std::ostream& out) {
       << g_map_candidate_chunks.load(std::memory_order_relaxed)
       << " sandbox_map_visible_chunks="
       << g_map_visible_chunks.load(std::memory_order_relaxed)
+      << " sandbox_map_occluded_chunks="
+      << g_map_occluded_chunks.load(std::memory_order_relaxed)
       << " sandbox_map_resident_chunks="
       << g_map_resident_chunks.load(std::memory_order_relaxed)
       << " sandbox_map_chunk_draws="

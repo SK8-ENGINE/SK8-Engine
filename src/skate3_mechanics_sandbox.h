@@ -105,7 +105,8 @@ void RecordRenderStage(RenderStage stage);
 void RecordRenderedItems(uint32_t draw_count);
 void RecordMapDraw(bool submitted);
 void RecordMapChunks(uint32_t total, uint32_t candidates,
-                     uint32_t visible, uint32_t resident,
+                     uint32_t visible, uint32_t occluded,
+                     uint32_t resident,
                      uint32_t draw_calls);
 void RecordSkyDraw(uint32_t draw_calls);
 

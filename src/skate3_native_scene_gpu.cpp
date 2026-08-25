@@ -13217,7 +13217,20 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
       std::ceil(kDetailRenderDistance / world.chunk_size));
   uint32_t candidate_chunks = 0;
   uint32_t visible_chunks = 0;
+  uint32_t occluded_chunks = 0;
   uint32_t draw_calls = 0;
+  bool owned_occlusion_active =
+      REXCVAR_GET(skate3_native_render_scene_occlusion_cull) &&
+      g_r.occl_grid_valid;
+  if (owned_occlusion_active) {
+    float camera_delta_squared = 0.0f;
+    for (int axis = 0; axis < 3; ++axis) {
+      const float delta =
+          scene.cam_pos[axis] - g_r.occl_grid_cam[axis];
+      camera_delta_squared += delta * delta;
+    }
+    owned_occlusion_active = camera_delta_squared < 1.0f;
+  }
   const auto draw_chunk = [&](std::size_t chunk_index) {
     const mechanics_sandbox::map::VisualChunk& chunk =
         world.chunks[chunk_index];
@@ -13238,6 +13251,26 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
       return;
     }
     ++visible_chunks;
+    if (owned_occlusion_active) {
+      DrawItem bounds_item{};
+      bounds_item.bbox_min[0] = chunk.bounds_min[0];
+      bounds_item.bbox_min[1] = chunk.bounds_min[1];
+      bounds_item.bbox_min[2] = chunk.bounds_min[2];
+      bounds_item.bbox_max[0] = chunk.bounds_max[0];
+      bounds_item.bbox_max[1] = chunk.bounds_max[1];
+      bounds_item.bbox_max[2] = chunk.bounds_max[2];
+      bounds_item.world[0] = 1.0f;
+      bounds_item.world[5] = 1.0f;
+      bounds_item.world[10] = 1.0f;
+      bounds_item.world[12] = origin[0];
+      bounds_item.world[13] = origin[1];
+      bounds_item.world[14] = origin[2];
+      bounds_item.world[15] = 1.0f;
+      if (ItemOccludedByGrid(bounds_item, 1.5f)) {
+        ++occluded_chunks;
+        return;
+      }
+    }
     if (!EnsureSandboxMapChunk(context.device, chunk_index)) {
       return;
     }
@@ -15623,7 +15656,7 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
   }
   mechanics_sandbox::RecordMapChunks(
       static_cast<uint32_t>(world.chunks.size()), candidate_chunks,
-      visible_chunks, resident_chunks, draw_calls);
+      visible_chunks, occluded_chunks, resident_chunks, draw_calls);
   mechanics_sandbox::RecordMapDraw(draw_calls != 0);
 }
 

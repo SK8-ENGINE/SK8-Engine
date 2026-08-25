@@ -49,6 +49,12 @@ REXCVAR_DEFINE_BOOL(
     "owned static collision. Leave the game's streamed retail collision "
     "collection authoritative.")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+REXCVAR_DEFINE_BOOL(
+    skate3_mechanics_sandbox_native_collision_diagnostics, false, "Skate 3",
+    "Collect detailed per-triangle owned-world collision diagnostics. This "
+    "adds instrumentation to hot native physics queries and is disabled for "
+    "normal gameplay.")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 
 namespace skate3::native_collision {
 namespace {
@@ -108,7 +114,8 @@ constexpr std::uint32_t kGroundResultOffset = 176;
 // collection pressure.
 constexpr std::size_t kMaximumOwnedStaticChunks = 1024;
 constexpr std::size_t kOwnedCollisionActiveMeshes = 32;
-constexpr float kOwnedCollisionStreamRefreshDistance = 24.0f;
+constexpr std::size_t kOwnedCollisionHysteresisMeshes = 16;
+constexpr float kOwnedCollisionStreamRefreshDistance = 40.0f;
 constexpr std::size_t kMaximumHingedDoors = 32;
 // University occupies 140 non-empty cells at 128 m, which exceeds the fixed
 // collection capacity. At 256 m it occupies 44 cells, and its largest cell
@@ -1289,8 +1296,30 @@ bool SelectOwnedCollisionMeshes(float x, float z, bool force) {
   const std::uint32_t desired_count = std::min<std::uint32_t>(
       count, static_cast<std::uint32_t>(kOwnedCollisionActiveMeshes));
   std::vector<bool> desired(count, false);
-  for (std::uint32_t rank = 0; rank < desired_count; ++rank) {
-    desired[ranked[rank].second] = true;
+  std::uint32_t retained = 0;
+  const std::uint32_t retention_rank = std::min<std::uint32_t>(
+      count, desired_count +
+                 static_cast<std::uint32_t>(
+                     kOwnedCollisionHysteresisMeshes));
+  // Preserve active resources while they remain close to the nearest set.
+  // Without this rank hysteresis, tiny player movements around equal-distance
+  // sector boundaries repeatedly rebuilt otherwise useful collection slots
+  // on the mechanics thread.
+  for (std::uint32_t rank = 0;
+       rank < retention_rank && retained < desired_count; ++rank) {
+    const std::uint32_t index = ranked[rank].second;
+    if (OwnedStaticDesired(index)) {
+      desired[index] = true;
+      ++retained;
+    }
+  }
+  for (std::uint32_t rank = 0;
+       rank < count && retained < desired_count; ++rank) {
+    const std::uint32_t index = ranked[rank].second;
+    if (!desired[index]) {
+      desired[index] = true;
+      ++retained;
+    }
   }
   bool changed = false;
   for (std::uint32_t index = 0; index < count; ++index) {
@@ -1638,7 +1667,15 @@ bool Enabled() {
   return REXCVAR_GET(skate3_mechanics_sandbox_native_collision);
 }
 
+bool DiagnosticsEnabled() {
+  return REXCVAR_GET(
+      skate3_mechanics_sandbox_native_collision_diagnostics);
+}
+
 void ObserveNativeLineWorker(std::uint32_t mesh) noexcept {
+  if (!DiagnosticsEnabled()) {
+    return;
+  }
   g_native_line_workers.fetch_add(1, std::memory_order_relaxed);
   const bool owned_static = IsOwnedStaticMesh(mesh);
   const bool owned_kinematic =
@@ -1654,6 +1691,9 @@ void ObserveNativeLineWorker(std::uint32_t mesh) noexcept {
 }
 
 void ObserveNativeBoxWorker(std::uint32_t mesh) noexcept {
+  if (!DiagnosticsEnabled()) {
+    return;
+  }
   g_native_box_workers.fetch_add(1, std::memory_order_relaxed);
   const bool owned_static = IsOwnedStaticMesh(mesh);
   const bool owned_kinematic =
@@ -1669,6 +1709,9 @@ void ObserveNativeBoxWorker(std::uint32_t mesh) noexcept {
 }
 
 void ObserveNativeIteratorMesh(std::uint32_t mesh) noexcept {
+  if (!DiagnosticsEnabled()) {
+    return;
+  }
   g_native_iterators.fetch_add(1, std::memory_order_relaxed);
   const bool owned_static = IsOwnedStaticMesh(mesh);
   const bool owned_kinematic =
@@ -1684,6 +1727,13 @@ void ObserveNativeIteratorMesh(std::uint32_t mesh) noexcept {
 }
 
 void ObserveNativeQueryMesh(std::uint32_t mesh) noexcept {
+  if (!DiagnosticsEnabled()) {
+    g_querying_kinematic_mesh = false;
+    g_querying_door_index = -1;
+    g_querying_mesh = 0;
+    g_querying_owned_mesh = false;
+    return;
+  }
   g_native_query_candidates.fetch_add(1, std::memory_order_relaxed);
   g_native_last_candidate_mesh.store(mesh, std::memory_order_relaxed);
   const std::uint32_t kinematic_mesh =
@@ -1790,8 +1840,12 @@ bool PrepareKinematicQueryBatch(std::uint32_t batch,
 
 void ObserveNativeLineQueryBatch(std::uint32_t batch,
                                  std::uint8_t* base) noexcept {
-  g_kinematic_line_batches.fetch_add(1, std::memory_order_relaxed);
-  if (PrepareKinematicQueryBatch(batch, base, true)) {
+  const bool diagnostics = DiagnosticsEnabled();
+  if (diagnostics) {
+    g_kinematic_line_batches.fetch_add(1, std::memory_order_relaxed);
+  }
+  if (PrepareKinematicQueryBatch(batch, base, diagnostics) &&
+      diagnostics) {
     g_kinematic_linear_line_batches.fetch_add(
         1, std::memory_order_relaxed);
   }
@@ -1799,7 +1853,8 @@ void ObserveNativeLineQueryBatch(std::uint32_t batch,
 
 void PrepareNativeBoxQueryBatch(std::uint32_t batch,
                                 std::uint8_t* base) noexcept {
-  if (PrepareKinematicQueryBatch(batch, base, false)) {
+  if (PrepareKinematicQueryBatch(batch, base, false) &&
+      DiagnosticsEnabled()) {
     g_kinematic_linear_box_batches.fetch_add(
         1, std::memory_order_relaxed);
   }
@@ -1807,6 +1862,9 @@ void PrepareNativeBoxQueryBatch(std::uint32_t batch,
 
 void ObserveNativeClusterDecode(
     std::uint32_t triangle_count) noexcept {
+  if (!DiagnosticsEnabled()) {
+    return;
+  }
   if (!ObserveCurrentTriangleQuery()) {
     return;
   }
@@ -1820,6 +1878,9 @@ void PrepareNativeTriangleTest(std::uint32_t result,
                                std::uint32_t line_delta,
                                std::uint8_t* base) noexcept {
   g_pending_native_triangle_test = {};
+  if (!DiagnosticsEnabled()) {
+    return;
+  }
   if (!base || !IsGuestDataAddress(result) ||
       !IsGuestDataAddress(line_start) ||
       !IsGuestDataAddress(line_start + 8) ||
@@ -1842,6 +1903,9 @@ void PrepareNativeTriangleTest(std::uint32_t result,
 void ObserveNativeTriangleResult(std::uint32_t hit,
                                  std::uint32_t decoded_triangle,
                                  std::uint8_t* base) noexcept {
+  if (!DiagnosticsEnabled()) {
+    return;
+  }
   if (!ObserveCurrentTriangleQuery()) {
     return;
   }
@@ -1994,6 +2058,9 @@ void ObserveNativeTriangleResult(std::uint32_t hit,
 void ObserveNativeTriangleAccepted(std::uint32_t decoded_triangle,
                                    std::uint32_t worker,
                                    std::uint8_t* base) noexcept {
+  if (!DiagnosticsEnabled()) {
+    return;
+  }
   if (!ObserveCurrentTriangleQuery() || base == nullptr ||
       decoded_triangle < 136 ||
       !IsGuestDataAddress(decoded_triangle - 136)) {
@@ -2034,6 +2101,9 @@ void ObserveNativeTriangleSelected(std::uint32_t decoded_triangle,
                                    std::uint32_t candidate,
                                    std::uint32_t worker,
                                    std::uint8_t* base) noexcept {
+  if (!DiagnosticsEnabled()) {
+    return;
+  }
   if (!ObserveCurrentTriangleQuery() || base == nullptr ||
       decoded_triangle < 136 ||
       !IsGuestDataAddress(decoded_triangle - 136) ||
@@ -2096,6 +2166,9 @@ void BeginNativePrimitivePair(std::uint32_t result,
                               std::uint32_t transform_b,
                               std::uint8_t* base) noexcept {
   g_pending_primitive_pair = {};
+  if (!DiagnosticsEnabled()) {
+    return;
+  }
   g_native_primitive_pair_tests.fetch_add(1,
                                           std::memory_order_relaxed);
   if (!base ||
@@ -2174,6 +2247,10 @@ void BeginNativePrimitivePair(std::uint32_t result,
 void EndNativePrimitivePair(std::uint32_t hit,
                             std::uint8_t* base) noexcept {
   (void)base;
+  if (!DiagnosticsEnabled()) {
+    g_pending_primitive_pair = {};
+    return;
+  }
   PendingPrimitivePair pending = g_pending_primitive_pair;
   g_pending_primitive_pair = {};
   if (hit == 0) {
@@ -2422,6 +2499,9 @@ void ObservePlayerCollisionTelemetry(const float world_position[3],
   }
   g_native_player_position_valid.store(true,
                                        std::memory_order_release);
+  if (!DiagnosticsEnabled()) {
+    return;
+  }
 
   thread_local std::uint64_t previous_frame = 0;
   thread_local std::uint64_t previous_hits = 0;
