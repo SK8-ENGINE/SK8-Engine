@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -334,6 +335,19 @@ struct CollisionTriangle {
   bool has_native_edge_codes = false;
 };
 
+// One association between a collision triangle in the portable SKATE stream
+// and the untouched retail ClusteredMesh resource that originally supplied
+// it. A triangle can occur in more than one streamed resource at cell seams,
+// so this is deliberately a separate many-to-many table rather than one
+// resource field on CollisionTriangle.
+struct RetailCollisionAssociation {
+  std::uint32_t triangle_index = 0;
+  std::uint16_t resource_index = 0;
+  std::uint16_t cluster_index = 0;
+  std::uint32_t group_id = std::numeric_limits<std::uint32_t>::max();
+  std::uint8_t unit_flags = 0;
+};
+
 // One independently editable Blender object. Ordinary SKATE render and
 // collision records remain flattened for backward compatibility; the MOBJ
 // extension materializes the object's referenced ranges into this local-space
@@ -545,6 +559,11 @@ struct MapDefinition {
   std::vector<ImageTexture> textures;
   RenderMesh render_mesh;
   std::vector<CollisionTriangle> collision_triangles;
+  // RCID v1 preserves provenance for exact-retail collision streaming. The
+  // resource names use the same order as University.spawn-collision.rwcmset.
+  // Generic and older maps leave both vectors empty.
+  std::vector<std::string> retail_collision_resource_names;
+  std::vector<RetailCollisionAssociation> retail_collision_associations;
   std::vector<MapObject> editable_objects;
   std::vector<GrindRail> grind_rails;
   std::vector<NpcRoute> npc_routes;
@@ -555,6 +574,14 @@ struct MapDefinition {
   std::vector<RaytracedPuddle> raytraced_puddles;
   std::vector<MovingLightOrb> moving_light_orbs;
 };
+
+bool HasRetailCollisionIdentity(const MapDefinition &map);
+std::vector<std::uint16_t>
+RetailCollisionResourcesForObject(const MapDefinition &map,
+                                  const MapObject &object);
+MapDefinition BuildRetailCollisionResourceFallback(
+    const MapDefinition &map, std::uint16_t resource_index,
+    std::span<const std::uint8_t> detached_objects);
 
 // Evaluates a cosine-eased ping-pong path. It is a pure function so replay,
 // the recomp adapter, and the standalone game can produce the same pose.

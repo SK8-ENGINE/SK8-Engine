@@ -176,6 +176,58 @@ int main() {
   }
 
   {
+    MapDefinition retail_map;
+    retail_map.name = "retail_collision_identity";
+    retail_map.collision_triangles = {
+        CollisionTriangle{.a = {0.0f, 0.0f, 0.0f}},
+        CollisionTriangle{.a = {1.0f, 0.0f, 0.0f}},
+        CollisionTriangle{.a = {2.0f, 0.0f, 0.0f}},
+    };
+    retail_map.retail_collision_resource_names = {"cell_a#0", "cell_b#0"};
+    retail_map.retail_collision_associations = {
+        {.triangle_index = 0, .resource_index = 0, .cluster_index = 2},
+        {.triangle_index = 1, .resource_index = 0, .cluster_index = 3},
+        {.triangle_index = 1, .resource_index = 1, .cluster_index = 0},
+        {.triangle_index = 2, .resource_index = 1, .cluster_index = 1},
+    };
+    retail_map.editable_objects = {
+        MapObject{
+            .id = 1,
+            .name = "Detached",
+            .source_first_collision_triangle = 0,
+            .source_collision_triangle_count = 1,
+        },
+        MapObject{
+            .id = 2,
+            .name = "Unchanged",
+            .source_first_collision_triangle = 2,
+            .source_collision_triangle_count = 1,
+        },
+    };
+    Require(HasRetailCollisionIdentity(retail_map),
+            "valid many-to-many retail collision identity was rejected");
+    Require(RetailCollisionResourcesForObject(retail_map,
+                                              retail_map.editable_objects[0]) ==
+                std::vector<std::uint16_t>{0},
+            "editable object did not resolve its exact retail resource");
+    const std::array<std::uint8_t, 2> detached{1, 0};
+    const MapDefinition fallback_a =
+        BuildRetailCollisionResourceFallback(retail_map, 0, detached);
+    const MapDefinition fallback_b =
+        BuildRetailCollisionResourceFallback(retail_map, 1, detached);
+    Require(fallback_a.collision_triangles.size() == 1 &&
+                NearlyEqual(fallback_a.collision_triangles.front().a.x, 1.0f),
+            "retail fallback retained a detached object's old collision");
+    Require(fallback_b.collision_triangles.size() == 2 &&
+                NearlyEqual(fallback_b.collision_triangles.back().a.x, 2.0f),
+            "retail fallback dropped unchanged resource collision");
+    retail_map.retail_collision_associations.erase(
+        retail_map.retail_collision_associations.begin());
+    Require(!HasRetailCollisionIdentity(retail_map),
+            "retail collision identity accepted a triangle coverage gap");
+  }
+
+  {
     constexpr float identity_view[16] = {
         1.0f, 0.0f, 0.0f, 0.0f,
         0.0f, 1.0f, 0.0f, 0.0f,

@@ -148,6 +148,33 @@ int main(int argc, char** argv) {
         << " bounds_max=" << maximum.x << "," << maximum.y << ","
         << maximum.z
         << '\n';
+    if (!map.retail_collision_resource_names.empty()) {
+      if (!skate::world::HasRetailCollisionIdentity(map)) {
+        std::cerr << "SKATE_RETAIL_COLLISION_IDENTITY_FAIL invalid_table\n";
+        return 1;
+      }
+      std::size_t collision_objects = 0;
+      std::size_t maximum_resources = 0;
+      for (const skate::world::MapObject &object : map.editable_objects) {
+        if (object.source_collision_triangle_count == 0) {
+          continue;
+        }
+        const std::vector<std::uint16_t> resources =
+            skate::world::RetailCollisionResourcesForObject(map, object);
+        if (resources.empty()) {
+          std::cerr << "SKATE_RETAIL_COLLISION_IDENTITY_FAIL object="
+                    << object.name << '\n';
+          return 1;
+        }
+        ++collision_objects;
+        maximum_resources = std::max(maximum_resources, resources.size());
+      }
+      std::cout << "SKATE_RETAIL_COLLISION_IDENTITY_OK"
+                << " resources=" << map.retail_collision_resource_names.size()
+                << " associations=" << map.retail_collision_associations.size()
+                << " collision_objects=" << collision_objects
+                << " max_resources_per_object=" << maximum_resources << '\n';
+    }
     if (compile_world) {
       {
         const skate::world::RenderWorld render_world =

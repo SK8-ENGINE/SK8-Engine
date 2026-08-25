@@ -31,8 +31,22 @@ $mapFileName = if ($UseGeneratedEditorMap) {
     'blender_bake_showcase.skate'
 }
 $mapPath = Join-Path $repoRoot "maps\$mapFileName"
+$retailCollisionArchive = Join-Path $repoRoot (
+    'tools\vanilla_map_extraction\intermediate\university\' +
+    'University.spawn-collision.rwcmset'
+)
+if ($UniversityPerformanceMode -ne 'None' -and
+    -not (Test-Path -LiteralPath $retailCollisionArchive -PathType Leaf)) {
+    throw (
+        'University exact-retail collision archive is missing: ' +
+        $retailCollisionArchive
+    )
+}
 $objectRoot = Join-Path $repoRoot 'objects'
-$testObjectPath = Join-Path $objectRoot 'test_grind_ledge.skateobj'
+$objectPaths = @(
+    Get-ChildItem -LiteralPath $objectRoot -Filter '*.skateobj' -File |
+        Sort-Object Name
+)
 $clang = 'C:\Program Files\LLVM\bin\clang.exe'
 $clangCxx = 'C:\Program Files\LLVM\bin\clang++.exe'
 
@@ -363,11 +377,22 @@ try {
     ) -Arguments @(
         $mapPath, '--compile-world'
     ) -Description "Validate and compile visual-check map $mapFileName"
-    Invoke-Checked -FilePath (
-        Join-Path $worldBuildRoot 'skate_owned_map_validate.exe'
-    ) -Arguments @(
-        $testObjectPath, '--object-profile', '--compile-world'
-    ) -Description 'Validate grindable SKATEOBJ spawn-menu test asset'
+    if ($UniversityPerformanceMode -ne 'None') {
+        Invoke-Checked -FilePath (
+            Join-Path $worldBuildRoot (
+                'skate_rw_collision_archive_validate.exe'
+            )
+        ) -Arguments @(
+            $retailCollisionArchive
+        ) -Description 'Validate exact University collision archive'
+    }
+    foreach ($objectPath in $objectPaths) {
+        Invoke-Checked -FilePath (
+            Join-Path $worldBuildRoot 'skate_owned_map_validate.exe'
+        ) -Arguments @(
+            $objectPath.FullName, '--object-profile', '--compile-world'
+        ) -Description "Validate spawn object $($objectPath.Name)"
+    }
 
     if ($VerifyOnly) {
         Write-Host ''
@@ -397,6 +422,15 @@ try {
     Copy-Item -LiteralPath $mapPath -Destination (
         Join-Path $stagedMapRoot $mapFileName
     ) -Force
+    $stagedRetailCollisionArchive = $null
+    if ($UniversityPerformanceMode -ne 'None') {
+        $stagedRetailCollisionArchive = Join-Path (
+            $stagedMapRoot
+        ) 'University.spawn-collision.rwcmset'
+        Copy-Item -LiteralPath $retailCollisionArchive -Destination (
+            $stagedRetailCollisionArchive
+        ) -Force
+    }
     Get-ChildItem -LiteralPath $objectRoot -Filter '*.skateobj' -File |
         Copy-Item -Destination $stagedObjectRoot -Force
     New-Item -ItemType Junction -Path (
@@ -437,11 +471,26 @@ try {
         Join-Path $runRoot 'launch-arguments.txt'
     ) -Encoding UTF8
     $env:SKATE3_OWNED_MAP = "owned_maps/$mapFileName"
+    if ($null -ne $stagedRetailCollisionArchive) {
+        $env:SKATE3_NATIVE_COLLISION_ARCHIVE =
+            $stagedRetailCollisionArchive
+    } else {
+        Remove-Item Env:SKATE3_NATIVE_COLLISION_ARCHIVE `
+            -ErrorAction SilentlyContinue
+    }
 
     Write-Host ''
     Write-Host "Prepared run:       $runRoot"
     Write-Host "Test map:           $mapFileName"
-    Write-Host 'Test object:        objects/test_grind_ledge.skateobj'
+    if ($null -ne $stagedRetailCollisionArchive) {
+        Write-Host (
+            "Exact collision:     $stagedRetailCollisionArchive"
+        )
+    }
+    Write-Host 'Spawn objects:'
+    foreach ($objectPath in $objectPaths) {
+        Write-Host "  objects/$($objectPath.Name)"
+    }
     Write-Host "Event log:          $eventLog"
     Write-Host "Telemetry log:      $telemetryLog"
     Write-Host ''

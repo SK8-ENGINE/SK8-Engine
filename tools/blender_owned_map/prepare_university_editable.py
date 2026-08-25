@@ -32,6 +32,15 @@ if str(TOOL_ROOT) not in sys.path:
 import owned_world_material_addon as addon  # noqa: E402
 from owned_world_material_addon import exporter  # noqa: E402
 
+COLLISION_TOOL_ROOT = (
+    TOOL_ROOT.parent
+    / "vanilla_map_extraction"
+    / "tools"
+)
+if str(COLLISION_TOOL_ROOT) not in sys.path:
+    sys.path.insert(0, str(COLLISION_TOOL_ROOT))
+from attach_retail_collision_identity import attach_identity  # noqa: E402
+
 
 # These are intentionally semantic world markers, not generic material words
 # such as "concrete" or "metal" that also appear on movable skate props.
@@ -104,6 +113,7 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--report", type=Path)
     parser.add_argument("--output-blend", type=Path)
     parser.add_argument("--output-skate", type=Path)
+    parser.add_argument("--retail-collision-archive", type=Path)
     return parser.parse_args(arguments)
 
 
@@ -693,6 +703,11 @@ def main() -> int:
         raise RuntimeError(
             "--output-blend and --output-skate are required for conversion"
         )
+    if arguments.retail_collision_archive is None:
+        raise RuntimeError(
+            "--retail-collision-archive is required for editable University "
+            "collision provenance"
+        )
 
     by_name = {item.object_name: item for item in classifications}
     for obj in visual_objects:
@@ -754,6 +769,20 @@ def main() -> int:
         bpy.context.scene["ow_map_name"] = "University District - Editable"
         bpy.ops.wm.save_as_mainfile(filepath=str(output_blend))
         exporter.export_scene(output_skate, force_rebuild=True)
+        identity_output = output_skate.with_name(
+            output_skate.stem + ".rcid" + output_skate.suffix
+        )
+        identity = attach_identity(
+            output_skate,
+            arguments.retail_collision_archive.resolve(),
+            identity_output,
+        )
+        identity_output.replace(output_skate)
+        print(
+            "UNIVERSITY_EDITABLE_COLLISION_IDENTITY",
+            json.dumps(identity, sort_keys=True),
+            flush=True,
+        )
     finally:
         addon.unregister()
     print(

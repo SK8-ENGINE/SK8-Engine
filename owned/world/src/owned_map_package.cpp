@@ -626,6 +626,69 @@ void ReadMapObjects(std::vector<std::uint8_t> payload,
   reader.RequireEnd();
 }
 
+void ReadRetailCollisionIdentity(std::vector<std::uint8_t> payload,
+                                 std::uint32_t schema, MapDefinition &map) {
+  if (schema != 1) {
+    return;
+  }
+  Reader reader(std::move(payload));
+  const std::uint32_t resource_count = reader.Scalar<std::uint32_t>();
+  RequireCount(resource_count, "retail collision resource");
+  if (resource_count == 0 ||
+      resource_count > std::numeric_limits<std::uint16_t>::max()) {
+    throw std::runtime_error(
+        "SKATE retail collision resource count is invalid");
+  }
+  map.retail_collision_resource_names.reserve(resource_count);
+  for (std::uint32_t index = 0; index < resource_count; ++index) {
+    std::string name = reader.String();
+    if (name.empty()) {
+      throw std::runtime_error(
+          "SKATE retail collision resource name is invalid");
+    }
+    map.retail_collision_resource_names.push_back(std::move(name));
+  }
+
+  const std::uint32_t triangle_count = reader.Scalar<std::uint32_t>();
+  if (triangle_count != map.collision_triangles.size()) {
+    throw std::runtime_error(
+        "SKATE retail collision identity triangle count is invalid");
+  }
+  const std::uint32_t association_count = reader.Scalar<std::uint32_t>();
+  RequireCount(association_count, "retail collision association");
+  if (association_count < triangle_count) {
+    throw std::runtime_error("SKATE retail collision identity omits triangles");
+  }
+  map.retail_collision_associations.reserve(association_count);
+  std::uint32_t previous_triangle = 0;
+  std::uint16_t previous_resource = 0;
+  bool first = true;
+  for (std::uint32_t index = 0; index < association_count; ++index) {
+    RetailCollisionAssociation association;
+    association.triangle_index = reader.Scalar<std::uint32_t>();
+    association.resource_index = reader.Scalar<std::uint16_t>();
+    association.cluster_index = reader.Scalar<std::uint16_t>();
+    association.group_id = reader.Scalar<std::uint32_t>();
+    association.unit_flags = reader.Scalar<std::uint8_t>();
+    const std::array<std::uint8_t, 3> reserved{reader.Scalar<std::uint8_t>(),
+                                               reader.Scalar<std::uint8_t>(),
+                                               reader.Scalar<std::uint8_t>()};
+    if (association.triangle_index >= triangle_count ||
+        association.resource_index >= resource_count ||
+        reserved != std::array<std::uint8_t, 3>{} ||
+        (!first && (association.triangle_index < previous_triangle ||
+                    (association.triangle_index == previous_triangle &&
+                     association.resource_index <= previous_resource)))) {
+      throw std::runtime_error("SKATE retail collision association is invalid");
+    }
+    first = false;
+    previous_triangle = association.triangle_index;
+    previous_resource = association.resource_index;
+    map.retail_collision_associations.push_back(association);
+  }
+  reader.RequireEnd();
+}
+
 void Validate(MapDefinition& map) {
   if (map.name.empty() || !Finite(map.spawn.position) ||
       !std::isfinite(map.spawn.heading_radians)) {
@@ -1488,6 +1551,8 @@ MapDefinition LoadOwnedMapPackage(const std::filesystem::path& path) {
       } else if (tag == std::array<char, 4>{'M', 'O', 'B', 'J'} &&
                  (schema == 1 || schema == 2)) {
         ReadMapObjects(std::move(payload), schema, map);
+      } else if (tag == std::array<char, 4>{'R', 'C', 'I', 'D'}) {
+        ReadRetailCollisionIdentity(std::move(payload), schema, map);
       }
     }
   }
