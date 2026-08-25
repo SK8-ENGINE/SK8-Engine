@@ -14,7 +14,7 @@ $latestFile = Join-Path $repoRoot 'out\visual-checks\LATEST.txt'
 if (-not (Test-Path -LiteralPath $latestFile -PathType Leaf)) {
     throw (
         'No completed visual-check setup was found. Run ' +
-        'RUN_MULTIPLAYER_VISUAL_CHECK.bat first.'
+        'scripts\Run-MultiplayerVisualCheck.ps1 first.'
     )
 }
 $runRoot = (Get-Content -LiteralPath $latestFile -Raw).Trim()

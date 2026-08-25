@@ -89,10 +89,11 @@ For all multiplayer implementation work:
   They may compile and run non-game unit, protocol, synthetic, and offline
   telemetry tests.
 - When in-game validation is justified, provide a convenient user-run Windows
-  `.bat` launcher in the multiplayer worktree. It must build the exact
-  worktree source without falling back to an older binary, stage isolated
-  clients, enable the required diagnostics, and write every run to a named
-  timestamped directory.
+  `.bat` launcher under the worktree's ignored
+  `out/local-tools/<feature>/` directory. Never stage or commit that launcher.
+  It must build the exact worktree source without falling back to an older
+  binary, stage isolated clients, enable the required diagnostics, and write
+  every run to a named timestamped directory.
 - Before the user runs a visual check, state the exact launcher, client count,
   scenario, duration, visual success criteria, and visual failure criteria.
   Never execute the visual-check `.bat` as an agent.
@@ -101,3 +102,14 @@ For all multiplayer implementation work:
   telemetry-backed findings. If the logs cannot answer a relevant failure,
   improve the instrumentation and prepare another user-run check rather than
   launching the game.
+
+## Repository hygiene
+
+- Never commit personal absolute paths, machine-specific launchers, local
+  configuration, retail data, build output, telemetry, logs, generated
+  archives, or extracted game content.
+- Keep user-run `.bat` files under ignored `out/local-tools/<feature>/`.
+  Portable project automation belongs in reviewed scripts with no personal
+  defaults.
+- Run `scripts/Test-RepositoryHygiene.ps1` before proposing a commit or pull
+  request.

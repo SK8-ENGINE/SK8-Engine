@@ -65,9 +65,6 @@ function Resolve-InstallRoot {
     if (-not [string]::IsNullOrWhiteSpace($Requested)) {
         $candidates.Add($Requested)
     }
-    $candidates.Add(
-        'C:\Users\Daddy\Documents\SK8 Engine - Latest Release'
-    )
     if (-not [string]::IsNullOrWhiteSpace(
             $env:SKATE3_PLAYER_ROOT
         )) {

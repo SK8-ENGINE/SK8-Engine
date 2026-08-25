@@ -140,7 +140,8 @@ be hidden by successful telemetry.
 map agent. It performs stale exports, package checks, game compilation,
 engine-side validation, and staging, and contains no game-launch path.
 
-`Run-University-Visual-Check.bat` is the user-facing launch-only command. It
-hash-checks the prepared executable/runtime/map, creates a timestamped runtime
-log directory, and launches the already staged build. Agents must not execute
-the BAT or `skate3.exe`; only the user decides visual correctness.
+`Launch-UniversityVisualCheck.ps1` is the user-facing launch-only command. It
+may be wrapped by an ignored local `.bat` under `out/local-tools`, hash-checks
+the prepared executable/runtime/map, creates a timestamped runtime log
+directory, and launches the already staged build. Agents must not execute the
+launch-only script or `skate3.exe`; only the user decides visual correctness.
