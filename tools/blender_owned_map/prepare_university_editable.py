@@ -1,11 +1,13 @@
-"""Prepare a curated props-editable University map from the extracted scene.
+"""Prepare an editable University map from the extracted scene.
 
 The University retail extraction contains material-batched presentation
 meshes and separately extracted exact collision. A retail mesh part is not
 automatically an authored object: most ``sur_`` records are floor, wall, or
-material fragments. This tool keeps permanent world pieces static, exposes
-compact retail props and named skate features, recentres those meshes for
-editor transforms, and reports every classification decision before export.
+material fragments. The curated profile exposes compact retail props and
+named skate features. The aggressive profile intentionally exposes every
+visual mesh record, up to a deterministic 20,000-object ceiling, for editor
+performance stress testing. Both profiles report every classification
+decision before export.
 
 Usage:
   blender --background DIST_University_Owned.blend \
@@ -121,6 +123,7 @@ MAX_HORIZONTAL_SPAN = 40.0
 MAX_VERTICAL_SPAN = 25.0
 MAX_FOOTPRINT_AREA = 650.0
 MAX_TRIANGLES = 20_000
+AGGRESSIVE_EDITABLE_LIMIT = 20_000
 COLLISION_GRID_SIZE = 20.0
 COLLISION_MATCH_DISTANCE = 0.32
 COLLISION_BOUNDS_MARGIN = 0.45
@@ -147,6 +150,15 @@ def parse_arguments() -> argparse.Namespace:
     )
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--audit-only", action="store_true")
+    parser.add_argument(
+        "--selection-profile",
+        choices=("curated", "aggressive"),
+        default="aggressive",
+        help=(
+            "curated selects coherent props; aggressive selects every visual "
+            "mesh record up to the 20,000-object stress-test ceiling"
+        ),
+    )
     parser.add_argument("--report", type=Path)
     parser.add_argument("--output-blend", type=Path)
     parser.add_argument("--output-skate", type=Path)
@@ -198,6 +210,7 @@ def proper_object_kind(obj: bpy.types.Object) -> str | None:
 
 def classify(
     obj: bpy.types.Object,
+    selection_profile: str,
 ) -> Classification:
     minimum, maximum = world_bounds(obj)
     dimensions_vector = maximum - minimum
@@ -205,36 +218,42 @@ def classify(
     obj.data.calc_loop_triangles()
     triangles = len(obj.data.loop_triangles)
 
-    object_kind = proper_object_kind(obj)
-    reason = f"proper_{object_kind}" if object_kind is not None else ""
-    editable = True
-    identity = semantic_identity(obj)
-    marker = next(
-        (
-            candidate
-            for candidate in PERMANENT_WORLD_MARKERS
-            if candidate in identity
-        ),
-        None,
-    )
-    if object_kind is None:
-        editable = False
-        reason = "not_proper_object"
-    elif marker is not None:
-        editable = False
-        reason = f"permanent_marker:{marker}"
-    elif max(dimensions[0], dimensions[1]) > MAX_HORIZONTAL_SPAN:
-        editable = False
-        reason = "large_horizontal_span"
-    elif dimensions[2] > MAX_VERTICAL_SPAN:
-        editable = False
-        reason = "large_vertical_span"
-    elif dimensions[0] * dimensions[1] > MAX_FOOTPRINT_AREA:
-        editable = False
-        reason = "large_footprint"
-    elif triangles > MAX_TRIANGLES:
-        editable = False
-        reason = "large_triangle_count"
+    if selection_profile == "aggressive":
+        editable = True
+        reason = "aggressive_visual_record"
+    else:
+        object_kind = proper_object_kind(obj)
+        reason = (
+            f"proper_{object_kind}" if object_kind is not None else ""
+        )
+        editable = True
+        identity = semantic_identity(obj)
+        marker = next(
+            (
+                candidate
+                for candidate in PERMANENT_WORLD_MARKERS
+                if candidate in identity
+            ),
+            None,
+        )
+        if object_kind is None:
+            editable = False
+            reason = "not_proper_object"
+        elif marker is not None:
+            editable = False
+            reason = f"permanent_marker:{marker}"
+        elif max(dimensions[0], dimensions[1]) > MAX_HORIZONTAL_SPAN:
+            editable = False
+            reason = "large_horizontal_span"
+        elif dimensions[2] > MAX_VERTICAL_SPAN:
+            editable = False
+            reason = "large_vertical_span"
+        elif dimensions[0] * dimensions[1] > MAX_FOOTPRINT_AREA:
+            editable = False
+            reason = "large_footprint"
+        elif triangles > MAX_TRIANGLES:
+            editable = False
+            reason = "large_triangle_count"
 
     return Classification(
         object_name=obj.name_full,
@@ -247,7 +266,9 @@ def classify(
     )
 
 
-def audit_scene() -> tuple[list[bpy.types.Object], list[Classification]]:
+def audit_scene(
+    selection_profile: str,
+) -> tuple[list[bpy.types.Object], list[Classification]]:
     visual_objects = [
         obj
         for obj in exporter._objects_from_collections(
@@ -260,19 +281,49 @@ def audit_scene() -> tuple[list[bpy.types.Object], list[Classification]]:
         and not exporter._is_helper_object(obj)
     ]
     classifications = [
-        classify(obj) for obj in visual_objects
+        classify(obj, selection_profile) for obj in visual_objects
     ]
+    if (
+        selection_profile == "aggressive"
+        and len(classifications) > AGGRESSIVE_EDITABLE_LIMIT
+    ):
+        retained_names = {
+            item.object_name
+            for item in sorted(
+                classifications,
+                key=lambda item: item.object_name.casefold(),
+            )[:AGGRESSIVE_EDITABLE_LIMIT]
+        }
+        classifications = [
+            (
+                item
+                if item.object_name in retained_names
+                else Classification(
+                    object_name=item.object_name,
+                    editable=False,
+                    reason="aggressive_object_limit",
+                    dimensions=item.dimensions,
+                    triangles=item.triangles,
+                    bounds_min=item.bounds_min,
+                    bounds_max=item.bounds_max,
+                )
+            )
+            for item in classifications
+        ]
     return visual_objects, classifications
 
 
 def report_payload(
     classifications: list[Classification],
+    selection_profile: str,
 ) -> dict[str, object]:
     editable = [item for item in classifications if item.editable]
     static = [item for item in classifications if not item.editable]
     return {
-        "format": "university-editable-classification-v1",
+        "format": "university-editable-classification-v2",
         "source_blend": str(Path(bpy.data.filepath).resolve()),
+        "selection_profile": selection_profile,
+        "aggressive_editable_limit": AGGRESSIVE_EDITABLE_LIMIT,
         "thresholds": {
             "maximum_horizontal_span": MAX_HORIZONTAL_SPAN,
             "maximum_vertical_span": MAX_VERTICAL_SPAN,
@@ -719,8 +770,13 @@ def associate_grinds(
 
 def main() -> int:
     arguments = parse_arguments()
-    visual_objects, classifications = audit_scene()
-    payload = report_payload(classifications)
+    visual_objects, classifications = audit_scene(
+        arguments.selection_profile
+    )
+    payload = report_payload(
+        classifications,
+        arguments.selection_profile,
+    )
     encoded = json.dumps(payload, indent=2)
     print(
         "UNIVERSITY_EDITABLE_AUDIT",
