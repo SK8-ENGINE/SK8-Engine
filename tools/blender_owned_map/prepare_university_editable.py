@@ -165,36 +165,36 @@ def classify(
     obj.data.calc_loop_triangles()
     triangles = len(obj.data.loop_triangles)
 
-    reason = "prop_sized_collidable"
+    reason = (
+        "presentation_only_prop_sized"
+        if obj in presentation_only
+        else "prop_sized_collidable"
+    )
     editable = True
-    if obj in presentation_only:
+    identity = semantic_identity(obj)
+    marker = next(
+        (
+            candidate
+            for candidate in PERMANENT_WORLD_MARKERS
+            if candidate in identity
+        ),
+        None,
+    )
+    if marker is not None:
         editable = False
-        reason = "presentation_only"
-    else:
-        identity = semantic_identity(obj)
-        marker = next(
-            (
-                candidate
-                for candidate in PERMANENT_WORLD_MARKERS
-                if candidate in identity
-            ),
-            None,
-        )
-        if marker is not None:
-            editable = False
-            reason = f"permanent_marker:{marker}"
-        elif max(dimensions[0], dimensions[1]) > MAX_HORIZONTAL_SPAN:
-            editable = False
-            reason = "large_horizontal_span"
-        elif dimensions[2] > MAX_VERTICAL_SPAN:
-            editable = False
-            reason = "large_vertical_span"
-        elif dimensions[0] * dimensions[1] > MAX_FOOTPRINT_AREA:
-            editable = False
-            reason = "large_footprint"
-        elif triangles > MAX_TRIANGLES:
-            editable = False
-            reason = "large_triangle_count"
+        reason = f"permanent_marker:{marker}"
+    elif max(dimensions[0], dimensions[1]) > MAX_HORIZONTAL_SPAN:
+        editable = False
+        reason = "large_horizontal_span"
+    elif dimensions[2] > MAX_VERTICAL_SPAN:
+        editable = False
+        reason = "large_vertical_span"
+    elif dimensions[0] * dimensions[1] > MAX_FOOTPRINT_AREA:
+        editable = False
+        reason = "large_footprint"
+    elif triangles > MAX_TRIANGLES:
+        editable = False
+        reason = "large_triangle_count"
 
     return Classification(
         object_name=obj.name_full,
@@ -720,14 +720,7 @@ def main() -> int:
     ]
     collision = assign_collision_ownership(provisional)
     owners = set(collision["owner_triangles"])
-    for obj in provisional:
-        if obj.name_full not in owners:
-            obj["ow_editor_editable"] = False
-    editable_objects = [
-        obj
-        for obj in provisional
-        if bool(obj.get("ow_editor_editable", False))
-    ]
+    editable_objects = provisional
     for obj in editable_objects:
         recenter_object(obj)
     # Blender does not immediately refresh every curve/object world bound after
@@ -739,7 +732,10 @@ def main() -> int:
     payload["collision_ownership"] = collision
     payload["grind_ownership"] = grinds
     payload["counts"]["collision_owned_editable_objects"] = len(
-        editable_objects
+        owners
+    )
+    payload["counts"]["visual_only_editable_objects"] = (
+        len(editable_objects) - len(owners)
     )
     if arguments.report is not None:
         arguments.report.resolve().write_text(
@@ -751,6 +747,9 @@ def main() -> int:
         json.dumps(
             {
                 "editable_objects": len(editable_objects),
+                "visual_only_objects": (
+                    len(editable_objects) - len(owners)
+                ),
                 "collision_components": collision["matched_components"],
                 "collision_triangles": collision["matched_triangles"],
                 "associated_grinds": grinds["associated_grinds"],

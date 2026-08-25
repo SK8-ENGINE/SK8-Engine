@@ -106,6 +106,12 @@ std::atomic<uint32_t> g_map_visible_chunks{0};
 std::atomic<uint32_t> g_map_occluded_chunks{0};
 std::atomic<uint32_t> g_map_resident_chunks{0};
 std::atomic<uint32_t> g_map_chunk_draws{0};
+std::atomic<uint32_t> g_map_editor_objects{0};
+std::atomic<uint32_t> g_map_editor_pose_ready{0};
+std::atomic<uint32_t> g_map_editor_pose_fallbacks{0};
+std::atomic<uint32_t> g_map_editor_visible_objects{0};
+std::atomic<uint32_t> g_map_editor_resident_objects{0};
+std::atomic<uint32_t> g_map_editor_object_draws{0};
 std::atomic<uint32_t> g_sky_draws{0};
 std::atomic<uint32_t> g_map_contact_count{0};
 std::atomic<uint32_t> g_map_last_contact_id{0};
@@ -1066,6 +1072,19 @@ void RecordMapChunks(uint32_t total, uint32_t candidates,
   g_map_chunk_draws.store(draw_calls, std::memory_order_relaxed);
 }
 
+void RecordMapEditorObjects(uint32_t total, uint32_t pose_ready,
+                            uint32_t editor_pose_fallbacks,
+                            uint32_t visible, uint32_t resident,
+                            uint32_t draw_calls) {
+  g_map_editor_objects.store(total, std::memory_order_relaxed);
+  g_map_editor_pose_ready.store(pose_ready, std::memory_order_relaxed);
+  g_map_editor_pose_fallbacks.store(editor_pose_fallbacks,
+                                    std::memory_order_relaxed);
+  g_map_editor_visible_objects.store(visible, std::memory_order_relaxed);
+  g_map_editor_resident_objects.store(resident, std::memory_order_relaxed);
+  g_map_editor_object_draws.store(draw_calls, std::memory_order_relaxed);
+}
+
 void RecordSkyDraw(uint32_t draw_calls) {
   g_sky_draws.store(draw_calls, std::memory_order_relaxed);
 }
@@ -1159,6 +1178,18 @@ void AppendTelemetry(std::ostream& out) {
       << g_map_resident_chunks.load(std::memory_order_relaxed)
       << " sandbox_map_chunk_draws="
       << g_map_chunk_draws.load(std::memory_order_relaxed)
+      << " sandbox_map_editor_objects="
+      << g_map_editor_objects.load(std::memory_order_relaxed)
+      << " sandbox_map_editor_pose_ready="
+      << g_map_editor_pose_ready.load(std::memory_order_relaxed)
+      << " sandbox_map_editor_pose_fallbacks="
+      << g_map_editor_pose_fallbacks.load(std::memory_order_relaxed)
+      << " sandbox_map_editor_visible_objects="
+      << g_map_editor_visible_objects.load(std::memory_order_relaxed)
+      << " sandbox_map_editor_resident_objects="
+      << g_map_editor_resident_objects.load(std::memory_order_relaxed)
+      << " sandbox_map_editor_object_draws="
+      << g_map_editor_object_draws.load(std::memory_order_relaxed)
       << " sandbox_sky_draws="
       << g_sky_draws.load(std::memory_order_relaxed)
       << " sandbox_presented_frames="

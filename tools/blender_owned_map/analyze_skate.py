@@ -466,16 +466,16 @@ def analyze_package(
                             12, f"MOBJ object {object_index} origin"
                         ),
                     )
-                    first_index = object_reader.u32(
+                    object_first_index = object_reader.u32(
                         f"MOBJ object {object_index} first index"
                     )
-                    index_count = object_reader.u32(
+                    object_index_count = object_reader.u32(
                         f"MOBJ object {object_index} index count"
                     )
-                    first_collision = object_reader.u32(
+                    object_first_collision = object_reader.u32(
                         f"MOBJ object {object_index} first collision"
                     )
-                    collision_count = object_reader.u32(
+                    object_collision_count = object_reader.u32(
                         f"MOBJ object {object_index} collision count"
                     )
                     grind_indices = []
@@ -494,10 +494,10 @@ def analyze_package(
                             "id": object_id,
                             "name": name,
                             "origin": origin,
-                            "first_index": first_index,
-                            "index_count": index_count,
-                            "first_collision": first_collision,
-                            "collision_count": collision_count,
+                            "first_index": object_first_index,
+                            "index_count": object_index_count,
+                            "first_collision": object_first_collision,
+                            "collision_count": object_collision_count,
                             "grind_indices": grind_indices,
                         }
                     )

@@ -108,6 +108,10 @@ void RecordMapChunks(uint32_t total, uint32_t candidates,
                      uint32_t visible, uint32_t occluded,
                      uint32_t resident,
                      uint32_t draw_calls);
+void RecordMapEditorObjects(uint32_t total, uint32_t pose_ready,
+                            uint32_t editor_pose_fallbacks,
+                            uint32_t visible, uint32_t resident,
+                            uint32_t draw_calls);
 void RecordSkyDraw(uint32_t draw_calls);
 
 // Harness reset uses the verified session-marker chord. This only records the

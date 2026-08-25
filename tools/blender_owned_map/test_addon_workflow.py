@@ -504,6 +504,15 @@ def main() -> None:
             "Static Blender objects leaked into editable object records",
         )
         require(
+            analysis["counts"]["indices"]
+            >= sum(record["index_count"] for record in object_records)
+            and analysis["counts"]["collision_triangles"]
+            >= sum(
+                record["collision_count"] for record in object_records
+            ),
+            "MOBJ parsing overwrote the package-level geometry counts",
+        )
+        require(
             len({record["id"] for record in object_records}) == 2
             and all(record["id"] != 0 for record in object_records),
             "Blender object IDs are zero or not unique",

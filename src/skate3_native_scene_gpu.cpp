@@ -13547,6 +13547,11 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
   // and never rebuilds or reuploads the world mesh.
   const skate::world::MapDefinition& definition =
       mechanics_sandbox::map::ActiveDefinition();
+  uint32_t editor_pose_ready = 0;
+  uint32_t editor_pose_fallbacks = 0;
+  uint32_t editor_visible_objects = 0;
+  uint32_t editor_resident_objects = 0;
+  uint32_t editor_object_draws = 0;
   for (std::size_t object_index = 0;
        object_index < definition.editable_objects.size();
        ++object_index) {
@@ -13560,17 +13565,32 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
         map_editor::ActiveGizmoHandle() != 0 &&
         map_editor::IsSelected(object_index);
     if (has_collision) {
-      if (previewing_selected_drag
-              ? !map_editor::ObjectTransform(
-                    object_index, translation, basis, nullptr)
-              : !native_collision::EditableObjectPose(
-                    object_index, translation, basis, nullptr)) {
+      // Exact-retail objects deliberately have no dynamic collision
+      // allocation until their first committed edit.  Their editor pose is
+      // still authoritative for rendering before that detachment; requiring
+      // EditableObjectPose here removed their triangles from both the static
+      // chunks and the object pass, leaving visible holes in the map.
+      bool pose_ready = false;
+      if (previewing_selected_drag) {
+        pose_ready = map_editor::ObjectTransform(
+            object_index, translation, basis, nullptr);
+      } else {
+        pose_ready = native_collision::EditableObjectPose(
+            object_index, translation, basis, nullptr);
+        if (!pose_ready) {
+          pose_ready = map_editor::ObjectTransform(
+              object_index, translation, basis, nullptr);
+          editor_pose_fallbacks += pose_ready ? 1u : 0u;
+        }
+      }
+      if (!pose_ready) {
         continue;
       }
     } else if (!map_editor::ObjectTransform(
                    object_index, translation, basis, nullptr)) {
       continue;
     }
+    ++editor_pose_ready;
     const skate::world::Vec3 x_axis{
         basis[0], basis[1], basis[2]};
     const skate::world::Vec3 y_axis{
@@ -13601,9 +13621,11 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
       corners[corner][1] = transformed.y;
       corners[corner][2] = transformed.z;
     }
-    if (CornersOutsideFrustum(corners, scene.view_proj, 1.05f) ||
-        !EnsureSandboxEditorObjectMesh(
-            context.device, object_index)) {
+    if (CornersOutsideFrustum(corners, scene.view_proj, 1.05f)) {
+      continue;
+    }
+    ++editor_visible_objects;
+    if (!EnsureSandboxEditorObjectMesh(context.device, object_index)) {
       continue;
     }
     const auto mesh = g_r.meshes.find(
@@ -13612,6 +13634,7 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
     if (mesh == g_r.meshes.end()) {
       continue;
     }
+    ++editor_resident_objects;
     const auto& visual =
         mechanics_sandbox::map::ActiveEditableObjectVisualMesh(
             object_index);
@@ -13698,6 +13721,7 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
       cmd->SetRootConstants(0, 52, constants, 0);
       cmd->DrawIndexed(draw.index_count, draw.first_index, 0);
       ++draw_calls;
+      ++editor_object_draws;
     }
 
     if (map_editor::Active() &&
@@ -13729,6 +13753,7 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
              visual.draws) {
           cmd->DrawIndexed(draw.index_count, draw.first_index, 0);
           ++draw_calls;
+          ++editor_object_draws;
         }
       }
     }
@@ -15938,6 +15963,10 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
   mechanics_sandbox::RecordMapChunks(
       static_cast<uint32_t>(world.chunks.size()), candidate_chunks,
       visible_chunks, occluded_chunks, resident_chunks, draw_calls);
+  mechanics_sandbox::RecordMapEditorObjects(
+      static_cast<uint32_t>(definition.editable_objects.size()),
+      editor_pose_ready, editor_pose_fallbacks, editor_visible_objects,
+      editor_resident_objects, editor_object_draws);
   mechanics_sandbox::RecordMapDraw(draw_calls != 0);
 }
 
