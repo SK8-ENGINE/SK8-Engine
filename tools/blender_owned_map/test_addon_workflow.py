@@ -7,6 +7,7 @@ import sys
 import tempfile
 
 import bpy
+import numpy
 
 
 TOOL_ROOT = Path(__file__).resolve().parent
@@ -56,6 +57,132 @@ def main() -> None:
         material = bpy.data.materials.new("TestConcrete")
         floor.data.materials.append(material)
         material.owned_world.roughness = 0.67
+
+        alpha_image = bpy.data.images.new(
+            "RoadMarking_A.tga", width=1, height=1, alpha=True
+        )
+        alpha_material = bpy.data.materials.new("RoadMarking_A")
+        alpha_material["ow_albedo_image"] = alpha_image.name
+        alpha_material["ow_alpha_mode"] = 0
+        require(
+            addon.exporter._effective_alpha_mode(alpha_material) == 1,
+            "Alpha-named RGBA material was incorrectly exported opaque",
+        )
+        alpha_material["ow_force_opaque"] = True
+        require(
+            addon.exporter._effective_alpha_mode(alpha_material) == 0,
+            "Explicit force-opaque override was ignored",
+        )
+        placeholder_image = bpy.data.images.new(
+            "none", width=1, height=1, alpha=True
+        )
+        alpha_material["ow_normal_image"] = placeholder_image.name
+        referenced_images, referenced_image_ids = (
+            addon.exporter._referenced_images([alpha_material])
+        )
+        require(
+            placeholder_image not in referenced_images
+            and placeholder_image.as_pointer() not in referenced_image_ids
+            and addon.exporter._texture_id(
+                alpha_material, "ow_normal_image", referenced_image_ids
+            )
+            == 0,
+            "Placeholder 'none' image was exported as a real texture",
+        )
+        require(
+            not addon.exporter._has_nonblank_rgb(bytes((0, 0, 0, 255)))
+            and addon.exporter._has_nonblank_rgb(bytes((0, 1, 0, 255))),
+            "Package-level blank RGB detection is incorrect",
+        )
+
+        uv_only_mesh = bpy.data.meshes.new("UvOnlyRegressionMesh")
+        uv_only_mesh.from_pydata(
+            [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0)],
+            [],
+            [(0, 1, 2)],
+        )
+        uv_only_mesh.update()
+        uv_only = uv_only_mesh.uv_layers.new(name="UVMap")
+        uv0, uv1 = addon.exporter._visual_uv_layers(
+            uv_only_mesh, "UvOnlyRegression"
+        )
+        require(
+            uv0 == uv_only and uv1 == uv_only,
+            "UVMap-only unlit mesh did not reuse its primary UV stream",
+        )
+
+        def duplicate_surface_mask(opposite_winding: bool):
+            mesh = bpy.data.meshes.new("DuplicateSurfaceRegressionMesh")
+            mesh.from_pydata(
+                [
+                    (0.0, 0.0, 0.0),
+                    (1.0, 0.0, 0.0),
+                    (1.0, 1.0, 0.0),
+                    (0.0, 1.0, 0.0),
+                    (0.0, 0.0, 0.02),
+                    (1.0, 0.0, 0.02),
+                    (1.0, 1.0, 0.02),
+                    (0.0, 1.0, 0.02),
+                ],
+                [],
+                [
+                    (0, 1, 2),
+                    (0, 2, 3),
+                    (
+                        (4, 7, 6)
+                        if opposite_winding
+                        else (4, 5, 6)
+                    ),
+                    (
+                        (4, 6, 5)
+                        if opposite_winding
+                        else (4, 6, 7)
+                    ),
+                ],
+            )
+            mesh.materials.append(material)
+            mesh.materials.append(material)
+            mesh.polygons[0].material_index = 0
+            mesh.polygons[1].material_index = 0
+            mesh.polygons[2].material_index = 1
+            mesh.polygons[3].material_index = 1
+            mesh.update()
+            mesh.calc_loop_triangles()
+            positions = numpy.empty(
+                len(mesh.vertices) * 3, dtype=numpy.float32
+            ).reshape((-1, 3))
+            mesh.vertices.foreach_get("co", positions.reshape(-1))
+            loop_vertices = numpy.empty(
+                len(mesh.loops), dtype=numpy.int32
+            )
+            mesh.loops.foreach_get("vertex_index", loop_vertices)
+            triangle_loops = numpy.empty(
+                len(mesh.loop_triangles) * 3, dtype=numpy.int32
+            ).reshape((-1, 3))
+            triangle_polygons = numpy.empty(
+                len(mesh.loop_triangles), dtype=numpy.int32
+            )
+            mesh.loop_triangles.foreach_get(
+                "loops", triangle_loops.reshape(-1)
+            )
+            mesh.loop_triangles.foreach_get(
+                "polygon_index", triangle_polygons
+            )
+            return addon.exporter._duplicate_visual_surface_keep_mask(
+                mesh,
+                loop_vertices[triangle_loops],
+                triangle_polygons,
+                positions,
+            )
+
+        require(
+            int(duplicate_surface_mask(False).sum()) == 2,
+            "Same-facing near-duplicate visual surface was not collapsed",
+        )
+        require(
+            int(duplicate_surface_mask(True).sum()) == 4,
+            "Intentional opposite-facing visual surface was removed",
+        )
 
         require(
             bpy.ops.skate_map.assign_selected(role="VISUAL") == {"FINISHED"},

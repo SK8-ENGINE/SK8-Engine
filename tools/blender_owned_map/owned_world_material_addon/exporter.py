@@ -60,7 +60,7 @@ _HELPER_OBJECT_MARKERS = (
     "scale_reference",
     "scale reference",
 )
-CACHE_SCHEMA = 17
+CACHE_SCHEMA = 18
 METADATA_FLOAT_COUNT = 49
 METADATA_BYTE_COUNT = METADATA_FLOAT_COUNT * 4
 RETAIL_NORMAL_ATTRIBUTE = "skate3_retail_normal"
@@ -368,6 +368,19 @@ def _mesh_for_export(
     return mesh, evaluated
 
 
+def _visual_uv_layers(
+    mesh: bpy.types.Mesh, source_name: str
+) -> tuple[bpy.types.MeshUVLoopLayer, bpy.types.MeshUVLoopLayer]:
+    uv0 = mesh.uv_layers.get("UVMap")
+    if uv0 is None:
+        raise ValueError(
+            f"visual mesh {source_name!r} requires a UVMap UV layer"
+        )
+    # The package always stores two UV streams, but unlit maps do not need
+    # authors to manufacture a duplicate Blender lightmap layer.
+    return uv0, mesh.uv_layers.get("Lightmap") or uv0
+
+
 def _retail_world_frame_attributes(mesh):
     normal = mesh.attributes.get(RETAIL_NORMAL_ATTRIBUTE)
     tangent = mesh.attributes.get(RETAIL_TANGENT_ATTRIBUTE)
@@ -475,13 +488,7 @@ def _hash_mesh(
                     digest,
                     repr(source_object.get(property_name, None)),
                 )
-            uv0 = mesh.uv_layers.get("UVMap")
-            uv1 = mesh.uv_layers.get("Lightmap")
-            if uv0 is None or uv1 is None:
-                raise ValueError(
-                    f"visual mesh {source_object.name!r} requires UVMap and "
-                    "Lightmap UV layers"
-                )
+            uv0, uv1 = _visual_uv_layers(mesh, source_object.name)
             _hash_foreach(digest, mesh.loops, "normal", 3, "f")
             _hash_foreach(digest, uv0.data, "uv", 2, "f")
             _hash_foreach(digest, uv1.data, "uv", 2, "f")
@@ -1113,15 +1120,11 @@ def _image_rgba8(
     return bytes(result)
 
 
-def _require_nonblank_rgb(name: str, rgba8: bytes) -> None:
-    if not any(
+def _has_nonblank_rgb(rgba8: bytes) -> bool:
+    return any(
         rgba8[index] or rgba8[index + 1] or rgba8[index + 2]
         for index in range(0, len(rgba8), 4)
-    ):
-        raise ValueError(
-            f"referenced texture {name!r} contains no RGB data; refusing "
-            "to export a black SKATE package"
-        )
+    )
 
 
 def _collection(name: str) -> bpy.types.Collection:
@@ -1273,6 +1276,25 @@ def _retail_render_flags(shader_name: str, alpha_mode: int) -> int:
     return flags
 
 
+def _effective_alpha_mode(material: bpy.types.Material) -> int:
+    authored_mode = _bounded_int(material, "ow_alpha_mode", 0, 2)
+    if authored_mode != 0 or bool(material.get("ow_force_opaque", False)):
+        return authored_mode
+
+    material_name = material.name.casefold()
+    image_name = str(material.get("ow_albedo_image", ""))
+    image_stem = image_name.casefold().rsplit(".", 1)[0]
+    alpha_named = (
+        material_name.endswith("_a")
+        or image_stem.endswith("_a")
+        or "alpha" in material_name
+    )
+    image = bpy.data.images.get(image_name)
+    if alpha_named and image is not None and image.channels >= 4:
+        return 1
+    return authored_mode
+
+
 def _retail_material_data(
     material: bpy.types.Material,
     image_ids: dict[int, int],
@@ -1341,7 +1363,7 @@ def _retail_material_data(
             parameters.append((name, encoded_values))
     parameters.sort(key=lambda item: item[0])
 
-    alpha_mode = _bounded_int(material, "ow_alpha_mode", 0, 2)
+    alpha_mode = _effective_alpha_mode(material)
     source = _json_object_property(
         material, "skate3_retail_source"
     )
@@ -1364,6 +1386,13 @@ def _retail_material_data(
     )
 
 
+def _is_placeholder_image_name(name: str) -> bool:
+    return name.strip().casefold().rsplit(".", 1)[0] in {
+        "none",
+        "null",
+    }
+
+
 def _referenced_images(
     materials: list[bpy.types.Material],
 ) -> tuple[list[bpy.types.Image], dict[int, int]]:
@@ -1378,7 +1407,7 @@ def _referenced_images(
             "ow_emissive_image",
         ):
             image_name = str(material.get(property_name, ""))
-            if not image_name:
+            if not image_name or _is_placeholder_image_name(image_name):
                 continue
             image = bpy.data.images.get(image_name)
             if image is None:
@@ -1393,7 +1422,10 @@ def _referenced_images(
         for source_id in _json_object_property(
             material, "skate3_retail_texture_ids"
         ).values():
-            image = bpy.data.images.get(str(source_id).lower())
+            source_name = str(source_id).lower()
+            if _is_placeholder_image_name(source_name):
+                continue
+            image = bpy.data.images.get(source_name)
             if image is None:
                 raise ValueError(
                     f"material {material.name!r} references missing retail "
@@ -1449,7 +1481,7 @@ def _presentation_depth_layer(material: bpy.types.Material) -> int:
                 f"material {material.name!r} has invalid ow_depth_layer={value}"
             )
         return value
-    alpha_mode = _bounded_int(material, "ow_alpha_mode", 0, 2)
+    alpha_mode = _effective_alpha_mode(material)
     if alpha_mode == 2:
         return 3
     lower_name = material.name.casefold()
@@ -1478,6 +1510,168 @@ def _presentation_depth_layer(material: bpy.types.Material) -> int:
     if any(token in lower_name for token in overlay_tokens):
         return 2
     return 1 if alpha_mode == 1 else 0
+
+
+def _duplicate_visual_surface_keep_mask(
+    mesh: bpy.types.Mesh,
+    triangle_vertices,
+    triangle_polygons,
+    source_positions,
+):
+    """Discard redundant dense copies of the same authored visual surface.
+
+    Some retail rips contain both a conventional static billboard quad and a
+    densely tessellated video-wall copy in separate material slots that point
+    at the same material. Rendering both produces persistent triangle-shaped
+    depth fighting. This detects only geometrically coincident connected
+    surfaces with the same material name, retaining the simpler copy.
+    """
+    triangle_count = len(triangle_polygons)
+    keep = numpy.ones(triangle_count, dtype=numpy.bool_)
+    if triangle_count < 2:
+        return keep
+
+    material_names = [
+        material.name if material is not None else None
+        for material in mesh.materials
+    ]
+    slots_by_name: dict[str, list[int]] = {}
+    for slot, name in enumerate(material_names):
+        if name is not None:
+            slots_by_name.setdefault(name, []).append(slot)
+    duplicated_slots = {
+        slot
+        for slots in slots_by_name.values()
+        if len(slots) > 1
+        for slot in slots
+    }
+    if not duplicated_slots:
+        return keep
+
+    polygon_materials = numpy.empty(
+        len(mesh.polygons), dtype=numpy.int32
+    )
+    mesh.polygons.foreach_get("material_index", polygon_materials)
+    triangle_materials = polygon_materials[triangle_polygons]
+    candidate_indices = numpy.flatnonzero(
+        numpy.isin(
+            triangle_materials,
+            numpy.fromiter(duplicated_slots, dtype=numpy.int32),
+        )
+    )
+    if len(candidate_indices) < 2:
+        return keep
+
+    parent = {int(index): int(index) for index in candidate_indices}
+
+    def find(index: int) -> int:
+        root = index
+        while parent[root] != root:
+            root = parent[root]
+        while parent[index] != index:
+            next_index = parent[index]
+            parent[index] = root
+            index = next_index
+        return root
+
+    def union(left: int, right: int) -> None:
+        left_root = find(left)
+        right_root = find(right)
+        if left_root != right_root:
+            parent[right_root] = left_root
+
+    first_triangle_by_slot_vertex: dict[tuple[int, int], int] = {}
+    for index_value in candidate_indices:
+        index = int(index_value)
+        slot = int(triangle_materials[index])
+        for vertex_value in triangle_vertices[index]:
+            key = (slot, int(vertex_value))
+            previous = first_triangle_by_slot_vertex.get(key)
+            if previous is None:
+                first_triangle_by_slot_vertex[key] = index
+            else:
+                union(index, previous)
+
+    component_indices: dict[int, list[int]] = {}
+    for index_value in candidate_indices:
+        index = int(index_value)
+        component_indices.setdefault(find(index), []).append(index)
+
+    components_by_name: dict[str, list[dict]] = {}
+    for indices in component_indices.values():
+        slot = int(triangle_materials[indices[0]])
+        points = source_positions[triangle_vertices[indices]].astype(
+            numpy.float64, copy=False
+        )
+        edge_a = points[:, 1] - points[:, 0]
+        edge_b = points[:, 2] - points[:, 0]
+        crosses = numpy.cross(edge_a, edge_b)
+        double_areas = numpy.linalg.norm(crosses, axis=1)
+        area = float(double_areas.sum() * 0.5)
+        if area <= 1.0e-10:
+            continue
+        centroids = points.mean(axis=1)
+        centroid = (
+            centroids * double_areas[:, None]
+        ).sum(axis=0) / double_areas.sum()
+        normal_sum = crosses.sum(axis=0)
+        normal_length = float(numpy.linalg.norm(normal_sum))
+        if normal_length <= 1.0e-10:
+            continue
+        flattened = points.reshape((-1, 3))
+        minimum = flattened.min(axis=0)
+        maximum = flattened.max(axis=0)
+        components_by_name.setdefault(material_names[slot], []).append(
+            {
+                "indices": indices,
+                "slot": slot,
+                "area": area,
+                "centroid": centroid,
+                "normal": normal_sum / normal_length,
+                "minimum": minimum,
+                "maximum": maximum,
+                "extent": float((maximum - minimum).max()),
+            }
+        )
+
+    removed = set()
+    for components in components_by_name.values():
+        for left_index, left in enumerate(components):
+            if left_index in removed:
+                continue
+            for right_index in range(left_index + 1, len(components)):
+                if right_index in removed:
+                    continue
+                right = components[right_index]
+                if left["slot"] == right["slot"]:
+                    continue
+                scale = max(left["extent"], right["extent"], 1.0)
+                position_tolerance = max(0.030, scale * 2.0e-4)
+                if (
+                    numpy.max(
+                        numpy.abs(left["minimum"] - right["minimum"])
+                    )
+                    > position_tolerance
+                    or numpy.max(
+                        numpy.abs(left["maximum"] - right["maximum"])
+                    )
+                    > position_tolerance
+                    or abs(left["area"] - right["area"])
+                    > max(0.005, max(left["area"], right["area"]) * 5.0e-4)
+                    or numpy.dot(left["normal"], right["normal"]) < 0.999
+                ):
+                    continue
+                left_key = (len(left["indices"]), left["slot"])
+                right_key = (len(right["indices"]), right["slot"])
+                discard_index = (
+                    right_index if left_key <= right_key else left_index
+                )
+                discard = components[discard_index]
+                keep[discard["indices"]] = False
+                removed.add(discard_index)
+                if discard_index == left_index:
+                    break
+    return keep
 
 
 def _export_visual_geometry(
@@ -1513,13 +1707,7 @@ def _export_visual_geometry(
         )
         try:
             mesh.calc_loop_triangles()
-            uv0 = mesh.uv_layers.get("UVMap")
-            uv1 = mesh.uv_layers.get("Lightmap")
-            if uv0 is None or uv1 is None:
-                raise ValueError(
-                    f"visual mesh {source_object.name!r} requires UVMap and "
-                    "Lightmap UV layers"
-                )
+            uv0, uv1 = _visual_uv_layers(mesh, source_object.name)
             loop_count = len(mesh.loops)
             if len(uv0.data) != loop_count or len(uv1.data) != loop_count:
                 raise ValueError(
@@ -1542,10 +1730,9 @@ def _export_visual_geometry(
             # Blender 5 can replace implicitly shared UV storage while
             # calculating tangents. Reacquire every layer so the references
             # below cannot alias the active UVMap after that mutation.
-            uv0 = mesh.uv_layers.get("UVMap")
-            uv1 = mesh.uv_layers.get("Lightmap")
+            uv0, uv1 = _visual_uv_layers(mesh, source_object.name)
             decal_uv = mesh.uv_layers.get("Decal") or uv0
-            if uv0 is None or uv1 is None or decal_uv is None:
+            if decal_uv is None:
                 raise ValueError(
                     f"visual mesh {source_object.name!r} lost an export UV "
                     "layer while calculating tangents"
@@ -1648,7 +1835,37 @@ def _export_visual_geometry(
                         material_name_ids[material.name]
                     )
 
-                corner_vertices = loop_vertices[triangle_loops]
+                triangle_loops = triangle_loops.reshape((-1, 3))
+                triangle_vertices = loop_vertices[triangle_loops]
+                if not bool(
+                    source_object.get(
+                        "ow_preserve_duplicate_visual_surfaces", False
+                    )
+                ):
+                    keep_triangles = _duplicate_visual_surface_keep_mask(
+                        mesh,
+                        triangle_vertices,
+                        triangle_polygons,
+                        source_positions,
+                    )
+                    removed_triangles = int(
+                        len(keep_triangles) - keep_triangles.sum()
+                    )
+                    if removed_triangles:
+                        print(
+                            "SKATE visual cleanup:"
+                            f" {source_object.name!r} omitted"
+                            f" {removed_triangles} redundant coincident"
+                            " triangle(s)",
+                            flush=True,
+                        )
+                        triangle_loops = triangle_loops[keep_triangles]
+                        triangle_polygons = triangle_polygons[keep_triangles]
+                        triangle_vertices = triangle_vertices[keep_triangles]
+                        triangle_count = len(triangle_polygons)
+                        corner_count = triangle_count * 3
+                triangle_loops = triangle_loops.reshape(-1)
+                corner_vertices = triangle_vertices.reshape(-1)
                 positions = source_positions[corner_vertices].astype(
                     numpy.float64
                 )
@@ -3150,7 +3367,7 @@ def export_scene(
             _write_u32(stream, exported.emissive_texture)
             _write_u32(
                 stream,
-                _bounded_int(material, "ow_alpha_mode", 0, 2),
+                _effective_alpha_mode(material),
             )
             alpha_cutoff = float(material.get("ow_alpha_cutoff", 0.5))
             if not 0.0 <= alpha_cutoff <= 1.0:
@@ -3219,6 +3436,8 @@ def export_scene(
                     f"lightmap image {lightmap_name!r} is referenced with "
                     "conflicting encodings"
                 )
+        checked_rgb_images = 0
+        any_checked_rgb = False
         for image_index, image in enumerate(images, start=1):
             lightmap_encoding = lightmap_encodings.get(image.name, "")
             rgba8 = _image_rgba8(
@@ -3226,13 +3445,17 @@ def export_scene(
                 lightmap=image.name in lightmap_encodings,
                 lightmap_encoding=lightmap_encoding,
             )
-            if (
+            check_rgb = (
                 not bool(image.get("skate3_allow_blank_rgb", False))
                 and not str(
                     image.get("skate3_retail_texture_id", "")
                 )
-            ):
-                _require_nonblank_rgb(image.name, rgba8)
+            )
+            if check_rgb:
+                checked_rgb_images += 1
+                any_checked_rgb = (
+                    any_checked_rgb or _has_nonblank_rgb(rgba8)
+                )
             _write_string(stream, image.name)
             _write_u32(stream, int(image.size[0]))
             _write_u32(stream, int(image.size[1]))
@@ -3248,6 +3471,11 @@ def export_scene(
                 + 0.06 * image_index / max(1, len(images)),
                 f"Packing textures ({image_index}/{len(images)}): "
                 f"{image.name}",
+            )
+        if checked_rgb_images and not any_checked_rgb:
+            raise ValueError(
+                "every referenced non-retail texture contains no RGB data; "
+                "refusing to export a black SKATE package"
             )
 
         _write_stored_chunks(stream, geometry.vertex_chunks)
