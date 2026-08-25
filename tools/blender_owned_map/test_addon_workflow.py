@@ -604,6 +604,46 @@ def main() -> None:
             cached_counts == counts,
             "Incremental cache changed sanitized package counts",
         )
+
+        # Authors can export a finished map with no selectable existing
+        # objects. Rendering, collision, materials, and other package counts
+        # must stay intact, while both face-level and proxy ownership metadata
+        # are ignored and the MOBJ table becomes empty.
+        settings.export_editable_objects = False
+        require(
+            bpy.ops.skate_map.quick_export() == {"FINISHED"},
+            "Non-editable map export failed",
+        )
+        non_editable = analyze_package(output, include_payloads=True)
+        require(
+            "MOBJ" in non_editable["extension_tags"]
+            and not non_editable["map_objects"],
+            "Non-editable export retained selectable map object records",
+        )
+        require(
+            non_editable["counts"] == analysis["counts"],
+            "Non-editable export changed visual, collision, or feature counts",
+        )
+        require(
+            non_editable["_collision_bytes"],
+            "Non-editable export discarded static collision",
+        )
+
+        # The global mode participates in the content fingerprint. Switching
+        # it back on must rebuild the object table instead of accepting the
+        # non-editable package as an incremental cache hit.
+        settings.export_editable_objects = True
+        require(
+            bpy.ops.skate_map.quick_export() == {"FINISHED"},
+            "Re-enabling editable map objects failed",
+        )
+        editable_again = analyze_package(output)
+        require(
+            [record["name"] for record in editable_again["map_objects"]]
+            == ["TestFloor", "ProxyOwnedVisual"],
+            "Editable object records were not restored after changing mode",
+        )
+
         blend_path = output.with_suffix(".blend")
         bpy.ops.wm.save_as_mainfile(filepath=str(blend_path))
         require(blend_path.is_file(), "Workflow test scene was not saved")

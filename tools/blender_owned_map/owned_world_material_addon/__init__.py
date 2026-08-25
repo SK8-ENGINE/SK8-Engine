@@ -866,6 +866,15 @@ class OwnedWorldSceneSettings(PropertyGroup):
         ),
         default="AUTO",
     )
+    export_editable_objects: BoolProperty(
+        name="Editable Map Objects",
+        description=(
+            "Include existing map meshes as selectable editor objects; "
+            "disable this to keep the exported map fully static while "
+            "preserving its rendering, collision, materials, and grind paths"
+        ),
+        default=True,
+    )
     last_status: StringProperty(
         name="Last Result",
         default="Run Validate Map before your first export.",
@@ -2044,9 +2053,13 @@ def _validate_scene(
                 "used by a presentation group."
             )
         owner_name = str(obj.get("ow_map_object_owner", "")).strip()
-        if owner_name and owner_name not in {
-            visual.name for visual in visual_objects
-        }:
+        if (
+            settings.export_editable_objects
+            and owner_name
+            and owner_name not in {
+                visual.name for visual in visual_objects
+            }
+        ):
             issues.append(
                 f"{obj.name}: editable collision owner {owner_name!r} "
                 "is not an exported presentation mesh."
@@ -2054,7 +2067,8 @@ def _validate_scene(
     collision_audit = None
     if collision_objects and inspect_geometry:
         _triangles, collision_audit = exporter.audit_collision_geometry(
-            collision_objects
+            collision_objects,
+            include_editor_ownership=settings.export_editable_objects,
         )
         issues.extend(collision_audit.issues)
         warnings.extend(collision_audit.warnings)
@@ -2190,6 +2204,7 @@ def _run_export(context, output: Path) -> set[str]:
             output,
             force_rebuild=settings.export_mode == "FORCE",
             metadata_only=settings.export_mode == "METADATA",
+            export_editable_objects=settings.export_editable_objects,
             progress=update_progress,
         )
     finally:
@@ -3256,6 +3271,17 @@ def _draw_map_panel(layout, context) -> None:
     output.label(text="Validate and Export", icon="EXPORT")
     output.prop(settings, "output_path")
     output.prop(settings, "export_mode")
+    editable_row = output.row()
+    editable_row.enabled = settings.export_mode != "METADATA"
+    editable_row.prop(settings, "export_editable_objects")
+    if (
+        settings.export_mode != "METADATA"
+        and not settings.export_editable_objects
+    ):
+        output.label(
+            text="Existing map geometry will be static in the editor.",
+            icon="LOCKED",
+        )
     row = output.row(align=True)
     row.operator("skate_map.validate", icon="CHECKMARK")
     row.operator("skate_map.quick_export", icon="FILE_TICK")

@@ -284,11 +284,18 @@ def _map_object_extension(
     geometry: PackedVisualGeometry,
     collision_ranges: dict[int, tuple[int, int]],
     rails: list[ExportGrindRail],
+    export_editable_objects: bool,
 ) -> bytes:
     payload = io.BytesIO()
-    editable_objects = [
-        record for record in geometry.objects if record.editor_editable
-    ]
+    editable_objects = (
+        [
+            record
+            for record in geometry.objects
+            if record.editor_editable
+        ]
+        if export_editable_objects
+        else []
+    )
     _write_u32(payload, len(editable_objects))
     for record in editable_objects:
         first_collision, collision_count = collision_ranges.get(
@@ -571,6 +578,7 @@ def _scene_content_fingerprint(
     materials: list[bpy.types.Material],
     images: list[bpy.types.Image],
     collision_triangle_count: int,
+    export_editable_objects: bool,
     progress: ProgressCallback | None = None,
 ) -> SceneContentFingerprint:
     started = time.perf_counter()
@@ -582,6 +590,10 @@ def _scene_content_fingerprint(
     )
     digest = hashlib.sha256()
     digest.update(f"SKATE_EXPORT_CACHE_{CACHE_SCHEMA}".encode("ascii"))
+    _hash_text(
+        digest,
+        f"EXPORT_EDITABLE_OBJECTS={int(export_editable_objects)}",
+    )
 
     material_properties = (
         "ow_flags",
@@ -2360,17 +2372,22 @@ def audit_collision_geometry(
     material_name_ids: dict[str, int] | None = None,
     progress: ProgressCallback | None = None,
     object_ranges: dict[int, tuple[int, int]] | None = None,
+    include_editor_ownership: bool = True,
 ) -> tuple[list[tuple], CollisionGeometryAudit]:
     depsgraph = bpy.context.evaluated_depsgraph_get()
     triangles: list[tuple] = []
     partitioned_triangles: dict[int, list[tuple]] = {}
     partitioned_owners: dict[int, bpy.types.Object] = {}
-    editable_owner_ids = {
-        _stable_object_id(obj.name_full): obj
-        for obj in bpy.data.objects
-        if obj.type == "MESH"
-        and bool(obj.get("ow_editor_editable", True))
-    }
+    editable_owner_ids = (
+        {
+            _stable_object_id(obj.name_full): obj
+            for obj in bpy.data.objects
+            if obj.type == "MESH"
+            and bool(obj.get("ow_editor_editable", True))
+        }
+        if include_editor_ownership
+        else {}
+    )
     triangle_owners: dict[tuple, str] = {}
     issues: list[str] = []
     warnings: list[str] = []
@@ -2423,8 +2440,10 @@ def audit_collision_geometry(
             preserve_all_data_layers=preserve_retail_codes,
         )
         edge_attributes = []
-        editor_owner_attribute = mesh.attributes.get(
-            EDITOR_COLLISION_OWNER_ATTRIBUTE
+        editor_owner_attribute = (
+            mesh.attributes.get(EDITOR_COLLISION_OWNER_ATTRIBUTE)
+            if include_editor_ownership
+            else None
         )
         if editor_owner_attribute is not None and (
             editor_owner_attribute.domain != "FACE"
@@ -2652,7 +2671,11 @@ def audit_collision_geometry(
                 "face downward or vertically, but this object is marked "
                 "Rideable Top Surface."
             )
-        if object_ranges is not None and editor_owner_attribute is None:
+        if (
+            include_editor_ownership
+            and object_ranges is not None
+            and editor_owner_attribute is None
+        ):
             owner_identity = source_object.as_pointer()
             owner_name = str(
                 source_object.get("ow_map_object_owner", "")
@@ -2725,6 +2748,7 @@ def audit_collision_geometry(
 def _export_collision(
     collision_objects: list[bpy.types.Object],
     material_name_ids: dict[str, int],
+    export_editable_objects: bool,
     progress: ProgressCallback | None = None,
 ) -> tuple[
     list[tuple],
@@ -2738,6 +2762,7 @@ def _export_collision(
         material_name_ids,
         progress,
         object_ranges,
+        export_editable_objects,
     )
     LAST_COLLISION_AUDIT = audit
     if audit.issues:
@@ -3252,6 +3277,7 @@ def export_scene(
     force_rebuild: bool = False,
     metadata_only: bool = False,
     adopt_existing_cache: bool = False,
+    export_editable_objects: bool = True,
     progress: ProgressCallback | None = None,
 ) -> Path:
     started = time.perf_counter()
@@ -3367,6 +3393,7 @@ def export_scene(
     collision, _collision_audit, collision_object_ranges = _export_collision(
         collision_objects,
         material_name_ids,
+        export_editable_objects,
         progress=lambda fraction, stage: _report_progress(
             progress,
             0.05 + fraction * 0.20,
@@ -3390,6 +3417,7 @@ def export_scene(
             materials,
             images,
             len(collision),
+            export_editable_objects,
             progress=lambda fraction, stage: _report_progress(
                 progress,
                 0.25 + fraction * 0.05,
@@ -3446,6 +3474,7 @@ def export_scene(
             materials,
             images,
             len(collision),
+            export_editable_objects,
             progress=lambda fraction, stage: _report_progress(
                 progress,
                 0.25 + fraction * 0.05,
@@ -3843,7 +3872,10 @@ def export_scene(
                 _write_vec(stream, point)
         retail_manifest = bpy.data.texts.get("SKATE3_RETAIL_MANIFEST")
         map_objects = _map_object_extension(
-            geometry, collision_object_ranges, rails
+            geometry,
+            collision_object_ranges,
+            rails,
+            export_editable_objects,
         )
         _write_u32(stream, 1 + (1 if retail_manifest is not None else 0))
         stream.write(b"MOBJ")
@@ -3880,6 +3912,7 @@ def export_scene(
             materials,
             images,
             len(collision),
+            export_editable_objects,
             progress=lambda fraction, stage: _report_progress(
                 progress,
                 0.94 + fraction * 0.05,
@@ -3908,12 +3941,14 @@ def main(arguments: list[str] | None = None) -> Path:
     if not arguments:
         raise SystemExit("usage: blender --background file.blend --python "
                          "export_skate.py -- output.skate "
-                         "[--force|--metadata-only|--adopt-existing-cache]")
+                         "[--force|--metadata-only|--adopt-existing-cache] "
+                         "[--no-editable-objects]")
     flags = set(arguments[1:])
     allowed_flags = {
         "--force",
         "--metadata-only",
         "--adopt-existing-cache",
+        "--no-editable-objects",
     }
     unknown_flags = flags - allowed_flags
     if unknown_flags:
@@ -3935,6 +3970,7 @@ def main(arguments: list[str] | None = None) -> Path:
         force_rebuild="--force" in flags,
         metadata_only="--metadata-only" in flags,
         adopt_existing_cache="--adopt-existing-cache" in flags,
+        export_editable_objects="--no-editable-objects" not in flags,
     )
 
 
