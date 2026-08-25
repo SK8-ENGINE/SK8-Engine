@@ -29,6 +29,7 @@ struct VisualDraw {
   float material[4] = {};
   skate::world::TextureId albedo_texture = 0;
   skate::world::TextureId indirect_lightmap = 0;
+  skate::world::TextureId retail_chromaticity_texture = 0;
   skate::world::TextureId normal_texture = 0;
   skate::world::TextureId orm_texture = 0;
   skate::world::TextureId emissive_texture = 0;
@@ -46,9 +47,13 @@ struct VisualDraw {
   float retail_scroll_u = 0.0f;
   float retail_scroll_v = 0.0f;
   float baked_indirect_strength = 0.0f;
+  float skate2_lightmap_component = -1.0f;
   skate::world::SurfaceMaterial::AlphaMode alpha_mode =
       skate::world::SurfaceMaterial::AlphaMode::Opaque;
   float alpha_cutoff = 0.5f;
+  uint32_t presentation_depth_layer = 0;
+  uint32_t presentation_depth_order = 0;
+  bool cull_backfaces = false;
 };
 
 struct VisualMesh {
@@ -151,6 +156,9 @@ const skate::world::MapDefinition& ActiveDefinition();
 const skate::world::ImageTexture* ActiveImageTexture(
     skate::world::TextureId id);
 const char* ActiveMapName();
+// Exact package path selected for this process. Retail sidecar resources use
+// this to resolve files beside the active .skate package.
+const char* ActiveMapPackagePath();
 std::size_t ActiveSurfaceCount();
 std::size_t ActiveRampCount();
 std::size_t ActiveKinematicObjectCount();

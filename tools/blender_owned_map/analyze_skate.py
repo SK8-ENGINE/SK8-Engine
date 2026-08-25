@@ -100,9 +100,10 @@ def analyze_package(
         b"SKATE10\0",
         b"SKATE11\0",
         b"SKATE12\0",
+        b"SKATE13\0",
     ):
         raise PackageError(
-            f"unsupported magic {magic!r}; expected SKATE v8-v12"
+            f"unsupported magic {magic!r}; expected SKATE v8-v13"
         )
     version = int(magic[5:7])
     if reader.u32("endian marker") != 0x12345678:
@@ -128,6 +129,7 @@ def analyze_package(
 
     start = reader.offset
     material_alpha_modes = {0: 0, 1: 0, 2: 0}
+    material_depth_layers = {0: 0, 1: 0, 2: 0, 3: 0}
     retail_family_counts: dict[int, int] = {}
     retail_binding_count = 0
     retail_parameter_count = 0
@@ -144,8 +146,15 @@ def analyze_package(
         record = {
                 "id": index + 1,
                 "name": name,
+                "roughness": struct.unpack_from("<f", fields, 24)[0],
+                "emissive_intensity": struct.unpack_from(
+                    "<f", fields, 28
+                )[0],
                 "albedo_texture": struct.unpack_from("<I", fields, 32)[0],
                 "lightmap_texture": struct.unpack_from("<I", fields, 36)[0],
+                "baked_indirect_strength": struct.unpack_from(
+                    "<f", fields, 40
+                )[0],
                 "normal_texture": struct.unpack_from("<I", fields, 44)[0],
                 "orm_texture": struct.unpack_from("<I", fields, 48)[0],
                 "emissive_texture": struct.unpack_from("<I", fields, 52)[0],
@@ -155,6 +164,17 @@ def analyze_package(
                 "physics_surface": struct.unpack_from("<I", fields, 68)[0],
                 "surface_pattern": struct.unpack_from("<I", fields, 72)[0],
         }
+        depth_layer = (
+            reader.u32(f"material {index} presentation depth layer")
+            if version >= 13
+            else 0
+        )
+        if depth_layer not in material_depth_layers:
+            raise PackageError(
+                f"material {index} uses invalid depth layer {depth_layer}"
+            )
+        material_depth_layers[depth_layer] += 1
+        record["presentation_depth_layer"] = depth_layer
         if version >= 12:
             retail_enabled = reader.u32(
                 f"material {index} retail enabled"
@@ -280,8 +300,8 @@ def analyze_package(
                 "height": height,
                 "color_space": color_space,
                 "decoded_bytes": len(rgba8),
-                "alpha_min": min(alpha),
-                "alpha_max": max(alpha),
+                "alpha_min": min(alpha) if alpha else None,
+                "alpha_max": max(alpha) if alpha else None,
                 "transparent_texels": alpha.count(0),
                 "opaque_texels": alpha.count(255),
             }
@@ -454,13 +474,23 @@ def analyze_package(
             base_values = struct.unpack("<10fI", record)
             floats = base_values[:10]
             material_id = base_values[10]
-        quantized_triangle_digest.update(
-            struct.pack(
-                f"<{len(floats)}qI",
-                *(round(value * 1_000_000.0) for value in floats),
-                material_id,
+        quantized = [
+            round(value * 1_000_000.0)
+            for value in floats
+        ]
+        try:
+            quantized_triangle_digest.update(
+                struct.pack(
+                    f"<{len(floats)}qI",
+                    *quantized,
+                    material_id,
+                )
             )
-        )
+        except struct.error as error:
+            raise PackageError(
+                f"vertex {index} contains values outside the analyzer's "
+                f"quantized range: {floats!r}"
+            ) from error
     positions = [
         struct.unpack_from("<3f", vertex_bytes, offset)
         for offset in range(0, len(vertex_bytes), vertex_stride)
@@ -497,6 +527,7 @@ def analyze_package(
             "mask": material_alpha_modes[1],
             "blend": material_alpha_modes[2],
         },
+        "material_depth_layers": material_depth_layers,
         "retail_shader_families": retail_family_counts,
         "extension_tags": extension_tags,
         "texture_decoded_bytes": texture_decoded_bytes,

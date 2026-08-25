@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <atomic>
 #include <bit>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -371,24 +372,38 @@ WeatherRuntime& ActiveWeatherRuntime() {
   return runtime;
 }
 
+const std::string& ActivePackagePath() {
+  static const std::string package_path([] {
+    const char* selected_map = std::getenv("SKATE3_OWNED_MAP");
+    return selected_map != nullptr && selected_map[0] != '\0'
+               ? std::string(selected_map)
+               : std::string("owned_maps/blender_bake_showcase.skate");
+  }());
+  return package_path;
+}
+
 const skate::world::WorldMap& ActiveWorld() {
   static const skate::world::WorldMap world([] {
     try {
-      const char* selected_map = std::getenv("SKATE3_OWNED_MAP");
-      const std::string package_path =
-          selected_map != nullptr && selected_map[0] != '\0'
-              ? selected_map
-              : "owned_maps/blender_bake_showcase.skate";
+      const std::string& package_path = ActivePackagePath();
+      REXLOG_INFO(
+          "mechanics-sandbox: loading owned map package '{}'",
+          package_path);
+      const auto load_started = std::chrono::steady_clock::now();
       skate::world::MapDefinition imported =
           skate::world::LoadOwnedMapPackage(package_path);
+      const auto load_ms = std::chrono::duration_cast<
+          std::chrono::milliseconds>(
+          std::chrono::steady_clock::now() - load_started);
       REXLOG_INFO(
           "mechanics-sandbox: loaded owned Blender map package '{}' from '{}' "
           "(vertices={} collision={} textures={} rails={} doors={} lights={} "
-          "npc_routes={})",
+          "npc_routes={} load_ms={})",
           imported.name, package_path, imported.render_mesh.vertices.size(),
           imported.collision_triangles.size(), imported.textures.size(),
           imported.grind_rails.size(), imported.hinged_doors.size(),
-          imported.moving_light_orbs.size(), imported.npc_routes.size());
+          imported.moving_light_orbs.size(), imported.npc_routes.size(),
+          load_ms.count());
       return imported;
     } catch (const std::exception& error) {
       REXLOG_ERROR(
@@ -415,6 +430,17 @@ const skate::world::SurfaceMaterial* FindMaterial(
 VisualVertex ConvertVertex(
     const skate::world::RenderVertex& source_vertex) {
   VisualVertex vertex{};
+  // Owned geometry shares the retained renderer's legacy vertex layout, but
+  // it is never bone-skinned. Reserve the last three blend-index lanes as
+  // the static marker so the first can carry the connected-surface
+  // presentation rank. This lets the shader reject skinning even if a later
+  // draw variant accidentally loses the owned-material constant sentinel.
+  // Leaving the marker lanes at zero makes an authored tangent frame look
+  // like weights for player bone 0.
+  vertex.blend_index[0] = source_vertex.presentation_rank;
+  vertex.blend_index[1] = 0xFF;
+  vertex.blend_index[2] = 0xFF;
+  vertex.blend_index[3] = 0xFF;
   vertex.position[0] = source_vertex.position.x;
   vertex.position[1] = source_vertex.position.y;
   vertex.position[2] = source_vertex.position.z;
@@ -503,6 +529,13 @@ void PopulateVisualDrawMaterial(
   draw.baked_indirect_strength = material.baked_indirect_strength;
   draw.alpha_mode = material.alpha_mode;
   draw.alpha_cutoff = material.alpha_cutoff;
+  draw.presentation_depth_layer =
+      material.presentation_depth_layer;
+  // Break ties between coplanar materials in the same semantic layer. The
+  // stable package material ID is sufficient. Eight bits sharply reduce
+  // collisions in large imported worlds while remaining exactly encodable
+  // in the float-backed owned-material flag word.
+  draw.presentation_depth_order = material.id & 255u;
   if (!material.retail.enabled) {
     return;
   }
@@ -516,6 +549,8 @@ void PopulateVisualDrawMaterial(
       RetailTexture(material, "transparent");
   const skate::world::TextureId retail_lightmap =
       RetailTexture(material, "lightmap");
+  draw.retail_chromaticity_texture =
+      RetailTexture(material, "chromaticity");
   if (draw.albedo_texture == 0) {
     draw.albedo_texture =
         retail_diffuse != 0 ? retail_diffuse : retail_transparent;
@@ -552,13 +587,25 @@ void PopulateVisualDrawMaterial(
       RetailParameter(material, "uAnimationSpeed", 0.0f);
   draw.retail_scroll_v =
       RetailParameter(material, "vAnimationSpeed", 0.0f);
+  draw.skate2_lightmap_component =
+      RetailParameter(material, "skate2_lightmap_component", -1.0f);
 }
 
 VisualWorld BuildVisualWorld() {
   const skate::world::MapDefinition& definition =
       ActiveWorld().Definition();
+  const auto build_started = std::chrono::steady_clock::now();
+  skate::world::RenderWorldBuildOptions build_options;
+  build_options.progress = [](std::size_t completed,
+                              std::size_t total) {
+    REXLOG_INFO(
+        "mechanics-sandbox: visual chunking progress {}/{} ({}%)",
+        completed, total,
+        total == 0 ? 100 : completed * 100 / total);
+  };
   const skate::world::RenderWorld source =
-      skate::world::BuildRenderWorld(definition);
+      skate::world::BuildRenderWorld(definition, build_options);
+  const auto partition_finished = std::chrono::steady_clock::now();
   VisualWorld world;
   world.chunk_size = source.chunk_size;
   world.source_triangle_count = source.source_triangle_count;
@@ -604,6 +651,7 @@ VisualWorld BuildVisualWorld() {
       VisualDraw draw;
       draw.first_index = source_draw.first_index;
       draw.index_count = source_draw.index_count;
+      draw.cull_backfaces = source_draw.cull_backfaces;
       PopulateVisualDrawMaterial(draw, *material);
       chunk.draws.push_back(draw);
     }
@@ -621,6 +669,21 @@ VisualWorld BuildVisualWorld() {
       ++world.cells.back().chunk_count;
     }
   }
+  const auto build_finished = std::chrono::steady_clock::now();
+  REXLOG_INFO(
+      "mechanics-sandbox: visual world ready chunks={} cells={} "
+      "source_triangles={} output_triangles={} culled_materials={} "
+      "presentation_surfaces={} partition_ms={} adapter_ms={} total_ms={}",
+      world.chunks.size(), world.cells.size(),
+      world.source_triangle_count, world.output_triangle_count,
+      source.backface_culled_material_count,
+      source.presentation_surface_count,
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          partition_finished - build_started).count(),
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          build_finished - partition_finished).count(),
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          build_finished - build_started).count());
   return world;
 }
 
@@ -1232,6 +1295,10 @@ const skate::world::ImageTexture* ActiveImageTexture(
 
 const char* ActiveMapName() {
   return ActiveWorld().Definition().name.c_str();
+}
+
+const char* ActiveMapPackagePath() {
+  return ActivePackagePath().c_str();
 }
 
 std::size_t ActiveSurfaceCount() {

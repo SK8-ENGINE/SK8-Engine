@@ -16,6 +16,7 @@
 #include <cstring>
 #include <cstdlib>
 #include <exception>
+#include <filesystem>
 #include <fstream>
 #include <limits>
 #include <map>
@@ -101,9 +102,13 @@ constexpr std::uint32_t kAuxiliaryAllocationSize = 192;
 constexpr std::uint32_t kResourceOffset = 96;
 constexpr std::uint32_t kMatrixOffset = 112;
 constexpr std::uint32_t kGroundResultOffset = 176;
-constexpr std::size_t kMaximumOwnedStaticChunks = 384;
-constexpr std::size_t kRetailCollisionActiveMeshes = 12;
-constexpr float kRetailCollisionStreamRefreshDistance = 24.0f;
+// Large owned maps and retail city archives retain one untouched resource per
+// streamed collision asset. Only kOwnedCollisionActiveMeshes are registered
+// at once, so this is a host-side resource-directory limit rather than
+// collection pressure.
+constexpr std::size_t kMaximumOwnedStaticChunks = 1024;
+constexpr std::size_t kOwnedCollisionActiveMeshes = 32;
+constexpr float kOwnedCollisionStreamRefreshDistance = 24.0f;
 constexpr std::size_t kMaximumHingedDoors = 32;
 // University occupies 140 non-empty cells at 128 m, which exceeds the fixed
 // collection capacity. At 256 m it occupies 44 cells, and its largest cell
@@ -852,7 +857,28 @@ struct OwnedCollisionBuildSet {
 
 const char* RetailCollisionArchivePath() {
   const char* path = std::getenv("SKATE3_NATIVE_COLLISION_ARCHIVE");
-  return path != nullptr && path[0] != '\0' ? path : nullptr;
+  if (path != nullptr && path[0] != '\0') {
+    return path;
+  }
+  static const std::string sidecar_path([] {
+    const char* package =
+        mechanics_sandbox::map::ActiveMapPackagePath();
+    if (package == nullptr || package[0] == '\0') {
+      return std::string();
+    }
+    std::filesystem::path candidate(package);
+    candidate.replace_extension(".spawn-collision.rwcmset");
+    std::error_code error;
+    if (!std::filesystem::is_regular_file(candidate, error) || error) {
+      return std::string();
+    }
+    const std::string resolved = candidate.string();
+    REXLOG_INFO(
+        "native-collision: discovered exact retail collision sidecar '{}'",
+        resolved);
+    return resolved;
+  }());
+  return sidecar_path.empty() ? nullptr : sidecar_path.c_str();
 }
 
 OwnedCollisionBuildSet LoadRetailCollisionArchive(const char* path) {
@@ -864,34 +890,38 @@ OwnedCollisionBuildSet LoadRetailCollisionArchive(const char* path) {
     return result;
   }
   const std::streamoff end = stream.tellg();
-  if (end < 12 || end > std::numeric_limits<std::uint32_t>::max()) {
+  constexpr std::uint64_t kMaximumCollisionArchiveBytes =
+      16ull * 1024ull * 1024ull * 1024ull;
+  if (end < 12 ||
+      static_cast<std::uint64_t>(end) >
+          kMaximumCollisionArchiveBytes) {
     result.error = "retail collision archive size is invalid";
     return result;
   }
   stream.seekg(0);
-  std::vector<std::uint8_t> bytes(static_cast<std::size_t>(end));
-  stream.read(reinterpret_cast<char*>(bytes.data()), end);
-  if (!stream) {
-    result.error = "could not read the complete retail collision archive";
-    return result;
-  }
   constexpr std::array<std::uint8_t, 8> kMagic{
       'R', 'W', 'C', 'M', 'S', 'E', 'T', '1'};
-  if (!std::equal(kMagic.begin(), kMagic.end(), bytes.begin())) {
+  std::array<std::uint8_t, 8> magic{};
+  stream.read(
+      reinterpret_cast<char*>(magic.data()),
+      static_cast<std::streamsize>(magic.size()));
+  if (!stream || magic != kMagic) {
     result.error = "retail collision archive magic is invalid";
     return result;
   }
-  std::size_t cursor = kMagic.size();
   auto read_u32 = [&]() -> std::optional<std::uint32_t> {
-    if (cursor > bytes.size() || bytes.size() - cursor < 4) {
+    std::array<std::uint8_t, 4> bytes{};
+    stream.read(
+        reinterpret_cast<char*>(bytes.data()),
+        static_cast<std::streamsize>(bytes.size()));
+    if (!stream) {
       return std::nullopt;
     }
     const std::uint32_t value =
-        static_cast<std::uint32_t>(bytes[cursor]) |
-        (static_cast<std::uint32_t>(bytes[cursor + 1]) << 8u) |
-        (static_cast<std::uint32_t>(bytes[cursor + 2]) << 16u) |
-        (static_cast<std::uint32_t>(bytes[cursor + 3]) << 24u);
-    cursor += 4;
+        static_cast<std::uint32_t>(bytes[0]) |
+        (static_cast<std::uint32_t>(bytes[1]) << 8u) |
+        (static_cast<std::uint32_t>(bytes[2]) << 16u) |
+        (static_cast<std::uint32_t>(bytes[3]) << 24u);
     return value;
   };
   const std::optional<std::uint32_t> count = read_u32();
@@ -906,27 +936,36 @@ OwnedCollisionBuildSet LoadRetailCollisionArchive(const char* path) {
   std::uint64_t total_mesh_bytes = 0;
   for (std::uint32_t index = 0; index < *count; ++index) {
     const std::optional<std::uint32_t> name_size = read_u32();
-    if (!name_size || *name_size > 4096u ||
-        *name_size > bytes.size() - cursor) {
+    if (!name_size || *name_size == 0 || *name_size > 4096u) {
       result.error = "retail collision archive mesh name is invalid";
       result.chunks.clear();
       return result;
     }
-    const std::string name(
-        reinterpret_cast<const char*>(bytes.data() + cursor), *name_size);
-    cursor += *name_size;
+    std::string name(*name_size, '\0');
+    stream.read(name.data(), static_cast<std::streamsize>(name.size()));
+    if (!stream) {
+      result.error = "retail collision archive mesh name is truncated";
+      result.chunks.clear();
+      return result;
+    }
     const std::optional<std::uint32_t> mesh_size = read_u32();
-    if (!mesh_size || *mesh_size < 96u ||
-        *mesh_size > bytes.size() - cursor) {
+    if (!mesh_size || *mesh_size < 96u) {
       result.error = "retail collision archive mesh payload is invalid";
+      result.chunks.clear();
+      return result;
+    }
+    std::vector<std::uint8_t> serialized(*mesh_size);
+    stream.read(
+        reinterpret_cast<char*>(serialized.data()),
+        static_cast<std::streamsize>(serialized.size()));
+    if (!stream) {
+      result.error = name + ": collision mesh payload is truncated";
       result.chunks.clear();
       return result;
     }
     skate::world::RwCollisionBuildResult mesh =
         skate::world::LoadSerializedRwCollisionMesh(
-            std::span<const std::uint8_t>(
-                bytes.data() + cursor, *mesh_size));
-    cursor += *mesh_size;
+            std::span<const std::uint8_t>(serialized));
     if (!mesh.ok) {
       result.error = name + ": " + mesh.error;
       result.chunks.clear();
@@ -937,8 +976,15 @@ OwnedCollisionBuildSet LoadRetailCollisionArchive(const char* path) {
     total_clusters += mesh.mesh.cluster_count;
     total_mesh_bytes += mesh.mesh.bytes.size();
     result.chunks.push_back(std::move(mesh));
+    if ((index + 1u) % 16u == 0u || index + 1u == *count) {
+      REXLOG_INFO(
+          "native-collision: sidecar load progress {}/{} ({}%)",
+          index + 1u, *count,
+          (static_cast<std::uint64_t>(index + 1u) * 100u) / *count);
+    }
   }
-  if (cursor != bytes.size()) {
+  const std::streamoff consumed = stream.tellg();
+  if (consumed != end) {
     result.error = "retail collision archive has trailing bytes";
     result.chunks.clear();
   } else {
@@ -954,14 +1000,9 @@ OwnedCollisionBuildSet LoadRetailCollisionArchive(const char* path) {
 OwnedCollisionBuildSet CompileOwnedMapChunks(
     const float world_translation[3]) {
   if (const char* archive = RetailCollisionArchivePath()) {
-    if (world_translation[0] != 0.0f ||
-        world_translation[1] != 0.0f ||
-        world_translation[2] != 0.0f) {
-      OwnedCollisionBuildSet result;
-      result.error =
-          "exact retail collision archive requires zero world translation";
-      return result;
-    }
+    // Load each retail ClusteredMesh without flattening or rebuilding it.
+    // EnsureInstalled later bakes one rigid translation into the coordinate
+    // fields while preserving the native KD/cluster and unit structure.
     return LoadRetailCollisionArchive(archive);
   }
   OwnedCollisionBuildSet result;
@@ -999,32 +1040,36 @@ OwnedCollisionBuildSet CompileOwnedMapChunks(
     }
   }
 
-  // Preserve triangle adjacency across the whole authored map whenever the
-  // native format can represent it. The ClusteredMesh already contains its
-  // own KD tree, so dividing an ordinary map into arbitrary 128 m top-level
-  // volumes only destroys edge adjacency at cell boundaries. Those invisible
-  // seams can make a board hop, stutter, or bail while crossing an otherwise
-  // continuous floor or ramp.
-  skate::world::RwCollisionBuildResult unified =
-      skate::world::BuildRwCollisionMesh(source, options);
-  if (unified.ok && !unified.mesh.bytes.empty()) {
+  // Preserve triangle adjacency across an ordinary authored map whenever the
+  // native format can represent it. A very large map cannot fit the native
+  // 16-bit cluster index, and discovering that only after constructing the
+  // complete KD tree wasted more than a minute on Liberty City. The same
+  // per-chunk triangle ceiling that keeps spatial resources representable is
+  // a conservative, deterministic cutoff for attempting one continuous mesh.
+  if (source.collision_triangles.size() <=
+      kMaximumTrianglesPerOwnedChunk) {
+    skate::world::RwCollisionBuildResult unified =
+        skate::world::BuildRwCollisionMesh(source, options);
+    if (unified.ok && !unified.mesh.bytes.empty()) {
+      REXLOG_INFO(
+          "native-collision: compiled continuous map triangles={} "
+          "vertices={} clusters={} bytes={}",
+          unified.mesh.triangle_count, unified.mesh.vertex_count,
+          unified.mesh.cluster_count, unified.mesh.bytes.size());
+      result.chunks.push_back(std::move(unified));
+      return result;
+    }
+    REXLOG_WARN(
+        "native-collision: continuous build failed ({}); falling back to "
+        "{} m spatial chunks",
+        unified.error.empty() ? "unknown error" : unified.error,
+        kOwnedCollisionCellSize);
+  } else {
     REXLOG_INFO(
-        "native-collision: compiled continuous map triangles={} vertices={} "
-        "clusters={} bytes={}",
-        unified.mesh.triangle_count, unified.mesh.vertex_count,
-        unified.mesh.cluster_count, unified.mesh.bytes.size());
-    result.chunks.push_back(std::move(unified));
-    return result;
+        "native-collision: skipping impossible continuous build for {} "
+        "triangles; compiling {} m spatial chunks directly",
+        source.collision_triangles.size(), kOwnedCollisionCellSize);
   }
-
-  // Extremely large maps may exceed a ClusteredMesh format limit. Retain a
-  // spatial fallback so they still load, while making the loss of cross-cell
-  // adjacency explicit in the log for diagnosis.
-  REXLOG_WARN(
-      "native-collision: continuous build failed ({}); falling back to "
-      "{} m spatial chunks",
-      unified.error.empty() ? "unknown error" : unified.error,
-      kOwnedCollisionCellSize);
 
   using Cell = std::pair<std::int32_t, std::int32_t>;
   std::map<Cell, std::vector<skate::world::CollisionTriangle>> cells;
@@ -1193,7 +1238,7 @@ bool OwnedStaticDesired(std::uint32_t index) {
          g_static_mesh_desired[index].load(std::memory_order_acquire);
 }
 
-bool SelectRetailCollisionMeshes(float x, float z, bool force) {
+bool SelectOwnedCollisionMeshes(float x, float z, bool force) {
   if (!std::isfinite(x) || !std::isfinite(z)) {
     return false;
   }
@@ -1206,8 +1251,8 @@ bool SelectRetailCollisionMeshes(float x, float z, bool force) {
     const float dx = x - previous_x;
     const float dz = z - previous_z;
     if (dx * dx + dz * dz <
-        kRetailCollisionStreamRefreshDistance *
-            kRetailCollisionStreamRefreshDistance) {
+        kOwnedCollisionStreamRefreshDistance *
+            kOwnedCollisionStreamRefreshDistance) {
       return false;
     }
   }
@@ -1242,7 +1287,7 @@ bool SelectRetailCollisionMeshes(float x, float z, bool force) {
                                          : left.first < right.first;
       });
   const std::uint32_t desired_count = std::min<std::uint32_t>(
-      count, static_cast<std::uint32_t>(kRetailCollisionActiveMeshes));
+      count, static_cast<std::uint32_t>(kOwnedCollisionActiveMeshes));
   std::vector<bool> desired(count, false);
   for (std::uint32_t rank = 0; rank < desired_count; ++rank) {
     desired[ranked[rank].second] = true;
@@ -1347,6 +1392,111 @@ bool ReconcileExclusiveCollection(PPCContext& source,
     return false;
   }
 
+  // Exact-retail streaming keeps a fixed-size active set. Swap changed
+  // resources in place instead of removing and re-adding collection entries:
+  // RenderWare's static collection caches aggregate broadphase state across
+  // the remove/add path, which can invalidate otherwise untouched entries.
+  // Rebuilding an existing slot is the same native path used by moving
+  // collision volumes and preserves the rest of the collection atomically.
+  struct StaticSlot {
+    std::uint32_t entry_index = 0;
+    std::uint32_t resource_index = 0;
+  };
+  const std::uint32_t owned_count = std::min<std::uint32_t>(
+      g_static_mesh_count.load(std::memory_order_acquire),
+      static_cast<std::uint32_t>(kMaximumOwnedStaticChunks));
+  std::array<bool, kMaximumOwnedStaticChunks> active_seen{};
+  std::vector<StaticSlot> inactive_slots;
+  bool has_non_owned_static = false;
+  for (std::uint32_t entry_index = 0; entry_index < count; ++entry_index) {
+    const std::uint32_t entry =
+        read_entries + entry_index * kCollectionEntrySize;
+    const std::uint32_t volume = LoadU32(base, entry);
+    const std::uint32_t mesh = LoadU32(base, entry + 4);
+    const std::uint32_t resource_index =
+        OwnedStaticEntryIndex(volume, mesh);
+    if (resource_index != UINT32_MAX) {
+      if (OwnedStaticDesired(resource_index)) {
+        active_seen[resource_index] = true;
+      } else {
+        inactive_slots.push_back(
+            StaticSlot{entry_index, resource_index});
+      }
+    } else if (!IsOwnedKinematicEntry(volume, mesh) &&
+               !IsOwnedDoorEntry(volume, mesh)) {
+      has_non_owned_static = true;
+    }
+  }
+  std::vector<std::uint32_t> missing_resources;
+  for (std::uint32_t index = 0; index < owned_count; ++index) {
+    if (OwnedStaticDesired(index) && !active_seen[index]) {
+      missing_resources.push_back(index);
+    }
+  }
+  if (!has_non_owned_static && !inactive_slots.empty() &&
+      inactive_slots.size() == missing_resources.size()) {
+    constexpr float identity_translation[3] = {0.0f, 0.0f, 0.0f};
+    for (std::size_t swap_index = 0;
+         swap_index < inactive_slots.size(); ++swap_index) {
+      const StaticSlot old_slot = inactive_slots[swap_index];
+      const std::uint32_t resource_index =
+          missing_resources[swap_index];
+      const std::uint32_t volume =
+          g_static_volume_addresses[resource_index].load(
+              std::memory_order_acquire);
+      const std::uint32_t mesh =
+          g_static_mesh_addresses[resource_index].load(
+              std::memory_order_acquire);
+      const std::uint32_t matrix = volume + kMatrixOffset;
+      if (!IsGuestDataAddress(volume) || !IsGuestDataAddress(mesh) ||
+          !IsGuestDataAddress(matrix)) {
+        return false;
+      }
+
+      const std::uint32_t old_volume =
+          g_static_volume_addresses[old_slot.resource_index].load(
+              std::memory_order_acquire);
+      const std::uint32_t old_mesh =
+          g_static_mesh_addresses[old_slot.resource_index].load(
+              std::memory_order_acquire);
+      const std::uint32_t write_index =
+          FindOwnedEntry(base, write_entries, count, old_volume, old_mesh);
+      if (write_index == UINT32_MAX ||
+          write_index != old_slot.entry_index) {
+        return false;
+      }
+
+      WriteMapTransform(base, matrix, identity_translation);
+      const std::uint32_t write_entry =
+          write_entries + write_index * kCollectionEntrySize;
+      PPCContext rebuild = source;
+      rebuild.r3.u64 = write_entry;
+      rebuild.r4.u64 = volume;
+      rebuild.r5.u64 = mesh;
+      rebuild.r6.u64 = matrix;
+      rebuild.r7.u64 = 0;
+      rebuild.r8.u64 = UINT32_MAX;
+      rebuild.r9.u64 = 0;
+      sub_8276CB18(rebuild, base);
+      if (LoadU32(base, write_entry) != volume ||
+          LoadU32(base, write_entry + 4) != mesh) {
+        return false;
+      }
+    }
+    PublishWriteEntries(base, read_entries, write_entries, count);
+    g_collection_count_after.store(count, std::memory_order_release);
+    g_static_stream_removed.fetch_add(
+        inactive_slots.size(), std::memory_order_relaxed);
+    g_static_stream_added.fetch_add(
+        missing_resources.size(), std::memory_order_relaxed);
+    g_exclusive_reconciliations.fetch_add(1, std::memory_order_relaxed);
+    REXLOG_INFO(
+        "native-collision: reconciled exclusive collection "
+        "(swapped_static={} count={})",
+        inactive_slots.size(), count);
+    return true;
+  }
+
   struct Removal {
     std::uint32_t volume = 0;
     bool owned_static = false;
@@ -1396,9 +1546,6 @@ bool ReconcileExclusiveCollection(PPCContext& source,
   }
 
   count = LoadU32(base, collection + 20);
-  const std::uint32_t owned_count = std::min<std::uint32_t>(
-      g_static_mesh_count.load(std::memory_order_acquire),
-      static_cast<std::uint32_t>(kMaximumOwnedStaticChunks));
   std::uint32_t readded = 0;
   for (std::uint32_t index = 0; index < owned_count; ++index) {
     if (!OwnedStaticDesired(index)) {
@@ -1419,23 +1566,50 @@ bool ReconcileExclusiveCollection(PPCContext& source,
       return false;
     }
 
+    const std::uint32_t matrix = volume + kMatrixOffset;
+    if (!IsGuestDataAddress(matrix)) {
+      return false;
+    }
+    // Static collision coordinates are already baked into the resource. Keep
+    // the aggregate at identity for every native query path.
+    constexpr float identity_translation[3] = {0.0f, 0.0f, 0.0f};
+    WriteMapTransform(base, matrix, identity_translation);
+
     PPCContext add = source;
     add.r3.u64 = collection;
     add.r4.u64 = volume;
-    add.r5.u64 = volume + kMatrixOffset;
+    add.r5.u64 = matrix;
     add.r6.u64 = 0;
     add.r7.u64 = 0;
     sub_82775F58(add, base);
 
     const std::uint32_t after = LoadU32(base, collection + 20);
-    if (after != count + 1 ||
-        LoadU32(base, write_entries + count * kCollectionEntrySize) !=
-            volume ||
-        LoadU32(base, write_entries + count * kCollectionEntrySize + 4) !=
-            mesh) {
+    const std::uint32_t write_entry =
+        write_entries + count * kCollectionEntrySize;
+    if (after != count + 1 || LoadU32(base, write_entry) != volume ||
+        LoadU32(base, write_entry + 4) != mesh) {
       return false;
     }
-    PublishWriteEntries(base, read_entries, write_entries, after);
+
+    // AddVolume's fast re-insertion path can reuse stale broadphase data from
+    // the removed entry. Rebuild from the authoritative aggregate, mesh, and
+    // transform exactly as the moving-volume path does, then mirror the
+    // rebuilt entry into the collection's read buffer.
+    PPCContext rebuild = source;
+    rebuild.r3.u64 = write_entry;
+    rebuild.r4.u64 = volume;
+    rebuild.r5.u64 = mesh;
+    rebuild.r6.u64 = matrix;
+    rebuild.r7.u64 = 0;
+    rebuild.r8.u64 = UINT32_MAX;
+    rebuild.r9.u64 = 0;
+    sub_8276CB18(rebuild, base);
+    const std::uint32_t read_entry =
+        read_entries + count * kCollectionEntrySize;
+    if (read_entry != write_entry) {
+      std::memcpy(base + read_entry, base + write_entry,
+                  kCollectionEntrySize);
+    }
     count = after;
     ++readded;
   }
@@ -2618,7 +2792,8 @@ void EnsureInstalled(PPCContext& ctx,
       const std::uint32_t collection =
           g_collection.load(std::memory_order_acquire);
       bool stream_selection_changed = false;
-      if (RetailCollisionArchivePath() != nullptr &&
+      if (g_static_stream_center_valid.load(
+              std::memory_order_acquire) &&
           g_native_player_position_valid.load(
               std::memory_order_acquire)) {
         const float player_x = std::bit_cast<float>(
@@ -2628,7 +2803,7 @@ void EnsureInstalled(PPCContext& ctx,
             g_native_player_position_bits[2].load(
                 std::memory_order_relaxed));
         stream_selection_changed =
-            SelectRetailCollisionMeshes(player_x, player_z, false);
+            SelectOwnedCollisionMeshes(player_x, player_z, false);
       }
       if (stream_selection_changed ||
           ExclusiveCollectionDrifted(base, collection)) {
@@ -2656,7 +2831,7 @@ void EnsureInstalled(PPCContext& ctx,
                       1, std::memory_order_relaxed) +
                   1;
               REXLOG_INFO(
-                  "native-collision: streamed exact retail resources "
+                  "native-collision: streamed owned resources "
                   "around player=({:.3f},{:.3f}) active={} update={}",
                   std::bit_cast<float>(
                       g_static_stream_center_x_bits.load(
@@ -2745,17 +2920,10 @@ void EnsureInstalled(PPCContext& ctx,
       map_origin[0] - spawn.position.x,
       ground[1] - spawn.position.y,
       map_origin[2] - spawn.position.z};
-  if (RetailCollisionArchivePath() != nullptr) {
-    // The archived retail ClusteredMesh resources already use University
-    // world coordinates and retain their original KD/cluster organization.
-    translation[0] = 0.0f;
-    translation[1] = 0.0f;
-    translation[2] = 0.0f;
-  }
   if (REXCVAR_GET(
           skate3_mechanics_sandbox_native_collision_retail_only)) {
-    // University extraction preserves retail world coordinates. Anchoring
-    // its authored spawn to the current skater position shifts the owned
+    // Retail extraction preserves source world coordinates. Anchoring its
+    // authored spawn to the current skater position shifts the owned
     // presentation away from the streamed retail collision and invalidates
     // an A/B comparison. Keep every extracted subsystem in the original
     // coordinate frame while retail collision remains authoritative.
@@ -2809,10 +2977,52 @@ void EnsureInstalled(PPCContext& ctx,
   }
   const bool exact_retail_archive =
       RetailCollisionArchivePath() != nullptr;
+  if (exact_retail_archive) {
+    const skate::world::Vec3 requested_translation{
+        translation[0], translation[1], translation[2]};
+    skate::world::Vec3 archive_translation{};
+    for (std::size_t index = 0; index < builds.chunks.size(); ++index) {
+      skate::world::Vec3 applied_translation{};
+      std::string error;
+      if (!skate::world::TranslateSerializedRwCollisionMesh(
+              builds.chunks[index].mesh, requested_translation,
+              &applied_translation, &error)) {
+        REXLOG_ERROR(
+            "native-collision: exact resource {} translation failed: {}",
+            index, error);
+        REX_KERNEL_MEMORY()->SystemHeapFree(auxiliary);
+        g_state.store(State::BuildFailed, std::memory_order_release);
+        return;
+      }
+      if (index == 0) {
+        archive_translation = applied_translation;
+      } else if (
+          applied_translation.x != archive_translation.x ||
+          applied_translation.y != archive_translation.y ||
+          applied_translation.z != archive_translation.z) {
+        REXLOG_ERROR(
+            "native-collision: exact resources use incompatible "
+            "translation granularities");
+        REX_KERNEL_MEMORY()->SystemHeapFree(auxiliary);
+        g_state.store(State::BuildFailed, std::memory_order_release);
+        return;
+      }
+    }
+    translation[0] = archive_translation.x;
+    translation[1] = archive_translation.y;
+    translation[2] = archive_translation.z;
+    REXLOG_INFO(
+        "native-collision: baked exact retail resources into world space "
+        "at ({:.3f},{:.3f},{:.3f}); aggregate transforms remain identity",
+        translation[0], translation[1], translation[2]);
+  }
+  const bool stream_owned_collision =
+      exact_retail_archive ||
+      count + builds.chunks.size() > capacity;
   const std::size_t initially_active_chunks =
-      exact_retail_archive
+      stream_owned_collision
           ? std::min(builds.chunks.size(),
-                     kRetailCollisionActiveMeshes)
+                     kOwnedCollisionActiveMeshes)
           : builds.chunks.size();
   if (builds.chunks.size() > kMaximumOwnedStaticChunks ||
       count + initially_active_chunks > capacity) {
@@ -2823,6 +3033,13 @@ void EnsureInstalled(PPCContext& ctx,
     REX_KERNEL_MEMORY()->SystemHeapFree(auxiliary);
     g_state.store(State::CollectionFull, std::memory_order_release);
     return;
+  }
+  if (stream_owned_collision && !exact_retail_archive) {
+    REXLOG_INFO(
+        "native-collision: enabling proximity streaming for {} owned "
+        "collision resources; {} will be active at once "
+        "(collection count={} capacity={})",
+        builds.chunks.size(), initially_active_chunks, count, capacity);
   }
 
   struct GuestChunk {
@@ -2910,6 +3127,9 @@ void EnsureInstalled(PPCContext& ctx,
   }
 
   const float identity_translation[3] = {0.0f, 0.0f, 0.0f};
+  // Every static resource is in destination world coordinates. Exact retail
+  // resources retain their original topology and metadata but have their
+  // coordinate fields rigidly translated before guest fixup.
   for (const GuestChunk& guest : guest_chunks) {
     WriteMapTransform(base, guest.matrix, identity_translation);
   }
@@ -2946,7 +3166,7 @@ void EnsureInstalled(PPCContext& ctx,
         std::bit_cast<std::uint32_t>(mesh.bounds_max.z),
         std::memory_order_relaxed);
     g_static_mesh_desired[index].store(
-        !exact_retail_archive, std::memory_order_relaxed);
+        !stream_owned_collision, std::memory_order_relaxed);
     total_bytes += mesh.bytes.size();
     total_triangles += mesh.triangle_count;
     total_vertices += mesh.vertex_count;
@@ -2954,8 +3174,8 @@ void EnsureInstalled(PPCContext& ctx,
   g_static_mesh_count.store(
       static_cast<std::uint32_t>(guest_chunks.size()),
       std::memory_order_release);
-  if (exact_retail_archive) {
-    SelectRetailCollisionMeshes(ground[0], ground[2], true);
+  if (stream_owned_collision) {
+    SelectOwnedCollisionMeshes(ground[0], ground[2], true);
   } else {
     g_static_active_mesh_count.store(
         static_cast<std::uint32_t>(guest_chunks.size()),

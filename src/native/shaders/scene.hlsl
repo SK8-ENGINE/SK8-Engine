@@ -79,6 +79,10 @@ Texture2D<float2> static_sun : register(t10);
 // at the white fallback and continues to use its tiled atlas at t10.
 Texture2D<float2> static_sun_history : register(t11);
 Texture2D<float2> static_sun_far : register(t12);
+// Skate 2 separates each packed monochrome layer-page component from a
+// low-resolution normalized RGB chromaticity page. Skate 3 owned maps leave
+// this at the white fallback and retain their original RGB lightmap decode.
+Texture2D<float4> chromaticity : register(t13);
 // Raw bone palette: 3 float4 rows per bone, column-vector affine [R | t],
 // applied with explicit dots (StructuredBuffer<float4x4> default packing is
 // column-major and would silently transpose the matrices).
@@ -89,6 +93,25 @@ SamplerState smp : register(s0);
 // transparent border keeps everything outside the single placement clear;
 // wrap sampling tiled the graffiti across the whole plaza.
 SamplerState smp_clamp : register(s1);
+
+float3 DecodeRetailLightmap(
+    float3 packed_lightmap, float2 uv, float skate2_component) {
+  if (skate2_component >= -0.5) {
+    uint component =
+        min((uint)(skate2_component + 0.5), 2u);
+    float monochrome =
+        component == 0u
+            ? packed_lightmap.r
+            : (component == 1u ? packed_lightmap.g : packed_lightmap.b);
+    float3 color =
+        chromaticity.SampleLevel(smp_clamp, uv, 0.0).rgb;
+    // Retail Skate 2 PS: dot(layerpage, i_monoLightmap_Dot), square,
+    // multiply normalized chromaticity, then multiply by literal 3.
+    return monochrome * monochrome * color * 3.0;
+  }
+  return packed_lightmap * packed_lightmap;
+}
+
 struct VSOut {
   float4 pos : SV_Position;
   float3 rpos : TEXCOORD0;
@@ -114,7 +137,13 @@ VSOut vs_main(float3 p : POSITION, float2 uv : TEXCOORD0, float2 uv2 : TEXCOORD1
   // The palette (row-vector matrices) maps model space to world space; mvp is
   // then just view*proj.
   float wsum = dot(bw, float4(1, 1, 1, 1));
-  bool is_skinned = cam_pos.w >= 0.0 && tint.g > 0.0 && wsum > 0.001;
+  // Owned geometry marks the last three otherwise-unused blend indices as
+  // 255. The first carries a stable connected-surface presentation rank.
+  // This is an independent hard gate: tangent-frame bytes must never turn a
+  // static map into a bone-0 attachment if a material/pass constant changes.
+  bool owned_static_vertex = all(bi.yzw == uint3(255u, 255u, 255u));
+  bool is_skinned = !owned_static_vertex && cam_pos.w >= 0.0 &&
+                    tint.g > 0.0 && wsum > 0.001;
   if (is_skinned) {
     float3 skinned = float3(0, 0, 0);
     float3 sn = float3(0, 0, 0);
@@ -132,8 +161,52 @@ VSOut vs_main(float3 p : POSITION, float2 uv : TEXCOORD0, float2 uv2 : TEXCOORD1
   } else {
     n = mul(n, (float3x3)world);
   }
+  float3 authored_world_position = mul(mp, world).xyz;
   o.pos = mul(mp, mvp);
-  o.rpos = mul(mp, world).xyz - cam_pos.xyz;
+  // Presentation layers solve deliberately near-coplanar signs, markings,
+  // LOD faces and decals in raster depth only. Moving a projected point
+  // toward the camera along its own view ray leaves its screen coordinate
+  // unchanged. Authored positions still drive lighting, collision, culling,
+  // shadows and every non-presentation pass.
+  if (owned_static_vertex &&
+      cam_pos.w < -40.5 && cam_pos.w > -41.5 &&
+      misc.x < -0.5) {
+    uint presentation_flags = (uint)(-misc.x + 0.5);
+    uint depth_layer = (presentation_flags >> 12u) & 3u;
+    uint depth_order = (presentation_flags >> 14u) & 255u;
+    uint surface_order = bi.x;
+    float layer_shift = (float)depth_layer * 0.030;
+    float material_step = 0.000020;
+    float surface_step = 0.000040;
+    float metric_shift =
+        layer_shift +
+        (float)depth_order * material_step +
+        (float)surface_order * surface_step;
+    float camera_distance =
+        length(cam_pos.xyz - authored_world_position);
+    if (metric_shift > 0.0 && camera_distance > 1.0e-5) {
+      float3 toward_camera =
+          (cam_pos.xyz - authored_world_position) /
+          camera_distance;
+      float4 presentation_position = mp;
+      presentation_position.xyz += toward_camera * metric_shift;
+      o.pos = mul(presentation_position, mvp);
+    }
+    if (metric_shift > 0.0 && abs(o.pos.w) > 1.0e-7) {
+      // Keep a representable separation after perspective projection at
+      // extreme distance, where even a real millimetre-scale view-ray shift
+      // can otherwise quantize back to the same D32 value.
+      float ndc_depth = abs(o.pos.z / o.pos.w);
+      float depth_ulp = exp2(
+          floor(log2(max(ndc_depth, 1.0e-6))) - 23.0);
+      float ulp_priority =
+          2.0 + (float)(depth_layer * 64u) +
+          (float)(depth_order & 63u) +
+          (float)(surface_order & 7u);
+      o.pos.z -= ulp_priority * depth_ulp * o.pos.w;
+    }
+  }
+  o.rpos = authored_world_position - cam_pos.xyz;
   o.uv = uv;
   o.uv2 = uv2;
   o.nrm = n;
@@ -379,6 +452,8 @@ float4 ShadePixel(VSOut i) {
     bool has_orm_map = (owned_flags & 16) != 0;
     bool has_emissive_map = (owned_flags & 32) != 0;
     bool has_indirect_lightmap = (owned_flags & 64) != 0;
+    float skate2_lightmap_component =
+        (float)((owned_flags >> 8) & 3) - 1.0;
     int pattern = (int)(misc.x + 0.5);
     float emissive_intensity =
         imported_material ? max(misc.w, 0.0) : max(-misc.z, 0.0);
@@ -442,59 +517,29 @@ float4 ShadePixel(VSOut i) {
     bool dynamic_lighting = mat_tint.w >= 0.0;
     float celestial_ambient = max(mat_tint.w, 0.0);
     if (imported_material && !dynamic_lighting) {
-      // "Dynamic Lighting: Off" is the retail-baked presentation mode,
-      // not an unlit/debug isolation. Imported albedo pages are uploaded
-      // scene-linear, while the retail lightmap pages retain their encoded
-      // sqrt energy. Reconstruct the retail diffuse body and then use the
-      // same captured fog, exposure and ToneOut chain as Alex's exact
-      // environment-family renderer. Sending this linear value through
-      // PassGamma made correctly decoded University lightmaps look far too
-      // dark because it marked them as already display-ready.
-      float3 retail_linear;
+      // Dynamic-off means that no live scene-light contribution reaches the
+      // owned map. Lightmapped materials may still show their authored static
+      // presentation; an ordinary imported material has no illumination and
+      // is therefore black. Raw albedo is not lighting and must never be used
+      // as a white "baked light" fallback.
       if (has_indirect_lightmap) {
         float3 retail_lm =
             lightmap.SampleLevel(smp_clamp, i.uv2, 0.0).rgb;
-        retail_linear =
-            albedo * (retail_lm * retail_lm) *
+        float3 baked_presentation =
+            albedo * DecodeRetailLightmap(
+                         retail_lm, i.uv2,
+                         skate2_lightmap_component) *
             (4.0 * max(misc.y, 0.0)) * 0.93429;
-      } else {
-        // Water and a small number of non-lightmapped imported surfaces
-        // still need a stable neutral body until their original shader
-        // families are preserved by the interchange format.
-        retail_linear = albedo * 0.25;
+        return ToneOut(
+            max(baked_presentation, 0.0), output_alpha, false);
       }
-
-      retail_linear += OwnedMovingLightContribution(
-          world_pos, normal, view_dir, albedo, roughness);
-      float3 retail_emissive =
-          has_emissive_map
-              ? decal_art.Sample(smp, i.uv).rgb
-              : albedo;
-      retail_linear += retail_emissive * emissive_intensity;
-
-      if (sh_sun.w > 0.01) {
-        float fdist = length(i.rpos);
-        float f1 = saturate(fdist * sh_fogp.x + sh_fogp.y);
-        if (sh_fogp.z != 1.0) {
-          f1 = pow(max(f1, 1e-6), sh_fogp.z);
-        }
-        float material_multiplier =
-            sh_env.x > 0.0 ? sh_env.x : 1.0;
-        float3 retail_xe =
-            (retail_linear *
-                 ((1.0 + sh_fogc.a * f1) * material_multiplier) +
-             sh_fogc.rgb * f1) *
-            sh_sun.w;
-        return ToneOut(retail_xe, output_alpha, false);
-      }
-      // Keep standalone imported maps readable when no retained retail
-      // environment frame has supplied exact exposure/fog rows.
-      return ToneOut(retail_linear, output_alpha, false);
+      return float4(0.0, 0.0, 0.0, output_alpha);
     }
     float3 ambient_light =
         dynamic_lighting
             ? sky_fill *
-                  (celestial_ambient * lerp(0.72, 1.12, sky_amount))
+                  (celestial_ambient * lerp(0.72, 1.12, sky_amount)) *
+                  (imported_material ? 0.45 : 1.0)
             : float3(0.0, 0.0, 0.0);
     if (imported_material && has_indirect_lightmap) {
       // UV1 holds static indirect illumination baked in Blender. It remains
@@ -506,7 +551,9 @@ float4 ShadePixel(VSOut i) {
       // before lighting; direct linear quantization crushed most of the
       // first low-energy indirect bake to exact black.
       float3 baked_indirect =
-          baked_encoded * baked_encoded * 4.0;
+          DecodeRetailLightmap(
+              baked_encoded, i.uv2,
+              skate2_lightmap_component) * 4.0;
       float baked_exposure =
           dynamic_lighting
               ? lerp(
@@ -523,7 +570,8 @@ float4 ShadePixel(VSOut i) {
     float3 diffuse_light =
         dynamic_lighting
             ? overlay.rgb * overlay.w *
-                  lerp(wrap * 0.24, ndotl, 0.84)
+                  lerp(wrap * 0.24, ndotl, 0.84) *
+                  (imported_material ? 0.55 : 1.0)
             : float3(0.0, 0.0, 0.0);
     float dynamic_visibility =
         SampleCsmShadowSoft(world_pos, 0.0, normal, i.pos.xy);
@@ -537,7 +585,7 @@ float4 ShadePixel(VSOut i) {
     float spec_power = lerp(128.0, 8.0, roughness);
     float specular = pow(saturate(dot(normal, halfway)), spec_power) *
                      ndotl * lerp(0.34, 0.035, roughness) *
-                     sun_visibility *
+                     sun_visibility * overlay.w *
                      (dynamic_lighting ? 1.0 : 0.0);
     float3 f0 = lerp(float3(0.04, 0.04, 0.04), albedo, metallic);
     float fresnel = pow(1.0 - saturate(dot(normal, view_dir)), 4.0);
@@ -548,10 +596,12 @@ float4 ShadePixel(VSOut i) {
         diffuse_color * (ambient_light + diffuse_light) *
             orientation_ao * ao +
         overlay.rgb * f0 * specular +
-        sky_fill * f0 * edge_fill *
+        sky_fill * f0 * edge_fill * celestial_ambient *
             (dynamic_lighting ? 1.0 : 0.0);
-    lit += OwnedMovingLightContribution(
-        world_pos, normal, view_dir, albedo, roughness);
+    if (dynamic_lighting) {
+      lit += OwnedMovingLightContribution(
+          world_pos, normal, view_dir, albedo, roughness);
+    }
     float3 emissive_color =
         has_emissive_map
             ? decal_art.Sample(smp, i.uv).rgb
@@ -744,7 +794,9 @@ float4 ShadePixel(VSOut i) {
         // Console lightmap semantics: bilinear, clamped, mip 0 (see the
         // main env fetch below).
         float3 lmg = lightmap.SampleLevel(smp_clamp, i.uv2, 0.0).rgb;
-        lin = dlin * max(lmg * lmg, sh_env.z) * sh_env.y;
+        float3 lml =
+            DecodeRetailLightmap(lmg, i.uv2, mat_tint.y);
+        lin = dlin * max(lml, sh_env.z) * sh_env.y;
         if (fam < 9.5) {
           lin *= sh_env.w;
         }
@@ -795,8 +847,14 @@ float4 ShadePixel(VSOut i) {
       // atlas (SampleCsmShadow bias/cascade conventions; the soft variant
       // adds the contact-hardening filter when PCSS is enabled), min'd
       // with the native static sun-shadow term.
-      float s = min(SampleCsmShadowSoft(i.rpos + cam_pos.xyz, 0.0, i.nrm, i.pos.xy),
-                    SampleStaticSun(i.rpos + cam_pos.xyz, i.nrm, i.pos.xy));
+      float s =
+          mat_tint.z > 0.5
+              ? min(
+                    SampleCsmShadowSoft(
+                        i.rpos + cam_pos.xyz, 0.0, i.nrm, i.pos.xy),
+                    SampleStaticSun(
+                        i.rpos + cam_pos.xyz, i.nrm, i.pos.xy))
+              : 1.0;
       // Lightmap fetch = the console's semantics: BILINEAR, CLAMPED, mip 0.
       // The composed atlas pages are single-level on console and the fetch
       // constants carry clamp_x/clamp_y = 2. Sampling them with the aniso-8
@@ -808,6 +866,8 @@ float4 ShadePixel(VSOut i) {
       // awning went dark, with the decode, UVs and constants all verified
       // exact (diagnosed via the mode-7 raw-lightmap isolation view).
       float3 lmg = lightmap.SampleLevel(smp_clamp, i.uv2, 0.0).rgb;
+      float3 decoded_lmg =
+          DecodeRetailLightmap(lmg, i.uv2, mat_tint.y);
       // F12 isolation mode 7: visualize the RAW lightmap sample; mode 8:
       // visualize the lightmap unwrap coordinate (frac(uv2*16) in rg).
       // Debug taps live on fams 5/6/13 only; on fams 1-4 misc.z carries
@@ -828,7 +888,10 @@ float4 ShadePixel(VSOut i) {
       // fallback against the CSM term rendered in-shadow surfaces as BLACK
       // patches for the decode window (the ramp-stencil "black square
       // flash"); serve unshadowed brightness until the real page lands.
-      float3 lml = tint.r > 0.0 ? min(lmg * lmg, s + sh_color.rgb) : lmg * lmg;
+      float3 lml =
+          tint.r > 0.0
+              ? min(decoded_lmg, s + sh_color.rgb)
+              : decoded_lmg;
       // GetTangentLight (world-shading v2). vnd is the tangent-space mapped
       // normal from the material's base normal map (t5) + detail map (t8 at
       // uv * misc.w): xy = 2*base + 2*detail - 2, z = 2*base.z - 1.
@@ -1017,6 +1080,35 @@ float4 ShadePixel(VSOut i) {
         reduced_tone = fam > 7.5;  // environmentdiffuse's cheap tonemap
       }
       fog_a *= sh_env.x;  // material multiplier (PS c11.y)
+    }
+    if (mat_tint.z > 0.5) {
+      // Owned-map policy: a retained/baked material still receives the live
+      // celestial and authored local lights. Its lightmap remains static
+      // indirect texture detail; it does not select a mutually exclusive
+      // baked-only shader mode.
+      float3 live_normal =
+          dot(i.nrm, i.nrm) > 0.01
+              ? normalize(i.nrm)
+              : normalize(cross(ddx(i.rpos), ddy(i.rpos)));
+      float3 live_direction =
+          normalize(owned_celestial_direction.xyz);
+      float live_ndotl =
+          saturate((dot(live_normal, live_direction) + 0.18) / 1.18);
+      float live_visibility =
+          min(
+              SampleCsmShadowSoft(
+                  i.rpos + cam_pos.xyz, 0.0, live_normal, i.pos.xy),
+              SampleStaticSun(
+                  i.rpos + cam_pos.xyz, live_normal, i.pos.xy));
+      float3 live_illumination =
+          owned_celestial_color.rgb *
+          (owned_celestial_color.w +
+           owned_celestial_direction.w *
+               live_ndotl * lerp(0.22, 1.0, live_visibility));
+      lin += dlin * live_illumination;
+      lin += OwnedMovingLightContribution(
+          i.rpos + cam_pos.xyz, live_normal, normalize(-i.rpos),
+          dlin, 0.72);
     }
     // Fog -> exposure -> tonemap -> sqrt, then the postfx uber's measured
     // 1.41 scene multiplier (same as the character branch).

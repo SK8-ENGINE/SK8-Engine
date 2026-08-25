@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import math
+from pathlib import Path
+import re
 import struct
 
 
@@ -13,6 +15,11 @@ SPLINE_RAIL_SIZE = 32
 SPLINE_SEGMENT_SIZE = 144
 SPLINE_SEGMENT_PAYLOAD_SIZE = 120
 SPLINE_CONTINUITY_EPSILON = 1.0e-3
+CELL_SIM_STREAM_PATTERN = re.compile(
+    r"^cSim_(-?\d+)_(-?\d+)_high\.xsf$",
+    re.IGNORECASE,
+)
+CELL_LOCAL_CLASSIFICATION_MARGIN = 40.0
 
 
 def _vec3(data: bytes, offset: int) -> tuple[float, float, float]:
@@ -32,6 +39,96 @@ def _distance(
     return math.sqrt(
         sum((left[axis] - right[axis]) ** 2 for axis in range(3))
     )
+
+
+def grind_cell_translation(
+    stream_file: str,
+) -> tuple[float, float, float] | None:
+    """Return a simulation cell's runtime-space translation, if named."""
+
+    match = CELL_SIM_STREAM_PATTERN.match(Path(stream_file).name)
+    if match is None:
+        return None
+    return float(match.group(1)), 0.0, float(match.group(2))
+
+
+def classify_grind_coordinate_frame(
+    stream_file: str,
+    native_segment_payloads: list[str] | tuple[str, ...],
+    *,
+    margin: float = CELL_LOCAL_CLASSIFICATION_MARGIN,
+) -> str:
+    """Classify one rail as world-space, cell-local, or ambiguous.
+
+    Skate 2's BAM streams mix both coordinate conventions, including within
+    one tSplineData asset. Classification therefore has to happen per rail.
+    The rail midpoint is compared with the origin and the stream cell center;
+    near-boundary cases remain untouched instead of being guessed.
+    """
+
+    translation = grind_cell_translation(stream_file)
+    if translation is None or not native_segment_payloads:
+        return "world_space"
+    if not math.isfinite(margin) or margin < 0.0:
+        raise ValueError("grind coordinate classification margin is invalid")
+
+    midpoint_x = 0.0
+    midpoint_z = 0.0
+    endpoint_count = 0
+    for payload_hex in native_segment_payloads:
+        payload = bytes.fromhex(payload_hex)
+        if len(payload) != SPLINE_SEGMENT_PAYLOAD_SIZE:
+            raise ValueError(
+                "retail grind segment payload must contain 120 bytes"
+            )
+        values = struct.unpack(">30f", payload)
+        coefficient_a = values[0:3]
+        coefficient_b = values[4:7]
+        coefficient_c = values[8:11]
+        coefficient_d = values[12:15]
+        segment_end = _add(
+            coefficient_d,
+            coefficient_c,
+            coefficient_b,
+            coefficient_a,
+        )
+        midpoint_x += coefficient_d[0] + segment_end[0]
+        midpoint_z += coefficient_d[2] + segment_end[2]
+        endpoint_count += 2
+
+    midpoint_x /= endpoint_count
+    midpoint_z /= endpoint_count
+    local_distance = math.hypot(midpoint_x, midpoint_z)
+    world_distance = math.hypot(
+        midpoint_x - translation[0],
+        midpoint_z - translation[2],
+    )
+    if local_distance + margin < world_distance:
+        return "cell_local"
+    if world_distance + margin < local_distance:
+        return "world_space"
+    return "ambiguous"
+
+
+def translate_native_segment_payload(
+    payload_hex: str,
+    translation: tuple[float, float, float],
+) -> str:
+    """Translate one exact native cubic and its retail bounds metadata."""
+
+    payload = bytearray.fromhex(payload_hex)
+    if len(payload) != SPLINE_SEGMENT_PAYLOAD_SIZE:
+        raise ValueError("retail grind segment payload must contain 120 bytes")
+    if not all(math.isfinite(component) for component in translation):
+        raise ValueError("grind segment translation is not finite")
+    # Word 12 is polynomial D (the segment origin); words 20 and 24 are the
+    # native bounds vectors. A/B/C are derivatives and must remain unchanged.
+    for vector_word in (12, 20, 24):
+        for axis, component in enumerate(translation):
+            offset = (vector_word + axis) * 4
+            value = struct.unpack_from(">f", payload, offset)[0]
+            struct.pack_into(">f", payload, offset, value + component)
+    return payload.hex()
 
 
 def decode_grind_splines(data: bytes) -> list[dict[str, object]]:

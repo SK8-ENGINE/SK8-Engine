@@ -14,6 +14,8 @@ from prepare_hawaiian_dream import (  # noqa: E402
     _bind_material_groups_by_guid,
     _group_material_parameters,
     _material_metadata,
+    _material_texture_id,
+    _texture_id,
 )
 
 
@@ -145,6 +147,37 @@ class MaterialPipelineTests(unittest.TestCase):
             [2, 0],
         )
 
+    def test_skate2_material_guid_namespace_can_fall_back_to_import_order(
+        self,
+    ) -> None:
+        data, parameters = _binding_fixture()
+        changed = bytearray(data)
+        # Give the first external reference a GUID that differs from its Name
+        # parameter, matching the Skate 2 BAM material-table variant.
+        struct.pack_into(">2I", changed, 0x400 + 20 + 8, 0xAAAAAAAA, 0xBBBBBBBB)
+        groups = _group_material_parameters(parameters)
+
+        selected, bindings = _bind_material_groups_by_guid(
+            bytes(changed),
+            groups,
+            2,
+            allow_import_order_fallback=True,
+        )
+
+        self.assertEqual(
+            [
+                _material_metadata(selected, index)["shader_name"]
+                for index in range(2)
+            ],
+            ["tree.default", "environment.default"],
+        )
+        self.assertTrue(
+            all(
+                binding["strategy"] == "external_reference_order"
+                for binding in bindings
+            )
+        )
+
     def test_missing_diffuse_does_not_shift_following_meshes(self) -> None:
         parameters = [
             Parameter("Name", "ground"),
@@ -248,6 +281,46 @@ class MaterialPipelineTests(unittest.TestCase):
                 "macrooverlay": "0x5555555555555555",
             },
         )
+
+    def test_symbolic_skate2_layerpage_resolves_to_stable_texture_id(
+        self,
+    ) -> None:
+        source_name = (
+            "layerpage_[0x0000000c03e38704]"
+            "[0x000002f003e38705]"
+            "[0x000495ec03e38706]_HighLOD_0056"
+        )
+        texture_id = _texture_id(
+            b"prefix\0" + source_name.encode("ascii") + b".Texture\0",
+            0x1234,
+        )
+
+        self.assertEqual(
+            texture_id,
+            _material_texture_id(source_name),
+        )
+        self.assertTrue(texture_id.startswith("retail_symbolic_"))
+        self.assertLessEqual(len(texture_id), 63)
+
+    def test_symbolic_skate2_chromaticity_resolves_to_stable_texture_id(
+        self,
+    ) -> None:
+        source_name = (
+            "chromo_[0x0000000c03e38704]"
+            "[0x000002f003e38705]"
+            "[0x000495ec03e38706]_HighLOD_0056"
+        )
+        texture_id = _texture_id(
+            b"prefix\0" + source_name.encode("ascii") + b".Texture\0",
+            0x5678,
+        )
+
+        self.assertEqual(
+            texture_id,
+            _material_texture_id(source_name),
+        )
+        self.assertTrue(texture_id.startswith("retail_symbolic_"))
+        self.assertLessEqual(len(texture_id), 63)
 
 
 if __name__ == "__main__":

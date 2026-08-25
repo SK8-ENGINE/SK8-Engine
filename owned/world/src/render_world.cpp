@@ -1,11 +1,15 @@
 #include "skate/world/render_world.h"
 
 #include <algorithm>
+#include <array>
+#include <bit>
 #include <cmath>
 #include <limits>
 #include <map>
 #include <stdexcept>
 #include <tuple>
+#include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -25,6 +29,53 @@ struct CellKey {
 
 using MaterialGeometry = std::map<MaterialId, std::vector<RenderVertex>>;
 using CellGeometry = std::map<CellKey, MaterialGeometry>;
+using OrientedTriangleKey =
+    std::array<std::array<std::uint32_t, 3>, 3>;
+
+OrientedTriangleKey OrientedPositionKey(
+    Vec3 a, Vec3 b, Vec3 c) {
+  const auto point = [](Vec3 value) {
+    return std::array<std::uint32_t, 3>{
+        std::bit_cast<std::uint32_t>(value.x),
+        std::bit_cast<std::uint32_t>(value.y),
+        std::bit_cast<std::uint32_t>(value.z)};
+  };
+  const auto pa = point(a);
+  const auto pb = point(b);
+  const auto pc = point(c);
+  return std::min({
+      OrientedTriangleKey{pa, pb, pc},
+      OrientedTriangleKey{pb, pc, pa},
+      OrientedTriangleKey{pc, pa, pb},
+  });
+}
+
+OrientedTriangleKey UnorientedPositionKey(
+    Vec3 a, Vec3 b, Vec3 c) {
+  const auto point = [](Vec3 value) {
+    return std::array<std::uint32_t, 3>{
+        std::bit_cast<std::uint32_t>(value.x),
+        std::bit_cast<std::uint32_t>(value.y),
+        std::bit_cast<std::uint32_t>(value.z)};
+  };
+  OrientedTriangleKey key{point(a), point(b), point(c)};
+  std::sort(key.begin(), key.end());
+  return key;
+}
+
+struct OrientedTriangleKeyHash {
+  std::size_t operator()(
+      const OrientedTriangleKey& key) const noexcept {
+    std::size_t hash = 1469598103934665603ull;
+    for (const auto& point : key) {
+      for (const std::uint32_t value : point) {
+        hash ^= value;
+        hash *= 1099511628211ull;
+      }
+    }
+    return hash;
+  }
+};
 
 RenderVertex Interpolate(const RenderVertex& a,
                          const RenderVertex& b,
@@ -55,6 +106,7 @@ RenderVertex Interpolate(const RenderVertex& a,
               std::abs(b.tangent_handedness)
           ? a.tangent_handedness
           : b.tangent_handedness;
+  result.presentation_rank = a.presentation_rank;
   return result;
 }
 
@@ -136,13 +188,16 @@ void ExpandBounds(RenderChunk& chunk, Vec3 position) {
 
 void AppendTriangle(RenderChunk& chunk,
                     MaterialId material,
+                    bool cull_backfaces,
                     const RenderVertex& a,
                     const RenderVertex& b,
                     const RenderVertex& c) {
   if (chunk.batches.empty() ||
-      chunk.batches.back().material != material) {
+      chunk.batches.back().material != material ||
+      chunk.batches.back().cull_backfaces != cull_backfaces) {
     chunk.batches.push_back(
-        {material, static_cast<std::uint32_t>(chunk.indices.size()), 0});
+        {material, static_cast<std::uint32_t>(chunk.indices.size()), 0,
+         cull_backfaces});
   }
   const std::uint32_t first =
       static_cast<std::uint32_t>(chunk.vertices.size());
@@ -183,6 +238,136 @@ RenderWorld BuildRenderWorld(
   world.source_triangle_count =
       definition.render_mesh.indices.size() / 3;
   CellGeometry cells;
+  std::vector<std::size_t> surface_parents(
+      world.source_triangle_count);
+  std::vector<std::uint8_t> surface_depths(
+      world.source_triangle_count, 0);
+  for (std::size_t triangle = 0;
+       triangle < world.source_triangle_count; ++triangle) {
+    surface_parents[triangle] = triangle;
+  }
+  const auto find_surface =
+      [&surface_parents](std::size_t triangle) {
+        std::size_t root = triangle;
+        while (surface_parents[root] != root) {
+          root = surface_parents[root];
+        }
+        while (surface_parents[triangle] != triangle) {
+          const std::size_t next = surface_parents[triangle];
+          surface_parents[triangle] = root;
+          triangle = next;
+        }
+        return root;
+      };
+  const auto merge_surfaces =
+      [&surface_parents, &surface_depths, &find_surface](
+          std::size_t left, std::size_t right) {
+        left = find_surface(left);
+        right = find_surface(right);
+        if (left == right) {
+          return;
+        }
+        if (surface_depths[left] < surface_depths[right]) {
+          std::swap(left, right);
+        }
+        surface_parents[right] = left;
+        if (surface_depths[left] == surface_depths[right]) {
+          ++surface_depths[left];
+        }
+      };
+  constexpr std::size_t kNoTriangle =
+      std::numeric_limits<std::size_t>::max();
+  std::vector<std::size_t> first_triangle_by_vertex(
+      definition.render_mesh.vertices.size(), kNoTriangle);
+  struct FirstFacing {
+    OrientedTriangleKey winding;
+    MaterialId material = 0;
+  };
+  std::unordered_map<
+      OrientedTriangleKey, FirstFacing, OrientedTriangleKeyHash>
+      first_facing_by_positions;
+  first_facing_by_positions.reserve(world.source_triangle_count);
+  std::unordered_set<MaterialId> backface_culled_materials;
+  backface_culled_materials.reserve(256);
+  for (std::size_t index = 0;
+       index < definition.render_mesh.indices.size();
+       index += 3) {
+    const std::size_t triangle_index = index / 3;
+    RenderVertex triangle[3];
+    for (std::size_t corner = 0; corner < 3; ++corner) {
+      const std::uint32_t source_index =
+          definition.render_mesh.indices[index + corner];
+      if (source_index >= definition.render_mesh.vertices.size()) {
+        throw std::invalid_argument("render mesh index is out of range");
+      }
+      triangle[corner] =
+          definition.render_mesh.vertices[source_index];
+      if (first_triangle_by_vertex[source_index] == kNoTriangle) {
+        first_triangle_by_vertex[source_index] = triangle_index;
+      } else {
+        merge_surfaces(
+            triangle_index,
+            first_triangle_by_vertex[source_index]);
+      }
+    }
+    const MaterialId material = triangle[0].material;
+    if (material == 0 || triangle[1].material != material ||
+        triangle[2].material != material) {
+      throw std::invalid_argument(
+          "render triangle has zero or mixed material IDs");
+    }
+    const OrientedTriangleKey winding =
+        OrientedPositionKey(
+            triangle[0].position,
+            triangle[1].position,
+            triangle[2].position);
+    const OrientedTriangleKey positions =
+        UnorientedPositionKey(
+            triangle[0].position,
+            triangle[1].position,
+            triangle[2].position);
+    const auto [found, inserted] =
+        first_facing_by_positions.emplace(
+            positions, FirstFacing{winding, material});
+    if (!inserted && found->second.winding != winding) {
+      backface_culled_materials.insert(found->second.material);
+      backface_culled_materials.insert(material);
+    }
+  }
+  world.backface_culled_material_count =
+      backface_culled_materials.size();
+  std::unordered_map<std::size_t, std::uint8_t>
+      presentation_rank_by_surface;
+  presentation_rank_by_surface.reserve(
+      world.source_triangle_count / 2);
+  std::unordered_map<MaterialId, std::uint32_t>
+      next_presentation_rank;
+  std::vector<std::uint8_t> triangle_presentation_ranks(
+      world.source_triangle_count, 0);
+  for (std::size_t triangle_index = 0;
+       triangle_index < world.source_triangle_count;
+       ++triangle_index) {
+    const std::size_t root = find_surface(triangle_index);
+    const std::uint32_t first_vertex =
+        definition.render_mesh.indices[triangle_index * 3];
+    const MaterialId material =
+        definition.render_mesh.vertices[first_vertex].material;
+    const auto [found, inserted] =
+        presentation_rank_by_surface.emplace(
+            root, std::uint8_t{0});
+    if (inserted) {
+      found->second = static_cast<std::uint8_t>(
+          next_presentation_rank[material]++ & 255u);
+    }
+    triangle_presentation_ranks[triangle_index] =
+        found->second;
+  }
+  world.presentation_surface_count =
+      presentation_rank_by_surface.size();
+  std::unordered_set<
+      OrientedTriangleKey, OrientedTriangleKeyHash>
+      oriented_triangles;
+  oriented_triangles.reserve(world.source_triangle_count);
 
   for (std::size_t index = 0;
        index < definition.render_mesh.indices.size();
@@ -202,6 +387,23 @@ RenderWorld BuildRenderWorld(
         triangle[2].material != material) {
       throw std::invalid_argument(
           "render triangle has zero or mixed material IDs");
+    }
+    for (RenderVertex& vertex : triangle) {
+      vertex.presentation_rank =
+          triangle_presentation_ranks[index / 3];
+    }
+    // Exact same-winding duplicate faces have no visual meaning and fight
+    // for the same depth value. Preserve the reverse-wound partner used by
+    // intentional two-sided foliage while compiling only the first copy of
+    // a true oriented duplicate, even when the duplicate uses another LOD
+    // material.
+    if (!oriented_triangles
+             .insert(OrientedPositionKey(
+                 triangle[0].position,
+                 triangle[1].position,
+                 triangle[2].position))
+             .second) {
+      continue;
     }
 
     float x_min = triangle[0].position.x;
@@ -262,6 +464,13 @@ RenderWorld BuildRenderWorld(
         }
       }
     }
+    const std::size_t completed_triangles = index / 3 + 1;
+    if (options.progress &&
+        (completed_triangles == world.source_triangle_count ||
+         completed_triangles % 1000000u == 0)) {
+      options.progress(
+          completed_triangles, world.source_triangle_count);
+    }
   }
 
   for (const auto& [cell, materials] : cells) {
@@ -281,8 +490,11 @@ RenderWorld BuildRenderWorld(
           chunk.cell_z = cell.z;
           chunk.part = ++part;
         }
-        AppendTriangle(chunk, material, vertices[index],
-                       vertices[index + 1], vertices[index + 2]);
+        AppendTriangle(
+            chunk, material,
+            backface_culled_materials.contains(material),
+            vertices[index], vertices[index + 1],
+            vertices[index + 2]);
       }
     }
     if (!chunk.vertices.empty()) {

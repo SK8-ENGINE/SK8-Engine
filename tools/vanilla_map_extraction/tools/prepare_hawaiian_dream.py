@@ -36,6 +36,12 @@ from skate3_streams import (
 DISTRICT_NAME = "DIST_DHS 32221"
 TEXTURE_NAME_PATTERN = re.compile(rb"(0x[0-9A-Fa-f]{16})\.Texture")
 MATERIAL_TEXTURE_PATTERN = re.compile(r"(0x[0-9A-Fa-f]{16})$")
+LAYERPAGE_TEXTURE_PATTERN = re.compile(
+    rb"(layerpage_[^\x00\r\n]+?)\.Texture"
+)
+CHROMATICITY_TEXTURE_PATTERN = re.compile(
+    rb"(chromo_[^\x00\r\n]+?)\.Texture"
+)
 ALPHA_BLEND_SHADERS = {
     "environment.reflective_trans",
     "environment.transparent",
@@ -47,6 +53,7 @@ RETAIL_TEXTURE_CHANNELS = (
     "normal2",
     "specular",
     "lightmap",
+    "chromaticity",
     "detail",
     "macrooverlay",
     "decal",
@@ -94,14 +101,44 @@ def _texture_id(data: bytes, asset_id: int) -> str:
     matches = TEXTURE_NAME_PATTERN.findall(data)
     if matches:
         return matches[-1].decode("ascii").lower()
+    layerpages = LAYERPAGE_TEXTURE_PATTERN.findall(data)
+    if layerpages:
+        return _symbolic_texture_id(
+            layerpages[-1].decode("ascii")
+        )
+    chromaticity = CHROMATICITY_TEXTURE_PATTERN.findall(data)
+    if chromaticity:
+        return _symbolic_texture_id(
+            chromaticity[-1].decode("ascii")
+        )
     return f"asset_{asset_id:016x}"
+
+
+def _symbolic_texture_id(name: str) -> str:
+    """Return a compact stable ID for a non-hashed retail texture name.
+
+    Skate 2's baked layer and chromaticity pages are referenced by long
+    symbolic names instead of the trailing 64-bit IDs used by ordinary
+    retail textures.
+    Blender truncates long datablock names, so use a deterministic digest as
+    the interchange identity while preserving the source spelling in retail
+    parameters.
+    """
+
+    normalized = name.strip().removesuffix(".Texture").lower()
+    digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:24]
+    return f"retail_symbolic_{digest}"
 
 
 def _material_texture_id(material_name: str | None) -> str | None:
     if not material_name:
         return None
     match = MATERIAL_TEXTURE_PATTERN.search(material_name)
-    return match.group(1).lower() if match else None
+    if match:
+        return match.group(1).lower()
+    if material_name.lower().startswith(("layerpage_", "chromo_")):
+        return _symbolic_texture_id(material_name)
+    return None
 
 
 def _group_material_parameters(
@@ -139,7 +176,9 @@ def _bind_material_groups_by_guid(
     data: bytes,
     groups: list[dict[str, list[str]]],
     mesh_count: int,
-) -> tuple[list[dict[str, list[str]]], list[dict[str, int]]]:
+    *,
+    allow_import_order_fallback: bool = False,
+) -> tuple[list[dict[str, list[str]]], list[dict[str, object]]]:
     """Resolve every mesh to its retail material through RX2 GUID handles.
 
     Material records are not stored in render-mesh order. Each ``Name``
@@ -220,8 +259,9 @@ def _bind_material_groups_by_guid(
             if import_type == RX2_TYPE_MATERIAL_IMPORT:
                 imports.append(((guid_high << 32) | guid_low, handle))
 
-    handle_groups: dict[int, tuple[int, int]] = {}
+    handle_groups: dict[int, tuple[int, int, int, str]] = {}
     import_cursor = 0
+    guid_binding_failed = False
     for group_index, material_guid in enumerate(material_guids):
         while (
             import_cursor < len(imports)
@@ -229,16 +269,41 @@ def _bind_material_groups_by_guid(
         ):
             import_cursor += 1
         if import_cursor >= len(imports):
-            raise ValueError(
-                "RX2 material GUID is missing from the external-reference table: "
-                f"0x{material_guid:016X}"
-            )
-        _, handle = imports[import_cursor]
-        handle_groups[handle] = (group_index, material_guid)
+            guid_binding_failed = True
+            break
+        external_guid, handle = imports[import_cursor]
+        handle_groups[handle] = (
+            group_index,
+            material_guid,
+            external_guid,
+            "external_reference_guid",
+        )
         import_cursor += 1
 
+    if guid_binding_failed:
+        if not allow_import_order_fallback or len(imports) != len(material_guids):
+            raise ValueError(
+                "RX2 material GUID is missing from the external-reference table: "
+                f"0x{material_guids[len(handle_groups)]:016X}"
+            )
+        # Skate 2 sometimes uses a different GUID namespace for a material's
+        # Name parameter and its external reference. The tables still have a
+        # one-to-one order, and mesh descriptors continue to reference the
+        # imported handles. Keep both GUIDs so the mismatch remains visible.
+        handle_groups.clear()
+        for group_index, (material_guid, imported) in enumerate(
+            zip(material_guids, imports)
+        ):
+            external_guid, handle = imported
+            handle_groups[handle] = (
+                group_index,
+                material_guid,
+                external_guid,
+                "external_reference_order",
+            )
+
     bound_groups: list[dict[str, list[str]]] = []
-    bindings: list[dict[str, int]] = []
+    bindings: list[dict[str, object]] = []
     for section_type, section_offset, _ in records:
         if section_type != RX2_TYPE_MESH_DESCRIPTOR:
             continue
@@ -248,13 +313,15 @@ def _bind_material_groups_by_guid(
                 "RX2 mesh material handle is unresolved: "
                 f"0x{handle:08X}"
             )
-        group_index, material_guid = handle_groups[handle]
+        group_index, material_guid, external_guid, strategy = handle_groups[handle]
         bound_groups.append(groups[group_index])
         bindings.append(
             {
                 "group_index": group_index,
                 "material_guid": material_guid,
+                "external_reference_guid": external_guid,
                 "material_handle": handle,
+                "strategy": strategy,
             }
         )
 
@@ -336,6 +403,9 @@ def prepare(
     cache_format: str = "skate3-hawaiian-dream-cache-v1",
     texture_stream_names: tuple[str, ...] = (),
     excluded_normal_texture_ids: tuple[str, ...] = (),
+    allow_material_import_order_fallback: bool = False,
+    grind_coordinate_mode: str = "world_space",
+    excluded_static_model_asset_ids: tuple[str, ...] = (),
 ) -> Path:
     sys.path.insert(0, str(utt_root))
     import rx2_parser
@@ -376,6 +446,16 @@ def prepare(
             "excluded_texture_ids": sorted(
                 texture_id.lower()
                 for texture_id in excluded_normal_texture_ids
+            ),
+        },
+        "grind_coordinate_policy": {
+            "mode": grind_coordinate_mode,
+            "classification_margin": 40.0,
+        },
+        "presentation_model_policy": {
+            "excluded_asset_ids": sorted(
+                asset_id.lower()
+                for asset_id in excluded_static_model_asset_ids
             ),
         },
         "textures": {},
@@ -489,6 +569,9 @@ def prepare(
                     asset.data,
                     source_material_groups,
                     len(parsed.meshes),
+                    allow_import_order_fallback=(
+                        allow_material_import_order_fallback
+                    ),
                 )
             )
             for mesh_index, mesh in enumerate(parsed.meshes):
@@ -578,6 +661,10 @@ def prepare(
                         "retail_material_guid": (
                             f"0x{material_binding['material_guid']:016X}"
                         ),
+                        "retail_external_reference_guid": (
+                            "0x"
+                            f"{material_binding['external_reference_guid']:016X}"
+                        ),
                         "retail_material_handle": (
                             f"0x{material_binding['material_handle']:08X}"
                         ),
@@ -663,7 +750,15 @@ def prepare(
                     "triangle_count": parsed.triangle_count,
                     "warnings": list(parsed.warnings),
                     "material_binding": {
-                        "strategy": "external_reference_guid",
+                        "strategy": (
+                            "external_reference_order"
+                            if any(
+                                binding["strategy"]
+                                == "external_reference_order"
+                                for binding in material_bindings
+                            )
+                            else "external_reference_guid"
+                        ),
                         "source_group_count": len(source_material_groups),
                         "selected_group_count": len(material_groups),
                         "mesh_count": len(parsed.meshes),
@@ -759,6 +854,15 @@ def prepare(
         "presentation_assets": len(presentation_assets),
         "model_assets": len(models),
         "mesh_parts": sum(len(model["meshes"]) for model in models),  # type: ignore[arg-type,index]
+        "excluded_static_mesh_parts": sum(
+            len(model["meshes"])  # type: ignore[arg-type,index]
+            for model in models
+            if str(model["asset_id"]).lower()  # type: ignore[index]
+            in {
+                asset_id.lower()
+                for asset_id in excluded_static_model_asset_ids
+            }
+        ),
         "vertices": sum(model["vertex_count"] for model in models),  # type: ignore[arg-type]
         "triangles": sum(model["triangle_count"] for model in models),  # type: ignore[arg-type]
         "texture_stream_assets": sum(

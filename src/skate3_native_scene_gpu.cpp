@@ -44,6 +44,7 @@
 #include "native/skate3_native_guest_read.h"
 #include "native/skate3_native_lw.h"
 #include "native/skate3_native_palette.h"
+#include "skate/world/owned_map_package.h"
 // Offline-compiled SPIR-V for the native shaders (compiled from the HLSL
 // sources with DXC): the Vulkan RHI backend consumes these blobs; the D3D12
 // backend runtime-compiles the embedded HLSL as before.
@@ -189,6 +190,24 @@ REXCVAR_DECLARE(std::string, skate3_native_render_snapshot_dir);
 
 namespace skate3::native_scene {
 namespace {
+
+// Owned worlds expose one intentional lighting switch in their World menu.
+// Persisted low-level retained-renderer cvars must not silently disable live
+// lighting or its caster resources for a SKATE package.
+bool SceneShadowsEnabled() {
+  if (mechanics_sandbox::VisualMapEnabled()) {
+    return mechanics_sandbox::map::DynamicWorldLightingEnabled();
+  }
+  return REXCVAR_GET(skate3_native_render_scene_shadows);
+}
+
+bool StaticSceneShadowsEnabled() {
+  if (mechanics_sandbox::VisualMapEnabled()) {
+    return mechanics_sandbox::map::DynamicWorldLightingEnabled();
+  }
+  return REXCVAR_GET(
+      skate3_native_render_scene_shadow_static_casters);
+}
 
 // Retire a guest texture's GPU resources AND its view. Destruction is
 // deferred inside the RHI against the CURRENT submission; the `submission`
@@ -2982,11 +3001,11 @@ bool EnsureRootSignature(const NativeGuestOutputRenderContext& context) {
     // root-signature DWORD the v2 material table below needs.
     ld.params[7] = {nrhi::BindingParamKind::kTextureTable, 6, 2,
                     nrhi::Visibility::kPixel};
-    // World-shading v2 material maps: detail (t8), spec/ecc (t9), and three
-    // independent owned-world static-shadow cascades (t10..t12). Retained
-    // rendering continues to use its tiled atlas in t10. Extending this
-    // existing descriptor table costs no root-signature DWORDs.
-    ld.params[8] = {nrhi::BindingParamKind::kTextureTable, 8, 5,
+    // World-shading v2 material maps: detail (t8), spec/ecc (t9), three
+    // independent owned-world static-shadow cascades (t10..t12), and Skate
+    // 2 lightmap chromaticity (t13). Retained rendering leaves t13 white.
+    // Extending this table costs no root-signature DWORDs.
+    ld.params[8] = {nrhi::BindingParamKind::kTextureTable, 8, 6,
                     nrhi::Visibility::kPixel};
     // Character lighting block (b2): the canonical per-draw rows captured
     // from the guest PS bank (CaptureCharLighting), sliced out of the bone
@@ -3032,7 +3051,8 @@ bool EnsureScenePsoFamily(const NativeGuestOutputRenderContext& context) {
   // previous pipelines (in-flight frames keep them alive via the deferred
   // destruction queue).
   for (nrhi::Pipeline** p :
-       {&g_r.pso, &g_r.pso_cullback, &g_r.pso_transparent, &g_r.pso_fade,
+       {&g_r.pso, &g_r.pso_cullback, &g_r.pso_transparent,
+        &g_r.pso_transparent_cullback, &g_r.pso_fade,
         &g_r.pso_hair_a, &g_r.pso_hair_b, &g_r.pso_nodepth,
         &g_r.pso_outline_mask}) {
     if (*p != nullptr) {
@@ -3113,6 +3133,14 @@ bool EnsureScenePsoFamily(const NativeGuestOutputRenderContext& context) {
   pso.blend.dst_alpha = nrhi::BlendFactor::kInvSrcAlpha;
   pso.blend.op_alpha = nrhi::BlendOp::kAdd;
   g_r.pso_transparent = device->CreateGraphicsPipeline(pso);
+  pso.cull = nrhi::CullMode::kFront;
+  g_r.pso_transparent_cullback =
+      device->CreateGraphicsPipeline(pso);
+  if (g_r.pso_transparent_cullback == nullptr) {
+    REXLOG_WARN(
+        "native-scene: transparent cull-back PSO creation failed");
+  }
+  pso.cull = nrhi::CullMode::kNone;
   // Entity-fade variant: z-write ON (see RendererState::pso_fade). Drawn
   // at the head of the blended sub-pass so glass/hair still composite
   // over the faded body.
@@ -3846,7 +3874,7 @@ bool EnsureShadowResources(const NativeGuestOutputRenderContext& context) {
       }
     }
   }
-  if (!g_r.shadow_raw && REXCVAR_GET(skate3_native_render_scene_shadows)) {
+  if (!g_r.shadow_raw && SceneShadowsEnabled()) {
     // Dynamic-shadow atlas chain: raw casters -> hblur intermediate ->
     // blurred final (the texture the scene pass samples). Three fixed-size
     // R16G16_UNORM targets (the game's atlas is fmt 25 = 16_16 fixed point;
@@ -3979,7 +4007,7 @@ bool EnsureShadowResources(const NativeGuestOutputRenderContext& context) {
     }
   }
   if (!g_r.static_sun && g_r.shadow_raw != nullptr &&
-      REXCVAR_GET(skate3_native_render_scene_shadow_static_casters)) {
+      StaticSceneShadowsEnabled()) {
     // Native static sun-shadow map (see RendererState). THREE cascade
     // tiles side by side: inner (r/6, centimeter contact detail with
     // useful reach), mid (r/2) and far (full radius, large-caster
@@ -4049,7 +4077,7 @@ bool EnsureShadowResources(const NativeGuestOutputRenderContext& context) {
         g_r.static_sun_history != nullptr ? 1 : 0);
   }
   if (g_r.shadow_raw != nullptr &&
-      REXCVAR_GET(skate3_native_render_scene_shadow_static_casters)) {
+      StaticSceneShadowsEnabled()) {
     for (uint32_t cascade = 0; cascade < 3; ++cascade) {
       if (g_r.owned_static_sun[cascade] != nullptr) {
         continue;
@@ -4351,12 +4379,14 @@ nrhi::TextureView* ResolveOwnedMapTexture(
 
   const skate::world::ImageTexture* source =
       mechanics_sandbox::map::ActiveImageTexture(texture_id);
+  std::string decode_error;
   if (source == nullptr || source->width == 0 || source->height == 0 ||
+      !skate::world::DecodeOwnedMapTexture(*source, &decode_error) ||
       source->rgba8.size() !=
           std::size_t(source->width) * source->height * 4u) {
     REXLOG_ERROR(
-        "native-scene: owned map texture {} is missing or malformed",
-        texture_id);
+        "native-scene: owned map texture {} is missing or malformed ({})",
+        texture_id, decode_error);
     g_r.owned_map_textures.emplace(cache_key, GuestTexture{});
     return g_r.white.srv;
   }
@@ -4501,6 +4531,7 @@ nrhi::TextureView* ResolveOwnedMapTexture(
         "native-scene: GPU allocation failed for owned map texture {} "
         "({}x{})",
         source->name, source->width, source->height);
+    skate::world::ReleaseOwnedMapTexturePixels(*source);
     g_r.owned_map_textures.emplace(cache_key, GuestTexture{});
     return g_r.white.srv;
   }
@@ -4510,6 +4541,7 @@ nrhi::TextureView* ResolveOwnedMapTexture(
   if (destination == nullptr) {
     context.device->DestroyDeferred(texture.texture);
     context.device->DestroyDeferred(texture.upload);
+    skate::world::ReleaseOwnedMapTexturePixels(*source);
     g_r.owned_map_textures.emplace(cache_key, GuestTexture{});
     return g_r.white.srv;
   }
@@ -4551,6 +4583,7 @@ nrhi::TextureView* ResolveOwnedMapTexture(
   REXLOG_INFO(
       "native-scene: uploaded owned map texture {} '{}' ({}x{}, {} mips)",
       texture_id, source->name, source->width, source->height, mips.size());
+  skate::world::ReleaseOwnedMapTexturePixels(*source);
   return resolved;
 }
 
@@ -7266,8 +7299,8 @@ static void RenderStaticSunMap(const NativeGuestOutputRenderContext& context,
   if (g_r.static_sun == nullptr || g_r.pso_shadow_caster == nullptr ||
       g_r.pso_shadow_caster_clip == nullptr || debug_mode != 0 ||
       (!scene.shadow_valid && !owned_shadow) ||
-      !REXCVAR_GET(skate3_native_render_scene_shadows) ||
-      !REXCVAR_GET(skate3_native_render_scene_shadow_static_casters)) {
+      !SceneShadowsEnabled() ||
+      !StaticSceneShadowsEnabled()) {
     g_r.owned_nsm_active = false;
     return;
   }
@@ -7913,7 +7946,7 @@ bool RenderShadowAtlas(const NativeGuestOutputRenderContext& context,
         k, path.string());
     ++g_r.shadow_dump_written;
   }
-  if (REXCVAR_GET(skate3_native_render_scene_shadows) && shadow_rows_valid &&
+  if (SceneShadowsEnabled() && shadow_rows_valid &&
       g_r.shadow_raw != nullptr && g_r.pso_shadow_caster != nullptr &&
       g_r.pso_shadow_blur != nullptr && debug_mode == 0) {
     struct Caster {
@@ -8212,7 +8245,7 @@ bool RenderShadowAtlas(const NativeGuestOutputRenderContext& context,
   // re-primes it.
   if (g_r.world_shadow != nullptr && g_r.pso_shadow_caster != nullptr &&
       debug_mode == 0 && scene.dynobj_ws_valid &&
-      REXCVAR_GET(skate3_native_render_scene_shadows) &&
+      SceneShadowsEnabled() &&
       REXCVAR_GET(skate3_native_render_scene_dynobj_v2)) {
     bool changed = !g_r.world_shadow_primed;
     for (int k = 0; k < 12 && !changed; ++k) {
@@ -8723,7 +8756,7 @@ static void TickShowcase(uint32_t output_width, bool hdr_on) {
     const auto layer_available = [&](uint32_t bit) -> bool {
       switch (bit) {
         case 8u:
-          return REXCVAR_GET(skate3_native_render_scene_shadows);
+          return SceneShadowsEnabled();
         case 16u:
           return hdr_on && REXCVAR_GET(skate3_native_render_scene_ssao);
         case 32u:
@@ -13160,14 +13193,15 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
       shadow_ready ? g_r.shadow_srv_final : g_r.white.srv);
   // Keep both static sun maps on t10/t11 while the owned-map renderer
   // changes t8/t9 material resources.
-  nrhi::TextureView* t8_default[5] = {
+  nrhi::TextureView* t8_default[6] = {
       g_r.white.srv, g_r.white.srv,
       g_r.owned_nsm_active ? g_r.owned_static_sun_srv[0]
                            : (g_r.static_sun_valid ? g_r.static_sun_srv
                                                    : g_r.white.srv),
       g_r.owned_nsm_active ? g_r.owned_static_sun_srv[1] : g_r.white.srv,
-      g_r.owned_nsm_active ? g_r.owned_static_sun_srv[2] : g_r.white.srv};
-  cmd->SetTextures(8, t8_default, 5);
+      g_r.owned_nsm_active ? g_r.owned_static_sun_srv[2] : g_r.white.srv,
+      g_r.white.srv};
+  cmd->SetTextures(8, t8_default, 6);
   cmd->SetPrimitiveTopology(nrhi::PrimitiveTopology::kTriangleList);
 
   const mechanics_sandbox::map::VisualWorld& world =
@@ -13237,16 +13271,26 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
       const bool imported =
           draw.albedo_texture != 0 || draw.indirect_lightmap != 0 ||
           draw.normal_texture != 0 || draw.orm_texture != 0 ||
-          draw.emissive_texture != 0;
+          draw.emissive_texture != 0 ||
+          draw.retail_chromaticity_texture != 0;
       const bool alpha_blend =
           draw.alpha_mode ==
               skate::world::SurfaceMaterial::AlphaMode::Blend ||
           (draw.retail_render_flags & 2u) != 0 ||
           draw.retail_shader_family == 13;
-      cmd->SetPipeline(
-          alpha_blend && g_r.pso_transparent != nullptr
-              ? g_r.pso_transparent
-              : (use_depth ? g_r.pso : g_r.pso_nodepth));
+      nrhi::Pipeline* owned_pipeline =
+          use_depth && draw.cull_backfaces &&
+                  g_r.pso_cullback != nullptr
+              ? g_r.pso_cullback
+              : (use_depth ? g_r.pso : g_r.pso_nodepth);
+      if (alpha_blend && g_r.pso_transparent != nullptr) {
+        owned_pipeline =
+            use_depth && draw.cull_backfaces &&
+                    g_r.pso_transparent_cullback != nullptr
+                ? g_r.pso_transparent_cullback
+                : g_r.pso_transparent;
+      }
+      cmd->SetPipeline(owned_pipeline);
       cmd->SetTexture(
           1, ResolveOwnedMapTexture(context, draw.albedo_texture));
       cmd->SetTexture(
@@ -13257,7 +13301,7 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
           ResolveOwnedMapTexture(context, draw.emissive_texture),
           ResolveOwnedMapTexture(
               context, draw.normal_texture, OwnedTextureRole::Normal));
-      nrhi::TextureView* owned_material_maps[5] = {
+      nrhi::TextureView* owned_material_maps[6] = {
           retail_exact
               ? ResolveOwnedMapTexture(
                     context, draw.retail_detail_texture,
@@ -13275,8 +13319,11 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
           g_r.owned_nsm_active ? g_r.owned_static_sun_srv[1]
                                : g_r.white.srv,
           g_r.owned_nsm_active ? g_r.owned_static_sun_srv[2]
-                               : g_r.white.srv};
-      cmd->SetTextures(8, owned_material_maps, 5);
+                               : g_r.white.srv,
+          ResolveOwnedMapTexture(
+              context, draw.retail_chromaticity_texture,
+              OwnedTextureRole::Data)};
+      cmd->SetTextures(8, owned_material_maps, 6);
       if (retail_exact) {
         nrhi::TextureView* macro_texture = ResolveOwnedMapTexture(
             context,
@@ -13317,6 +13364,21 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
       owned_flags |= draw.orm_texture != 0 ? 16u : 0u;
       owned_flags |= draw.emissive_texture != 0 ? 32u : 0u;
       owned_flags |= draw.indirect_lightmap != 0 ? 64u : 0u;
+      const bool has_skate2_lightmap =
+          draw.retail_chromaticity_texture != 0 &&
+          draw.skate2_lightmap_component >= 0.0f &&
+          draw.skate2_lightmap_component < 3.0f;
+      if (has_skate2_lightmap) {
+        owned_flags |=
+            (static_cast<std::uint32_t>(
+                 draw.skate2_lightmap_component) +
+             1u)
+            << 8u;
+      }
+      owned_flags |=
+          (draw.presentation_depth_layer & 3u) << 12u;
+      owned_flags |=
+          (draw.presentation_depth_order & 255u) << 14u;
       constants[48] =
           imported ? -static_cast<float>(owned_flags) : draw.material[0];
       constants[49] =
@@ -13345,8 +13407,14 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
         constants[39] = -static_cast<float>(family);
         constants[40] =
             draw.indirect_lightmap != 0 ? 1.0f : 0.0f;
-        constants[41] = 0.0f;
-        constants[42] = 0.0f;
+        constants[41] =
+            has_skate2_lightmap
+                ? draw.skate2_lightmap_component
+                : -1.0f;
+        // Exact retail materials always retain their baked lightmaps. This
+        // separately controls the live native sun-shadow layer so the World
+        // menu's Dynamic Lighting switch has a visible, honest effect.
+        constants[42] = dynamic_lighting ? 1.0f : 0.0f;
         constants[43] = 0.0f;
         constants[44] = draw.retail_macro_scale;
         constants[45] = draw.retail_macro_opacity;
@@ -13658,7 +13726,8 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
       const bool imported =
           draw.albedo_texture != 0 || draw.indirect_lightmap != 0 ||
           draw.normal_texture != 0 || draw.orm_texture != 0 ||
-          draw.emissive_texture != 0;
+          draw.emissive_texture != 0 ||
+          draw.retail_chromaticity_texture != 0;
       const bool alpha_blend =
           draw.alpha_mode ==
           skate::world::SurfaceMaterial::AlphaMode::Blend;
@@ -13678,7 +13747,7 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
           ResolveOwnedMapTexture(
               context, draw.normal_texture,
               OwnedTextureRole::Normal));
-      nrhi::TextureView* door_material_maps[5] = {
+      nrhi::TextureView* door_material_maps[6] = {
           g_r.white.srv,
           ResolveOwnedMapTexture(
               context, draw.orm_texture, OwnedTextureRole::Data),
@@ -13687,8 +13756,11 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
           g_r.owned_nsm_active ? g_r.owned_static_sun_srv[1]
                                : g_r.white.srv,
           g_r.owned_nsm_active ? g_r.owned_static_sun_srv[2]
-                               : g_r.white.srv};
-      cmd->SetTextures(8, door_material_maps, 5);
+                               : g_r.white.srv,
+          ResolveOwnedMapTexture(
+              context, draw.retail_chromaticity_texture,
+              OwnedTextureRole::Data)};
+      cmd->SetTextures(8, door_material_maps, 6);
       constants[32] = draw.color[0];
       constants[33] = draw.color[1];
       constants[34] = draw.color[2];
@@ -13700,6 +13772,21 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
       owned_flags |= draw.orm_texture != 0 ? 16u : 0u;
       owned_flags |= draw.emissive_texture != 0 ? 32u : 0u;
       owned_flags |= draw.indirect_lightmap != 0 ? 64u : 0u;
+      const bool has_skate2_lightmap =
+          draw.retail_chromaticity_texture != 0 &&
+          draw.skate2_lightmap_component >= 0.0f &&
+          draw.skate2_lightmap_component < 3.0f;
+      if (has_skate2_lightmap) {
+        owned_flags |=
+            (static_cast<std::uint32_t>(
+                 draw.skate2_lightmap_component) +
+             1u)
+            << 8u;
+      }
+      owned_flags |=
+          (draw.presentation_depth_layer & 3u) << 12u;
+      owned_flags |=
+          (draw.presentation_depth_order & 255u) << 14u;
       constants[48] =
           imported ? -static_cast<float>(owned_flags)
                    : draw.material[0];
@@ -13722,7 +13809,7 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
   cmd->SetTexture(1, g_r.white.srv);
   cmd->SetTexture(2, g_r.white.srv);
   cmd->SetTexturePair(5, g_r.white.srv, g_r.white.srv);
-  cmd->SetTextures(8, t8_default, 5);
+  cmd->SetTextures(8, t8_default, 6);
   set_world_translation(origin[0], origin[1], origin[2]);
 
   const auto multiplayer_perf_t0 = PerfClock::now();
@@ -15606,10 +15693,10 @@ void DrawSandboxSky(const NativeGuestOutputRenderContext& context,
   cmd->SetTexture(4, g_r.white.srv);
   cmd->SetTexture(5, g_r.white.srv);
   cmd->SetTexturePair(7, g_r.white_cube.srv, g_r.white.srv);
-  nrhi::TextureView* defaults[5] = {
+  nrhi::TextureView* defaults[6] = {
       g_r.white.srv, g_r.white.srv, g_r.white.srv, g_r.white.srv,
-      g_r.white.srv};
-  cmd->SetTextures(8, defaults, 5);
+      g_r.white.srv, g_r.white.srv};
+  cmd->SetTextures(8, defaults, 6);
   cmd->SetVertexBuffer(
       mesh->second.vb_view.buffer, mesh->second.vb_view.offset,
       mesh->second.vb_view.size_bytes, mesh->second.vb_view.stride);
@@ -16517,14 +16604,15 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
                         shadow_ready ? g_r.shadow_srv_final : g_r.white.srv);
     // v2 material table default (t8/t9 white) + independent static-shadow
     // maps at t10..t12. Every lit branch can sample them.
-    nrhi::TextureView* t8_default[5] = {
+    nrhi::TextureView* t8_default[6] = {
         g_r.white.srv, g_r.white.srv,
         g_r.owned_nsm_active ? g_r.owned_static_sun_srv[0]
                              : (g_r.static_sun_valid ? g_r.static_sun_srv
                                                      : g_r.white.srv),
         g_r.owned_nsm_active ? g_r.owned_static_sun_srv[1] : g_r.white.srv,
-        g_r.owned_nsm_active ? g_r.owned_static_sun_srv[2] : g_r.white.srv};
-    cmd->SetTextures(8, t8_default, 5);
+        g_r.owned_nsm_active ? g_r.owned_static_sun_srv[2] : g_r.white.srv,
+        g_r.white.srv};
+    cmd->SetTextures(8, t8_default, 6);
   }
   nrhi::TextureView* const nsm_view =
       g_r.owned_nsm_active
@@ -17940,11 +18028,11 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
     // ocean rides the same pair (t8 = second PCA component, t9 = overlay).
     if (v2_flags != 0 || ocean_n2 || ocean_ov) {
       // Rebinding only t8/t9 would reset the three static-shadow maps.
-      nrhi::TextureView* t8_views[5] = {
+      nrhi::TextureView* t8_views[6] = {
           (v2_detail != nullptr ? v2_detail : &g_r.white)->srv,
           (v2_spec2 != nullptr ? v2_spec2 : &g_r.white)->srv, nsm_view,
-          nsm_mid_view, nsm_far_view};
-      cmd->SetTextures(8, t8_views, 5);
+          nsm_mid_view, nsm_far_view, g_r.white.srv};
+      cmd->SetTextures(8, t8_views, 6);
     }
     // ROPA shape blend (see RendererState::ropa_shapes): combine the shape
     // generations with the kernel weights InterpolateDynamicItems computed

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <bit>
 #include <cctype>
 #include <cmath>
@@ -10,8 +11,11 @@
 #include <cstring>
 #include <fstream>
 #include <limits>
+#include <mutex>
+#include <span>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <type_traits>
 #include <unordered_set>
 #include <utility>
@@ -46,17 +50,44 @@ constexpr std::array<char, 8> kMagicV11 = {
     'S', 'K', 'A', 'T', 'E', '1', '1', '\0'};
 constexpr std::array<char, 8> kMagicV12 = {
     'S', 'K', 'A', 'T', 'E', '1', '2', '\0'};
+constexpr std::array<char, 8> kMagicV13 = {
+    'S', 'K', 'A', 'T', 'E', '1', '3', '\0'};
 constexpr std::uint32_t kEndianMarker = 0x12345678u;
 constexpr std::uint32_t kStorageRaw = 0;
 constexpr std::uint32_t kStorageDeflate = 1;
 constexpr std::uint32_t kMaximumCount = 16u * 1024u * 1024u;
+constexpr std::uint32_t kMaximumGeometryCount = 64u * 1024u * 1024u;
+constexpr std::uint32_t kMaximumIndexCount = 128u * 1024u * 1024u;
 constexpr std::uint32_t kMaximumTextureDimension = 8192u;
 constexpr std::uint32_t kMaximumTextureBytes =
     kMaximumTextureDimension * kMaximumTextureDimension * 4u;
 constexpr std::uint32_t kMaximumStringBytes = 64u * 1024u;
 constexpr std::uint32_t kMaximumMetadataBytes = 128u * 1024u * 1024u;
-constexpr std::uint64_t kMaximumPackageBytes = 2ull * 1024ull * 1024ull * 1024ull;
+constexpr std::uint64_t kMaximumPackageBytes = 4ull * 1024ull * 1024ull * 1024ull;
 constexpr float kAreaEpsilon = 1.0e-10f;
+
+std::uint32_t InferPresentationDepthLayer(
+    const SurfaceMaterial& material) {
+  if (material.alpha_mode == SurfaceMaterial::AlphaMode::Blend) {
+    return 3;
+  }
+  std::string lower_name = material.name;
+  std::transform(
+      lower_name.begin(), lower_name.end(), lower_name.begin(),
+      [](unsigned char value) {
+        return static_cast<char>(std::tolower(value));
+      });
+  constexpr std::array<const char*, 13> kOverlayNames = {
+      "sign", "poster", "billboard", "adbord", "advert",
+      "banner", "logo", "decal", "graffiti", "sticker",
+      "plaque", "letter", "neon"};
+  for (const char* token : kOverlayNames) {
+    if (lower_name.find(token) != std::string::npos) {
+      return 2;
+    }
+  }
+  return material.alpha_mode == SurfaceMaterial::AlphaMode::Mask ? 1 : 0;
+}
 
 class Reader {
  public:
@@ -99,11 +130,28 @@ class Reader {
     return result;
   }
 
+  std::span<const std::uint8_t> View(std::size_t size) {
+    if (size > bytes_.size() - offset_) {
+      throw std::runtime_error("SKATE package is truncated");
+    }
+    const std::span<const std::uint8_t> result(
+        bytes_.data() + offset_, size);
+    offset_ += size;
+    return result;
+  }
+
   void Bytes(void* destination, std::size_t size) {
     if (size > bytes_.size() - offset_) {
       throw std::runtime_error("SKATE package is truncated");
     }
     std::memcpy(destination, bytes_.data() + offset_, size);
+    offset_ += size;
+  }
+
+  void Skip(std::size_t size) {
+    if (size > bytes_.size() - offset_) {
+      throw std::runtime_error("SKATE package is truncated");
+    }
     offset_ += size;
   }
 
@@ -118,28 +166,41 @@ class Reader {
   std::size_t offset_ = 0;
 };
 
-std::vector<std::uint8_t> ReadStoredBytes(
+struct StoredPayload {
+  std::uint32_t method = kStorageRaw;
+  std::size_t expected_size = 0;
+  std::vector<std::uint8_t> bytes;
+};
+
+StoredPayload ReadStoredPayload(
     Reader& reader,
     std::size_t expected_size,
     const char* label) {
   const std::uint32_t method = reader.Scalar<std::uint32_t>();
   const std::uint32_t stored_size = reader.Scalar<std::uint32_t>();
-  if (stored_size > kMaximumPackageBytes) {
-    throw std::runtime_error(
-        std::string("SKATE ") + label + " stored size is invalid");
-  }
-  std::vector<std::uint8_t> stored = reader.ByteVector(stored_size);
+  StoredPayload payload{
+      method, expected_size, reader.ByteVector(stored_size)};
   if (method == kStorageRaw) {
-    if (stored.size() != expected_size) {
+    if (payload.bytes.size() != expected_size) {
       throw std::runtime_error(
           std::string("SKATE ") + label + " raw size is invalid");
     }
-    return stored;
+    return payload;
   }
   if (method != kStorageDeflate) {
     throw std::runtime_error(
         std::string("SKATE ") + label + " storage method is unsupported");
   }
+  return payload;
+}
+
+std::vector<std::uint8_t> DecodeStoredPayload(
+    StoredPayload payload,
+    const char* label) {
+  if (payload.method == kStorageRaw) {
+    return std::move(payload.bytes);
+  }
+  const std::size_t expected_size = payload.expected_size;
   if (expected_size > std::numeric_limits<uLongf>::max()) {
     throw std::runtime_error(
         std::string("SKATE ") + label + " decoded size is invalid");
@@ -149,8 +210,8 @@ std::vector<std::uint8_t> ReadStoredBytes(
   const int result = uncompress(
       decoded.data(),
       &decoded_size,
-      stored.data(),
-      static_cast<uLong>(stored.size()));
+      payload.bytes.data(),
+      static_cast<uLong>(payload.bytes.size()));
   if (result != Z_OK || decoded_size != expected_size) {
     throw std::runtime_error(
         std::string("SKATE ") + label + " DEFLATE payload is invalid");
@@ -158,11 +219,90 @@ std::vector<std::uint8_t> ReadStoredBytes(
   return decoded;
 }
 
+std::vector<std::uint8_t> ReadStoredBytes(
+    Reader& reader,
+    std::size_t expected_size,
+    const char* label) {
+  return DecodeStoredPayload(
+      ReadStoredPayload(reader, expected_size, label), label);
+}
+
+void SkipStoredBytes(Reader& reader,
+                     std::size_t expected_size,
+                     const char* label) {
+  const std::uint32_t method = reader.Scalar<std::uint32_t>();
+  const std::uint32_t stored_size = reader.Scalar<std::uint32_t>();
+  if (method == kStorageRaw && stored_size != expected_size) {
+    throw std::runtime_error(
+        std::string("SKATE ") + label + " raw size is invalid");
+  }
+  if (method != kStorageRaw && method != kStorageDeflate) {
+    throw std::runtime_error(
+        std::string("SKATE ") + label + " storage method is unsupported");
+  }
+  reader.Skip(stored_size);
+}
+
 float DecodeSnorm8(std::uint32_t packed, std::uint32_t shift) {
   const auto value = static_cast<std::int8_t>(
       static_cast<std::uint8_t>((packed >> shift) & 0xFFu));
   return std::clamp(static_cast<float>(value) / 127.0f, -1.0f, 1.0f);
 }
+
+template <typename Function>
+void ParallelRanges(std::size_t count, Function function) {
+  if (count == 0) {
+    return;
+  }
+  const std::size_t worker_count = std::min<std::size_t>(
+      count,
+      std::min<std::size_t>(
+          std::max(1u, std::thread::hardware_concurrency()), 8u));
+  if (worker_count == 1 || count < 65536) {
+    function(0, count);
+    return;
+  }
+  std::vector<std::thread> workers;
+  workers.reserve(worker_count);
+  for (std::size_t worker = 0; worker < worker_count; ++worker) {
+    const std::size_t first = count * worker / worker_count;
+    const std::size_t last = count * (worker + 1) / worker_count;
+    workers.emplace_back(function, first, last);
+  }
+  for (std::thread& worker : workers) {
+    worker.join();
+  }
+}
+
+struct PackedRenderVertexV9 {
+  float position[3];
+  float normal[3];
+  float uv[2];
+  float lightmap_uv[2];
+  std::uint32_t material;
+};
+static_assert(sizeof(PackedRenderVertexV9) == 44);
+
+struct PackedRenderVertexV12 {
+  PackedRenderVertexV9 base;
+  float decal_uv[2];
+  std::uint32_t packed_tangent;
+};
+static_assert(sizeof(PackedRenderVertexV12) == 56);
+
+struct PackedCollisionTriangleV9 {
+  float vertices[9];
+  std::uint32_t surface;
+  std::uint32_t material;
+};
+static_assert(sizeof(PackedCollisionTriangleV9) == 44);
+
+struct PackedCollisionTriangleV11 {
+  PackedCollisionTriangleV9 base;
+  std::uint8_t edge_codes[3];
+  std::uint8_t has_edge_codes;
+};
+static_assert(sizeof(PackedCollisionTriangleV11) == 48);
 
 void ReadPackedTangentFrame(Reader& reader, RenderVertex& vertex) {
   const std::uint32_t packed = reader.Scalar<std::uint32_t>();
@@ -179,32 +319,74 @@ void ReadRenderVertices(
     std::uint32_t count,
     std::vector<RenderVertex>& destination,
     bool has_retail_channels = false) {
-  destination.reserve(destination.size() + count);
-  for (std::uint32_t index = 0; index < count; ++index) {
-    RenderVertex vertex;
-    vertex.position = reader.Vector3();
-    vertex.normal = reader.Vector3();
-    vertex.uv = reader.Vector2();
-    vertex.lightmap_uv = reader.Vector2();
-    vertex.material = reader.Scalar<MaterialId>();
-    if (has_retail_channels) {
-      vertex.decal_uv = reader.Vector2();
-      ReadPackedTangentFrame(reader, vertex);
-    } else {
+  const std::size_t first_destination = destination.size();
+  destination.resize(first_destination + count);
+  if (has_retail_channels) {
+    const std::span<const std::uint8_t> bytes = reader.View(
+        std::size_t(count) * sizeof(PackedRenderVertexV12));
+    ParallelRanges(count, [&](std::size_t first, std::size_t last) {
+      for (std::size_t index = first; index < last; ++index) {
+        PackedRenderVertexV12 source;
+        std::memcpy(
+            &source,
+            bytes.data() + index * sizeof(source),
+            sizeof(source));
+        RenderVertex& vertex = destination[first_destination + index];
+        vertex.position = {
+            source.base.position[0], source.base.position[1],
+            source.base.position[2]};
+        vertex.normal = {
+            source.base.normal[0], source.base.normal[1],
+            source.base.normal[2]};
+        vertex.uv = {source.base.uv[0], source.base.uv[1]};
+        vertex.material = source.base.material;
+        vertex.lightmap_uv = {
+            source.base.lightmap_uv[0], source.base.lightmap_uv[1]};
+        vertex.decal_uv = {
+            source.decal_uv[0], source.decal_uv[1]};
+        vertex.tangent_binormal = {
+            DecodeSnorm8(source.packed_tangent, 0u),
+            DecodeSnorm8(source.packed_tangent, 8u),
+            DecodeSnorm8(source.packed_tangent, 16u)};
+        vertex.tangent_handedness =
+            DecodeSnorm8(source.packed_tangent, 24u);
+      }
+    });
+    return;
+  }
+
+  const std::span<const std::uint8_t> bytes =
+      reader.View(std::size_t(count) * sizeof(PackedRenderVertexV9));
+  ParallelRanges(count, [&](std::size_t first, std::size_t last) {
+    for (std::size_t index = first; index < last; ++index) {
+      PackedRenderVertexV9 source;
+      std::memcpy(
+          &source,
+          bytes.data() + index * sizeof(source),
+          sizeof(source));
+      RenderVertex& vertex = destination[first_destination + index];
+      vertex.position = {
+          source.position[0], source.position[1], source.position[2]};
+      vertex.normal = {
+          source.normal[0], source.normal[1], source.normal[2]};
+      vertex.uv = {source.uv[0], source.uv[1]};
+      vertex.material = source.material;
+      vertex.lightmap_uv = {
+          source.lightmap_uv[0], source.lightmap_uv[1]};
       vertex.decal_uv = vertex.uv;
     }
-    destination.push_back(vertex);
-  }
+  });
 }
 
 void ReadIndices(
     Reader& reader,
     std::uint32_t count,
     std::vector<std::uint32_t>& destination) {
-  destination.reserve(destination.size() + count);
-  for (std::uint32_t index = 0; index < count; ++index) {
-    destination.push_back(reader.Scalar<std::uint32_t>());
-  }
+  const std::size_t first_destination = destination.size();
+  destination.resize(first_destination + count);
+  reader.Bytes(
+      destination.data() + first_destination,
+      std::size_t(count) * sizeof(std::uint32_t));
 }
 
 void ReadCollisionTriangles(
@@ -212,22 +394,63 @@ void ReadCollisionTriangles(
     std::uint32_t count,
     std::vector<CollisionTriangle>& destination,
     bool has_native_edge_codes = false) {
-  destination.reserve(destination.size() + count);
-  for (std::uint32_t index = 0; index < count; ++index) {
-    CollisionTriangle triangle;
-    triangle.a = reader.Vector3();
-    triangle.b = reader.Vector3();
-    triangle.c = reader.Vector3();
-    triangle.surface = reader.Scalar<SurfaceId>();
-    triangle.material = reader.Scalar<MaterialId>();
-    if (has_native_edge_codes) {
-      for (std::uint8_t& code : triangle.native_edge_codes) {
-        code = reader.Scalar<std::uint8_t>();
+  const std::size_t first_destination = destination.size();
+  destination.resize(first_destination + count);
+  if (has_native_edge_codes) {
+    const std::span<const std::uint8_t> bytes = reader.View(
+        std::size_t(count) * sizeof(PackedCollisionTriangleV11));
+    ParallelRanges(count, [&](std::size_t first, std::size_t last) {
+      for (std::size_t index = first; index < last; ++index) {
+        PackedCollisionTriangleV11 source;
+        std::memcpy(
+            &source,
+            bytes.data() + index * sizeof(source),
+            sizeof(source));
+        CollisionTriangle& triangle =
+            destination[first_destination + index];
+        triangle.a = {
+            source.base.vertices[0], source.base.vertices[1],
+            source.base.vertices[2]};
+        triangle.b = {
+            source.base.vertices[3], source.base.vertices[4],
+            source.base.vertices[5]};
+        triangle.c = {
+            source.base.vertices[6], source.base.vertices[7],
+            source.base.vertices[8]};
+        triangle.surface = source.base.surface;
+        triangle.material = source.base.material;
+        std::copy(
+            std::begin(source.edge_codes),
+            std::end(source.edge_codes),
+            triangle.native_edge_codes.begin());
+        triangle.has_native_edge_codes =
+            source.has_edge_codes != 0;
       }
-      triangle.has_native_edge_codes = reader.Scalar<std::uint8_t>() != 0;
-    }
-    destination.push_back(triangle);
+    });
+    return;
   }
+
+  const std::span<const std::uint8_t> bytes = reader.View(
+      std::size_t(count) * sizeof(PackedCollisionTriangleV9));
+  ParallelRanges(count, [&](std::size_t first, std::size_t last) {
+    for (std::size_t index = first; index < last; ++index) {
+      PackedCollisionTriangleV9 source;
+      std::memcpy(
+          &source,
+          bytes.data() + index * sizeof(source),
+          sizeof(source));
+      CollisionTriangle& triangle =
+          destination[first_destination + index];
+      triangle.a = {
+          source.vertices[0], source.vertices[1], source.vertices[2]};
+      triangle.b = {
+          source.vertices[3], source.vertices[4], source.vertices[5]};
+      triangle.c = {
+          source.vertices[6], source.vertices[7], source.vertices[8]};
+      triangle.surface = source.surface;
+      triangle.material = source.material;
+    }
+  });
 }
 
 bool Finite(Vec2 value) {
@@ -239,28 +462,13 @@ bool Finite(Vec3 value) {
          std::isfinite(value.z);
 }
 
-void RequireCount(std::uint32_t count, const char* label) {
-  if (count > kMaximumCount) {
+void RequireCount(std::uint32_t count,
+                  const char* label,
+                  std::uint32_t maximum = kMaximumCount) {
+  if (count > maximum) {
     throw std::runtime_error(
         std::string("SKATE ") + label + " count exceeds the format limit");
   }
-}
-
-const SurfaceMaterial* FindMaterial(const MapDefinition& map,
-                                    MaterialId id) {
-  const auto found = std::find_if(
-      map.materials.begin(), map.materials.end(),
-      [id](const SurfaceMaterial& material) {
-        return material.id == id;
-      });
-  return found == map.materials.end() ? nullptr : &*found;
-}
-
-const ImageTexture* FindTexture(const MapDefinition& map, TextureId id) {
-  const auto found = std::find_if(
-      map.textures.begin(), map.textures.end(),
-      [id](const ImageTexture& texture) { return texture.id == id; });
-  return found == map.textures.end() ? nullptr : &*found;
 }
 
 void Validate(MapDefinition& map) {
@@ -305,6 +513,32 @@ void Validate(MapDefinition& map) {
         "SKATE requires materials, render geometry, and collision");
   }
 
+  std::unordered_set<TextureId> texture_ids;
+  for (const ImageTexture& texture : map.textures) {
+    const std::uint64_t expected =
+        std::uint64_t(texture.width) * texture.height * 4u;
+    const bool empty_placeholder =
+        texture.width == 0 && texture.height == 0 &&
+        texture.rgba8.empty() && texture.stored_rgba8.empty();
+    const bool decoded =
+        texture.rgba8.size() == expected;
+    const bool package_backed =
+        texture.rgba8.empty() &&
+        ((texture.stored_rgba8_method == kStorageRaw &&
+          texture.stored_rgba8.size() == expected) ||
+         (texture.stored_rgba8_method == kStorageDeflate &&
+          (expected == 0 || !texture.stored_rgba8.empty())));
+    if (texture.id == 0 || texture.name.empty() ||
+        !texture_ids.insert(texture.id).second ||
+        (!empty_placeholder &&
+         (texture.width == 0 || texture.height == 0 ||
+          texture.width > kMaximumTextureDimension ||
+          texture.height > kMaximumTextureDimension)) ||
+        (!empty_placeholder && !decoded && !package_backed)) {
+      throw std::runtime_error("SKATE embedded texture is invalid");
+    }
+  }
+
   std::unordered_set<MaterialId> material_ids;
   for (const SurfaceMaterial& material : map.materials) {
     if (material.id == 0 || material.name.empty() ||
@@ -321,16 +555,17 @@ void Validate(MapDefinition& map) {
         material.skate_audio_surface > 93 ||
         material.skate_physics_surface > 13 ||
         material.skate_surface_pattern > 15 ||
+        material.presentation_depth_layer > 3 ||
         (material.albedo_texture != 0 &&
-         FindTexture(map, material.albedo_texture) == nullptr) ||
+         !texture_ids.contains(material.albedo_texture)) ||
         (material.indirect_lightmap != 0 &&
-         FindTexture(map, material.indirect_lightmap) == nullptr) ||
+         !texture_ids.contains(material.indirect_lightmap)) ||
         (material.normal_texture != 0 &&
-         FindTexture(map, material.normal_texture) == nullptr) ||
+         !texture_ids.contains(material.normal_texture)) ||
         (material.orm_texture != 0 &&
-         FindTexture(map, material.orm_texture) == nullptr) ||
+         !texture_ids.contains(material.orm_texture)) ||
         (material.emissive_texture != 0 &&
-         FindTexture(map, material.emissive_texture) == nullptr)) {
+         !texture_ids.contains(material.emissive_texture))) {
       throw std::runtime_error("SKATE material table is invalid");
     }
     if (material.retail.enabled) {
@@ -352,7 +587,7 @@ void Validate(MapDefinition& map) {
       for (const RetailTextureBinding& binding :
            material.retail.texture_bindings) {
         if (binding.semantic.empty() || binding.texture == 0 ||
-            FindTexture(map, binding.texture) == nullptr ||
+            !texture_ids.contains(binding.texture) ||
             binding.uv_set > 2 || binding.address_u > 2 ||
             binding.address_v > 2) {
           throw std::runtime_error(
@@ -369,50 +604,80 @@ void Validate(MapDefinition& map) {
     }
   }
 
-  std::unordered_set<TextureId> texture_ids;
-  for (const ImageTexture& texture : map.textures) {
-    const std::uint64_t expected =
-        std::uint64_t(texture.width) * texture.height * 4u;
-    if (texture.id == 0 || texture.name.empty() ||
-        !texture_ids.insert(texture.id).second ||
-        texture.width == 0 || texture.height == 0 ||
-        texture.width > kMaximumTextureDimension ||
-        texture.height > kMaximumTextureDimension ||
-        expected != texture.rgba8.size()) {
-      throw std::runtime_error("SKATE embedded texture is invalid");
-    }
-  }
-
   if (map.render_mesh.indices.size() % 3 != 0) {
     throw std::runtime_error(
         "SKATE render indices do not form complete triangles");
   }
-  for (const RenderVertex& vertex : map.render_mesh.vertices) {
-    if (!Finite(vertex.position) || !Finite(vertex.normal) ||
-        !Finite(vertex.uv) || !Finite(vertex.lightmap_uv) ||
-        !Finite(vertex.decal_uv) ||
-        !Finite(vertex.tangent_binormal) ||
-        !std::isfinite(vertex.tangent_handedness) ||
-        FindMaterial(map, vertex.material) == nullptr) {
-      throw std::runtime_error("SKATE render vertex is invalid");
-    }
+  std::atomic<bool> invalid_render_vertex{false};
+  ParallelRanges(
+      map.render_mesh.vertices.size(),
+      [&](std::size_t first, std::size_t last) {
+        for (std::size_t index = first;
+             index < last &&
+             !invalid_render_vertex.load(std::memory_order_relaxed);
+             ++index) {
+          const RenderVertex& vertex =
+              map.render_mesh.vertices[index];
+          if (!Finite(vertex.position) || !Finite(vertex.normal) ||
+              !Finite(vertex.uv) || !Finite(vertex.lightmap_uv) ||
+              !Finite(vertex.decal_uv) ||
+              !Finite(vertex.tangent_binormal) ||
+              !std::isfinite(vertex.tangent_handedness) ||
+              !material_ids.contains(vertex.material)) {
+            invalid_render_vertex.store(
+                true, std::memory_order_relaxed);
+          }
+        }
+      });
+  if (invalid_render_vertex.load(std::memory_order_relaxed)) {
+    throw std::runtime_error("SKATE render vertex is invalid");
   }
-  for (std::uint32_t index : map.render_mesh.indices) {
-    if (index >= map.render_mesh.vertices.size()) {
-      throw std::runtime_error("SKATE render index is out of range");
-    }
+
+  std::atomic<bool> invalid_render_index{false};
+  ParallelRanges(
+      map.render_mesh.indices.size(),
+      [&](std::size_t first, std::size_t last) {
+        for (std::size_t position = first;
+             position < last &&
+             !invalid_render_index.load(std::memory_order_relaxed);
+             ++position) {
+          if (map.render_mesh.indices[position] >=
+              map.render_mesh.vertices.size()) {
+            invalid_render_index.store(
+                true, std::memory_order_relaxed);
+          }
+        }
+      });
+  if (invalid_render_index.load(std::memory_order_relaxed)) {
+    throw std::runtime_error("SKATE render index is out of range");
   }
-  for (CollisionTriangle& triangle : map.collision_triangles) {
-    const Vec3 cross = Cross(triangle.b - triangle.a,
-                             triangle.c - triangle.a);
-    if (!Finite(triangle.a) || !Finite(triangle.b) ||
-        !Finite(triangle.c) ||
-        LengthSquared(cross) <= kAreaEpsilon ||
-        triangle.surface == 0 ||
-        FindMaterial(map, triangle.material) == nullptr) {
-      throw std::runtime_error("SKATE collision triangle is invalid");
-    }
-    triangle.normal = Normalize(cross);
+
+  std::atomic<bool> invalid_collision{false};
+  ParallelRanges(
+      map.collision_triangles.size(),
+      [&](std::size_t first, std::size_t last) {
+        for (std::size_t index = first;
+             index < last &&
+             !invalid_collision.load(std::memory_order_relaxed);
+             ++index) {
+          CollisionTriangle& triangle =
+              map.collision_triangles[index];
+          const Vec3 cross = Cross(
+              triangle.b - triangle.a, triangle.c - triangle.a);
+          if (!Finite(triangle.a) || !Finite(triangle.b) ||
+              !Finite(triangle.c) ||
+              LengthSquared(cross) <= kAreaEpsilon ||
+              triangle.surface == 0 ||
+              !material_ids.contains(triangle.material)) {
+            invalid_collision.store(
+                true, std::memory_order_relaxed);
+            continue;
+          }
+          triangle.normal = Normalize(cross);
+        }
+      });
+  if (invalid_collision.load(std::memory_order_relaxed)) {
+    throw std::runtime_error("SKATE collision triangle is invalid");
   }
   for (const GrindRail& rail : map.grind_rails) {
     const bool native = !rail.native_segments.empty();
@@ -506,7 +771,7 @@ void Validate(MapDefinition& map) {
           !Finite(vertex.decal_uv) ||
           !Finite(vertex.tangent_binormal) ||
           !std::isfinite(vertex.tangent_handedness) ||
-          FindMaterial(map, vertex.material) == nullptr) {
+          !material_ids.contains(vertex.material)) {
         throw std::runtime_error("SKATE hinged-door render vertex is invalid");
       }
     }
@@ -522,7 +787,7 @@ void Validate(MapDefinition& map) {
           !Finite(triangle.c) ||
           LengthSquared(cross) <= kAreaEpsilon ||
           triangle.surface == 0 ||
-          FindMaterial(map, triangle.material) == nullptr) {
+          !material_ids.contains(triangle.material)) {
         throw std::runtime_error(
             "SKATE hinged-door collision triangle is invalid");
       }
@@ -590,8 +855,9 @@ MapDefinition LoadOwnedMapPackage(const std::filesystem::path& path) {
   const bool version_10 = magic == kMagicV10;
   const bool version_11 = magic == kMagicV11;
   const bool version_12 = magic == kMagicV12;
+  const bool version_13 = magic == kMagicV13;
   const bool version_10_or_newer =
-      version_10 || version_11 || version_12;
+      version_10 || version_11 || version_12 || version_13;
   const bool skate_magic =
       std::memcmp(magic.data(), "SKATE", 5) == 0 &&
       std::isdigit(static_cast<unsigned char>(magic[5])) &&
@@ -599,17 +865,17 @@ MapDefinition LoadOwnedMapPackage(const std::filesystem::path& path) {
       magic[7] == '\0';
   const int package_version =
       skate_magic ? (magic[5] - '0') * 10 + (magic[6] - '0') : 0;
-  if (skate_magic && package_version > 12) {
+  if (skate_magic && package_version > 13) {
     throw std::runtime_error(
         "SKATE v" + std::to_string(package_version) +
         " requires a newer Custom Engine Layer release");
   }
   if ((!version_1 && !version_2 && !version_3 && !version_4 && !version_5 &&
        !version_6 && !version_7 && !version_8 && !version_9 &&
-       !version_10 && !version_11 && !version_12) ||
+       !version_10 && !version_11 && !version_12 && !version_13) ||
       reader.Scalar<std::uint32_t>() != kEndianMarker) {
     throw std::runtime_error(
-        "file is not a supported little-endian SKATE v1-v12 package");
+        "file is not a supported little-endian SKATE v1-v13 package");
   }
 
   MapDefinition map;
@@ -662,9 +928,9 @@ MapDefinition LoadOwnedMapPackage(const std::filesystem::path& path) {
       package_version >= 8 ? reader.Scalar<std::uint32_t>() : 0;
   RequireCount(material_count, "material");
   RequireCount(texture_count, "texture");
-  RequireCount(vertex_count, "vertex");
-  RequireCount(index_count, "index");
-  RequireCount(collision_count, "collision");
+  RequireCount(vertex_count, "vertex", kMaximumGeometryCount);
+  RequireCount(index_count, "index", kMaximumIndexCount);
+  RequireCount(collision_count, "collision", kMaximumGeometryCount);
   RequireCount(rail_count, "grind rail");
   RequireCount(door_count, "hinged door");
   RequireCount(local_light_count, "local light");
@@ -699,6 +965,13 @@ MapDefinition LoadOwnedMapPackage(const std::filesystem::path& path) {
           static_cast<std::uint8_t>(reader.Scalar<std::uint32_t>());
       material.skate_surface_pattern =
           static_cast<std::uint8_t>(reader.Scalar<std::uint32_t>());
+    }
+    if (package_version >= 13) {
+      material.presentation_depth_layer =
+          reader.Scalar<std::uint32_t>();
+    } else {
+      material.presentation_depth_layer =
+          InferPresentationDepthLayer(material);
     }
     if (package_version >= 12) {
       material.retail.enabled =
@@ -768,17 +1041,22 @@ MapDefinition LoadOwnedMapPackage(const std::filesystem::path& path) {
         static_cast<TextureColorSpace>(reader.Scalar<std::uint32_t>());
     const std::uint64_t expected_byte_count =
         std::uint64_t(texture.width) * texture.height * 4u;
-    if (texture.width == 0 || texture.height == 0 ||
-        texture.width > kMaximumTextureDimension ||
-        texture.height > kMaximumTextureDimension ||
+    const bool empty_placeholder =
+        texture.width == 0 && texture.height == 0;
+    if ((texture.width == 0) != (texture.height == 0) ||
+        (!empty_placeholder &&
+         (texture.width > kMaximumTextureDimension ||
+          texture.height > kMaximumTextureDimension)) ||
         expected_byte_count > kMaximumTextureBytes) {
       throw std::runtime_error("SKATE embedded texture is invalid");
     }
     if (package_version >= 9) {
-      texture.rgba8 = ReadStoredBytes(
+      StoredPayload payload = ReadStoredPayload(
           reader,
           static_cast<std::size_t>(expected_byte_count),
           "embedded texture");
+      texture.stored_rgba8_method = payload.method;
+      texture.stored_rgba8 = std::move(payload.bytes);
     } else {
       const std::uint32_t byte_count = reader.Scalar<std::uint32_t>();
       if (byte_count != expected_byte_count) {
@@ -983,6 +1261,16 @@ MapDefinition LoadOwnedMapPackage(const std::filesystem::path& path) {
       const std::uint32_t decoded_size =
           reader.Scalar<std::uint32_t>();
       if (decoded_size > kMaximumMetadataBytes) {
+        // WMET is provenance for extraction and round-tripping, not data
+        // needed by the runtime world. Very large combined retail maps may
+        // legitimately carry more metadata than the runtime's allocation
+        // safety limit, so retain the limit while safely ignoring only this
+        // optional known extension.
+        if (tag == std::array<char, 4>{'W', 'M', 'E', 'T'} &&
+            schema == 1) {
+          SkipStoredBytes(reader, decoded_size, "extension");
+          continue;
+        }
         throw std::runtime_error(
             "SKATE extension exceeds the metadata limit");
       }
@@ -1000,6 +1288,82 @@ MapDefinition LoadOwnedMapPackage(const std::filesystem::path& path) {
   reader.RequireEnd();
   Validate(map);
   return map;
+}
+
+bool DecodeOwnedMapTexture(
+    const ImageTexture& texture,
+    std::string* error) {
+  const std::uint64_t expected_u64 =
+      std::uint64_t(texture.width) * texture.height * 4u;
+  if (expected_u64 > std::numeric_limits<std::size_t>::max()) {
+    if (error != nullptr) {
+      *error = "decoded texture size exceeds the host address space";
+    }
+    return false;
+  }
+  const std::size_t expected =
+      static_cast<std::size_t>(expected_u64);
+  if (texture.rgba8.size() == expected) {
+    return true;
+  }
+  if (!texture.rgba8.empty()) {
+    if (error != nullptr) {
+      *error = "decoded texture has the wrong byte count";
+    }
+    return false;
+  }
+  if (texture.stored_rgba8_method == kStorageRaw) {
+    if (texture.stored_rgba8.size() != expected) {
+      if (error != nullptr) {
+        *error = "raw texture payload has the wrong byte count";
+      }
+      return false;
+    }
+    texture.rgba8 = texture.stored_rgba8;
+    return true;
+  }
+  if (texture.stored_rgba8_method != kStorageDeflate) {
+    if (error != nullptr) {
+      *error = "texture storage method is unsupported";
+    }
+    return false;
+  }
+  if (expected == 0) {
+    return texture.stored_rgba8.empty();
+  }
+  if (texture.stored_rgba8.empty() ||
+      texture.stored_rgba8.size() >
+          std::numeric_limits<uLong>::max() ||
+      expected > std::numeric_limits<uLongf>::max()) {
+    if (error != nullptr) {
+      *error = "compressed texture payload is invalid";
+    }
+    return false;
+  }
+  std::vector<std::uint8_t> decoded(expected);
+  uLongf decoded_size = static_cast<uLongf>(expected);
+  const int status = uncompress(
+      decoded.data(), &decoded_size,
+      texture.stored_rgba8.data(),
+      static_cast<uLong>(texture.stored_rgba8.size()));
+  if (status != Z_OK || decoded_size != expected) {
+    if (error != nullptr) {
+      *error = "texture DEFLATE payload did not decode to the expected size";
+    }
+    return false;
+  }
+  texture.rgba8 = std::move(decoded);
+  return true;
+}
+
+void ReleaseOwnedMapTexturePixels(const ImageTexture& texture) {
+  // Legacy packages have no retained encoded payload, so their decoded
+  // bytes remain authoritative. Version 9+ packages can recreate RGBA8
+  // after a GPU-cache eviction.
+  if (!texture.stored_rgba8.empty() ||
+      (texture.width == 0 && texture.height == 0)) {
+    std::vector<std::uint8_t>().swap(texture.rgba8);
+  }
 }
 
 }  // namespace skate::world

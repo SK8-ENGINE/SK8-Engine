@@ -296,8 +296,7 @@ DayNightState EvaluateDayNightCycle(
   state.ambient =
       cycle.night_ambient +
       (cycle.day_ambient - cycle.night_ambient) *
-          state.daylight_amount +
-      state.twilight_amount * 0.035f;
+          state.daylight_amount;
   return state;
 }
 

@@ -1,10 +1,10 @@
-# SKATE v12 binary format
+# SKATE v13 binary format
 
 All integers and IEEE-754 floats are little-endian. Strings are a `u32` byte
 length followed by UTF-8 bytes. Coordinates are right-handed Y-up metres.
 
 ```text
-char[8] magic = "SKATE12\0"
+char[8] magic = "SKATE13\0"
 u32 endian_marker = 0x12345678
 string map_name
 f32 spawn_position[3]
@@ -43,6 +43,7 @@ material[material_count]:
   u32 skate_audio_surface        # 0..93
   u32 skate_physics_surface      # 0..13 (13 appears in retail collision)
   u32 skate_surface_pattern      # 0..15
+  u32 presentation_depth_layer   # 0 world, 1 cutout, 2 decal/sign, 3 blend
   u32 has_retail_definition
   if has_retail_definition:
     u64 retail_material_guid
@@ -252,15 +253,32 @@ The native collision compiler emits those bytes unchanged. Blender-authored
 collision leaves the marker clear, and the compiler derives adjacency,
 edge-angle, and smooth-vertex codes from geometry as before.
 
-The loader retains read compatibility with SKATE v1 through v12. Missing v2
+Every SKATE material participates in runtime directional and local lighting.
+An indirect lightmap is an additive static-bounce term; it never changes the
+material into a baked-only or unlit surface. The runtime's Dynamic Lighting
+setting is the one global presentation switch for that live contribution.
+
+`presentation_depth_layer` resolves intentionally coplanar authored detail
+without changing geometry. The renderer applies a tiny projection-space depth
+preference to layers 1 through 3, so signs and decals remain at their exact
+authored world transforms and collision is unaffected. A deterministic
+millimetre-scale material tie order resolves overlapping LOD/sign materials
+inside the same layer. Runtime world compilation also removes exact
+same-winding duplicate presentation faces while retaining reverse-wound
+partners used for intentional two-sided foliage. Exporters infer a default
+from alpha mode and common sign/decal material names, while `ow_depth_layer`
+can explicitly select 0 through 3.
+
+The loader retains read compatibility with SKATE v1 through v13. Missing v2
 material fields use opaque, polished-concrete/smooth defaults with no
 additional PBR maps. Missing v3 cycle fields retain the original full-day
 behavior. Missing v6 environment fields use the engine's neutral sky grading
 and standard twilight, night, sun, moon, and ambient defaults. Older packages
 simply contain no authored local lights or NPC routes. Packages before v12 use
 the base UV as decal UV and have no tangent frame, retail material definition,
-or extension table. NPC routes in v8 are experimental runtime data and are not
-yet a stable gameplay feature.
+or extension table. Packages before v13 infer their presentation depth layer
+from alpha mode and material name. NPC routes in v8 are experimental runtime
+data and are not yet a stable gameplay feature.
 
 ## Version compatibility
 

@@ -64,9 +64,19 @@ int main(int argc, char** argv) {
     }
     std::uint64_t texture_bytes = 0;
     for (const skate::world::ImageTexture& texture : map.textures) {
+      std::string texture_error;
+      if (!skate::world::DecodeOwnedMapTexture(
+              texture, &texture_error)) {
+        std::cerr
+            << "SKATE_PACKAGE_FAIL texture " << texture.id << " '"
+            << texture.name << "' could not be decoded: "
+            << texture_error << '\n';
+        return 1;
+      }
       texture_bytes += texture.rgba8.size();
     }
     std::array<std::uint64_t, 3> alpha_modes{};
+    std::array<std::uint64_t, 4> depth_layers{};
     for (const skate::world::SurfaceMaterial& material : map.materials) {
       const std::size_t alpha_mode =
           static_cast<std::size_t>(material.alpha_mode);
@@ -75,6 +85,11 @@ int main(int argc, char** argv) {
         return 1;
       }
       ++alpha_modes[alpha_mode];
+      if (material.presentation_depth_layer >= depth_layers.size()) {
+        std::cerr << "SKATE_PACKAGE_FAIL invalid material depth layer\n";
+        return EXIT_FAILURE;
+      }
+      ++depth_layers[material.presentation_depth_layer];
     }
     std::cout
         << "SKATE_PACKAGE_OK"
@@ -83,6 +98,10 @@ int main(int argc, char** argv) {
         << " alpha_opaque=" << alpha_modes[0]
         << " alpha_mask=" << alpha_modes[1]
         << " alpha_blend=" << alpha_modes[2]
+        << " depth_base=" << depth_layers[0]
+        << " depth_cutout=" << depth_layers[1]
+        << " depth_overlay=" << depth_layers[2]
+        << " depth_blend=" << depth_layers[3]
         << " textures=" << map.textures.size()
         << " texture_rgba8_bytes=" << texture_bytes
         << " vertices=" << map.render_mesh.vertices.size()
@@ -106,6 +125,10 @@ int main(int argc, char** argv) {
             << "SKATE_RENDER_WORLD_OK"
             << " source_triangles=" << render_world.source_triangle_count
             << " output_triangles=" << render_world.output_triangle_count
+            << " backface_culled_materials="
+            << render_world.backface_culled_material_count
+            << " presentation_surfaces="
+            << render_world.presentation_surface_count
             << " chunks=" << render_world.chunks.size()
             << '\n';
       }

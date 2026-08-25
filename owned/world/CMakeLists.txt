@@ -70,5 +70,27 @@ if(SKATE_OWNED_WORLD_BUILD_TESTS)
     skate_rw_collision_archive_validate PRIVATE cxx_std_20
   )
 
+  add_executable(skate_rw_collision_archive_build
+    tools/build_collision_archive.cpp
+  )
+
+  target_link_libraries(
+    skate_rw_collision_archive_build PRIVATE skate_owned_world
+  )
+  target_compile_features(
+    skate_rw_collision_archive_build PRIVATE cxx_std_20
+  )
+
+  add_executable(skate_owned_map_crop
+    tools/crop_owned_map.cpp
+  )
+
+  target_link_libraries(
+    skate_owned_map_crop PRIVATE skate_owned_world ZLIB::ZLIBSTATIC
+  )
+  target_compile_features(
+    skate_owned_map_crop PRIVATE cxx_std_20
+  )
+
   add_test(NAME skate_owned_world_tests COMMAND skate_owned_world_tests)
 endif()

@@ -55,6 +55,15 @@ std::uint32_t ReadBeU32(const std::vector<std::uint8_t>& bytes,
          bytes.at(offset + 3);
 }
 
+void WriteBeU32(std::vector<std::uint8_t>& bytes,
+                std::size_t offset,
+                std::uint32_t value) {
+  bytes.at(offset) = static_cast<std::uint8_t>(value >> 24u);
+  bytes.at(offset + 1) = static_cast<std::uint8_t>(value >> 16u);
+  bytes.at(offset + 2) = static_cast<std::uint8_t>(value >> 8u);
+  bytes.at(offset + 3) = static_cast<std::uint8_t>(value);
+}
+
 std::uint64_t ReadBeU64(const std::vector<std::uint8_t>& bytes,
                         std::size_t offset) {
   return (static_cast<std::uint64_t>(ReadBeU32(bytes, offset)) << 32u) |
@@ -76,7 +85,7 @@ int main() {
         std::filesystem::temp_directory_path() /
         "skate_owned_world_future_format_test.skate";
     const std::array<std::uint8_t, 12> header = {
-        'S', 'K', 'A', 'T', 'E', '1', '3', '\0',
+        'S', 'K', 'A', 'T', 'E', '1', '4', '\0',
         0x78, 0x56, 0x34, 0x12};
     {
       std::ofstream output(
@@ -96,6 +105,38 @@ int main() {
     std::filesystem::remove(future_package, ec);
     Require(rejected_as_future,
             "future SKATE versions must request a newer runtime");
+  }
+
+  {
+    MapDefinition duplicate_faces;
+    duplicate_faces.render_mesh.vertices.resize(3);
+    duplicate_faces.render_mesh.vertices[0].position = {1.0f, 0.0f, 1.0f};
+    duplicate_faces.render_mesh.vertices[1].position = {2.0f, 0.0f, 1.0f};
+    duplicate_faces.render_mesh.vertices[2].position = {1.0f, 0.0f, 2.0f};
+    for (RenderVertex& vertex :
+         duplicate_faces.render_mesh.vertices) {
+      vertex.material = 1;
+      vertex.normal = {0.0f, 1.0f, 0.0f};
+    }
+    duplicate_faces.render_mesh.indices = {
+        0, 1, 2,  // first oriented face
+        0, 1, 2,  // exact same-winding duplicate: remove
+        0, 2, 1,  // reverse-wound two-sided partner: retain
+    };
+    RenderWorldBuildOptions options;
+    options.chunk_size = 16.0f;
+    const RenderWorld duplicate_world =
+        BuildRenderWorld(duplicate_faces, options);
+    Require(
+        duplicate_world.source_triangle_count == 3 &&
+            duplicate_world.output_triangle_count == 2,
+        "render compiler did not distinguish duplicate and reverse faces");
+    Require(
+        duplicate_world.backface_culled_material_count == 1 &&
+            duplicate_world.chunks.size() == 1 &&
+            duplicate_world.chunks[0].batches.size() == 1 &&
+            duplicate_world.chunks[0].batches[0].cull_backfaces,
+        "reverse-wound presentation twins did not enable backface culling");
   }
 
   ShallowWaterConfig water_config;
@@ -295,6 +336,19 @@ int main() {
               ping_evening.night_amount < 0.01f &&
               ping_morning.night_amount < 0.01f,
           "daylight ping-pong evaluation changed");
+  DayNightCycleDefinition zero_ambient_cycle =
+      definition.day_night_cycle;
+  zero_ambient_cycle.day_ambient = 0.0f;
+  zero_ambient_cycle.night_ambient = 0.0f;
+  for (int second = 0; second < 96; ++second) {
+    Require(
+        NearlyEqual(
+            EvaluateDayNightCycle(
+                zero_ambient_cycle, static_cast<float>(second))
+                .ambient,
+            0.0f),
+        "zero day/night ambient settings must produce zero ambient light");
+  }
   Require(definition.raytraced_puddles.size() == 3,
           "starter map raytraced puddle count changed");
   const RaytracedPuddle& demo_puddle =
@@ -824,6 +878,154 @@ int main() {
           adopted_retail_mesh.mesh.cluster_count ==
               retail_edge_mesh.mesh.cluster_count,
       "serialized retail collision mesh adoption changed the resource");
+
+  RwCollisionMeshBlob translated_retail = rw.mesh;
+  const std::vector<std::uint8_t> untranslated_bytes =
+      translated_retail.bytes;
+  constexpr Vec3 requested_retail_translation{
+      10.125f, -3.250f, 7.375f};
+  Vec3 applied_retail_translation{};
+  std::string retail_translation_error;
+  Require(
+      TranslateSerializedRwCollisionMesh(
+          translated_retail, requested_retail_translation,
+          &applied_retail_translation, &retail_translation_error),
+      retail_translation_error);
+  Require(
+      NearlyEqual(applied_retail_translation.x,
+                  requested_retail_translation.x) &&
+          NearlyEqual(applied_retail_translation.y,
+                      requested_retail_translation.y) &&
+          NearlyEqual(applied_retail_translation.z,
+                      requested_retail_translation.z) &&
+          NearlyEqual(
+              translated_retail.bounds_min.x,
+              rw.mesh.bounds_min.x + applied_retail_translation.x) &&
+          NearlyEqual(
+              ReadBeF32(translated_retail.bytes, 16),
+              ReadBeF32(untranslated_bytes, 16) +
+                  applied_retail_translation.x),
+      "retail collision translation did not update mesh bounds");
+  const std::uint32_t translated_kd =
+      ReadBeU32(untranslated_bytes, 48);
+  const std::uint32_t translated_branches =
+      ReadBeU32(untranslated_bytes, translated_kd);
+  const std::uint32_t translated_branch_count =
+      ReadBeU32(untranslated_bytes, translated_kd + 4);
+  for (std::uint32_t branch = 0;
+       branch < translated_branch_count; ++branch) {
+    const std::size_t record =
+        translated_branches + static_cast<std::size_t>(branch) * 32u;
+    const std::uint32_t axis = ReadBeU32(untranslated_bytes, record + 4);
+    const float axis_translation =
+        axis == 0 ? applied_retail_translation.x
+                  : (axis == 1 ? applied_retail_translation.y
+                               : applied_retail_translation.z);
+    Require(
+        NearlyEqual(
+            ReadBeF32(translated_retail.bytes, record + 24),
+            ReadBeF32(untranslated_bytes, record + 24) +
+                axis_translation) &&
+            NearlyEqual(
+                ReadBeF32(translated_retail.bytes, record + 28),
+                ReadBeF32(untranslated_bytes, record + 28) +
+                    axis_translation),
+        "retail collision translation did not update KD extents");
+  }
+  for (std::uint32_t cluster = 0; cluster < cluster_count; ++cluster) {
+    const std::uint32_t cluster_offset =
+        ReadBeU32(untranslated_bytes,
+                  cluster_table_offset + cluster * 4);
+    const std::uint16_t vertex_blocks =
+        ReadBeU16(untranslated_bytes, cluster_offset + 4);
+    const std::uint8_t vertex_count =
+        untranslated_bytes.at(cluster_offset + 10);
+    Require(untranslated_bytes.at(cluster_offset + 12) == 0,
+            "rebuilt collision test unexpectedly uses compression");
+    for (std::uint32_t vertex = 0; vertex < vertex_count; ++vertex) {
+      const std::size_t vertex_offset =
+          cluster_offset + 16u +
+          static_cast<std::size_t>(vertex) * 16u;
+      Require(
+          NearlyEqual(
+              ReadBeF32(translated_retail.bytes, vertex_offset),
+              ReadBeF32(untranslated_bytes, vertex_offset) +
+                  applied_retail_translation.x) &&
+              NearlyEqual(
+                  ReadBeF32(translated_retail.bytes, vertex_offset + 4),
+                  ReadBeF32(untranslated_bytes, vertex_offset + 4) +
+                      applied_retail_translation.y) &&
+              NearlyEqual(
+                  ReadBeF32(translated_retail.bytes, vertex_offset + 8),
+                  ReadBeF32(untranslated_bytes, vertex_offset + 8) +
+                      applied_retail_translation.z),
+          "retail collision translation did not update vertices");
+    }
+    const std::size_t unit_offset =
+        cluster_offset +
+        (static_cast<std::size_t>(vertex_blocks) + 1u) * 16u;
+    const std::uint16_t unit_bytes =
+        ReadBeU16(untranslated_bytes, cluster_offset + 2);
+    Require(
+        std::equal(
+            untranslated_bytes.begin() + unit_offset,
+            untranslated_bytes.begin() + unit_offset + unit_bytes,
+            translated_retail.bytes.begin() + unit_offset),
+        "retail collision translation changed native unit metadata");
+  }
+
+  for (std::uint8_t compression : {std::uint8_t{1},
+                                   std::uint8_t{2}}) {
+    RwCollisionMeshBlob compressed = retail_edge_mesh.mesh;
+    const std::uint32_t compressed_table =
+        ReadBeU32(compressed.bytes, 52);
+    const std::uint32_t compressed_cluster =
+        ReadBeU32(compressed.bytes, compressed_table);
+    const std::uint8_t compressed_vertices =
+        compressed.bytes.at(compressed_cluster + 10);
+    compressed.bytes.at(compressed_cluster + 12) = compression;
+    if (compression == 1) {
+      for (std::size_t axis = 0; axis < 3; ++axis) {
+        WriteBeU32(compressed.bytes,
+                   compressed_cluster + 16u + axis * 4u,
+                   static_cast<std::uint32_t>(100 + axis));
+      }
+    } else {
+      for (std::uint32_t vertex = 0;
+           vertex < compressed_vertices; ++vertex) {
+        for (std::size_t axis = 0; axis < 3; ++axis) {
+          WriteBeU32(
+              compressed.bytes,
+              compressed_cluster + 16u +
+                  static_cast<std::size_t>(vertex) * 12u + axis * 4u,
+              static_cast<std::uint32_t>(
+                  100 + vertex * 10u + axis));
+        }
+      }
+    }
+    Vec3 compressed_translation{};
+    Require(
+        TranslateSerializedRwCollisionMesh(
+            compressed, {2.0f, -1.0f, 3.0f},
+            &compressed_translation, &retail_translation_error),
+        retail_translation_error);
+    const std::array<std::int32_t, 3> quantized_translation{
+        2000, -1000, 3000};
+    for (std::size_t axis = 0; axis < 3; ++axis) {
+      const std::size_t offset =
+          compressed_cluster + 16u + axis * 4u;
+      const std::int32_t expected =
+          static_cast<std::int32_t>(100 + axis) +
+          quantized_translation[axis];
+      Require(
+          std::bit_cast<std::int32_t>(
+              ReadBeU32(compressed.bytes, offset)) == expected,
+          compression == 1
+              ? "16-bit compressed retail base was not translated"
+              : "32-bit compressed retail vertex was not translated");
+    }
+  }
+
   std::vector<std::uint8_t> branchless_retail =
       adopted_retail_mesh.mesh.bytes;
   const std::uint32_t branchless_kd =

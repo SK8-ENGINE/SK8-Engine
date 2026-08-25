@@ -178,6 +178,11 @@ struct SurfaceMaterial {
   std::uint8_t skate_audio_surface = 3;    // Concrete_Polished
   std::uint8_t skate_physics_surface = 1;  // Smooth
   std::uint8_t skate_surface_pattern = 0;  // None
+  // Semantic raster ordering for authored coplanar detail. Layer zero is
+  // ordinary world geometry; higher layers win the depth test by a tiny
+  // projection-space bias without changing world transforms, collision, or
+  // the package's authored vertex positions. Values above three are invalid.
+  std::uint32_t presentation_depth_layer = 0;
   RetailMaterialDefinition retail;
 };
 
@@ -192,7 +197,12 @@ struct ImageTexture {
   std::uint32_t width = 0;
   std::uint32_t height = 0;
   TextureColorSpace color_space = TextureColorSpace::Linear;
-  std::vector<std::uint8_t> rgba8;
+  // Package-loaded textures may retain their losslessly compressed payload
+  // until first use. Keeping 8+ GiB of Liberty City RGBA resident before the
+  // first frame caused severe paging on 32 GiB systems.
+  mutable std::vector<std::uint8_t> rgba8;
+  std::uint32_t stored_rgba8_method = 0;
+  mutable std::vector<std::uint8_t> stored_rgba8;
 };
 
 struct SpawnPoint {
@@ -298,6 +308,9 @@ struct RenderVertex {
   // is enough to reconstruct T = cross(B, N) * handedness.
   Vec3 tangent_binormal;
   float tangent_handedness = 0.0f;
+  // Runtime-only stable rank for one connected presentation surface. It is
+  // derived while compiling package geometry and is not serialized.
+  std::uint8_t presentation_rank = 0;
 };
 
 struct RenderMesh {

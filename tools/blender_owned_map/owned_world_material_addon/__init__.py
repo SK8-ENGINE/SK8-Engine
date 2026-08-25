@@ -1,4 +1,4 @@
-"""Human-friendly Blender authoring and export tools for SKATE v12.
+"""Human-friendly Blender authoring and export tools for SKATE v13.
 
 This addon and exporter are original project code. They do not import,
 invoke, redistribute, or depend on ArenaBuilder.
@@ -1538,11 +1538,26 @@ def _auto_configure_material(
     metallic = max(
         0.0, min(1.0, _socket_float(shader, "Metallic", 0.0))
     )
-    emissive = max(
-        0.0, _socket_float(shader, "Emission Strength", 0.0)
-    )
     emissive_color = _socket_color(
         shader, "Emission Color", (1.0, 1.0, 1.0)
+    )
+    emission_socket = (
+        shader.inputs.get("Emission Color")
+        if shader is not None
+        else None
+    )
+    emission_authored = bool(
+        emissive_image is not None
+        or (emission_socket is not None and emission_socket.links)
+        or max(emissive_color) > 1.0e-6
+    )
+    # Blender 4/5 Principled materials default to black Emission Color but an
+    # Emission Strength of 1. Black times one is still non-emissive. Copying
+    # the scalar alone made every automatically adopted material self-lit.
+    emissive = (
+        max(0.0, _socket_float(shader, "Emission Strength", 0.0))
+        if emission_authored
+        else 0.0
     )
     if generate_maps:
         normal_image, orm_image, emissive_image = _generate_material_maps(

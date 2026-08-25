@@ -1,4 +1,4 @@
-"""Original Blender -> SKATE v12 exporter.
+"""Original Blender -> SKATE v13 exporter.
 
 This module intentionally targets the narrow project-owned scene contract
 documented beside it. It has no ArenaBuilder imports or runtime dependency.
@@ -27,7 +27,7 @@ except ImportError:
     numpy = None
 
 
-MAGIC = b"SKATE12\0"
+MAGIC = b"SKATE13\0"
 ENDIAN_MARKER = 0x12345678
 STORAGE_RAW = 0
 STORAGE_DEFLATE = 1
@@ -60,7 +60,7 @@ _HELPER_OBJECT_MARKERS = (
     "scale_reference",
     "scale reference",
 )
-CACHE_SCHEMA = 16
+CACHE_SCHEMA = 17
 METADATA_FLOAT_COUNT = 49
 METADATA_BYTE_COUNT = METADATA_FLOAT_COUNT * 4
 RETAIL_NORMAL_ATTRIBUTE = "skate3_retail_normal"
@@ -547,6 +547,7 @@ def _scene_content_fingerprint(
         "ow_audio_surface",
         "ow_physics_surface",
         "ow_surface_pattern",
+        "ow_depth_layer",
         "ow_collision_enabled",
         "skate3_shader_name",
         "skate3_retail_material_guid",
@@ -812,7 +813,7 @@ def _sun_metadata() -> tuple[tuple[float, float, float], float, float]:
 def _read_package_header(output: Path) -> tuple[str, int, tuple[int, ...]]:
     with output.open("rb") as stream:
         if stream.read(len(MAGIC)) != MAGIC:
-            raise ValueError(f"{output} is not an SKATE v12 package")
+            raise ValueError(f"{output} is not an SKATE v13 package")
         marker = struct.unpack("<I", stream.read(4))[0]
         if marker != ENDIAN_MARKER:
             raise ValueError(f"{output} has an invalid endian marker")
@@ -1314,10 +1315,12 @@ def _retail_material_data(
             raise ValueError(
                 f"retail image {image.name!r} was not collected for export"
             )
-        uv_set = 1 if semantic in {"lightmap", "alpha"} else (
+        uv_set = 1 if semantic in {
+            "lightmap", "chromaticity", "alpha"
+        } else (
             2 if semantic == "decal" else 0
         )
-        clamp = semantic == "lightmap" or (
+        clamp = semantic in {"lightmap", "chromaticity"} or (
             semantic == "decal" and not tileable_decal
         )
         address = 1 if clamp else 0
@@ -1435,6 +1438,46 @@ def _material_color(material: bpy.types.Material) -> tuple[float, float, float]:
     if authored is not None and len(authored) >= 3:
         return tuple(float(authored[index]) for index in range(3))
     return tuple(float(material.diffuse_color[index]) for index in range(3))
+
+
+def _presentation_depth_layer(material: bpy.types.Material) -> int:
+    authored = material.get("ow_depth_layer")
+    if authored is not None:
+        value = int(authored)
+        if value < 0 or value > 3:
+            raise ValueError(
+                f"material {material.name!r} has invalid ow_depth_layer={value}"
+            )
+        return value
+    alpha_mode = _bounded_int(material, "ow_alpha_mode", 0, 2)
+    if alpha_mode == 2:
+        return 3
+    lower_name = material.name.casefold()
+    overlay_tokens = (
+        "sign",
+        "_sgn",
+        "sgn_",
+        "sgns",
+        "poster",
+        "billboard",
+        "adbord",
+        "advert",
+        "banner",
+        "logo",
+        "decal",
+        "graffiti",
+        "sticker",
+        "plaque",
+        "letter",
+        "neon",
+        "marking",
+        "videowall",
+        "vwall",
+        "branding",
+    )
+    if any(token in lower_name for token in overlay_tokens):
+        return 2
+    return 1 if alpha_mode == 1 else 0
 
 
 def _export_visual_geometry(
@@ -3127,6 +3170,7 @@ def export_scene(
                 stream,
                 _bounded_int(material, "ow_surface_pattern", 0, 15),
             )
+            _write_u32(stream, _presentation_depth_layer(material))
             retail_enabled = bool(exported.retail_shader_name)
             _write_u32(stream, 1 if retail_enabled else 0)
             if retail_enabled:

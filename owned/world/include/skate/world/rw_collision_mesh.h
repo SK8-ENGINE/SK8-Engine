@@ -66,6 +66,19 @@ RwCollisionBuildResult BuildRwCollisionMesh(
 RwCollisionBuildResult LoadSerializedRwCollisionMesh(
     std::span<const std::uint8_t> bytes);
 
+// Applies a rigid world-space translation without rebuilding a retail mesh.
+// KD topology, cluster boundaries, unit flags, surfaces, group IDs, edge
+// metadata, and compressed vertex representation are retained. Translation is
+// snapped to the mesh granularity so compressed integer vertices remain exact;
+// the snapped value is returned through applied_translation when requested.
+//
+// This must be called on the serialized form before guest pointer fixup.
+bool TranslateSerializedRwCollisionMesh(
+    RwCollisionMeshBlob& mesh,
+    Vec3 requested_translation,
+    Vec3* applied_translation = nullptr,
+    std::string* error = nullptr);
+
 // Applies the same mixed pointer/offset contract as Skate's RenderWare asset
 // loader. The top-level KD-tree and cluster-table addresses, plus the KD
 // branch-record address, become absolute guest pointers. Cluster-table
