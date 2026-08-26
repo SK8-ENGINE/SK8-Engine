@@ -113,6 +113,19 @@ bool ReadRuntimeVector(std::uint8_t* base,
   const std::uint32_t begin = LoadU32(base, owner);
   const std::uint32_t end = LoadU32(base, owner + 4);
   const std::uint32_t capacity = LoadU32(base, owner + 8);
+  // Suppressing the retail world's first registration deliberately leaves
+  // the vector in its native empty state. sub_82C1ED60 grows that state on
+  // the first owned append; rejecting it here prevented the append from
+  // ever being attempted.
+  if (begin == 0 && end == 0 && capacity == 0) {
+    result = {
+        .owner = owner,
+        .begin = 0,
+        .end = 0,
+        .count = 0,
+    };
+    return true;
+  }
   if (!IsGuestDataAddress(begin) || end < begin ||
       capacity < end || (end - begin) % 4 != 0 ||
       end - begin > 16384u * 4u) {
@@ -323,7 +336,15 @@ void EnsureInstalled(PPCContext& ctx, std::uint8_t* base) noexcept {
     g_state.store(State::Disabled, std::memory_order_release);
     return;
   }
-  if (g_state.load(std::memory_order_acquire) == State::Installed) {
+  const State current_state =
+      g_state.load(std::memory_order_acquire);
+  // A failed native append may have retained pointers into the persistent
+  // blob. Do not allocate another blob every player-collision frame.
+  // Restarting the local test cleanly retries after a code/data fix.
+  if (current_state == State::RegistrationFailed) {
+    return;
+  }
+  if (current_state == State::Installed) {
     const std::uint64_t commit_serial =
         map_editor::TransformCommitSerial();
     if (commit_serial ==
