@@ -301,10 +301,13 @@ The stored geometry is Skate 2's four-vertex projection surface, not a literal
 world-space dome. Retail `sky_defaultVS` expands it around the camera. The
 native renderer reconstructs that projection as a camera-relative sphere and
 maps the complete 360-degree gradient and detail panoramas over it while
-retaining the authored elevation. The sky therefore never affects map bounds,
-collision, chunking, or occlusion. The gradient, detail/cloud, and sun-ramp
-layers are composed by the recovered retail sky shader path. Older packages
-without `SKYB` continue to use the project-owned procedural sky.
+retaining the authored elevation. Skate 2's panorama layers are 8:1, so their
+authored UV projection spans a 45-degree vertical belt (`360 / 8`) with
+horizontal wrap and vertical clamp, matching the sampler declarations in
+`sky_defaultPS`. The sky therefore never affects map bounds, collision,
+chunking, or occlusion. The gradient, detail/cloud, and sun-ramp layers are
+composed by the recovered retail sky shader path. Older packages without
+`SKYB` continue to use the project-owned procedural sky.
 
 `day_night_duration_seconds == 0` freezes celestial lighting at
 `day_night_start_hour`. With a positive duration and

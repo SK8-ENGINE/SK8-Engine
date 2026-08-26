@@ -1045,7 +1045,8 @@ VisualMesh BuildSkyMesh() {
           2.0f * kPi * static_cast<float>(segment) / kSegments;
       const float longitude1 =
           2.0f * kPi * static_cast<float>(segment + 1) / kSegments;
-      const auto append = [&mesh](float latitude, float longitude) {
+      const auto append =
+          [&mesh, &textured](float latitude, float longitude) {
         const float horizontal = std::cos(latitude);
         const float x = horizontal * std::cos(longitude);
         const float y = std::sin(latitude);
@@ -1055,7 +1056,13 @@ VisualMesh BuildSkyMesh() {
         source.normal = {-x, -y, -z};
         source.uv = {
             longitude / (2.0f * kPi),
-            latitude / kPi + 0.5f,
+            textured.enabled
+                // Skate 2's 2048x256 and 512x64 panoramas are both 8:1.
+                // sky_defaultVS passes authored UVs through unchanged and
+                // the samplers clamp V. Preserve square angular texels:
+                // 360 degrees / 8 = a 45-degree vertical sky belt.
+                ? 0.5f - latitude * (4.0f / kPi)
+                : latitude / kPi + 0.5f,
         };
         mesh.vertices.push_back(ConvertVertex(source));
         return static_cast<uint16_t>(mesh.vertices.size() - 1);

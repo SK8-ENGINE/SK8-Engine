@@ -737,11 +737,19 @@ float4 ShadePixel(VSOut i) {
     float3 dome = normalize(i.rpos + float3(0.0, cam_pos.y - mat_tint.w, 0.0));
     float3 sky_gradient = albedo.rgb;
     if (overlay.z > 0.5) {
+      // Skate 2 sky_defaultPS uses WRAP in U and CLAMP in V for both
+      // panorama layers. The generated dome duplicates its seam vertices,
+      // so the clamp sampler preserves the same result at U=0/1 while also
+      // holding the panorama's zenith/horizon edge colours outside its
+      // authored 45-degree vertical belt.
+      float2 sky_uv = float2(frac(i.uv.x), saturate(i.uv.y));
+      sky_gradient = diffuse.Sample(smp_clamp, sky_uv).rgb;
       float luminance =
           dot(float3(0.3, 0.59, 0.11), sky_gradient);
       sky_gradient =
           lerp(luminance.xxx, sky_gradient, misc.z) * tint.rgb;
-      sky_gradient += detail_map.Sample(smp, i.uv).rgb - 0.5;
+      sky_gradient +=
+          detail_map.Sample(smp_clamp, sky_uv).rgb - 0.5;
     }
     float3 lin = max(sky_gradient, 0.0);
     lin *= lin;
