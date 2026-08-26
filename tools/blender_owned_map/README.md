@@ -232,6 +232,13 @@ sleep/start-awake switches. Every marked Blender object becomes one
 independent body. Do not join a stack of props if they must topple
 independently.
 
+For pre-fractured glass or similar props, give each dynamic piece the same
+nonzero **Break Group**. Set initial Gravity to `0` and disable **Start
+Awake**, then tune **Impact Speed**, **Shatter Force**, **Shard Spin**, and
+**Released Gravity**. The pieces stay locked until the player reaches the
+impact threshold; the entire group then releases once. This is deterministic
+pre-fracturing, not runtime mesh cutting.
+
 ## Advanced Blender scene contract
 
 Create these exclusive collections:

@@ -38,6 +38,11 @@ struct PhysicsTelemetry {
   std::size_t player_contact_count = 0;
   std::uint64_t player_proxy_updates = 0;
   bool player_proxy_active = false;
+  std::size_t breakable_body_count = 0;
+  std::size_t broken_group_count = 0;
+  std::uint64_t glass_break_events = 0;
+  std::uint32_t last_broken_group = 0;
+  float last_break_speed = 0.0f;
   double accumulator_seconds = 0.0;
   PhysicsObjectPose representative_dynamic_pose;
 };

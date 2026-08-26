@@ -44,7 +44,7 @@ exporter = importlib.reload(_exporter)
 bl_info = {
     "name": "Owned World Authoring",
     "author": "Skate 3 Custom Engine Layer contributors",
-    "version": (1, 11, 0),
+    "version": (1, 12, 0),
     "blender": (5, 0, 0),
     "location": "3D View > Sidebar > Skate 3 Map",
     "description": "Create, validate, and export Skate 3 Custom Engine maps",
@@ -273,6 +273,19 @@ def _sync_physics(settings: "OwnedWorldPhysicsSettings") -> None:
     obj["ow_box3d_gravity_scale"] = float(settings.box3d_gravity_scale)
     obj["ow_box3d_enable_sleep"] = bool(settings.box3d_enable_sleep)
     obj["ow_box3d_initially_awake"] = bool(settings.box3d_initially_awake)
+    obj["ow_box3d_break_group"] = int(settings.box3d_break_group)
+    obj["ow_box3d_break_speed_threshold"] = float(
+        settings.box3d_break_speed_threshold
+    )
+    obj["ow_box3d_break_impulse_scale"] = float(
+        settings.box3d_break_impulse_scale
+    )
+    obj["ow_box3d_break_angular_impulse"] = float(
+        settings.box3d_break_angular_impulse
+    )
+    obj["ow_box3d_break_gravity_scale"] = float(
+        settings.box3d_break_gravity_scale
+    )
     if settings.collision_material is not None:
         obj["ow_material"] = settings.collision_material.name
     obj["ow_upward_surface"] = bool(settings.upward_surface)
@@ -520,6 +533,49 @@ class OwnedWorldPhysicsSettings(PropertyGroup):
         name="Start Awake",
         description="Begin active instead of waiting for another body",
         default=True,
+        update=_physics_updated,
+    )
+    box3d_break_group: IntProperty(
+        name="Break Group",
+        description=(
+            "Zero disables breaking; matching nonzero groups release together"
+        ),
+        default=0,
+        min=0,
+        max=65535,
+        update=_physics_updated,
+    )
+    box3d_break_speed_threshold: FloatProperty(
+        name="Impact Speed",
+        description="Minimum player impact speed needed to shatter the group",
+        default=2.5,
+        min=0.1,
+        max=30.0,
+        unit="VELOCITY",
+        update=_physics_updated,
+    )
+    box3d_break_impulse_scale: FloatProperty(
+        name="Shatter Force",
+        description="How strongly the player's motion scatters released pieces",
+        default=0.45,
+        min=0.0,
+        max=10.0,
+        update=_physics_updated,
+    )
+    box3d_break_angular_impulse: FloatProperty(
+        name="Shard Spin",
+        description="Deterministic rotational kick applied on shatter",
+        default=0.08,
+        min=0.0,
+        max=10.0,
+        update=_physics_updated,
+    )
+    box3d_break_gravity_scale: FloatProperty(
+        name="Released Gravity",
+        description="Gravity applied after the break group is released",
+        default=1.0,
+        min=0.0,
+        max=4.0,
         update=_physics_updated,
     )
     hinge_axis: FloatVectorProperty(
@@ -3167,6 +3223,14 @@ class OWPHYSICS_PT_object(Panel):
                 body.prop(settings, "box3d_enable_sleep")
                 if settings.box3d_enable_sleep:
                     body.prop(settings, "box3d_initially_awake")
+                breaking = layout.box()
+                breaking.label(text="Breakable Group")
+                breaking.prop(settings, "box3d_break_group")
+                if settings.box3d_break_group > 0:
+                    breaking.prop(settings, "box3d_break_speed_threshold")
+                    breaking.prop(settings, "box3d_break_impulse_scale")
+                    breaking.prop(settings, "box3d_break_angular_impulse")
+                    breaking.prop(settings, "box3d_break_gravity_scale")
             contact = layout.box()
             contact.label(text="Box3D Contact")
             contact.prop(settings, "box3d_friction")
@@ -3545,6 +3609,28 @@ def _hydrate_physics(obj: Object) -> None:
     )
     settings.box3d_initially_awake = bool(
         obj.get("ow_box3d_initially_awake", True)
+    )
+    settings.box3d_break_group = max(
+        0, min(65535, int(obj.get("ow_box3d_break_group", 0)))
+    )
+    settings.box3d_break_speed_threshold = max(
+        0.1,
+        min(
+            30.0,
+            float(obj.get("ow_box3d_break_speed_threshold", 2.5)),
+        ),
+    )
+    settings.box3d_break_impulse_scale = max(
+        0.0,
+        min(10.0, float(obj.get("ow_box3d_break_impulse_scale", 0.45))),
+    )
+    settings.box3d_break_angular_impulse = max(
+        0.0,
+        min(10.0, float(obj.get("ow_box3d_break_angular_impulse", 0.08))),
+    )
+    settings.box3d_break_gravity_scale = max(
+        0.0,
+        min(4.0, float(obj.get("ow_box3d_break_gravity_scale", 1.0))),
     )
     settings.hinge_axis = tuple(obj.get("ow_hinge_axis", (0.0, 0.0, 1.0)))
     settings.minimum_angle = math.radians(

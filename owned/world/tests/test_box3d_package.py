@@ -79,6 +79,37 @@ def repack_mobj(
     suffix = package[tag_offset + 20 + old_stored_size :]
     return bytes(prefix) + stored + suffix
 
+def unpack_bgrp(package: bytes) -> tuple[int, bytearray]:
+    tag_offset = package.find(b"BGRP")
+    require(tag_offset >= 0, "glass sample has no BGRP extension")
+    schema = struct.unpack_from("<I", package, tag_offset + 4)[0]
+    decoded_size, method, stored_size = struct.unpack_from(
+        "<III", package, tag_offset + 8
+    )
+    require(schema == 1, "glass sample does not use BGRP schema 1")
+    stored_offset = tag_offset + 20
+    stored = package[stored_offset : stored_offset + stored_size]
+    require(len(stored) == stored_size, "sample BGRP storage is truncated")
+    payload = stored if method == 0 else zlib.decompress(stored)
+    require(method in (0, 1), "sample BGRP storage method is unsupported")
+    require(len(payload) == decoded_size, "sample BGRP size is inconsistent")
+    return tag_offset, bytearray(payload)
+
+
+def repack_bgrp(
+    package: bytes,
+    tag_offset: int,
+    payload: bytes,
+    *,
+    schema: int = 1,
+) -> bytes:
+    stored = zlib.compress(payload, level=6)
+    prefix = bytearray(package[: tag_offset + 4])
+    prefix += struct.pack("<IIII", schema, len(payload), 1, len(stored))
+    old_stored_size = struct.unpack_from("<I", package, tag_offset + 16)[0]
+    suffix = package[tag_offset + 20 + old_stored_size :]
+    return bytes(prefix) + stored + suffix
+
 
 def expect_rejected(
     package: bytes,
@@ -116,6 +147,7 @@ def main() -> int:
     validator = Path(sys.argv[2]).resolve()
     legacy_object = Path(sys.argv[3]).resolve()
     legacy_map = Path(sys.argv[4]).resolve()
+    glass_sample = Path(sys.argv[5]).resolve()
 
     analysis = analyze_package(sample)
     roots = analysis["map_objects"]
@@ -212,9 +244,59 @@ def main() -> int:
         "truncated physics record",
     )
 
+    glass_analysis = analyze_package(glass_sample)
+    glass_roots = glass_analysis["map_objects"]
+    breakable = [
+        root for root in glass_roots
+        if root["physics"]["break_group"] != 0
+    ]
+    require(
+        glass_analysis["version"] == 14
+        and len(glass_roots) == 52
+        and len(breakable) == 48
+        and all(root["physics"]["break_group"] == 1 for root in breakable)
+        and all(root["physics"]["gravity_scale"] == 0.0 for root in breakable),
+        "glass sample does not contain 48 locked shards in one break group",
+    )
+    runtime_glass = subprocess.run(
+        [str(validator), str(glass_sample), "--object-profile"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    require(
+        runtime_glass.returncode == 0
+        and "SKATEOBJ_PHYSICS_OK static=4 dynamic=48"
+        in runtime_glass.stdout,
+        "Box3D-linked runtime did not create the glass sample bodies",
+    )
+    glass_package = glass_sample.read_bytes()
+    bgrp_offset, bgrp_payload = unpack_bgrp(glass_package)
+    expect_rejected(
+        repack_bgrp(
+            glass_package, bgrp_offset, bgrp_payload, schema=2
+        ),
+        validator,
+        "BGRP schema",
+    )
+    invalid_group = bytearray(bgrp_payload)
+    struct.pack_into("<I", invalid_group, 8, 0)
+    expect_rejected(
+        repack_bgrp(glass_package, bgrp_offset, invalid_group),
+        validator,
+        "zero break group",
+    )
+    invalid_reference = bytearray(bgrp_payload)
+    struct.pack_into("<I", invalid_reference, 4, 0)
+    expect_rejected(
+        repack_bgrp(glass_package, bgrp_offset, invalid_reference),
+        validator,
+        "break group object reference",
+    )
+
     print(
         "BOX3D_PACKAGE_TEST_PASS "
-        "roots=11 dynamic=10 malformed_cases=4 "
+        "roots=11 dynamic=10 glass_shards=48 malformed_cases=7 "
         "legacy_skate=12 legacy_skateobj=12"
     )
     return 0

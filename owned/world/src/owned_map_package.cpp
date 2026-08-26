@@ -659,6 +659,45 @@ void ReadMapObjects(std::vector<std::uint8_t> payload,
   reader.RequireEnd();
 }
 
+void ReadBreakGroups(std::vector<std::uint8_t> payload,
+                     std::uint32_t schema, MapDefinition& map) {
+  if (schema != 1) {
+    throw std::runtime_error(
+        "SKATE BGRP extension uses an unsupported schema");
+  }
+  if (map.editable_objects.empty()) {
+    throw std::runtime_error(
+        "SKATE BGRP extension requires map objects");
+  }
+  Reader reader(std::move(payload));
+  const std::uint32_t count = reader.Scalar<std::uint32_t>();
+  RequireCount(count, "break group object");
+  std::unordered_set<MapObjectId> claimed;
+  for (std::uint32_t index = 0; index < count; ++index) {
+    const MapObjectId object_id = reader.Scalar<MapObjectId>();
+    const auto found = std::find_if(
+        map.editable_objects.begin(), map.editable_objects.end(),
+        [object_id](const MapObject& object) {
+          return object.id == object_id;
+        });
+    if (found == map.editable_objects.end() ||
+        !claimed.insert(object_id).second) {
+      throw std::runtime_error(
+          "SKATE BGRP object reference is invalid");
+    }
+    found->physics.break_group = reader.Scalar<std::uint32_t>();
+    found->physics.break_speed_threshold = reader.Scalar<float>();
+    found->physics.break_impulse_scale = reader.Scalar<float>();
+    found->physics.break_angular_impulse = reader.Scalar<float>();
+    found->physics.break_gravity_scale = reader.Scalar<float>();
+    if (found->physics.break_group == 0) {
+      throw std::runtime_error(
+          "SKATE BGRP group identifier must be nonzero");
+    }
+  }
+  reader.RequireEnd();
+}
+
 void ReadRetailCollisionIdentity(std::vector<std::uint8_t> payload,
                                  std::uint32_t schema, MapDefinition &map) {
   if (schema != 1) {
@@ -960,7 +999,21 @@ void Validate(MapDefinition& map) {
         object.physics.angular_damping <= 100.0f &&
         std::isfinite(object.physics.gravity_scale) &&
         object.physics.gravity_scale >= -10.0f &&
-        object.physics.gravity_scale <= 10.0f;
+        object.physics.gravity_scale <= 10.0f &&
+        std::isfinite(object.physics.break_speed_threshold) &&
+        object.physics.break_speed_threshold >= 0.1f &&
+        object.physics.break_speed_threshold <= 30.0f &&
+        std::isfinite(object.physics.break_impulse_scale) &&
+        object.physics.break_impulse_scale >= 0.0f &&
+        object.physics.break_impulse_scale <= 10.0f &&
+        std::isfinite(object.physics.break_angular_impulse) &&
+        object.physics.break_angular_impulse >= 0.0f &&
+        object.physics.break_angular_impulse <= 10.0f &&
+        std::isfinite(object.physics.break_gravity_scale) &&
+        object.physics.break_gravity_scale >= 0.0f &&
+        object.physics.break_gravity_scale <= 4.0f &&
+        (object.physics.break_group == 0 ||
+         object.physics.type == ObjectPhysicsType::Dynamic);
     if (object.id == 0 || object.name.empty() ||
         !object_ids.insert(object.id).second ||
         !object_names.insert(object.name).second ||
@@ -1583,6 +1636,9 @@ MapDefinition LoadOwnedMapPackage(const std::filesystem::path& path) {
   }
 
   if (package_version >= 12) {
+    std::vector<std::uint8_t> break_group_payload;
+    std::uint32_t break_group_schema = 0;
+    bool break_group_seen = false;
     const std::uint32_t extension_count =
         reader.Scalar<std::uint32_t>();
     RequireCount(extension_count, "extension");
@@ -1628,7 +1684,19 @@ MapDefinition LoadOwnedMapPackage(const std::filesystem::path& path) {
         ReadMapObjects(std::move(payload), schema, map);
       } else if (tag == std::array<char, 4>{'R', 'C', 'I', 'D'}) {
         ReadRetailCollisionIdentity(std::move(payload), schema, map);
+      } else if (tag == std::array<char, 4>{'B', 'G', 'R', 'P'}) {
+        if (break_group_seen) {
+          throw std::runtime_error(
+              "SKATE package contains duplicate BGRP extensions");
+        }
+        break_group_seen = true;
+        break_group_schema = schema;
+        break_group_payload = std::move(payload);
       }
+    }
+    if (break_group_seen) {
+      ReadBreakGroups(
+          std::move(break_group_payload), break_group_schema, map);
     }
   }
 

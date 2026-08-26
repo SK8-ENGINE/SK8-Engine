@@ -227,6 +227,60 @@ int main() {
         !physics.Telemetry().player_proxy_active,
         "Box3D native-player proxy did not disable cleanly");
 
+    MapDefinition glass_map = MakePhysicsTestMap(2);
+    for (MapObject& shard : glass_map.editable_objects) {
+      shard.physics.gravity_scale = 0.0f;
+      shard.physics.initially_awake = false;
+      shard.physics.break_group = 7;
+      shard.physics.break_speed_threshold = 2.0f;
+      shard.physics.break_impulse_scale = 0.35f;
+      shard.physics.break_angular_impulse = 0.04f;
+      shard.physics.break_gravity_scale = 1.0f;
+    }
+    physics.Load(glass_map);
+    const float initial_glass_height =
+        physics.ObjectPose(1).position.y;
+    for (int frame = 0; frame < 20; ++frame) {
+      physics.Step(kBox3DFixedTimeStepSeconds);
+    }
+    Require(
+        NearlyEqual(
+            physics.ObjectPose(1).position.y, initial_glass_height, 0.01f) &&
+            physics.Telemetry().breakable_body_count == 2 &&
+            physics.Telemetry().glass_break_events == 0,
+        "breakable bodies did not remain locked before impact");
+    for (int frame = 0; frame < 120; ++frame) {
+      const float time = static_cast<float>(frame) / 60.0f;
+      physics.SetPlayerProxy(
+          {-1.6f + 4.5f * time, 0.65f, 0.0f},
+          {4.5f, 0.0f, 0.0f}, true);
+      physics.Step(kBox3DFixedTimeStepSeconds);
+    }
+    const PhysicsTelemetry glass_telemetry = physics.Telemetry();
+    if (glass_telemetry.glass_break_events != 1 ||
+        glass_telemetry.broken_group_count != 1 ||
+        glass_telemetry.last_broken_group != 7 ||
+        glass_telemetry.last_break_speed < 4.4f ||
+        physics.ObjectPose(1).position.y >=
+            initial_glass_height - 0.05f) {
+      std::cerr
+          << "GLASS_DIAGNOSTIC events="
+          << glass_telemetry.glass_break_events
+          << " groups=" << glass_telemetry.broken_group_count
+          << " last_group=" << glass_telemetry.last_broken_group
+          << " speed=" << glass_telemetry.last_break_speed
+          << " initial_y=" << initial_glass_height
+          << " final_y=" << physics.ObjectPose(1).position.y << '\n';
+    }
+    Require(
+        glass_telemetry.glass_break_events == 1 &&
+            glass_telemetry.broken_group_count == 1 &&
+            glass_telemetry.last_broken_group == 7 &&
+            glass_telemetry.last_break_speed >= 4.4f &&
+            physics.ObjectPose(1).position.y <
+                initial_glass_height - 0.05f,
+        "player impact did not release the complete glass break group");
+
     const std::uint64_t generation =
         physics.Telemetry().world_generation;
     physics.Load(MakePhysicsTestMap(1));

@@ -436,6 +436,7 @@ def analyze_package(
 
     extension_tags: list[str] = []
     map_objects: list[dict[str, object]] = []
+    break_groups: dict[int, dict[str, object]] = {}
     if version >= 12:
         start = reader.offset
         extension_count = reader.u32("extension count")
@@ -508,6 +509,11 @@ def analyze_package(
                         "gravity_scale": 1.0,
                         "enable_sleep": True,
                         "initially_awake": True,
+                        "break_group": 0,
+                        "break_speed_threshold": 2.5,
+                        "break_impulse_scale": 0.45,
+                        "break_angular_impulse": 0.08,
+                        "break_gravity_scale": 1.0,
                     }
                     if schema >= 3:
                         values = struct.unpack(
@@ -544,6 +550,11 @@ def analyze_package(
                             "gravity_scale": values[7],
                             "enable_sleep": bool(values[8]),
                             "initially_awake": bool(values[9]),
+                            "break_group": 0,
+                            "break_speed_threshold": 2.5,
+                            "break_impulse_scale": 0.45,
+                            "break_angular_impulse": 0.08,
+                            "break_gravity_scale": 1.0,
                         }
                     map_objects.append(
                         {
@@ -560,6 +571,50 @@ def analyze_package(
                     )
                 if object_reader.offset != len(payload):
                     raise PackageError("MOBJ has trailing bytes")
+            elif tag == "BGRP":
+                if schema != 1:
+                    raise PackageError(
+                        f"BGRP schema {schema} is unsupported"
+                    )
+                break_reader = Reader(payload)
+                break_count = break_reader.u32("BGRP object count")
+                for break_index in range(break_count):
+                    object_id, group, speed, impulse, spin, gravity = (
+                        struct.unpack(
+                            "<II4f",
+                            break_reader.take(
+                                24, f"BGRP object {break_index}"
+                            ),
+                        )
+                    )
+                    if (
+                        object_id in break_groups
+                        or group == 0
+                        or not 0.1 <= speed <= 30.0
+                        or not 0.0 <= impulse <= 10.0
+                        or not 0.0 <= spin <= 10.0
+                        or not 0.0 <= gravity <= 4.0
+                    ):
+                        raise PackageError(
+                            f"BGRP object {break_index} is invalid"
+                        )
+                    break_groups[object_id] = {
+                        "break_group": group,
+                        "break_speed_threshold": speed,
+                        "break_impulse_scale": impulse,
+                        "break_angular_impulse": spin,
+                        "break_gravity_scale": gravity,
+                    }
+                if break_reader.offset != len(payload):
+                    raise PackageError("BGRP has trailing bytes")
+        objects_by_id = {record["id"]: record for record in map_objects}
+        for object_id, breakable in break_groups.items():
+            record = objects_by_id.get(object_id)
+            if record is None or record["physics"]["type"] != 2:
+                raise PackageError(
+                    "BGRP references a missing or non-dynamic object"
+                )
+            record["physics"].update(breakable)
         _section(sections, reader, "extensions", start)
 
     if reader.offset != len(reader.data):

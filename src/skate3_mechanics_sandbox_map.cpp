@@ -1709,6 +1709,8 @@ void AdvanceOwnedPhysics(double frame_seconds) {
         "box3d: generation={} steps={} static={} dynamic={} contacts={} "
         "sleeping={} player_proxy={} player_contacts={} "
         "player_proxy_updates={} updates={} dropped_batches={} "
+        "breakable={} broken_groups={} break_events={} "
+        "last_break_group={} last_break_speed={:.3f} "
         "accumulator={:.6f} "
         "representative_valid={} representative_position="
         "({:.3f},{:.3f},{:.3f}) representative_awake={}",
@@ -1718,6 +1720,9 @@ void AdvanceOwnedPhysics(double frame_seconds) {
         telemetry.player_proxy_active, telemetry.player_contact_count,
         telemetry.player_proxy_updates,
         telemetry.transform_updates, telemetry.dropped_step_batches,
+        telemetry.breakable_body_count, telemetry.broken_group_count,
+        telemetry.glass_break_events, telemetry.last_broken_group,
+        telemetry.last_break_speed,
         telemetry.accumulator_seconds, pose.valid, pose.position.x,
         pose.position.y, pose.position.z, pose.awake);
   }

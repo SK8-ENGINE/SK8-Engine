@@ -24,6 +24,11 @@ separate Box3D body. Multi-root assets therefore support structures such as a
 cube pyramid whose cubes fall, collide, sleep, and topple independently.
 Roots are never silently combined into a compound rigid body.
 
+SKATEOBJ v2 may optionally carry the SKATE `BGRP` schema-1 extension.
+Breakable roots remain separate Box3D bodies, but roots with the same
+nonzero break group are released together after a qualifying player impact.
+Files without `BGRP` remain non-breakable and load exactly as before.
+
 `OW_SPAWN` is the v2 prefab pivot. Loading subtracts its package-space
 position from every root origin and authored grind point. Spawn-time placement
 then adds one map-space position to the whole prefab while retaining each
@@ -47,3 +52,9 @@ referenced by the prefab.
 Future prefab behavior belongs in optional tagged extensions. Unknown
 extension tags retain the normal SKATE validation/skip behavior; a future
 feature does not require changing the base geometry layout.
+
+The tracked `objects/box3d_glass_smash.skateobj` fixture contains 48
+pre-fractured glass shards and four static frame roots. Regenerate it
+deterministically with Blender 5 using
+`tools/blender_owned_map/create_box3d_glass_smash.py`; the generated `.blend`
+and export cache remain local-only.

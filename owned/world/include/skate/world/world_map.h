@@ -375,6 +375,15 @@ struct ObjectPhysicsDefinition {
   float gravity_scale = 1.0f;
   bool enable_sleep = true;
   bool initially_awake = true;
+  // Optional pre-fractured break group. Group zero is never breakable.
+  // Breakable bodies are authored asleep (normally with zero initial
+  // gravity), then released together when the player impact speed reaches
+  // the threshold.
+  std::uint32_t break_group = 0;
+  float break_speed_threshold = 2.5f;
+  float break_impulse_scale = 0.45f;
+  float break_angular_impulse = 0.08f;
+  float break_gravity_scale = 1.0f;
 };
 
 // One independently editable Blender object. Ordinary SKATE render and

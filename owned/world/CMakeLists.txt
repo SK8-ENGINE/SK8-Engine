@@ -119,5 +119,6 @@ if(SKATE_OWNED_WORLD_BUILD_TESTS)
       $<TARGET_FILE:skate_owned_map_validate>
       ${CMAKE_CURRENT_SOURCE_DIR}/../../objects/test_grind_ledge.skateobj
       ${CMAKE_CURRENT_SOURCE_DIR}/../../maps/blender_bake_showcase.skate
+      ${CMAKE_CURRENT_SOURCE_DIR}/../../objects/box3d_glass_smash.skateobj
   )
 endif()

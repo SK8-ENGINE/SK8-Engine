@@ -250,6 +250,30 @@ metre to 1 Box3D unit.
 Schema-1 and schema-2 MOBJ records default to physics disabled. SKATE v12 and
 v13 packages with no physics fields continue to load unchanged.
 
+### Optional `BGRP` schema 1 extension
+
+`BGRP` adds deterministic pre-fractured break groups without changing
+SKATE14 or MOBJ schema 3. Unknown-extension compatibility therefore remains
+intact. Its decoded payload is:
+
+```text
+u32 object_count
+object[object_count]:
+  u32 map_object_id
+  u32 break_group                 # nonzero; matching groups release together
+  f32 player_impact_speed         # 0.1..30 metres/second
+  f32 linear_impulse_scale        # 0..10
+  f32 angular_impulse             # 0..10
+  f32 released_gravity_scale      # 0..4
+```
+
+Every referenced object must exist and use Box3D Dynamic physics. Authors
+normally set initial gravity to zero and Start Awake off so pre-fractured
+pieces remain locked in place. A player-proxy contact at or above the impact
+threshold releases the complete group once, applies released gravity, and
+adds deterministic linear and angular impulses. Group zero is the
+backward-compatible non-breakable default.
+
 `day_night_duration_seconds == 0` freezes celestial lighting at
 `day_night_start_hour`. With a positive duration and
 `day_night_ping_pong == 0`, the duration describes one complete 24-hour

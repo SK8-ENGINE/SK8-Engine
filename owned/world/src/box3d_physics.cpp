@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -128,6 +129,11 @@ struct OwnedPhysicsWorld::Impl {
     std::string name;
     PhysicsObjectPose last_pose;
     std::uint64_t pose_revision = 0;
+    std::uint32_t break_group = 0;
+    float break_speed_threshold = 2.5f;
+    float break_impulse_scale = 0.45f;
+    float break_angular_impulse = 0.08f;
+    float break_gravity_scale = 1.0f;
   };
 
   b3WorldId world = b3_nullWorldId;
@@ -137,6 +143,8 @@ struct OwnedPhysicsWorld::Impl {
   std::vector<BodyRecord> bodies;
   PhysicsTelemetry telemetry;
   double accumulator_seconds = 0.0;
+  Vec3 player_proxy_velocity;
+  std::set<std::uint32_t> broken_groups;
 
   void Reset() noexcept {
     if (B3_IS_NON_NULL(world)) {
@@ -166,6 +174,8 @@ struct OwnedPhysicsWorld::Impl {
     static_world_mesh = nullptr;
     bodies.clear();
     accumulator_seconds = 0.0;
+    player_proxy_velocity = {};
+    broken_groups.clear();
     telemetry.world_steps = 0;
     telemetry.dropped_step_batches = 0;
     telemetry.transform_updates = 0;
@@ -176,6 +186,11 @@ struct OwnedPhysicsWorld::Impl {
     telemetry.player_contact_count = 0;
     telemetry.player_proxy_updates = 0;
     telemetry.player_proxy_active = false;
+    telemetry.breakable_body_count = 0;
+    telemetry.broken_group_count = 0;
+    telemetry.glass_break_events = 0;
+    telemetry.last_broken_group = 0;
+    telemetry.last_break_speed = 0.0f;
     telemetry.accumulator_seconds = 0.0;
     telemetry.representative_dynamic_pose = {};
   }
@@ -353,6 +368,14 @@ struct OwnedPhysicsWorld::Impl {
       BodyRecord& record = bodies[index];
       record.type = object.physics.type;
       record.name = object.name.substr(0, B3_BODY_NAME_LENGTH - 1);
+      record.break_group = object.physics.break_group;
+      record.break_speed_threshold =
+          object.physics.break_speed_threshold;
+      record.break_impulse_scale = object.physics.break_impulse_scale;
+      record.break_angular_impulse =
+          object.physics.break_angular_impulse;
+      record.break_gravity_scale =
+          object.physics.break_gravity_scale;
       if (object.physics.type == ObjectPhysicsType::Disabled) {
         continue;
       }
@@ -387,9 +410,94 @@ struct OwnedPhysicsWorld::Impl {
 
       if (object.physics.type == ObjectPhysicsType::Dynamic) {
         ++telemetry.dynamic_body_count;
+        if (record.break_group != 0) {
+          ++telemetry.breakable_body_count;
+        }
       } else {
         ++telemetry.static_body_count;
       }
+    }
+  }
+
+  void BreakGroup(std::uint32_t group, float impact_speed) {
+    if (group == 0 || broken_groups.contains(group)) {
+      return;
+    }
+    broken_groups.insert(group);
+    const b3Vec3 player_impulse = ToBox3D(player_proxy_velocity);
+    for (std::size_t index = 0; index < bodies.size(); ++index) {
+      BodyRecord& record = bodies[index];
+      if (record.break_group != group ||
+          B3_IS_NULL(record.id) || !b3Body_IsValid(record.id)) {
+        continue;
+      }
+      b3Body_SetGravityScale(record.id, record.break_gravity_scale);
+      b3Body_SetAwake(record.id, true);
+      b3Body_ApplyLinearImpulseToCenter(
+          record.id, player_impulse * record.break_impulse_scale, true);
+      const float sign = (index & 1u) == 0u ? 1.0f : -1.0f;
+      const b3Vec3 angular_impulse{
+          sign * record.break_angular_impulse,
+          (0.35f + 0.07f * static_cast<float>(index % 5)) *
+              record.break_angular_impulse,
+          -sign * 0.65f * record.break_angular_impulse,
+      };
+      b3Body_ApplyAngularImpulse(
+          record.id, angular_impulse, true);
+    }
+    telemetry.broken_group_count = broken_groups.size();
+    ++telemetry.glass_break_events;
+    telemetry.last_broken_group = group;
+    telemetry.last_break_speed = impact_speed;
+  }
+
+  void ProcessPlayerBreakContacts() {
+    if (!telemetry.player_proxy_active ||
+        B3_IS_NULL(player_proxy_body) ||
+        !b3Body_IsValid(player_proxy_body) ||
+        !b3Body_IsEnabled(player_proxy_body)) {
+      return;
+    }
+    const float impact_speed = Length(player_proxy_velocity);
+    if (impact_speed <= 0.0f) {
+      return;
+    }
+    const int capacity = b3Body_GetContactCapacity(player_proxy_body);
+    if (capacity <= 0) {
+      return;
+    }
+    std::vector<b3ContactData> contacts(
+        static_cast<std::size_t>(capacity));
+    const int count = b3Body_GetContactData(
+        player_proxy_body, contacts.data(), capacity);
+    std::set<std::uint32_t> triggered_groups;
+    for (int index = 0; index < count; ++index) {
+      const b3ContactData& contact = contacts[index];
+      const b3BodyId body_a = b3Shape_GetBody(contact.shapeIdA);
+      const b3BodyId body_b = b3Shape_GetBody(contact.shapeIdB);
+      b3BodyId other = b3_nullBodyId;
+      if (B3_ID_EQUALS(body_a, player_proxy_body)) {
+        other = body_b;
+      } else if (B3_ID_EQUALS(body_b, player_proxy_body)) {
+        other = body_a;
+      }
+      if (B3_IS_NULL(other) || !b3Body_IsValid(other)) {
+        continue;
+      }
+      const std::uintptr_t user_data =
+          reinterpret_cast<std::uintptr_t>(b3Body_GetUserData(other));
+      if (user_data == 0 || user_data > bodies.size()) {
+        continue;
+      }
+      const BodyRecord& record = bodies[user_data - 1];
+      if (record.break_group != 0 &&
+          impact_speed >= record.break_speed_threshold &&
+          !broken_groups.contains(record.break_group)) {
+        triggered_groups.insert(record.break_group);
+      }
+    }
+    for (const std::uint32_t group : triggered_groups) {
+      BreakGroup(group, impact_speed);
     }
   }
 
@@ -550,6 +658,7 @@ void OwnedPhysicsWorld::Step(double frame_seconds) {
     const b3BodyEvents events = b3World_GetBodyEvents(impl_->world);
     impl_->telemetry.transform_updates +=
         static_cast<std::uint64_t>(std::max(events.moveCount, 0));
+    impl_->ProcessPlayerBreakContacts();
     impl_->RefreshBodyPoseRevisions();
   }
   if (step_count == kMaximumStepsPerAdvance &&
@@ -579,6 +688,7 @@ void OwnedPhysicsWorld::SetPlayerProxy(
     }
     impl_->telemetry.player_proxy_active = false;
     impl_->telemetry.player_contact_count = 0;
+    impl_->player_proxy_velocity = {};
     return;
   }
 
@@ -589,6 +699,7 @@ void OwnedPhysicsWorld::SetPlayerProxy(
       impl_->player_proxy_body, ToBox3D(position), b3Quat_identity);
   b3Body_SetLinearVelocity(
       impl_->player_proxy_body, ToBox3D(linear_velocity));
+  impl_->player_proxy_velocity = linear_velocity;
   impl_->telemetry.player_proxy_active = true;
   ++impl_->telemetry.player_proxy_updates;
 }

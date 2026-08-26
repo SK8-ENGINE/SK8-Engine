@@ -1236,6 +1236,22 @@ void AppendTelemetry(std::ostream& out) {
       << physics.contact_count
       << " sandbox_box3d_sleeping_bodies="
       << physics.sleeping_body_count
+      << " sandbox_box3d_player_proxy_active="
+      << (physics.player_proxy_active ? 1 : 0)
+      << " sandbox_box3d_player_contacts="
+      << physics.player_contact_count
+      << " sandbox_box3d_player_proxy_updates="
+      << physics.player_proxy_updates
+      << " sandbox_box3d_breakable_bodies="
+      << physics.breakable_body_count
+      << " sandbox_box3d_broken_groups="
+      << physics.broken_group_count
+      << " sandbox_box3d_glass_break_events="
+      << physics.glass_break_events
+      << " sandbox_box3d_last_broken_group="
+      << physics.last_broken_group
+      << " sandbox_box3d_last_break_speed_bits="
+      << std::bit_cast<std::uint32_t>(physics.last_break_speed)
       << " sandbox_box3d_accumulator_bits="
       << std::bit_cast<std::uint64_t>(physics.accumulator_seconds)
       << " sandbox_box3d_representative_valid="
