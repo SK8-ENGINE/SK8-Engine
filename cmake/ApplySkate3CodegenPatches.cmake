@@ -251,7 +251,7 @@ function(_skate3_add_include _contents_var _include)
 endfunction()
 
 set(_native_grind_load_observer_patched FALSE)
-set(_native_grind_add_observer_patched FALSE)
+set(_native_grind_add_suppression_patched FALSE)
 foreach(_file IN LISTS _skate3_recomp_files)
   file(READ "${_file}" _contents)
 
@@ -273,8 +273,17 @@ foreach(_file IN LISTS _skate3_recomp_files)
     endif()
   endif()
 
-  if(_contents MATCHES "ObserveGrindDataAdd\\(ctx, base\\)")
-    set(_native_grind_add_observer_patched TRUE)
+  if(_contents MATCHES "ShouldSuppressGrindDataAdd\\(ctx, base\\)")
+    set(_native_grind_add_suppression_patched TRUE)
+  elseif(_contents MATCHES "ObserveGrindDataAdd\\(ctx, base\\)")
+    string(REPLACE
+      "skate3::native_grind::ObserveGrindDataAdd(ctx, base);"
+      "if (skate3::native_grind::ShouldSuppressGrindDataAdd(ctx, base)) {\n\t\treturn;\n\t}"
+      _patched_contents "${_contents}")
+    if(NOT _patched_contents STREQUAL _contents)
+      set(_contents "${_patched_contents}")
+      set(_native_grind_add_suppression_patched TRUE)
+    endif()
   elseif(_contents MATCHES "DEFINE_REX_FUNC\\(sub_82C1ED60\\)")
     set(_native_grind_add_site
 "DEFINE_REX_FUNC(sub_82C1ED60) {
@@ -282,17 +291,19 @@ foreach(_file IN LISTS _skate3_recomp_files)
     set(_native_grind_add_patch
 "DEFINE_REX_FUNC(sub_82C1ED60) {
 	REX_FUNC_PROLOGUE();
-	skate3::native_grind::ObserveGrindDataAdd(ctx, base);")
+	if (skate3::native_grind::ShouldSuppressGrindDataAdd(ctx, base)) {
+		return;
+	}")
     string(REPLACE "${_native_grind_add_site}"
       "${_native_grind_add_patch}" _patched_contents "${_contents}")
     if(NOT _patched_contents STREQUAL _contents)
       set(_contents "${_patched_contents}")
-      set(_native_grind_add_observer_patched TRUE)
+      set(_native_grind_add_suppression_patched TRUE)
     endif()
   endif()
 
   if(_contents MATCHES "ObserveSplineDataLoad\\(ctx, base\\)" OR
-     _contents MATCHES "ObserveGrindDataAdd\\(ctx, base\\)")
+     _contents MATCHES "ShouldSuppressGrindDataAdd\\(ctx, base\\)")
     _skate3_add_include(_contents "skate3_native_grind.h")
     file(WRITE "${_file}" "${_contents}")
   endif()
@@ -301,9 +312,9 @@ if(NOT _native_grind_load_observer_patched)
   message(FATAL_ERROR
     "Failed to apply native grind tSplineData load observer")
 endif()
-if(NOT _native_grind_add_observer_patched)
+if(NOT _native_grind_add_suppression_patched)
   message(FATAL_ERROR
-    "Failed to apply native GrindData add observer")
+    "Failed to apply native GrindData vanilla-registration suppression")
 endif()
 
 set(_native_collision_streamer_observer_patched FALSE)

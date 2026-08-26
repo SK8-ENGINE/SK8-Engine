@@ -1865,6 +1865,14 @@ bool DiagnosticsEnabled() {
       skate3_mechanics_sandbox_native_collision_diagnostics);
 }
 
+bool OriginalWorldReplacementRequested() {
+  return Enabled() &&
+         REXCVAR_GET(
+             skate3_mechanics_sandbox_native_collision_replace_retail) &&
+         !REXCVAR_GET(
+             skate3_mechanics_sandbox_native_collision_retail_only);
+}
+
 void ObserveNativeLineWorker(std::uint32_t mesh) noexcept {
   if (!DiagnosticsEnabled()) {
     return;
