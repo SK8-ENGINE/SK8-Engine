@@ -19,6 +19,9 @@ constexpr double kMaximumAccumulatedSeconds = 0.25;
 constexpr int kMaximumStepsPerAdvance = 8;
 constexpr float kMinimumHalfExtent = 0.005f;
 constexpr int kMaximumHullVertices = 64;
+constexpr float kPlayerProxyRadius = 0.52f;
+constexpr float kPlayerProxyLowerCenter = -0.20f;
+constexpr float kPlayerProxyUpperCenter = 1.25f;
 
 b3Vec3 ToBox3D(const Vec3& value) {
   return {
@@ -123,10 +126,13 @@ struct OwnedPhysicsWorld::Impl {
     b3BodyId id = b3_nullBodyId;
     ObjectPhysicsType type = ObjectPhysicsType::Disabled;
     std::string name;
+    PhysicsObjectPose last_pose;
+    std::uint64_t pose_revision = 0;
   };
 
   b3WorldId world = b3_nullWorldId;
   b3BodyId static_world_body = b3_nullBodyId;
+  b3BodyId player_proxy_body = b3_nullBodyId;
   b3MeshData* static_world_mesh = nullptr;
   std::vector<BodyRecord> bodies;
   PhysicsTelemetry telemetry;
@@ -140,6 +146,10 @@ struct OwnedPhysicsWorld::Impl {
           b3DestroyBody(iterator->id);
         }
       }
+      if (B3_IS_NON_NULL(player_proxy_body) &&
+          b3Body_IsValid(player_proxy_body)) {
+        b3DestroyBody(player_proxy_body);
+      }
       if (B3_IS_NON_NULL(static_world_body) &&
           b3Body_IsValid(static_world_body)) {
         b3DestroyBody(static_world_body);
@@ -152,6 +162,7 @@ struct OwnedPhysicsWorld::Impl {
 
     world = b3_nullWorldId;
     static_world_body = b3_nullBodyId;
+    player_proxy_body = b3_nullBodyId;
     static_world_mesh = nullptr;
     bodies.clear();
     accumulator_seconds = 0.0;
@@ -162,8 +173,40 @@ struct OwnedPhysicsWorld::Impl {
     telemetry.dynamic_body_count = 0;
     telemetry.contact_count = 0;
     telemetry.sleeping_body_count = 0;
+    telemetry.player_contact_count = 0;
+    telemetry.player_proxy_updates = 0;
+    telemetry.player_proxy_active = false;
     telemetry.accumulator_seconds = 0.0;
     telemetry.representative_dynamic_pose = {};
+  }
+
+  void CreatePlayerProxy() {
+    b3BodyDef body_definition = b3DefaultBodyDef();
+    body_definition.type = b3_kinematicBody;
+    body_definition.name = "native-player-proxy";
+    body_definition.isEnabled = false;
+    body_definition.enableContactRecycling = false;
+    player_proxy_body = b3CreateBody(world, &body_definition);
+    if (B3_IS_NULL(player_proxy_body)) {
+      throw std::runtime_error(
+          "Box3D failed to create the native player proxy");
+    }
+
+    b3ShapeDef shape_definition = b3DefaultShapeDef();
+    shape_definition.baseMaterial.friction = 0.45f;
+    shape_definition.baseMaterial.restitution = 0.0f;
+    shape_definition.enableContactEvents = true;
+    const b3Capsule capsule{
+        .center1 = {0.0f, kPlayerProxyLowerCenter, 0.0f},
+        .center2 = {0.0f, kPlayerProxyUpperCenter, 0.0f},
+        .radius = kPlayerProxyRadius,
+    };
+    const b3ShapeId shape = b3CreateCapsuleShape(
+        player_proxy_body, &shape_definition, &capsule);
+    if (B3_IS_NULL(shape)) {
+      throw std::runtime_error(
+          "Box3D failed to attach the native player proxy capsule");
+    }
   }
 
   void CreateStaticWorldMesh(const MapDefinition& map) {
@@ -363,6 +406,7 @@ struct OwnedPhysicsWorld::Impl {
     const b3WorldTransform transform = b3Body_GetTransform(record.id);
     const b3Matrix3 matrix = b3MakeMatrixFromQuat(transform.q);
     result.valid = true;
+    result.revision = record.pose_revision;
     result.position = FromBox3DPosition(transform.p);
     result.x_axis = FromBox3DDirection(matrix.cx);
     result.y_axis = FromBox3DDirection(matrix.cy);
@@ -375,6 +419,34 @@ struct OwnedPhysicsWorld::Impl {
     return result;
   }
 
+  void RefreshBodyPoseRevisions() {
+    constexpr float kPositionToleranceSquared = 1.0e-10f;
+    constexpr float kAxisToleranceSquared = 1.0e-10f;
+    for (std::size_t index = 0; index < bodies.size(); ++index) {
+      BodyRecord& record = bodies[index];
+      if (record.type == ObjectPhysicsType::Disabled ||
+          B3_IS_NULL(record.id) || !b3Body_IsValid(record.id)) {
+        continue;
+      }
+      PhysicsObjectPose pose = ObjectPose(index);
+      const bool changed =
+          !record.last_pose.valid ||
+          LengthSquared(pose.position - record.last_pose.position) >
+              kPositionToleranceSquared ||
+          LengthSquared(pose.x_axis - record.last_pose.x_axis) >
+              kAxisToleranceSquared ||
+          LengthSquared(pose.y_axis - record.last_pose.y_axis) >
+              kAxisToleranceSquared ||
+          LengthSquared(pose.z_axis - record.last_pose.z_axis) >
+              kAxisToleranceSquared;
+      if (changed) {
+        ++record.pose_revision;
+      }
+      pose.revision = record.pose_revision;
+      record.last_pose = pose;
+    }
+  }
+
   void RefreshTelemetry() {
     if (B3_IS_NULL(world)) {
       return;
@@ -383,7 +455,23 @@ struct OwnedPhysicsWorld::Impl {
     telemetry.contact_count =
         static_cast<std::size_t>(std::max(counters.contactCount, 0));
     telemetry.sleeping_body_count = 0;
+    telemetry.player_contact_count = 0;
     telemetry.representative_dynamic_pose = {};
+    if (B3_IS_NON_NULL(player_proxy_body) &&
+        b3Body_IsValid(player_proxy_body) &&
+        b3Body_IsEnabled(player_proxy_body)) {
+      const int capacity =
+          b3Body_GetContactCapacity(player_proxy_body);
+      if (capacity > 0) {
+        std::vector<b3ContactData> contacts(
+            static_cast<std::size_t>(capacity));
+        telemetry.player_contact_count = static_cast<std::size_t>(
+            std::max(
+                b3Body_GetContactData(
+                    player_proxy_body, contacts.data(), capacity),
+                0));
+      }
+    }
     for (std::size_t index = 0; index < bodies.size(); ++index) {
       const BodyRecord& record = bodies[index];
       if (record.type != ObjectPhysicsType::Dynamic ||
@@ -426,7 +514,9 @@ void OwnedPhysicsWorld::Load(const MapDefinition& map) {
       throw std::runtime_error("Box3D failed to create an owned-world");
     }
     impl_->CreateStaticWorldMesh(map);
+    impl_->CreatePlayerProxy();
     impl_->CreateObjectBodies(map);
+    impl_->RefreshBodyPoseRevisions();
     impl_->RefreshTelemetry();
   } catch (...) {
     impl_->Reset();
@@ -460,6 +550,7 @@ void OwnedPhysicsWorld::Step(double frame_seconds) {
     const b3BodyEvents events = b3World_GetBodyEvents(impl_->world);
     impl_->telemetry.transform_updates +=
         static_cast<std::uint64_t>(std::max(events.moveCount, 0));
+    impl_->RefreshBodyPoseRevisions();
   }
   if (step_count == kMaximumStepsPerAdvance &&
       impl_->accumulator_seconds >= kBox3DFixedTimeStepSeconds) {
@@ -469,6 +560,37 @@ void OwnedPhysicsWorld::Step(double frame_seconds) {
                   static_cast<double>(kBox3DFixedTimeStepSeconds));
   }
   impl_->RefreshTelemetry();
+}
+
+void OwnedPhysicsWorld::SetPlayerProxy(
+    Vec3 position, Vec3 linear_velocity, bool active) {
+  if (B3_IS_NULL(impl_->player_proxy_body) ||
+      !b3Body_IsValid(impl_->player_proxy_body)) {
+    return;
+  }
+  const bool finite =
+      std::isfinite(position.x) && std::isfinite(position.y) &&
+      std::isfinite(position.z) && std::isfinite(linear_velocity.x) &&
+      std::isfinite(linear_velocity.y) &&
+      std::isfinite(linear_velocity.z);
+  if (!active || !finite) {
+    if (b3Body_IsEnabled(impl_->player_proxy_body)) {
+      b3Body_Disable(impl_->player_proxy_body);
+    }
+    impl_->telemetry.player_proxy_active = false;
+    impl_->telemetry.player_contact_count = 0;
+    return;
+  }
+
+  if (!b3Body_IsEnabled(impl_->player_proxy_body)) {
+    b3Body_Enable(impl_->player_proxy_body);
+  }
+  b3Body_SetTransform(
+      impl_->player_proxy_body, ToBox3D(position), b3Quat_identity);
+  b3Body_SetLinearVelocity(
+      impl_->player_proxy_body, ToBox3D(linear_velocity));
+  impl_->telemetry.player_proxy_active = true;
+  ++impl_->telemetry.player_proxy_updates;
 }
 
 bool OwnedPhysicsWorld::IsLoaded() const noexcept {

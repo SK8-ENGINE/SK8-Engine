@@ -194,8 +194,38 @@ int main() {
     Require(
         std::abs(Length(bottom.x_axis) - 1.0f) < 0.01f &&
             std::abs(Length(bottom.y_axis) - 1.0f) < 0.01f &&
+            bottom.revision > 0 &&
             physics.Telemetry().contact_count >= 3,
         "Box3D transform propagation or contact telemetry is invalid");
+
+    physics.Load(MakePhysicsTestMap(1));
+    const float before_player_contact =
+        physics.ObjectPose(0).position.x;
+    constexpr float player_speed = 4.0f;
+    std::size_t maximum_player_contacts = 0;
+    for (int frame = 0; frame < 90; ++frame) {
+      const float time = static_cast<float>(frame) / 60.0f;
+      physics.SetPlayerProxy(
+          {-1.4f + player_speed * time, 0.55f, 0.0f},
+          {player_speed, 0.0f, 0.0f}, true);
+      physics.Step(kBox3DFixedTimeStepSeconds);
+      maximum_player_contacts = std::max(
+          maximum_player_contacts,
+          physics.Telemetry().player_contact_count);
+    }
+    const PhysicsObjectPose after_player_contact =
+        physics.ObjectPose(0);
+    Require(
+        after_player_contact.position.x >
+                before_player_contact + 0.15f &&
+            physics.Telemetry().player_proxy_active &&
+            physics.Telemetry().player_proxy_updates == 90 &&
+            maximum_player_contacts > 0,
+        "Box3D native-player proxy did not move a dynamic owned body");
+    physics.SetPlayerProxy({}, {}, false);
+    Require(
+        !physics.Telemetry().player_proxy_active,
+        "Box3D native-player proxy did not disable cleanly");
 
     const std::uint64_t generation =
         physics.Telemetry().world_generation;

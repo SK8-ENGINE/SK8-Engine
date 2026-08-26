@@ -165,6 +165,10 @@ bool ActivePhysicsObjectPose(
     std::size_t index,
     skate::world::PhysicsObjectPose& out);
 skate::world::PhysicsTelemetry ActivePhysicsTelemetry();
+void UpdateOwnedPhysicsPlayerProxy(
+    skate::world::Vec3 position,
+    skate::world::Vec3 linear_velocity,
+    bool active);
 const skate::world::ImageTexture* ActiveImageTexture(
     skate::world::TextureId id);
 const char* ActiveMapName();

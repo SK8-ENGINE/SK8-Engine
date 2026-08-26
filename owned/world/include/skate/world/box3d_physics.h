@@ -16,6 +16,7 @@ inline constexpr int kBox3DSolverSubSteps = 4;
 
 struct PhysicsObjectPose {
   bool valid = false;
+  std::uint64_t revision = 0;
   Vec3 position;
   Vec3 x_axis{1.0f, 0.0f, 0.0f};
   Vec3 y_axis{0.0f, 1.0f, 0.0f};
@@ -34,6 +35,9 @@ struct PhysicsTelemetry {
   std::size_t dynamic_body_count = 0;
   std::size_t contact_count = 0;
   std::size_t sleeping_body_count = 0;
+  std::size_t player_contact_count = 0;
+  std::uint64_t player_proxy_updates = 0;
+  bool player_proxy_active = false;
   double accumulator_seconds = 0.0;
   PhysicsObjectPose representative_dynamic_pose;
 };
@@ -57,6 +61,11 @@ class OwnedPhysicsWorld {
   // Advances a fixed 60 Hz simulation through a bounded accumulator. Invalid
   // or negative frame deltas are ignored; long stalls are capped.
   void Step(double frame_seconds);
+
+  // Mirrors Skate's native player into Box3D as a kinematic capsule. This
+  // gives dynamic owned objects reciprocal contact without replacing the
+  // retail skater/board controller.
+  void SetPlayerProxy(Vec3 position, Vec3 linear_velocity, bool active);
 
   [[nodiscard]] bool IsLoaded() const noexcept;
   [[nodiscard]] bool HasBody(std::size_t object_index) const noexcept;

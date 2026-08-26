@@ -59,6 +59,7 @@ skate::world::WorldMap& ActiveWorld();
 skate::world::OwnedPhysicsWorld g_owned_physics;
 bool g_owned_physics_initialized = false;
 std::uint64_t g_owned_physics_last_log_step = 0;
+std::mutex g_owned_physics_mutex;
 
 constexpr float kRadiansToDegrees = 57.29577951308232f;
 constexpr float kDegreesToRadians = 0.017453292519943295f;
@@ -435,7 +436,7 @@ bool HasOwnedPhysics(const skate::world::MapDefinition& definition) {
       });
 }
 
-void ReloadOwnedPhysics() {
+void ReloadOwnedPhysicsLocked() {
   g_owned_physics.Reset();
   const skate::world::MapDefinition& definition =
       ActiveWorld().Definition();
@@ -454,9 +455,14 @@ void ReloadOwnedPhysics() {
   g_owned_physics_last_log_step = 0;
 }
 
-void EnsureOwnedPhysicsInitialized() {
+void ReloadOwnedPhysics() {
+  std::scoped_lock lock(g_owned_physics_mutex);
+  ReloadOwnedPhysicsLocked();
+}
+
+void EnsureOwnedPhysicsInitializedLocked() {
   if (!g_owned_physics_initialized) {
-    ReloadOwnedPhysics();
+    ReloadOwnedPhysicsLocked();
   }
 }
 
@@ -1688,7 +1694,8 @@ std::size_t AppendSpawnedObject(
 }
 
 void AdvanceOwnedPhysics(double frame_seconds) {
-  EnsureOwnedPhysicsInitialized();
+  std::scoped_lock lock(g_owned_physics_mutex);
+  EnsureOwnedPhysicsInitializedLocked();
   if (!g_owned_physics.IsLoaded()) {
     return;
   }
@@ -1700,12 +1707,16 @@ void AdvanceOwnedPhysics(double frame_seconds) {
     const auto& pose = telemetry.representative_dynamic_pose;
     REXLOG_INFO(
         "box3d: generation={} steps={} static={} dynamic={} contacts={} "
-        "sleeping={} updates={} dropped_batches={} accumulator={:.6f} "
+        "sleeping={} player_proxy={} player_contacts={} "
+        "player_proxy_updates={} updates={} dropped_batches={} "
+        "accumulator={:.6f} "
         "representative_valid={} representative_position="
         "({:.3f},{:.3f},{:.3f}) representative_awake={}",
         telemetry.world_generation, telemetry.world_steps,
         telemetry.static_body_count, telemetry.dynamic_body_count,
         telemetry.contact_count, telemetry.sleeping_body_count,
+        telemetry.player_proxy_active, telemetry.player_contact_count,
+        telemetry.player_proxy_updates,
         telemetry.transform_updates, telemetry.dropped_step_batches,
         telemetry.accumulator_seconds, pose.valid, pose.position.x,
         pose.position.y, pose.position.z, pose.awake);
@@ -1715,14 +1726,28 @@ void AdvanceOwnedPhysics(double frame_seconds) {
 bool ActivePhysicsObjectPose(
     std::size_t index,
     skate::world::PhysicsObjectPose& out) {
-  EnsureOwnedPhysicsInitialized();
+  std::scoped_lock lock(g_owned_physics_mutex);
+  EnsureOwnedPhysicsInitializedLocked();
   out = g_owned_physics.ObjectPose(index);
   return out.valid;
 }
 
 skate::world::PhysicsTelemetry ActivePhysicsTelemetry() {
-  EnsureOwnedPhysicsInitialized();
+  std::scoped_lock lock(g_owned_physics_mutex);
+  EnsureOwnedPhysicsInitializedLocked();
   return g_owned_physics.Telemetry();
+}
+
+void UpdateOwnedPhysicsPlayerProxy(
+    skate::world::Vec3 position,
+    skate::world::Vec3 linear_velocity,
+    bool active) {
+  std::scoped_lock lock(g_owned_physics_mutex);
+  EnsureOwnedPhysicsInitializedLocked();
+  if (g_owned_physics.IsLoaded()) {
+    g_owned_physics.SetPlayerProxy(
+        position, linear_velocity, active);
+  }
 }
 
 const skate::world::ImageTexture* ActiveImageTexture(
