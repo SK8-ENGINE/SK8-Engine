@@ -271,12 +271,14 @@ stages its `.xexp` patches next to the application.
 
 Custom Engine Layer release codegen deliberately keeps the base executable's
 stable addresses because the owned collision, grind, trick, and lifecycle
-observers are reviewed against that address space. TU3 is then applied by the
-runtime. If an extracted dump already contains both `.xexp` files, the build
-detects and stages them without needing the original package. Generating host
-code directly from the patched executable is an experimental upstream path
-available with `-DSKATE3_CODEGEN_PATCHED_TITLE_UPDATE=ON`; it is not compatible
-with the current owned observer patch set.
+observers are reviewed against that address space. The TU3 function-boundary
+configuration is still required so TU-only alternate entry points are present
+in the generated function table, and TU3 is then applied by the runtime. If an
+extracted dump already contains both `.xexp` files, the build detects and
+stages them without needing the original package. Generating host code directly
+from the patched executable is an experimental upstream path available with
+`-DSKATE3_CODEGEN_PATCHED_TITLE_UPDATE=ON`; it is not compatible with the
+current owned observer patch set.
 
 Generate the recompiled source first:
 

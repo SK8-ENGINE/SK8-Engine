@@ -6,6 +6,7 @@
 #include "skate3_mechanics_sandbox_map.h"
 #include "skate3_map_editor.h"
 #include "skate3_native_collision.h"
+#include "skate3_native_grind_policy.h"
 
 #include <atomic>
 #include <cstddef>
@@ -50,7 +51,11 @@ std::atomic<std::uint32_t> g_rail_count{0};
 std::atomic<std::uint32_t> g_segment_count{0};
 std::atomic<std::uint32_t> g_last_add_vector_count{0};
 std::atomic<std::uint64_t> g_runtime_load_calls{0};
+std::atomic<std::uint64_t> g_runtime_add_attempts{0};
 std::atomic<std::uint64_t> g_runtime_add_calls{0};
+std::atomic<std::uint64_t> g_runtime_registered_rails{0};
+std::atomic<std::uint64_t> g_suppressed_runtime_add_calls{0};
+std::atomic<std::uint64_t> g_suppressed_runtime_rails{0};
 std::atomic<std::uint64_t> g_owned_load_calls{0};
 std::atomic<std::uint64_t> g_owned_add_calls{0};
 std::atomic<std::uint64_t> g_install_attempts{0};
@@ -275,8 +280,8 @@ void ObserveSplineDataLoad(const PPCContext& ctx,
   }
 }
 
-void ObserveGrindDataAdd(const PPCContext& ctx,
-                         std::uint8_t* base) noexcept {
+bool ShouldSuppressGrindDataAdd(const PPCContext& ctx,
+                                std::uint8_t* base) noexcept {
   const std::uint32_t vector = ctx.r4.u32;
   std::uint32_t count = 0;
   if (base && IsGuestDataAddress(vector)) {
@@ -290,9 +295,24 @@ void ObserveGrindDataAdd(const PPCContext& ctx,
   g_last_add_vector_count.store(count, std::memory_order_release);
   if (g_installing_owned) {
     g_owned_add_calls.fetch_add(1, std::memory_order_relaxed);
-  } else {
-    g_runtime_add_calls.fetch_add(1, std::memory_order_relaxed);
+    return false;
   }
+
+  g_runtime_add_attempts.fetch_add(1, std::memory_order_relaxed);
+  const RegistrationDecision decision = DecideRegistration(
+      false, native_collision::OriginalWorldReplacementRequested());
+  if (count != 0 &&
+      decision == RegistrationDecision::SuppressVanilla) {
+    g_suppressed_runtime_add_calls.fetch_add(
+        1, std::memory_order_relaxed);
+    g_suppressed_runtime_rails.fetch_add(
+        count, std::memory_order_relaxed);
+    return true;
+  }
+  g_runtime_add_calls.fetch_add(1, std::memory_order_relaxed);
+  g_runtime_registered_rails.fetch_add(count,
+                                       std::memory_order_relaxed);
+  return false;
 }
 
 void EnsureInstalled(PPCContext& ctx, std::uint8_t* base) noexcept {
@@ -511,6 +531,19 @@ void EnsureInstalled(PPCContext& ctx, std::uint8_t* base) noexcept {
 }
 
 void AppendTelemetry(std::ostream& out) {
+  const std::uint64_t registered_vanilla_rails =
+      g_runtime_registered_rails.load(std::memory_order_relaxed);
+  const std::uint64_t suppressed_vanilla_adds =
+      g_suppressed_runtime_add_calls.load(std::memory_order_relaxed);
+  const bool replacement_requested =
+      native_collision::OriginalWorldReplacementRequested();
+  const char* vanilla_state =
+      !replacement_requested
+          ? "allowed"
+          : (registered_vanilla_rails != 0
+                 ? "leak_detected"
+                 : (suppressed_vanilla_adds != 0 ? "suppressed"
+                                                 : "waiting"));
   out << " sandbox_native_grind=" << (Enabled() ? 1 : 0)
       << " sandbox_native_grind_state="
       << StateName(g_state.load(std::memory_order_acquire))
@@ -530,8 +563,20 @@ void AppendTelemetry(std::ostream& out) {
       << g_last_add_vector_count.load(std::memory_order_acquire)
       << " sandbox_native_grind_runtime_loads="
       << g_runtime_load_calls.load(std::memory_order_relaxed)
+      << " sandbox_native_grind_runtime_add_attempts="
+      << g_runtime_add_attempts.load(std::memory_order_relaxed)
       << " sandbox_native_grind_runtime_adds="
       << g_runtime_add_calls.load(std::memory_order_relaxed)
+      << " sandbox_native_grind_original_world_replacement_requested="
+      << (replacement_requested ? 1 : 0)
+      << " sandbox_native_grind_vanilla_registration_state="
+      << vanilla_state
+      << " sandbox_native_grind_vanilla_registered_rails="
+      << registered_vanilla_rails
+      << " sandbox_native_grind_suppressed_vanilla_adds="
+      << suppressed_vanilla_adds
+      << " sandbox_native_grind_suppressed_vanilla_rails="
+      << g_suppressed_runtime_rails.load(std::memory_order_relaxed)
       << " sandbox_native_grind_owned_loads="
       << g_owned_load_calls.load(std::memory_order_relaxed)
       << " sandbox_native_grind_owned_adds="

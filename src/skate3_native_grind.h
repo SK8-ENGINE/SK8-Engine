@@ -7,13 +7,13 @@ struct PPCContext;
 
 namespace skate3::native_grind {
 
-// Generated-function observers for the retail tSplineData load path and the
-// GrindData registration boundary. They capture the authoritative runtime
-// owner/lifetime contract without replacing either function.
+// The tSplineData observer captures the authoritative runtime owner/lifetime
+// contract. The GrindData boundary rejects vanilla rail vectors before the
+// game's allocator/registry can make invisible original-world rails active.
 void ObserveSplineDataLoad(const PPCContext& ctx,
                            std::uint8_t* base) noexcept;
-void ObserveGrindDataAdd(const PPCContext& ctx,
-                         std::uint8_t* base) noexcept;
+bool ShouldSuppressGrindDataAdd(const PPCContext& ctx,
+                                std::uint8_t* base) noexcept;
 
 bool Enabled();
 

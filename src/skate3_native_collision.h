@@ -67,6 +67,10 @@ void ObservePlayerCollisionTelemetry(const float world_position[3],
 
 bool Enabled();
 
+// True from startup whenever the configured owned-world mode must exclude the
+// original world's independent collision and grind-registration consumers.
+bool OriginalWorldReplacementRequested();
+
 // Returns the exact translation registered with the native collision
 // collection. Presentation uses this same value so visible and physical
 // geometry cannot drift onto separate coordinate seams.
