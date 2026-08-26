@@ -145,6 +145,11 @@ Copy-Item -LiteralPath (
 ) -Destination (
     Join-Path $stageRoot 'LICENSE-rexglue.txt'
 )
+Copy-Item -LiteralPath (
+    Join-Path $repoRoot 'third_party\box3d\LICENSE'
+) -Destination (
+    Join-Path $stageRoot 'LICENSE-Box3D.txt'
+)
 Copy-Item -LiteralPath (Join-Path $repoRoot 'release\maps\README.txt') `
     -Destination (Join-Path $stageRoot 'maps\README.txt')
 foreach ($bundledMapFile in @(

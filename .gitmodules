@@ -6,3 +6,6 @@
 	path = third_party/zlib
 	url = https://github.com/madler/zlib.git
 
+[submodule "third_party/box3d"]
+	path = third_party/box3d
+	url = https://github.com/erincatto/box3d.git
