@@ -1040,6 +1040,9 @@ void Skate3BaseApp::OnCreateDialogs(rex::ui::ImGuiDrawer *drawer) {
       std::make_unique<skate3::RenderModeIndicator>(drawer);
   map_editor_spawn_dialog_ =
       std::make_unique<skate3::MapEditorSpawnDialog>(drawer);
+  skate3::map_editor::ConfigureObjectLibrary(
+      game_data_root(), user_data_root() / "objects",
+      rex::filesystem::GetAppRootFolder() / "objects");
   auto poll_vanilla_ui_gamepad = [this]() {
     skate3::vanilla_ui::GamepadState pad;
     auto *rt = runtime();

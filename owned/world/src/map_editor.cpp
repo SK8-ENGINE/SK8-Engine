@@ -1,6 +1,7 @@
 #include "skate/world/map_editor.h"
 
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <stdexcept>
 
@@ -249,6 +250,86 @@ std::vector<GrindRail> TransformEditorGrindRails(
       }
       for (Vec3& point : rails[rail_index].points) {
         point = TransformEditorPoint(transform, point - object.origin);
+      }
+      for (NativeGrindSegment& segment :
+           rails[rail_index].native_segments) {
+        const auto read = [&segment](std::size_t word) {
+          return Vec3{
+              std::bit_cast<float>(segment.words[word]),
+              std::bit_cast<float>(segment.words[word + 1]),
+              std::bit_cast<float>(segment.words[word + 2])};
+        };
+        const auto write =
+            [&segment](std::size_t word, Vec3 value) {
+              segment.words[word] =
+                  std::bit_cast<std::uint32_t>(value.x);
+              segment.words[word + 1] =
+                  std::bit_cast<std::uint32_t>(value.y);
+              segment.words[word + 2] =
+                  std::bit_cast<std::uint32_t>(value.z);
+            };
+        const auto rotate = [&transform](Vec3 value) {
+          return transform.x_axis * value.x +
+                 transform.y_axis * value.y +
+                 transform.z_axis * value.z;
+        };
+        const Vec3 a = rotate(read(0));
+        const Vec3 b = rotate(read(4));
+        const Vec3 c = rotate(read(8));
+        const Vec3 d = TransformEditorPoint(
+            transform, read(12) - object.origin);
+        write(0, a);
+        write(4, b);
+        write(8, c);
+        write(12, d);
+
+        Vec3 minimum = d;
+        Vec3 maximum = d;
+        const auto include = [&minimum, &maximum](Vec3 value) {
+          minimum.x = std::min(minimum.x, value.x);
+          minimum.y = std::min(minimum.y, value.y);
+          minimum.z = std::min(minimum.z, value.z);
+          maximum.x = std::max(maximum.x, value.x);
+          maximum.y = std::max(maximum.y, value.y);
+          maximum.z = std::max(maximum.z, value.z);
+        };
+        const auto position = [a, b, c, d](float t) {
+          return d + c * t + b * (t * t) +
+                 a * (t * t * t);
+        };
+        include(position(1.0f));
+        for (std::size_t axis = 0; axis < 3; ++axis) {
+          const auto component = [axis](Vec3 value) {
+            return axis == 0 ? value.x
+                             : (axis == 1 ? value.y : value.z);
+          };
+          const float qa = 3.0f * component(a);
+          const float qb = 2.0f * component(b);
+          const float qc = component(c);
+          if (std::abs(qa) <= 1.0e-8f) {
+            if (std::abs(qb) > 1.0e-8f) {
+              const float t = -qc / qb;
+              if (t > 0.0f && t < 1.0f) {
+                include(position(t));
+              }
+            }
+            continue;
+          }
+          const float discriminant = qb * qb - 4.0f * qa * qc;
+          if (discriminant < 0.0f) {
+            continue;
+          }
+          const float root = std::sqrt(discriminant);
+          for (const float t :
+               {(-qb - root) / (2.0f * qa),
+                (-qb + root) / (2.0f * qa)}) {
+            if (t > 0.0f && t < 1.0f) {
+              include(position(t));
+            }
+          }
+        }
+        write(20, minimum);
+        write(24, maximum);
       }
     }
   }

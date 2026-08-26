@@ -879,7 +879,7 @@ void Validate(MapDefinition& map) {
         static_cast<std::uint32_t>(material.alpha_mode) >
             static_cast<std::uint32_t>(
                 SurfaceMaterial::AlphaMode::Blend) ||
-        material.skate_audio_surface > 93 ||
+        material.skate_audio_surface > 127 ||
         material.skate_physics_surface > 13 ||
         material.skate_surface_pattern > 15 ||
         material.presentation_depth_layer > 3 ||

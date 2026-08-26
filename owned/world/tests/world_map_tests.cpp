@@ -394,6 +394,30 @@ int main() {
     rail.name = "Top Edge";
     rail.points = {{10.0f, 1.0f, 0.5f}, {12.0f, 1.0f, 0.5f}};
     prefab_package.grind_rails.push_back(rail);
+    GrindRail native_rail;
+    native_rail.name = "Retail Top Edge";
+    native_rail.native_segments.resize(1);
+    native_rail.native_segments.front().words[8] =
+        std::bit_cast<std::uint32_t>(2.0f);
+    native_rail.native_segments.front().words[12] =
+        std::bit_cast<std::uint32_t>(10.0f);
+    native_rail.native_segments.front().words[13] =
+        std::bit_cast<std::uint32_t>(1.0f);
+    native_rail.native_segments.front().words[14] =
+        std::bit_cast<std::uint32_t>(0.5f);
+    native_rail.native_segments.front().words[20] =
+        std::bit_cast<std::uint32_t>(10.0f);
+    native_rail.native_segments.front().words[21] =
+        std::bit_cast<std::uint32_t>(1.0f);
+    native_rail.native_segments.front().words[22] =
+        std::bit_cast<std::uint32_t>(0.5f);
+    native_rail.native_segments.front().words[24] =
+        std::bit_cast<std::uint32_t>(12.0f);
+    native_rail.native_segments.front().words[25] =
+        std::bit_cast<std::uint32_t>(1.0f);
+    native_rail.native_segments.front().words[26] =
+        std::bit_cast<std::uint32_t>(0.5f);
+    prefab_package.grind_rails.push_back(native_rail);
     MapObject root;
     root.id = 7;
     root.name = "ManualPadRoot";
@@ -402,7 +426,7 @@ int main() {
     root.source_collision_triangle_count = 1;
     root.render_mesh.indices = {0, 1, 2};
     root.collision_triangles.resize(1);
-    root.grind_rail_indices = {0};
+    root.grind_rail_indices = {0, 1};
     prefab_package.editable_objects.push_back(root);
 
     SkateObjectAsset asset =
@@ -411,11 +435,29 @@ int main() {
                 asset.objects.size() == 1 &&
                 asset.objects[0].origin.x == 0.0f &&
                 asset.objects[0].grind_rail_indices ==
-                    std::vector<std::uint32_t>{0} &&
+                    std::vector<std::uint32_t>{0, 1} &&
                 NearlyEqual(asset.grind_rails[0].points[0].x, 0.0f) &&
                 NearlyEqual(asset.grind_rails[0].points[0].z, 0.5f) &&
                 NearlyEqual(asset.grind_rails[0].points[1].x, 2.0f) &&
-                NearlyEqual(asset.grind_rails[0].points[1].z, 0.5f),
+                NearlyEqual(asset.grind_rails[0].points[1].z, 0.5f) &&
+                NearlyEqual(
+                    std::bit_cast<float>(
+                        asset.grind_rails[1]
+                            .native_segments[0]
+                            .words[12]),
+                    0.0f) &&
+                NearlyEqual(
+                    std::bit_cast<float>(
+                        asset.grind_rails[1]
+                            .native_segments[0]
+                            .words[20]),
+                    0.0f) &&
+                NearlyEqual(
+                    std::bit_cast<float>(
+                        asset.grind_rails[1]
+                            .native_segments[0]
+                            .words[24]),
+                    2.0f),
             "SKATEOBJ profile did not normalize its root and grind spline");
   }
 
@@ -698,6 +740,77 @@ int main() {
                 NearlyEqual(transformed_rails[0].points[1].z, 2.0f),
             "editor grind spline did not follow object translation and "
             "rotation");
+
+    MapDefinition native_editor_map;
+    GrindRail native_editor_rail;
+    native_editor_rail.id = 33;
+    native_editor_rail.name = "RetailRail";
+    native_editor_rail.native_segments.resize(1);
+    native_editor_rail.native_segments.front().words[8] =
+        std::bit_cast<std::uint32_t>(2.0f);
+    native_editor_rail.native_segments.front().words[12] =
+        std::bit_cast<std::uint32_t>(10.0f);
+    native_editor_rail.native_segments.front().words[13] =
+        std::bit_cast<std::uint32_t>(1.0f);
+    native_editor_rail.native_segments.front().words[20] =
+        std::bit_cast<std::uint32_t>(10.0f);
+    native_editor_rail.native_segments.front().words[21] =
+        std::bit_cast<std::uint32_t>(1.0f);
+    native_editor_rail.native_segments.front().words[24] =
+        std::bit_cast<std::uint32_t>(12.0f);
+    native_editor_rail.native_segments.front().words[25] =
+        std::bit_cast<std::uint32_t>(1.0f);
+    native_editor_map.grind_rails.push_back(native_editor_rail);
+    native_editor_map.editable_objects.push_back(
+        MapObject{
+            .id = 43,
+            .name = "RetailRailObject",
+            .origin = {10.0f, 0.0f, 0.0f},
+            .grind_rail_indices = {0},
+        });
+    const std::vector<GrindRail> transformed_native_rails =
+        TransformEditorGrindRails(
+            native_editor_map, grind_transforms);
+    Require(
+        transformed_native_rails.size() == 1 &&
+                NearlyEqual(
+                    std::bit_cast<float>(
+                        transformed_native_rails[0]
+                            .native_segments[0]
+                            .words[8 + 2]),
+                    -2.0f) &&
+                NearlyEqual(
+                    std::bit_cast<float>(
+                        transformed_native_rails[0]
+                            .native_segments[0]
+                            .words[12]),
+                    20.0f) &&
+                NearlyEqual(
+                    std::bit_cast<float>(
+                        transformed_native_rails[0]
+                            .native_segments[0]
+                            .words[13]),
+                    4.0f) &&
+                NearlyEqual(
+                    std::bit_cast<float>(
+                        transformed_native_rails[0]
+                            .native_segments[0]
+                            .words[14]),
+                    4.0f) &&
+                NearlyEqual(
+                    std::bit_cast<float>(
+                        transformed_native_rails[0]
+                            .native_segments[0]
+                            .words[22]),
+                    2.0f) &&
+                NearlyEqual(
+                    std::bit_cast<float>(
+                        transformed_native_rails[0]
+                            .native_segments[0]
+                            .words[26]),
+                    4.0f),
+        "editor native grind spline did not follow object translation and "
+        "rotation");
     grind_map.grind_rails.push_back(
         GrindRail{
             .id = 32,

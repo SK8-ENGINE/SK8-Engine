@@ -33,6 +33,7 @@ add_library(skate_owned_world STATIC
   src/render_world.cpp
   src/rw_collision_mesh.cpp
   src/skate_object_package.cpp
+  src/skate_object_writer.cpp
   src/starter_flatground.cpp
   src/water_simulation.cpp
   src/world_map.cpp
