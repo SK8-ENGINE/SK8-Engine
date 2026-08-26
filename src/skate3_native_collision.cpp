@@ -1,5 +1,7 @@
 #include "skate3_native_collision.h"
 
+#include "skate3_owned_collision_selection.h"
+
 #include "generated/skate3_init.h"
 #include "skate/world/map_editor.h"
 #include "skate/world/rw_collision_mesh.h"
@@ -116,8 +118,9 @@ constexpr std::uint32_t kGroundResultOffset = 176;
 // collection pressure.
 constexpr std::size_t kMaximumOwnedStaticChunks = 1024;
 constexpr std::size_t kOwnedCollisionActiveMeshes = 32;
+constexpr std::size_t kOwnedCollisionGuaranteedMeshes = 24;
 constexpr std::size_t kOwnedCollisionHysteresisMeshes = 16;
-constexpr float kOwnedCollisionStreamRefreshDistance = 40.0f;
+constexpr float kOwnedCollisionStreamRefreshDistance = 16.0f;
 constexpr std::size_t kMaximumHingedDoors = 32;
 // University-style retail maps contain thousands of independently retained
 // presentation parts. Collision-bearing records are still constrained by the
@@ -1497,37 +1500,27 @@ bool SelectOwnedCollisionMeshes(float x, float z, bool force) {
       });
   const std::uint32_t desired_count = std::min<std::uint32_t>(
       count, static_cast<std::uint32_t>(kOwnedCollisionActiveMeshes));
-  std::vector<bool> desired(count, false);
-  std::uint32_t retained = 0;
-  const std::uint32_t retention_rank = std::min<std::uint32_t>(
-      count, desired_count +
-                 static_cast<std::uint32_t>(
-                     kOwnedCollisionHysteresisMeshes));
-  // Preserve active resources while they remain close to the nearest set.
-  // Without this rank hysteresis, tiny player movements around equal-distance
-  // sector boundaries repeatedly rebuilt otherwise useful collection slots
-  // on the mechanics thread.
-  for (std::uint32_t rank = 0;
-       rank < retention_rank && retained < desired_count; ++rank) {
-    const std::uint32_t index = ranked[rank].second;
-    if (OwnedStaticDesired(index)) {
-      desired[index] = true;
-      ++retained;
-    }
+  std::vector<std::uint32_t> ranked_indices;
+  ranked_indices.reserve(count);
+  std::vector<std::uint8_t> currently_selected(count, 0);
+  for (const auto& [distance, index] : ranked) {
+    (void)distance;
+    ranked_indices.push_back(index);
+    currently_selected[index] =
+        OwnedStaticDesired(index) ? 1u : 0u;
   }
-  for (std::uint32_t rank = 0;
-       rank < count && retained < desired_count; ++rank) {
-    const std::uint32_t index = ranked[rank].second;
-    if (!desired[index]) {
-      desired[index] = true;
-      ++retained;
-    }
-  }
+  const std::vector<std::uint8_t> desired =
+      BuildOwnedCollisionSelection(
+          ranked_indices, currently_selected,
+          kOwnedCollisionActiveMeshes,
+          kOwnedCollisionGuaranteedMeshes,
+          kOwnedCollisionHysteresisMeshes);
   bool changed = false;
   for (std::uint32_t index = 0; index < count; ++index) {
-    changed |= OwnedStaticDesired(index) != desired[index];
+    const bool selected = desired[index] != 0;
+    changed |= OwnedStaticDesired(index) != selected;
     g_static_mesh_desired[index].store(
-        desired[index], std::memory_order_release);
+        selected, std::memory_order_release);
   }
   g_static_active_mesh_count.store(desired_count, std::memory_order_release);
   g_static_stream_center_x_bits.store(

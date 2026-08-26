@@ -12,6 +12,32 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   )
 endif()
 
+add_executable(skate3_owned_collision_selection_tests
+  skate3_owned_collision_selection_tests.cpp
+)
+
+target_include_directories(
+  skate3_owned_collision_selection_tests PRIVATE
+  ${CMAKE_CURRENT_LIST_DIR}/../src
+)
+target_compile_features(
+  skate3_owned_collision_selection_tests PRIVATE cxx_std_23)
+
+if(MSVC)
+  target_compile_options(
+    skate3_owned_collision_selection_tests PRIVATE
+    /W4 /permissive- /utf-8)
+else()
+  target_compile_options(
+    skate3_owned_collision_selection_tests PRIVATE
+    -Wall -Wextra -Wpedantic)
+endif()
+
+add_test(
+  NAME skate3_owned_collision_selection_tests
+  COMMAND skate3_owned_collision_selection_tests
+)
+
 add_executable(skate3_multiplayer_protocol_tests
   skate3_multiplayer_protocol_tests.cpp
 )
