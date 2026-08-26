@@ -27,6 +27,21 @@ game closes, while retail game data, saves, settings, and user maps are left
 in place. The downloaded release also refreshes the standalone Blender addon
 zip; users remain in control of installing it into Blender.
 
+### Experimental native vanilla-style menu
+
+Press **F6** during gameplay to open the experimental native menu prototype.
+It reconstructs Skate 3's Career crossbar presentation with project-owned
+C++/ImGui rendering and exact UI assets extracted locally from the user's own
+game copy. The prototype supports category and row navigation and can display
+the reconstructed Game Settings screen without replacing the existing
+settings menu.
+
+This is an opt-in development feature, not a complete frontend replacement.
+Game Settings entries are currently display-only, most menu actions are not
+connected to gameplay outcomes, and sound-event mappings remain experimental.
+No extracted retail assets are included in the repository or distributed with
+source releases.
+
 ## Documentation
 
 | Topic | Documentation |

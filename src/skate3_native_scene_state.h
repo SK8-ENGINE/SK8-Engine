@@ -253,6 +253,9 @@ inline int g_ui_blur_hold = 0;
 // settings menu is open (the game issues no popup blur then). Set from the
 // app UI thread, read at scene publish.
 inline std::atomic<bool> g_settings_menu_blur{false};
+// Dedicated F6 Career-menu backdrop. Its exact retail pass constants are
+// applied by ApplyVanillaUiBackdropPass; this must not alter Alex's menu.
+inline std::atomic<bool> g_vanilla_ui_backdrop{false};
 // Emulated-post blur diagnostics: reset on each menu open so every open
 // logs a fresh burst.
 inline std::atomic<uint32_t> g_post_blur_log_count{0};

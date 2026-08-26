@@ -15,6 +15,7 @@
 
 #include "skate3_native_debug_dialog.h"
 #include "skate3_release_updater.h"
+#include "skate3_vanilla_ui/skate3_vanilla_ui_dialog.h"
 
 namespace rex::ui {
 class ImGuiDrawer;
@@ -40,6 +41,7 @@ class Skate3BaseApp : public rex::ReXApp {
   void InstallBigDeviceAliases();
   void InstallDlcPackages();
   void ToggleSimpleSettings();
+  void ToggleVanillaUiPrototype();
   void ToggleNativeDebug();
   void ApplySettingsCursorMode();
   void ApplyGameplayCursorMode();
@@ -60,6 +62,8 @@ class Skate3BaseApp : public rex::ReXApp {
   std::filesystem::path profiles_path_;
   std::filesystem::path maps_path_;
   std::unique_ptr<rex::ui::SimpleSettingsDialog> simple_settings_dialog_;
+  std::unique_ptr<skate3::vanilla_ui::PrototypeDialog>
+      vanilla_ui_prototype_dialog_;
   std::unique_ptr<skate3::ReleaseUpdater> release_updater_;
   std::unique_ptr<skate3::NativeDebugDialog> native_debug_dialog_;
   std::unique_ptr<skate3::RenderModeIndicator> render_mode_indicator_;

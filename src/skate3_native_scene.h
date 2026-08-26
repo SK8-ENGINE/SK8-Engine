@@ -508,11 +508,14 @@ inline constexpr const char* kShowcaseOrderDefault =
 
 bool Enabled();
 
-// Host settings-overlay backdrop: while the SDK settings menu is open, run
-// the game's own popup blur chain (FrameScene::ui_blur) over every finished
-// frame; the game issues no popup blur of its own then. The overlay draws
-// its dark tint on top of the blurred scene.
+// Existing host settings-overlay backdrop. This retains its clean Gaussian
+// and remains independent from the rewritten vanilla UI's retail GPU chain.
 void SetSettingsMenuBlur(bool enabled);
+
+// Rewritten vanilla UI backdrop: reproduce the retail Career menu's exact
+// fixed-resolution blur and two-pass colour modulation. Kept separate from
+// Alex's settings-menu Gaussian so the existing menu remains unchanged.
+void SetVanillaUiBackdrop(bool enabled);
 
 // The captured (un-overridden) sun direction, for the debug dialog's sun
 // override to seed its sliders from (unit vector toward the sun).

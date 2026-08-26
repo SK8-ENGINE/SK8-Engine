@@ -2699,12 +2699,23 @@ bool Enabled() { return SceneEnabled(); }
 
 void SetSettingsMenuBlur(bool enabled) {
   g_settings_menu_blur.store(enabled, std::memory_order_relaxed);
-  REXLOG_INFO("native-scene: settings-menu blur {} (post-processor {})", enabled ? "ON" : "off",
+  REXLOG_INFO("native-scene: settings-menu blur {} (post-processor {})",
+              enabled ? "ON" : "off",
               enabled ? "armed" : "disarms after ease-out");
   if (enabled) {
     g_post_blur_log_count.store(0, std::memory_order_relaxed);
     // Arms the emulated-output post-processor (boot frames / manual emulated
     // mode). It disarms itself once the blur has fully eased out.
+    rex::graphics::RequestNativeGuestOutputPostProcess(true);
+  }
+}
+
+void SetVanillaUiBackdrop(bool enabled) {
+  g_vanilla_ui_backdrop.store(enabled, std::memory_order_relaxed);
+  REXLOG_INFO("native-scene: vanilla-UI retail backdrop {}",
+              enabled ? "ON" : "off");
+  if (enabled) {
+    g_post_blur_log_count.store(0, std::memory_order_relaxed);
     rex::graphics::RequestNativeGuestOutputPostProcess(true);
   }
 }

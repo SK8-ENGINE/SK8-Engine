@@ -10,6 +10,9 @@
 !/tools/blender_owned_map/**
 !/tools/vanilla_map_extraction/
 !/tools/vanilla_map_extraction/**
+!/tools/skate3_ui_extract/
+!/tools/skate3_ui_extract/**
+/tools/skate3_ui_extract/capture_menu_audio_telemetry.py
 **/__pycache__/
 *.pyc
 
