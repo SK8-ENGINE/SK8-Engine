@@ -1711,18 +1711,18 @@ MapDefinition LoadOwnedMapPackage(const std::filesystem::path& path) {
           tag == std::array<char, 4>{'S', 'K', 'Y', 'B'} &&
           schema == 1) {
         Reader sky_reader(std::move(payload));
-        const std::uint32_t vertex_count =
+        const std::uint32_t sky_vertex_count =
             sky_reader.Scalar<std::uint32_t>();
-        const std::uint32_t index_count =
+        const std::uint32_t sky_index_count =
             sky_reader.Scalar<std::uint32_t>();
         RequireCount(
-            vertex_count, "textured-sky vertex",
+            sky_vertex_count, "textured-sky vertex",
             kMaximumGeometryCount);
         RequireCount(
-            index_count, "textured-sky index",
+            sky_index_count, "textured-sky index",
             kMaximumIndexCount);
-        if (vertex_count == 0 || index_count == 0 ||
-            index_count % 3 != 0) {
+        if (sky_vertex_count == 0 || sky_index_count == 0 ||
+            sky_index_count % 3 != 0) {
           throw std::runtime_error(
               "SKATE textured-sky geometry is invalid");
         }
@@ -1775,10 +1775,12 @@ MapDefinition LoadOwnedMapPackage(const std::filesystem::path& path) {
 
         Reader vertex_reader(ReadStoredBytes(
             sky_reader,
-            std::size_t(vertex_count) * kTexturedSkyVertexBytes,
+            std::size_t(sky_vertex_count) *
+                kTexturedSkyVertexBytes,
             "textured-sky vertex block"));
-        sky.mesh.vertices.reserve(vertex_count);
-        for (std::uint32_t index = 0; index < vertex_count; ++index) {
+        sky.mesh.vertices.reserve(sky_vertex_count);
+        for (std::uint32_t index = 0;
+             index < sky_vertex_count; ++index) {
           RenderVertex vertex;
           vertex.position = vertex_reader.Vector3();
           vertex.uv = vertex_reader.Vector2();
@@ -1797,10 +1799,10 @@ MapDefinition LoadOwnedMapPackage(const std::filesystem::path& path) {
 
         Reader index_reader(ReadStoredBytes(
             sky_reader,
-            std::size_t(index_count) * sizeof(std::uint32_t),
+            std::size_t(sky_index_count) * sizeof(std::uint32_t),
             "textured-sky index block"));
         ReadIndices(
-            index_reader, index_count, sky.mesh.indices);
+            index_reader, sky_index_count, sky.mesh.indices);
         index_reader.RequireEnd();
         sky_reader.RequireEnd();
         map.textured_sky = std::move(sky);
