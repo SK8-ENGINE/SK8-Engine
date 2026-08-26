@@ -619,6 +619,41 @@ int main() {
                     }),
             "editable render span remained in the static world");
 
+    MapDefinition fully_editable_map = split_map;
+    fully_editable_map.render_mesh.vertices.resize(4);
+    fully_editable_map.render_mesh.vertices[0].position =
+        {-1.0f, 0.0f, -1.0f};
+    fully_editable_map.render_mesh.vertices[1].position =
+        {1.0f, 0.0f, -1.0f};
+    fully_editable_map.render_mesh.vertices[2].position =
+        {1.0f, 0.0f, 1.0f};
+    fully_editable_map.render_mesh.vertices[3].position =
+        {-1.0f, 0.0f, 1.0f};
+    fully_editable_map.render_mesh.indices = {
+        0, 1, 2,
+        0, 2, 3,
+    };
+    std::size_t completed_render_triangles = 1;
+    std::size_t total_render_triangles = 1;
+    RenderWorldBuildOptions fully_editable_options;
+    fully_editable_options.excluded_index_ranges.push_back({0, 6});
+    fully_editable_options.progress =
+        [&](std::size_t completed, std::size_t total) {
+          completed_render_triangles = completed;
+          total_render_triangles = total;
+        };
+    const RenderWorld fully_editable_render =
+        BuildRenderWorld(fully_editable_map, fully_editable_options);
+    Require(
+        fully_editable_render.source_triangle_count == 0 &&
+            fully_editable_render.output_triangle_count == 0 &&
+            fully_editable_render.presentation_surface_count == 0 &&
+            fully_editable_render.chunks.empty() &&
+            completed_render_triangles == 0 &&
+            total_render_triangles == 0,
+        "fully editable shared-vertex geometry was not cleanly excluded "
+        "from the static render world");
+
     RwCollisionBuildOptions collision_options;
     collision_options.excluded_triangle_ranges.push_back({1, 1});
     const RwCollisionBuildResult static_collision =
