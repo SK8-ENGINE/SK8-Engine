@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Extract Skate 2's retail sky and attach it to an existing SKATE v12/v13 map.
+"""Extract Skate 2's retail sky and attach it to a SKATE v12-v14 map.
 
 The source is ``miscboot.big``. Only ``DIST_skybox.rx2`` and its texture RX2
 are read; proxy mountains, advertising signs, and unrelated textures in the
@@ -225,9 +225,9 @@ def _find_extension_offset(path: Path) -> int:
     with path.open("rb") as stream:
         reader = FileReader(stream)
         magic = reader.take(8, "magic")
-        if magic not in (b"SKATE12\0", b"SKATE13\0"):
+        if magic not in (b"SKATE12\0", b"SKATE13\0", b"SKATE14\0"):
             raise PackageError(
-                f"{path} is not a SKATE v12/v13 package ({magic!r})"
+                f"{path} is not a SKATE v12-v14 package ({magic!r})"
             )
         version = int(magic[5:7])
         if reader.u32("endian marker") != 0x12345678:
