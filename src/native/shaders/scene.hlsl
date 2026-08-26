@@ -716,7 +716,11 @@ float4 ShadePixel(VSOut i) {
     }
   }
   // Exact sky dome (cam_pos.w = -40; sky_defaultPS transcribed from the
-  // Skate 3 ucode in a live capture). The emulated frame's big sun
+  // retail shader). Imported SKYB domes set overlay.z and supply the
+  // diffuse sky gradient at t0 plus the cloud/detail layer at t8. Retained
+  // Skate 3 skies keep overlay.z clear because their t0 has already been
+  // combined upstream.
+  // The emulated frame's big sun
   // glow is computed IN the dome shader: a 1D radial gradient (the sky
   // material's `specular` channel, bound at t4 here) indexed by the sine of
   // the angle between the dome direction and the sun, its rgb^2 amplified
@@ -731,7 +735,24 @@ float4 ShadePixel(VSOut i) {
     // cam.z), so the shader's dome-local direction (sky.fx In.vPos) is
     // rpos + (0, cam.y - sky_h, 0).
     float3 dome = normalize(i.rpos + float3(0.0, cam_pos.y - mat_tint.w, 0.0));
-    float3 lin = albedo.rgb * albedo.rgb;
+    float3 sky_gradient = albedo.rgb;
+    if (overlay.z > 0.5) {
+      // Skate 2 sky_defaultPS uses WRAP in U and CLAMP in V for both
+      // panorama layers. The generated dome duplicates its seam vertices,
+      // so the clamp sampler preserves the same result at U=0/1 while also
+      // holding the panorama's zenith/horizon edge colours outside its
+      // authored 45-degree vertical belt.
+      float2 sky_uv = float2(frac(i.uv.x), saturate(i.uv.y));
+      sky_gradient = diffuse.Sample(smp_clamp, sky_uv).rgb;
+      float luminance =
+          dot(float3(0.3, 0.59, 0.11), sky_gradient);
+      sky_gradient =
+          lerp(luminance.xxx, sky_gradient, misc.z) * tint.rgb;
+      sky_gradient +=
+          detail_map.Sample(smp_clamp, sky_uv).rgb - 0.5;
+    }
+    float3 lin = max(sky_gradient, 0.0);
+    lin *= lin;
     float dotPL = saturate(dot(dome, mat_tint.xyz));
     float sinA = sqrt(saturate(1.0 - dotPL * dotPL));
     float4 sun = decal_art.Sample(smp_clamp, float2(sinA / overlay.x, 0.5 / 16.0));

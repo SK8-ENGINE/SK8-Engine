@@ -275,6 +275,40 @@ once, applies released gravity, and receives deterministic linear and angular
 impulses. Spawned prefab instances remap their local groups to unused runtime
 IDs. Group zero is the backward-compatible non-breakable default.
 
+The optional `SKYB` extension uses schema version 1 and carries a textured
+retail sky independently from world geometry:
+
+```text
+u32 vertex_count, index_count
+f32 elevation
+f32 gradient_tint[3]
+f32 gradient_chromaticity
+f32 sun_angular_scale
+f32 exposure_multiplier
+sky_texture gradient, detail, sun:
+  string name
+  u32 width, height
+  u32 color_space
+  stored_bytes rgba8
+stored_bytes sky_vertices:
+  vertex[vertex_count]:
+    f32 position[3], uv[2]
+stored_bytes sky_indices:
+  u32 index[index_count]
+```
+
+The stored geometry is Skate 2's four-vertex projection surface, not a literal
+world-space dome. Retail `sky_defaultVS` expands it around the camera. The
+native renderer reconstructs that projection as a camera-relative sphere and
+maps the complete 360-degree gradient and detail panoramas over it while
+retaining the authored elevation. Skate 2's panorama layers are 8:1, so their
+authored UV projection spans a 45-degree vertical belt (`360 / 8`) with
+horizontal wrap and vertical clamp, matching the sampler declarations in
+`sky_defaultPS`. The sky therefore never affects map bounds, collision,
+chunking, or occlusion. The gradient, detail/cloud, and sun-ramp layers are
+composed by the recovered retail sky shader path. Older packages without
+`SKYB` continue to use the project-owned procedural sky.
+
 `day_night_duration_seconds == 0` freezes celestial lighting at
 `day_night_start_hour`. With a positive duration and
 `day_night_ping_pong == 0`, the duration describes one complete 24-hour

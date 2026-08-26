@@ -16011,15 +16011,27 @@ void DrawSandboxSky(const NativeGuestOutputRenderContext& context,
   }
   mesh->second.last_used_frame = frame_number;
 
-  // The owned sphere follows the camera. It has no parallax and does not
-  // depend on Skate's sky assets or the authored world's physical extent.
+  const skate::world::TexturedSkyDefinition& textured =
+      mechanics_sandbox::map::ActiveDefinition().textured_sky;
+  // Both sky forms follow the camera horizontally and have no parallax.
+  // Retail textured domes retain their authored vertical level, matching
+  // sky.fx; the procedural sphere follows the camera on all three axes.
+  float sky_height = scene.cam_pos[1];
+  if (textured.enabled) {
+    float origin[3] = {};
+    if (mechanics_sandbox::SandboxMapRenderOrigin(origin)) {
+      sky_height = origin[1] + textured.elevation;
+    } else {
+      sky_height = textured.elevation;
+    }
+  }
   float constants[52] = {};
   constants[0] = 1.0f;
   constants[5] = 1.0f;
   constants[10] = 1.0f;
   constants[15] = 1.0f;
   constants[12] = scene.cam_pos[0];
-  constants[13] = scene.cam_pos[1];
+  constants[13] = sky_height;
   constants[14] = scene.cam_pos[2];
   for (int row = 0; row < 4; ++row) {
     for (int column = 0; column < 4; ++column) {
@@ -16034,37 +16046,73 @@ void DrawSandboxSky(const NativeGuestOutputRenderContext& context,
   constants[36] = scene.cam_pos[0];
   constants[37] = scene.cam_pos[1];
   constants[38] = scene.cam_pos[2];
-  constants[39] = -42.0f;
+  constants[39] = textured.enabled ? -40.0f : -42.0f;
   const skate::world::DayNightState celestial =
       mechanics_sandbox::map::ActiveDayNightState();
-  constants[32] = celestial.sun_direction_to_light.x;
-  constants[33] = celestial.sun_direction_to_light.y;
-  constants[34] = celestial.sun_direction_to_light.z;
-  constants[35] = 0.0f;
-  constants[40] = celestial.sky_zenith.x;
-  constants[41] = celestial.sky_zenith.y;
-  constants[42] = celestial.sky_zenith.z;
-  constants[43] = celestial.star_visibility;
-  constants[44] = celestial.sky_horizon.x;
-  constants[45] = celestial.sky_horizon.y;
-  constants[46] = celestial.sky_horizon.z;
-  constants[47] = celestial.sun_visibility;
-  constants[48] = celestial.sky_nadir.x;
-  constants[49] = celestial.sky_nadir.y;
-  constants[50] = celestial.sky_nadir.z;
-  constants[51] = celestial.moon_visibility;
+  if (textured.enabled) {
+    constants[32] = textured.gradient_tint.x;
+    constants[33] = textured.gradient_tint.y;
+    constants[34] = textured.gradient_tint.z;
+    constants[35] = 0.0f;
+    constants[40] = celestial.sun_direction_to_light.x;
+    constants[41] = celestial.sun_direction_to_light.y;
+    constants[42] = celestial.sun_direction_to_light.z;
+    constants[43] = sky_height;
+    constants[44] = textured.sun_angular_scale;
+    constants[45] = textured.exposure_multiplier;
+    constants[46] = 1.0f;  // SKYB gradient + detail composition marker.
+    constants[47] = 0.0f;
+    constants[48] = 0.0f;
+    constants[49] = 1.0f;
+    constants[50] = textured.gradient_chromaticity;
+    constants[51] = 0.0f;
+  } else {
+    constants[32] = celestial.sun_direction_to_light.x;
+    constants[33] = celestial.sun_direction_to_light.y;
+    constants[34] = celestial.sun_direction_to_light.z;
+    constants[35] = 0.0f;
+    constants[40] = celestial.sky_zenith.x;
+    constants[41] = celestial.sky_zenith.y;
+    constants[42] = celestial.sky_zenith.z;
+    constants[43] = celestial.star_visibility;
+    constants[44] = celestial.sky_horizon.x;
+    constants[45] = celestial.sky_horizon.y;
+    constants[46] = celestial.sky_horizon.z;
+    constants[47] = celestial.sun_visibility;
+    constants[48] = celestial.sky_nadir.x;
+    constants[49] = celestial.sky_nadir.y;
+    constants[50] = celestial.sky_nadir.z;
+    constants[51] = celestial.moon_visibility;
+  }
 
   cmd->SetBindingLayout(g_r.layout);
   cmd->SetPipeline(g_r.pso_nodepth);
   cmd->SetRootConstants(0, 52, constants, 0);
   cmd->SetBufferSrv(3, g_r.bone_ring, 0);
-  cmd->SetTexture(1, g_r.white.srv);
+  cmd->SetTexture(
+      1, textured.enabled
+             ? ResolveOwnedMapTexture(
+                   context, textured.gradient_texture,
+                   OwnedTextureRole::Color)
+             : g_r.white.srv);
   cmd->SetTexture(2, g_r.white.srv);
   cmd->SetTexture(4, g_r.white.srv);
-  cmd->SetTexture(5, g_r.white.srv);
+  cmd->SetTexturePair(
+      5,
+      textured.enabled
+          ? ResolveOwnedMapTexture(
+                context, textured.sun_texture,
+                OwnedTextureRole::Data)
+          : g_r.white.srv,
+      g_r.white.srv);
   cmd->SetTexturePair(7, g_r.white_cube.srv, g_r.white.srv);
   nrhi::TextureView* defaults[6] = {
-      g_r.white.srv, g_r.white.srv, g_r.white.srv, g_r.white.srv,
+      textured.enabled
+          ? ResolveOwnedMapTexture(
+                context, textured.detail_texture,
+                OwnedTextureRole::Color)
+          : g_r.white.srv,
+      g_r.white.srv, g_r.white.srv, g_r.white.srv,
       g_r.white.srv, g_r.white.srv};
   cmd->SetTextures(8, defaults, 6);
   cmd->SetVertexBuffer(

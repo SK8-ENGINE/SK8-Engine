@@ -320,6 +320,23 @@ struct RenderMesh {
   std::vector<std::uint32_t> indices;
 };
 
+// Optional textured retail sky carried by the extensible SKYB package
+// record. Retail stores a four-vertex projection surface that its sky vertex
+// shader expands around the camera; we retain that source mesh for validation
+// and provenance while the native renderer reconstructs the equivalent dome.
+struct TexturedSkyDefinition {
+  bool enabled = false;
+  RenderMesh mesh;
+  TextureId gradient_texture = 0;
+  TextureId detail_texture = 0;
+  TextureId sun_texture = 0;
+  float elevation = 0.0f;
+  Vec3 gradient_tint{1.0f, 1.0f, 1.0f};
+  float gradient_chromaticity = 1.0f;
+  float sun_angular_scale = 0.035f;
+  float exposure_multiplier = 1.0f;
+};
+
 struct CollisionTriangle {
   Vec3 a;
   Vec3 b;
@@ -595,6 +612,7 @@ struct MapDefinition {
   std::string retail_world_metadata_json;
   SpawnPoint spawn;
   SkyDefinition sky;
+  TexturedSkyDefinition textured_sky;
   DirectionalLightDefinition sun;
   DayNightCycleDefinition day_night_cycle;
   WeatherDefinition weather;

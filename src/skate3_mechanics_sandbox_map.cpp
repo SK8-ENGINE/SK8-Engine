@@ -1014,12 +1014,21 @@ VisualMesh BuildEditorGizmoVisualMesh() {
 }
 
 VisualMesh BuildSkyMesh() {
-  const skate::world::SkyDefinition& sky =
-      ActiveWorld().Definition().sky;
+  const skate::world::MapDefinition& definition =
+      ActiveWorld().Definition();
+  const skate::world::SkyDefinition& sky = definition.sky;
   VisualMesh mesh;
   if (!sky.enabled) {
     return mesh;
   }
+  const skate::world::TexturedSkyDefinition& textured =
+      definition.textured_sky;
+  // Retail's four authored vertices are inputs to sky_defaultVS, not literal
+  // world geometry. That shader expands the projection surface around the
+  // camera and supplies a direction for every sky pixel. Feeding the tiny
+  // source quad through our ordinary scene VS leaves only the clear colour
+  // visible. Reconstruct the equivalent camera-centred projection surface as
+  // a sphere; its UVs map the complete 360-degree gradient/detail panoramas.
   constexpr int kSegments = 48;
   constexpr int kBands = 16;
   constexpr float kPi = 3.14159265358979323846f;
@@ -1036,7 +1045,8 @@ VisualMesh BuildSkyMesh() {
           2.0f * kPi * static_cast<float>(segment) / kSegments;
       const float longitude1 =
           2.0f * kPi * static_cast<float>(segment + 1) / kSegments;
-      const auto append = [&mesh](float latitude, float longitude) {
+      const auto append =
+          [&mesh, &textured](float latitude, float longitude) {
         const float horizontal = std::cos(latitude);
         const float x = horizontal * std::cos(longitude);
         const float y = std::sin(latitude);
@@ -1046,7 +1056,13 @@ VisualMesh BuildSkyMesh() {
         source.normal = {-x, -y, -z};
         source.uv = {
             longitude / (2.0f * kPi),
-            latitude / kPi + 0.5f,
+            textured.enabled
+                // Skate 2's 2048x256 and 512x64 panoramas are both 8:1.
+                // sky_defaultVS passes authored UVs through unchanged and
+                // the samplers clamp V. Preserve square angular texels:
+                // 360 degrees / 8 = a 45-degree vertical sky belt.
+                ? 0.5f - latitude * (4.0f / kPi)
+                : latitude / kPi + 0.5f,
         };
         mesh.vertices.push_back(ConvertVertex(source));
         return static_cast<uint16_t>(mesh.vertices.size() - 1);
@@ -1063,6 +1079,15 @@ VisualMesh BuildSkyMesh() {
   // zenith/horizon/nadir palette. One draw avoids visible latitude bands.
   draw.index_count = static_cast<uint32_t>(mesh.indices.size());
   draw.color[3] = 1.0f;
+  if (textured.enabled) {
+    draw.albedo_texture = textured.gradient_texture;
+    draw.retail_detail_texture = textured.detail_texture;
+    draw.retail_specular_texture = textured.sun_texture;
+    draw.retail_shader_family = static_cast<std::uint32_t>(
+        skate::world::RetailShaderFamily::Sky);
+    draw.retail_render_flags = static_cast<std::uint32_t>(
+        skate::world::RetailRenderFlags::Unlit);
+  }
   mesh.draws.push_back(draw);
   return mesh;
 }
