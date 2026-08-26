@@ -5,10 +5,34 @@
 #include <imgui.h>
 
 #include <algorithm>
+#include <cctype>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace skate3 {
+namespace {
+
+bool ContainsInsensitive(
+    std::string_view value, std::string_view query) {
+  if (query.empty()) {
+    return true;
+  }
+  return std::search(
+             value.begin(), value.end(), query.begin(), query.end(),
+             [](unsigned char left, unsigned char right) {
+               return std::tolower(left) == std::tolower(right);
+             }) != value.end();
+}
+
+bool MatchesSearch(
+    const map_editor::SpawnObjectEntry& entry,
+    std::string_view query) {
+  return ContainsInsensitive(entry.name, query) ||
+         ContainsInsensitive(entry.category, query);
+}
+
+}  // namespace
 
 void MapEditorSpawnDialog::OnDraw(ImGuiIO& io) {
   if (!map_editor::SpawnMenuVisible()) {
@@ -94,6 +118,39 @@ void MapEditorSpawnDialog::OnDraw(ImGuiIO& io) {
         "No valid .skateobj files are available yet. Build the default "
         "library above or add files to the Custom folder.");
   } else {
+    ImGui::SetNextItemWidth(-62.0f);
+    ImGui::InputTextWithHint(
+        "##spawn-object-search", "Search items or categories...",
+        search_.data(), search_.size(),
+        ImGuiInputTextFlags_EscapeClearsAll);
+    ImGui::SameLine();
+    if (ImGui::Button("Clear")) {
+      search_.fill('\0');
+    }
+
+    const std::string_view query(search_.data());
+    int first_match = -1;
+    std::size_t match_count = 0;
+    bool selected_visible = false;
+    for (int index = 0;
+         index < static_cast<int>(entries.size()); ++index) {
+      if (!MatchesSearch(entries[index], query)) {
+        continue;
+      }
+      if (first_match < 0) {
+        first_match = index;
+      }
+      ++match_count;
+      selected_visible = selected_visible || selected_ == index;
+    }
+    if (!selected_visible && first_match >= 0) {
+      selected_ = first_match;
+    }
+    ImGui::TextDisabled(
+        query.empty() ? "%zu object(s)" : "%zu of %zu object(s)",
+        query.empty() ? entries.size() : match_count,
+        entries.size());
+
     ImGui::BeginChild(
         "##spawn-object-list", ImVec2(0.0f, -46.0f),
         ImGuiChildFlags_Borders);
@@ -102,11 +159,22 @@ void MapEditorSpawnDialog::OnDraw(ImGuiIO& io) {
     for (int index = 0;
          index < static_cast<int>(entries.size()); ++index) {
       const map_editor::SpawnObjectEntry& entry = entries[index];
+      if (!MatchesSearch(entry, query)) {
+        continue;
+      }
       if (entry.category != category) {
         category = entry.category;
-        category_open = ImGui::CollapsingHeader(
-            category.c_str(),
-            ImGuiTreeNodeFlags_DefaultOpen);
+        if (query.empty()) {
+          // Category folders begin closed. ImGui retains any explicit user
+          // choice for the rest of the editor session.
+          category_open =
+              ImGui::CollapsingHeader(category.c_str());
+        } else {
+          // Search results should be immediately visible rather than hidden
+          // behind the category's normal collapsed state.
+          ImGui::TextDisabled("%s", category.c_str());
+          category_open = true;
+        }
       }
       if (!category_open) {
         continue;
@@ -118,15 +186,21 @@ void MapEditorSpawnDialog::OnDraw(ImGuiIO& io) {
       }
       ImGui::PopID();
     }
+    if (match_count == 0) {
+      ImGui::TextDisabled("No items match \"%s\".", search_.data());
+    }
     ImGui::EndChild();
     ImGui::Separator();
+    ImGui::BeginDisabled(match_count == 0);
     const bool activate =
         ImGui::Button("Spawn selected", ImVec2(-1.0f, 0.0f)) ||
-        ImGui::IsKeyPressed(ImGuiKey_Enter, false);
+        (!ImGui::IsAnyItemActive() &&
+         ImGui::IsKeyPressed(ImGuiKey_Enter, false));
     if (activate) {
       map_editor::QueueSpawnObject(
           entries[static_cast<std::size_t>(selected_)].asset_index);
     }
+    ImGui::EndDisabled();
   }
   ImGui::End();
 }
