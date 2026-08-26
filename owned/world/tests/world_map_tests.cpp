@@ -1,3 +1,4 @@
+#include "skate/world/box3d_physics.h"
 #include "skate/world/maps.h"
 #include "skate/world/grind_spline.h"
 #include "skate/world/map_editor.h"
@@ -78,6 +79,46 @@ float ReadBeF32(const std::vector<std::uint8_t>& bytes,
   return std::bit_cast<float>(ReadBeU32(bytes, offset));
 }
 
+skate::world::MapDefinition MakePhysicsTestMap(
+    std::size_t cube_count) {
+  using namespace skate::world;
+  MapDefinition map;
+  map.name = "box3d_test";
+  map.collision_triangles = {
+      {
+          .a = {-20.0f, 0.0f, -20.0f},
+          .b = {20.0f, 0.0f, 20.0f},
+          .c = {20.0f, 0.0f, -20.0f},
+      },
+      {
+          .a = {-20.0f, 0.0f, -20.0f},
+          .b = {-20.0f, 0.0f, 20.0f},
+          .c = {20.0f, 0.0f, 20.0f},
+      },
+  };
+  for (std::size_t index = 0; index < cube_count; ++index) {
+    MapObject cube;
+    cube.id = static_cast<MapObjectId>(index + 1);
+    cube.name = "cube_" + std::to_string(index);
+    cube.origin = {
+        index % 2 == 0 ? 0.0f : 0.08f,
+        0.55f + static_cast<float>(index) * 1.05f,
+        0.0f,
+    };
+    cube.local_bounds_min = {-0.5f, -0.5f, -0.5f};
+    cube.local_bounds_max = {0.5f, 0.5f, 0.5f};
+    cube.physics.type = ObjectPhysicsType::Dynamic;
+    cube.physics.shape = ObjectCollisionShape::Box;
+    cube.physics.density = 120.0f;
+    cube.physics.friction = 0.7f;
+    cube.physics.restitution = 0.0f;
+    cube.physics.linear_damping = 0.05f;
+    cube.physics.angular_damping = 0.2f;
+    map.editable_objects.push_back(std::move(cube));
+  }
+  return map;
+}
+
 }  // namespace
 
 int main() {
@@ -88,7 +129,7 @@ int main() {
         std::filesystem::temp_directory_path() /
         "skate_owned_world_future_format_test.skate";
     const std::array<std::uint8_t, 12> header = {
-        'S', 'K', 'A', 'T', 'E', '1', '4', '\0',
+        'S', 'K', 'A', 'T', 'E', '1', '5', '\0',
         0x78, 0x56, 0x34, 0x12};
     {
       std::ofstream output(
@@ -108,6 +149,208 @@ int main() {
     std::filesystem::remove(future_package, ec);
     Require(rejected_as_future,
             "future SKATE versions must request a newer runtime");
+  }
+
+  {
+    MapDefinition physics_map = MakePhysicsTestMap(3);
+    OwnedPhysicsWorld physics;
+    physics.Load(physics_map);
+    Require(
+        physics.IsLoaded() && physics.HasBody(0) &&
+            physics.HasBody(1) && physics.HasBody(2),
+        "Box3D did not create one body per enabled owned object");
+    PhysicsTelemetry telemetry = physics.Telemetry();
+    Require(
+        telemetry.static_body_count == 1 &&
+            telemetry.dynamic_body_count == 3 &&
+            telemetry.world_steps == 0,
+        "Box3D initial body telemetry is incorrect");
+
+    const float initial_top = physics.ObjectPose(2).position.y;
+    physics.Step(kBox3DFixedTimeStepSeconds * 0.49);
+    Require(
+        physics.Telemetry().world_steps == 0,
+        "Box3D fixed-step accumulator advanced too early");
+    physics.Step(kBox3DFixedTimeStepSeconds * 0.51);
+    Require(
+        physics.Telemetry().world_steps == 1,
+        "Box3D fixed-step accumulator did not advance at 60 Hz");
+
+    for (int frame = 0; frame < 12 * 120; ++frame) {
+      physics.Step(1.0 / 120.0);
+    }
+    const PhysicsObjectPose bottom = physics.ObjectPose(0);
+    const PhysicsObjectPose middle = physics.ObjectPose(1);
+    const PhysicsObjectPose top = physics.ObjectPose(2);
+    Require(
+        bottom.valid && middle.valid && top.valid &&
+            top.position.y < initial_top &&
+            bottom.position.y > 0.35f &&
+            bottom.position.y < 0.75f &&
+            middle.position.y > bottom.position.y + 0.75f &&
+            top.position.y > middle.position.y + 0.75f,
+        "Box3D cube stack did not fall onto static owned-world collision "
+        "and settle independently");
+    Require(
+        std::abs(Length(bottom.x_axis) - 1.0f) < 0.01f &&
+            std::abs(Length(bottom.y_axis) - 1.0f) < 0.01f &&
+            bottom.revision > 0 &&
+            physics.Telemetry().contact_count >= 3,
+        "Box3D transform propagation or contact telemetry is invalid");
+
+    physics.Load(MakePhysicsTestMap(1));
+    const float before_player_contact =
+        physics.ObjectPose(0).position.x;
+    constexpr float player_speed = 4.0f;
+    std::size_t maximum_player_contacts = 0;
+    for (int frame = 0; frame < 90; ++frame) {
+      const float time = static_cast<float>(frame) / 60.0f;
+      physics.SetPlayerProxy(
+          {-1.4f + player_speed * time, 0.55f, 0.0f},
+          {player_speed, 0.0f, 0.0f}, true);
+      physics.Step(kBox3DFixedTimeStepSeconds);
+      maximum_player_contacts = std::max(
+          maximum_player_contacts,
+          physics.Telemetry().player_contact_count);
+    }
+    const PhysicsObjectPose after_player_contact =
+        physics.ObjectPose(0);
+    Require(
+        after_player_contact.position.x >
+                before_player_contact + 0.15f &&
+            physics.Telemetry().player_proxy_active &&
+            physics.Telemetry().player_proxy_updates == 90 &&
+            maximum_player_contacts > 0,
+        "Box3D native-player proxy did not move a dynamic owned body");
+    physics.SetPlayerProxy({}, {}, false);
+    Require(
+        !physics.Telemetry().player_proxy_active,
+        "Box3D native-player proxy did not disable cleanly");
+
+    MapDefinition glass_map = MakePhysicsTestMap(2);
+    for (MapObject& shard : glass_map.editable_objects) {
+      shard.physics.gravity_scale = 0.0f;
+      shard.physics.initially_awake = false;
+      shard.physics.break_group = 7;
+      shard.physics.break_speed_threshold = 2.0f;
+      shard.physics.break_impulse_scale = 0.35f;
+      shard.physics.break_angular_impulse = 0.04f;
+      shard.physics.break_gravity_scale = 1.0f;
+    }
+    physics.Load(glass_map);
+    const float initial_glass_height =
+        physics.ObjectPose(1).position.y;
+    for (int frame = 0; frame < 20; ++frame) {
+      physics.Step(kBox3DFixedTimeStepSeconds);
+    }
+    Require(
+        NearlyEqual(
+            physics.ObjectPose(1).position.y, initial_glass_height, 0.01f) &&
+            physics.Telemetry().breakable_body_count == 2 &&
+            physics.Telemetry().glass_break_events == 0,
+        "breakable bodies did not remain locked before impact");
+    for (int frame = 0; frame < 120; ++frame) {
+      const float time = static_cast<float>(frame) / 60.0f;
+      physics.SetPlayerProxy(
+          {-1.6f + 4.5f * time, 0.65f, 0.0f},
+          {4.5f, 0.0f, 0.0f}, true);
+      physics.Step(kBox3DFixedTimeStepSeconds);
+    }
+    const PhysicsTelemetry glass_telemetry = physics.Telemetry();
+    if (glass_telemetry.glass_break_events != 1 ||
+        glass_telemetry.broken_group_count != 1 ||
+        glass_telemetry.last_broken_group != 7 ||
+        glass_telemetry.last_break_speed < 4.4f ||
+        physics.ObjectPose(1).position.y >=
+            initial_glass_height - 0.05f) {
+      std::cerr
+          << "GLASS_DIAGNOSTIC events="
+          << glass_telemetry.glass_break_events
+          << " groups=" << glass_telemetry.broken_group_count
+          << " last_group=" << glass_telemetry.last_broken_group
+          << " speed=" << glass_telemetry.last_break_speed
+          << " initial_y=" << initial_glass_height
+          << " final_y=" << physics.ObjectPose(1).position.y << '\n';
+    }
+    Require(
+        glass_telemetry.glass_break_events == 1 &&
+            glass_telemetry.broken_group_count == 1 &&
+            glass_telemetry.last_broken_group == 7 &&
+            glass_telemetry.last_break_speed >= 4.4f &&
+            physics.ObjectPose(1).position.y <
+                initial_glass_height - 0.05f,
+        "player impact did not release the complete glass break group");
+
+    const PhysicsObjectPose broken_pose_before_append =
+        physics.ObjectPose(1);
+    MapObject second_pane_shard = glass_map.editable_objects.front();
+    second_pane_shard.id = 3;
+    second_pane_shard.name = "second_pane_shard";
+    second_pane_shard.origin = {8.0f, 0.55f, 0.0f};
+    second_pane_shard.physics.break_group = 8;
+    glass_map.editable_objects.push_back(second_pane_shard);
+    physics.AppendBodies(glass_map, 2);
+    const PhysicsTelemetry appended_telemetry = physics.Telemetry();
+    Require(
+        physics.HasBody(2) &&
+            appended_telemetry.dynamic_body_count == 3 &&
+            appended_telemetry.breakable_body_count == 3 &&
+            appended_telemetry.glass_break_events == 1 &&
+            appended_telemetry.broken_group_count == 1 &&
+            NearlyEqual(
+                physics.ObjectPose(1).position.x,
+                broken_pose_before_append.position.x, 0.01f) &&
+            NearlyEqual(
+                physics.ObjectPose(1).position.y,
+                broken_pose_before_append.position.y, 0.01f),
+        "appending a second pane rebuilt or repaired existing glass bodies");
+    const float second_pane_initial_height =
+        physics.ObjectPose(2).position.y;
+    for (int frame = 0; frame < 120; ++frame) {
+      const float time = static_cast<float>(frame) / 60.0f;
+      physics.SetPlayerProxy(
+          {6.4f + 4.5f * time, 0.65f, 0.0f},
+          {4.5f, 0.0f, 0.0f}, true);
+      physics.Step(kBox3DFixedTimeStepSeconds);
+    }
+    const PhysicsTelemetry second_pane_telemetry = physics.Telemetry();
+    const PhysicsObjectPose second_pane_pose = physics.ObjectPose(2);
+    if (second_pane_telemetry.glass_break_events != 2 ||
+        second_pane_telemetry.broken_group_count != 2 ||
+        second_pane_telemetry.last_broken_group != 8 ||
+        second_pane_pose.position.y >=
+            second_pane_initial_height - 0.02f) {
+      std::cerr
+          << "APPENDED_GLASS_DIAGNOSTIC events="
+          << second_pane_telemetry.glass_break_events
+          << " groups=" << second_pane_telemetry.broken_group_count
+          << " last_group=" << second_pane_telemetry.last_broken_group
+          << " player_contacts="
+          << second_pane_telemetry.player_contact_count
+          << " initial_y=" << second_pane_initial_height
+          << " final_y=" << second_pane_pose.position.y << '\n';
+    }
+    Require(
+        second_pane_telemetry.glass_break_events == 2 &&
+            second_pane_telemetry.broken_group_count == 2 &&
+            second_pane_telemetry.last_broken_group == 8 &&
+            second_pane_pose.position.y <
+                second_pane_initial_height - 0.02f,
+        "independently appended glass group did not break separately");
+
+    const std::uint64_t generation =
+        physics.Telemetry().world_generation;
+    physics.Load(MakePhysicsTestMap(1));
+    Require(
+        physics.Telemetry().world_generation == generation + 1 &&
+            physics.Telemetry().dynamic_body_count == 1 &&
+            physics.HasBody(0) && !physics.HasBody(1),
+        "Box3D map reload left stale owned bodies behind");
+    physics.Reset();
+    Require(
+        !physics.IsLoaded() && !physics.HasBody(0) &&
+            physics.Telemetry().dynamic_body_count == 0,
+        "Box3D reset did not destroy the owned world");
   }
 
   {
@@ -165,14 +408,78 @@ int main() {
     SkateObjectAsset asset =
         ExtractSkateObjectAsset(std::move(prefab_package));
     Require(asset.name == "Manual Pad" &&
-                asset.object.origin.x == 0.0f &&
-                asset.object.grind_rail_indices ==
+                asset.objects.size() == 1 &&
+                asset.objects[0].origin.x == 0.0f &&
+                asset.objects[0].grind_rail_indices ==
                     std::vector<std::uint32_t>{0} &&
                 NearlyEqual(asset.grind_rails[0].points[0].x, 0.0f) &&
                 NearlyEqual(asset.grind_rails[0].points[0].z, 0.5f) &&
                 NearlyEqual(asset.grind_rails[0].points[1].x, 2.0f) &&
                 NearlyEqual(asset.grind_rails[0].points[1].z, 0.5f),
             "SKATEOBJ profile did not normalize its root and grind spline");
+  }
+
+  {
+    MapDefinition prefab_package;
+    prefab_package.package_version = 14;
+    prefab_package.map_object_schema_version = 3;
+    prefab_package.name = "Box3D Pair";
+    prefab_package.spawn.position = {10.0f, 0.0f, -2.0f};
+    prefab_package.render_mesh.indices = {0, 1, 2, 3, 4, 5};
+    prefab_package.collision_triangles.resize(2);
+    for (std::size_t index = 0; index < 2; ++index) {
+      MapObject root;
+      root.id = static_cast<MapObjectId>(index + 1);
+      root.name = "Cube" + std::to_string(index + 1);
+      root.origin = {
+          10.0f + static_cast<float>(index) * 2.0f, 1.0f, -2.0f};
+      root.source_first_index =
+          static_cast<std::uint32_t>(index * 3);
+      root.source_index_count = 3;
+      root.source_first_collision_triangle =
+          static_cast<std::uint32_t>(index);
+      root.source_collision_triangle_count = 1;
+      root.render_mesh.indices = {0, 1, 2};
+      root.collision_triangles.resize(1);
+      root.physics.type = ObjectPhysicsType::Dynamic;
+      root.physics.shape = ObjectCollisionShape::Box;
+      prefab_package.editable_objects.push_back(std::move(root));
+    }
+
+    SkateObjectAsset asset =
+        ExtractSkateObjectAsset(std::move(prefab_package));
+    Require(
+        asset.format_version == 2 && asset.objects.size() == 2 &&
+            NearlyEqual(asset.objects[0].origin.x, 0.0f) &&
+            NearlyEqual(asset.objects[0].origin.y, 1.0f) &&
+            NearlyEqual(asset.objects[1].origin.x, 2.0f) &&
+            asset.objects[0].physics.type ==
+                ObjectPhysicsType::Dynamic &&
+            asset.objects[1].physics.shape ==
+                ObjectCollisionShape::Box,
+        "SKATEOBJ v2 did not preserve independent physics roots in "
+        "prefab-pivot space");
+
+    asset.objects[0].physics.break_group = 1;
+    asset.objects[1].physics.break_group = 1;
+    MapDefinition destination;
+    MapObject existing;
+    existing.physics.break_group = 41;
+    destination.editable_objects.push_back(existing);
+    RemapSkateObjectBreakGroups(asset, destination);
+    Require(
+        asset.objects[0].physics.break_group == 42 &&
+            asset.objects[1].physics.break_group == 42,
+        "SKATEOBJ instance did not receive one unique shared break group");
+    destination.editable_objects.insert(
+        destination.editable_objects.end(),
+        asset.objects.begin(), asset.objects.end());
+    SkateObjectAsset second_instance = asset;
+    RemapSkateObjectBreakGroups(second_instance, destination);
+    Require(
+        second_instance.objects[0].physics.break_group == 43 &&
+            second_instance.objects[1].physics.break_group == 43,
+        "separate SKATEOBJ copies reused a runtime break group");
   }
 
   {
@@ -473,6 +780,41 @@ int main() {
                           });
                     }),
             "editable render span remained in the static world");
+
+    MapDefinition fully_editable_map = split_map;
+    fully_editable_map.render_mesh.vertices.resize(4);
+    fully_editable_map.render_mesh.vertices[0].position =
+        {-1.0f, 0.0f, -1.0f};
+    fully_editable_map.render_mesh.vertices[1].position =
+        {1.0f, 0.0f, -1.0f};
+    fully_editable_map.render_mesh.vertices[2].position =
+        {1.0f, 0.0f, 1.0f};
+    fully_editable_map.render_mesh.vertices[3].position =
+        {-1.0f, 0.0f, 1.0f};
+    fully_editable_map.render_mesh.indices = {
+        0, 1, 2,
+        0, 2, 3,
+    };
+    std::size_t completed_render_triangles = 1;
+    std::size_t total_render_triangles = 1;
+    RenderWorldBuildOptions fully_editable_options;
+    fully_editable_options.excluded_index_ranges.push_back({0, 6});
+    fully_editable_options.progress =
+        [&](std::size_t completed, std::size_t total) {
+          completed_render_triangles = completed;
+          total_render_triangles = total;
+        };
+    const RenderWorld fully_editable_render =
+        BuildRenderWorld(fully_editable_map, fully_editable_options);
+    Require(
+        fully_editable_render.source_triangle_count == 0 &&
+            fully_editable_render.output_triangle_count == 0 &&
+            fully_editable_render.presentation_surface_count == 0 &&
+            fully_editable_render.chunks.empty() &&
+            completed_render_triangles == 0 &&
+            total_render_triangles == 0,
+        "fully editable shared-vertex geometry was not cleanly excluded "
+        "from the static render world");
 
     RwCollisionBuildOptions collision_options;
     collision_options.excluded_triangle_ranges.push_back({1, 1});

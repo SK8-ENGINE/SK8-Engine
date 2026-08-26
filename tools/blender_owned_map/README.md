@@ -139,7 +139,7 @@ work is Blender data extraction and binary file packing, where avoiding Python
 scalar overhead is substantially more useful than transferring the data to a
 graphics device. Complete float32 vertex records are indexed exactly, so
 shared corners no longer duplicate position, normal, UV, lightmap UV, and
-material data. SKATE v13 then applies bounded lossless DEFLATE to RGBA8
+material data. SKATE v14 then applies bounded lossless DEFLATE to RGBA8
 textures, vertices, indices, and collision. The loader reconstructs and
 validates the original runtime records; export does not simplify meshes,
 reduce texture resolution, omit maps, quantize attributes, or merge UV/hard
@@ -159,7 +159,7 @@ Retail-imported meshes may carry the hidden point attributes
 `skate3_retail_tangent_handedness`. When the complete validated set is
 present, the exporter uses the authored tangent rather than recalculating it
 from Blender UVs, then reconstructs the compact runtime binormal expected by
-SKATE v13. This preserves the game's authored per-island lighting
+SKATE v14. This preserves the game's authored per-island lighting
 orientation. Existing University working files whose tangent was stored under
 the old `skate3_retail_binormal` name remain supported as a migration path.
 Ordinary custom maps do not need these attributes and continue to use
@@ -221,6 +221,26 @@ Properties > Owned World Physics**. Choose **Hinged Door**, place the 3D
 cursor on its hinge, and select **Set Hinge From 3D Cursor**. The same panel
 controls limits, mass, damping, self-closing strength, maximum speed, push
 response, friction, and bounce.
+
+For Box3D simulation, select an owned mesh in Group 1 and choose **Box3D
+Static** or **Box3D Dynamic** in the same panel. **Not Simulated** remains the
+default for compatibility. Start with the fitted **Box** shape; use
+**Sphere** for round props or **Convex Hull** for simple irregular convex
+objects. Dynamic controls expose density (from which Box3D derives mass),
+contact friction/bounce, linear and angular damping, gravity scale, and safe
+sleep/start-awake switches. Every marked Blender object becomes one
+independent body. Do not join a stack of props if they must topple
+independently.
+
+For pre-fractured glass or similar props, give each dynamic piece the same
+nonzero **Break Group**. Set initial Gravity to `0` and disable **Start
+Awake**, then tune **Impact Speed**, **Shatter Force**, **Shard Spin**, and
+**Released Gravity**. The pieces stay locked until the player reaches the
+impact threshold; the entire group then releases once. This is deterministic
+pre-fracturing, not runtime mesh cutting. Spawned prefab copies receive
+different runtime group IDs, so breaking one copy cannot break or repair
+another. A qualifying player impact is held for a brief resistance window
+before release, allowing the native player collision to feel the intact pane.
 
 ## Advanced Blender scene contract
 
@@ -285,7 +305,9 @@ The extension's Material Properties panel supports:
 
 Its Object Physics panel supports:
 
-- static or hinged-door body type;
+- not-simulated, Box3D static, Box3D dynamic, or hinged-door body type;
+- fitted box, sphere, or convex-hull Box3D collision;
+- Box3D density, friction, bounce, damping, gravity, and sleep state;
 - 3D-cursor hinge placement and world-space hinge axis;
 - opening limits and initial angle; and
 - mass, angular damping, friction, and bounce.
@@ -342,7 +364,7 @@ In the development workspace this creates:
 - `maps/blender_bake_showcase.blend`
 - `maps/blender_bake_showcase.skate`
 
-The current SKATE v13 build preserves the park's static Blender features as
+The current SKATE v14 build preserves the park's static Blender features as
 independent editor objects. Each collision proxy is associated with its
 visual owner, and each complete rail owns its matching grind spline.
 

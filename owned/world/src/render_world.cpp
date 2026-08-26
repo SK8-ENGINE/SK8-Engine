@@ -249,18 +249,28 @@ RenderWorld BuildRenderWorld(
 
   RenderWorld world;
   world.chunk_size = options.chunk_size;
-  world.source_triangle_count =
+  const std::size_t total_triangle_count =
       definition.render_mesh.indices.size() / 3;
+  world.source_triangle_count = total_triangle_count;
+  std::vector<bool> excluded_triangles(total_triangle_count, false);
   for (const auto& range : options.excluded_index_ranges) {
     world.source_triangle_count -= range.count / 3;
+    const std::size_t first_triangle = range.first / 3;
+    const std::size_t end_triangle =
+        first_triangle + range.count / 3;
+    std::fill(
+        excluded_triangles.begin() + first_triangle,
+        excluded_triangles.begin() + end_triangle, true);
   }
   CellGeometry cells;
-  std::vector<std::size_t> surface_parents(
-      world.source_triangle_count);
+  // Surface and presentation metadata use original source-triangle indices.
+  // Keep them in that full index space even though editable objects do not
+  // contribute triangles to the immutable render world.
+  std::vector<std::size_t> surface_parents(total_triangle_count);
   std::vector<std::uint8_t> surface_depths(
-      world.source_triangle_count, 0);
+      total_triangle_count, 0);
   for (std::size_t triangle = 0;
-       triangle < world.source_triangle_count; ++triangle) {
+       triangle < total_triangle_count; ++triangle) {
     surface_parents[triangle] = triangle;
   }
   const auto find_surface =
@@ -319,6 +329,19 @@ RenderWorld BuildRenderWorld(
       }
       triangle[corner] =
           definition.render_mesh.vertices[source_index];
+    }
+    const MaterialId material = triangle[0].material;
+    if (material == 0 || triangle[1].material != material ||
+        triangle[2].material != material) {
+      throw std::invalid_argument(
+          "render triangle has zero or mixed material IDs");
+    }
+    if (excluded_triangles[triangle_index]) {
+      continue;
+    }
+    for (std::size_t corner = 0; corner < 3; ++corner) {
+      const std::uint32_t source_index =
+          definition.render_mesh.indices[index + corner];
       if (first_triangle_by_vertex[source_index] == kNoTriangle) {
         first_triangle_by_vertex[source_index] = triangle_index;
       } else {
@@ -326,12 +349,6 @@ RenderWorld BuildRenderWorld(
             triangle_index,
             first_triangle_by_vertex[source_index]);
       }
-    }
-    const MaterialId material = triangle[0].material;
-    if (material == 0 || triangle[1].material != material ||
-        triangle[2].material != material) {
-      throw std::invalid_argument(
-          "render triangle has zero or mixed material IDs");
     }
     const OrientedTriangleKey winding =
         OrientedPositionKey(
@@ -360,10 +377,13 @@ RenderWorld BuildRenderWorld(
   std::unordered_map<MaterialId, std::uint32_t>
       next_presentation_rank;
   std::vector<std::uint8_t> triangle_presentation_ranks(
-      world.source_triangle_count, 0);
+      total_triangle_count, 0);
   for (std::size_t triangle_index = 0;
-       triangle_index < world.source_triangle_count;
+       triangle_index < total_triangle_count;
        ++triangle_index) {
+    if (excluded_triangles[triangle_index]) {
+      continue;
+    }
     const std::size_t root = find_surface(triangle_index);
     const std::uint32_t first_vertex =
         definition.render_mesh.indices[triangle_index * 3];
@@ -386,24 +406,21 @@ RenderWorld BuildRenderWorld(
       oriented_triangles;
   oriented_triangles.reserve(world.source_triangle_count);
 
-  std::size_t exclusion_index = 0;
+  std::size_t completed_triangles = 0;
+  const auto report_progress = [&]() {
+    ++completed_triangles;
+    if (options.progress &&
+        (completed_triangles == world.source_triangle_count ||
+         completed_triangles % 1000000u == 0)) {
+      options.progress(
+          completed_triangles, world.source_triangle_count);
+    }
+  };
   for (std::size_t index = 0;
        index < definition.render_mesh.indices.size();
        index += 3) {
-    while (exclusion_index < options.excluded_index_ranges.size() &&
-           index >=
-               static_cast<std::uint64_t>(
-                   options.excluded_index_ranges[exclusion_index].first) +
-                   options.excluded_index_ranges[exclusion_index].count) {
-      ++exclusion_index;
-    }
-    if (exclusion_index < options.excluded_index_ranges.size()) {
-      const auto& range =
-          options.excluded_index_ranges[exclusion_index];
-      if (index >= range.first &&
-          index < static_cast<std::uint64_t>(range.first) + range.count) {
-        continue;
-      }
+    if (excluded_triangles[index / 3]) {
+      continue;
     }
     RenderVertex triangle[3];
     for (std::size_t corner = 0; corner < 3; ++corner) {
@@ -436,6 +453,7 @@ RenderWorld BuildRenderWorld(
                  triangle[1].position,
                  triangle[2].position))
              .second) {
+      report_progress();
       continue;
     }
 
@@ -497,13 +515,10 @@ RenderWorld BuildRenderWorld(
         }
       }
     }
-    const std::size_t completed_triangles = index / 3 + 1;
-    if (options.progress &&
-        (completed_triangles == world.source_triangle_count ||
-         completed_triangles % 1000000u == 0)) {
-      options.progress(
-          completed_triangles, world.source_triangle_count);
-    }
+    report_progress();
+  }
+  if (options.progress && world.source_triangle_count == 0) {
+    options.progress(0, 0);
   }
 
   for (const auto& [cell, materials] : cells) {

@@ -326,13 +326,21 @@ std::array<std::atomic<bool>, kMaximumEditableObjects>
     g_editor_collision_active{};
 std::array<std::atomic<bool>, kMaximumEditableObjects>
     g_editor_collision_detached{};
+std::array<std::atomic<bool>, kMaximumEditableObjects>
+    g_editor_collision_dynamic{};
 std::atomic<std::uint32_t> g_editor_collision_active_count{0};
+std::atomic<std::uint32_t> g_editor_collision_dynamic_count{0};
 std::atomic<std::uint64_t> g_editor_collision_installs{0};
 std::atomic<std::uint64_t> g_editor_collision_updates{0};
+std::atomic<std::uint64_t> g_editor_dynamic_pose_updates{0};
+std::atomic<std::uint64_t> g_editor_dynamic_query_batches{0};
 std::atomic<std::uint64_t> g_editor_broadphase_refreshes{0};
 std::atomic<std::uint64_t> g_editor_collision_failures{0};
 std::atomic<std::uint64_t> g_editor_exact_resource_rebuilds{0};
 std::atomic<std::uint64_t> g_editor_exact_resource_failures{0};
+std::uint64_t g_box3d_player_proxy_frame = 0;
+skate::world::Vec3 g_box3d_player_proxy_previous_position{};
+bool g_box3d_player_proxy_previous_valid = false;
 std::mutex g_install_mutex;
 std::vector<std::uint32_t> g_original_volumes;
 thread_local bool g_querying_owned_mesh = false;
@@ -432,6 +440,43 @@ bool IsOwnedEditorMesh(std::uint32_t mesh) {
     }
   }
   return false;
+}
+
+std::int32_t OwnedDynamicEditorIndex(
+    std::uint32_t volume, std::uint32_t mesh) {
+  if (volume == 0 || mesh == 0) {
+    return -1;
+  }
+  const std::uint32_t count = std::min<std::uint32_t>(
+      g_editor_collision_count.load(std::memory_order_acquire),
+      static_cast<std::uint32_t>(kMaximumEditableObjects));
+  for (std::uint32_t index = 0; index < count; ++index) {
+    if (g_editor_collision_dynamic[index].load(
+            std::memory_order_acquire) &&
+        g_editor_volume_addresses[index].load(
+            std::memory_order_acquire) == volume &&
+        g_editor_mesh_addresses[index].load(
+            std::memory_order_acquire) == mesh) {
+      return static_cast<std::int32_t>(index);
+    }
+  }
+  return -1;
+}
+
+void CopyPhysicsPose(const skate::world::PhysicsObjectPose& pose,
+                     float translation[3], float basis[9]) {
+  translation[0] = pose.position.x;
+  translation[1] = pose.position.y;
+  translation[2] = pose.position.z;
+  basis[0] = pose.x_axis.x;
+  basis[1] = pose.x_axis.y;
+  basis[2] = pose.x_axis.z;
+  basis[3] = pose.y_axis.x;
+  basis[4] = pose.y_axis.y;
+  basis[5] = pose.y_axis.z;
+  basis[6] = pose.z_axis.x;
+  basis[7] = pose.z_axis.y;
+  basis[8] = pose.z_axis.z;
 }
 
 std::int32_t OwnedDoorIndex(std::uint32_t mesh) {
@@ -1501,8 +1546,9 @@ std::vector<bool> EditableCollisionObjects(
           kMaximumEditableObjects);
   std::vector<bool> desired(object_count, false);
   for (std::size_t index = 0; index < object_count; ++index) {
-    desired[index] = !definition.editable_objects[index]
-                          .collision_triangles.empty();
+    const skate::world::MapObject& object =
+        definition.editable_objects[index];
+    desired[index] = !object.collision_triangles.empty();
   }
   return desired;
 }
@@ -1979,6 +2025,7 @@ bool PrepareKinematicQueryBatch(std::uint32_t batch,
     return false;
   }
   bool found_dynamic = false;
+  bool found_dynamic_editor = false;
   const std::uint32_t collection =
       g_collection.load(std::memory_order_acquire);
   const std::uint32_t source_entries =
@@ -2005,8 +2052,11 @@ bool PrepareKinematicQueryBatch(std::uint32_t batch,
         volume == g_door_volume_addresses[
                       static_cast<std::size_t>(door_index)]
                       .load(std::memory_order_acquire);
-    if (kinematic || door) {
+    const bool dynamic_editor =
+        OwnedDynamicEditorIndex(volume, mesh) >= 0;
+    if (kinematic || door || dynamic_editor) {
       found_dynamic = true;
+      found_dynamic_editor = found_dynamic_editor || dynamic_editor;
       if (record_line_telemetry) {
         g_kinematic_visible_line_batches.fetch_add(
             1, std::memory_order_relaxed);
@@ -2038,6 +2088,10 @@ bool PrepareKinematicQueryBatch(std::uint32_t batch,
         }
       }
     }
+  }
+  if (found_dynamic_editor) {
+    g_editor_dynamic_query_batches.fetch_add(
+        1, std::memory_order_relaxed);
   }
   return found_dynamic;
 }
@@ -4201,19 +4255,37 @@ bool InstallEditableObjectCollision(
     const float map_origin[3], const float local_translation[3],
     const float local_basis[9], std::uint64_t revision) {
   const skate::world::MapObject &object = definition.editable_objects[index];
+  const bool dynamic =
+      object.physics.type == skate::world::ObjectPhysicsType::Dynamic;
   const float world_translation[3] = {map_origin[0] + local_translation[0],
                                       map_origin[1] + local_translation[1],
                                       map_origin[2] + local_translation[2]};
+  const float identity_basis[9] = {
+      1.0f, 0.0f, 0.0f,
+      0.0f, 1.0f, 0.0f,
+      0.0f, 0.0f, 1.0f,
+  };
+  const float local_origin[3] = {};
   skate::world::RwCollisionBuildResult build;
   try {
-    build = CompileEditableObject(object, definition, world_translation,
-                                  local_basis);
+    build = CompileEditableObject(
+        object, definition,
+        dynamic ? local_origin : world_translation,
+        dynamic ? identity_basis : local_basis);
   } catch (...) {
     return false;
   }
   AllocatedCollision allocation;
   if (!AllocateCollision(ctx, base, build, allocation)) {
     return false;
+  }
+  if (dynamic) {
+    WriteBasisTransform(
+        base, allocation.matrix,
+        {local_basis[0], local_basis[1], local_basis[2]},
+        {local_basis[3], local_basis[4], local_basis[5]},
+        {local_basis[6], local_basis[7], local_basis[8]},
+        {world_translation[0], world_translation[1], world_translation[2]});
   }
 
   WaitForCollectionJobs(ctx, base, collection);
@@ -4258,6 +4330,9 @@ bool InstallEditableObjectCollision(
   rebuild.r8.u64 = UINT32_MAX;
   rebuild.r9.u64 = 0;
   sub_8276CB18(rebuild, base);
+  if (dynamic) {
+    WriteEntryLocalBounds(base, write_entry, object);
+  }
   const std::uint32_t read_entry = read_entries + count * kCollectionEntrySize;
   if (read_entry != write_entry) {
     std::memcpy(base + read_entry, base + write_entry, kCollectionEntrySize);
@@ -4284,18 +4359,25 @@ bool InstallEditableObjectCollision(
         std::memory_order_relaxed);
   }
   g_editor_applied_revisions[index].store(revision, std::memory_order_relaxed);
+  g_editor_collision_dynamic[index].store(dynamic,
+                                          std::memory_order_relaxed);
   g_editor_collision_active[index].store(true, std::memory_order_relaxed);
   g_editor_mesh_addresses[index].store(allocation.mesh,
                                        std::memory_order_release);
   g_editor_collision_active_count.fetch_add(1, std::memory_order_relaxed);
+  if (dynamic) {
+    g_editor_collision_dynamic_count.fetch_add(
+        1, std::memory_order_relaxed);
+  }
   g_editor_collision_installs.fetch_add(1, std::memory_order_relaxed);
   g_editor_broadphase_refreshes.fetch_add(1, std::memory_order_relaxed);
   g_collection_count_after.store(count_after, std::memory_order_release);
   REXLOG_INFO("map-editor: detached collision installed id={} name='{}' "
-              "triangles={} translation=({:.3f},{:.3f},{:.3f}) revision={}",
+              "triangles={} translation=({:.3f},{:.3f},{:.3f}) revision={} "
+              "mode={}",
               object.id, object.name, build.mesh.triangle_count,
               local_translation[0], local_translation[1], local_translation[2],
-              revision);
+              revision, dynamic ? "moving_proxy" : "baked_identity");
   return true;
 }
 
@@ -4525,6 +4607,94 @@ bool RebuildEditableObjectCollision(
   return true;
 }
 
+bool UpdateDynamicEditableObjectCollisionPose(
+    PPCContext& ctx, std::uint8_t* base, std::uint32_t collection,
+    const skate::world::MapDefinition& definition, std::size_t index,
+    const float map_origin[3], const float local_translation[3],
+    const float local_basis[9], std::uint64_t desired_revision) {
+  if (index >= definition.editable_objects.size()) {
+    return false;
+  }
+  const std::uint32_t volume =
+      g_editor_volume_addresses[index].load(std::memory_order_acquire);
+  const std::uint32_t mesh =
+      g_editor_mesh_addresses[index].load(std::memory_order_acquire);
+  const std::uint32_t matrix =
+      g_editor_matrix_addresses[index].load(std::memory_order_acquire);
+  if (!IsGuestDataAddress(volume) || !IsGuestDataAddress(mesh) ||
+      !IsGuestDataAddress(matrix) ||
+      !g_editor_collision_active[index].load(std::memory_order_acquire)) {
+    return false;
+  }
+
+  const std::uint32_t count = LoadU32(base, collection + 20);
+  const std::uint32_t read_entries = LoadU32(base, collection + 16);
+  const std::uint32_t write_entries = LoadU32(base, collection + 32);
+  const std::uint32_t read_index =
+      FindOwnedEntry(base, read_entries, count, volume, mesh);
+  const std::uint32_t write_index =
+      FindOwnedEntry(base, write_entries, count, volume, mesh);
+  if (!IsGuestDataAddress(read_entries) ||
+      !IsGuestDataAddress(write_entries) ||
+      read_index == UINT32_MAX || write_index == UINT32_MAX ||
+      read_index != write_index) {
+    return false;
+  }
+
+  WriteBasisTransform(
+      base, matrix,
+      {local_basis[0], local_basis[1], local_basis[2]},
+      {local_basis[3], local_basis[4], local_basis[5]},
+      {local_basis[6], local_basis[7], local_basis[8]},
+      {map_origin[0] + local_translation[0],
+       map_origin[1] + local_translation[1],
+       map_origin[2] + local_translation[2]});
+  const std::uint32_t write_entry =
+      write_entries + write_index * kCollectionEntrySize;
+  PPCContext rebuild = ctx;
+  rebuild.r3.u64 = write_entry;
+  rebuild.r4.u64 = volume;
+  rebuild.r5.u64 = mesh;
+  rebuild.r6.u64 = matrix;
+  rebuild.r7.u64 = 0;
+  rebuild.r8.u64 = UINT32_MAX;
+  rebuild.r9.u64 = 0;
+  sub_8276CB18(rebuild, base);
+  WriteEntryLocalBounds(
+      base, write_entry, definition.editable_objects[index]);
+  const std::uint32_t read_entry =
+      read_entries + read_index * kCollectionEntrySize;
+  if (read_entry != write_entry) {
+    std::memcpy(base + read_entry, base + write_entry,
+                kCollectionEntrySize);
+  }
+
+  g_editor_translation_sequences[index].fetch_add(
+      1, std::memory_order_acq_rel);
+  g_editor_translation_x_bits[index].store(
+      std::bit_cast<std::uint32_t>(local_translation[0]),
+      std::memory_order_relaxed);
+  g_editor_translation_y_bits[index].store(
+      std::bit_cast<std::uint32_t>(local_translation[1]),
+      std::memory_order_relaxed);
+  g_editor_translation_z_bits[index].store(
+      std::bit_cast<std::uint32_t>(local_translation[2]),
+      std::memory_order_relaxed);
+  for (std::size_t component = 0; component < 9; ++component) {
+    g_editor_basis_bits[component][index].store(
+        std::bit_cast<std::uint32_t>(local_basis[component]),
+        std::memory_order_relaxed);
+  }
+  g_editor_applied_revisions[index].store(
+      desired_revision, std::memory_order_relaxed);
+  g_editor_translation_sequences[index].fetch_add(
+      1, std::memory_order_release);
+  g_editor_collision_updates.fetch_add(1, std::memory_order_relaxed);
+  g_editor_dynamic_pose_updates.fetch_add(1, std::memory_order_relaxed);
+  g_editor_broadphase_refreshes.fetch_add(1, std::memory_order_relaxed);
+  return true;
+}
+
 bool UpdateExactRetailEditableObjects(
     PPCContext &ctx, std::uint8_t *base, std::uint32_t collection,
     const skate::world::MapDefinition &definition, const float map_origin[3]) {
@@ -4545,12 +4715,33 @@ bool UpdateExactRetailEditableObjects(
     // Publish table width before any AddVolume call so collection
     // reconciliation recognizes a newly installed editor entry.
     g_editor_collision_count.store(object_count, std::memory_order_release);
+    if (initialized == 0) {
+      g_editor_collision_active_count.store(
+          0, std::memory_order_release);
+      g_editor_collision_dynamic_count.store(
+          0, std::memory_order_release);
+    }
     for (std::size_t index = initialized; index < object_count; ++index) {
+      const skate::world::MapObject &object =
+          definition.editable_objects[index];
+      const bool dynamic =
+          object.physics.type == skate::world::ObjectPhysicsType::Dynamic;
       float local_translation[3] = {};
       float local_basis[9] = {};
       std::uint64_t revision = 0;
-      if (!map_editor::ObjectTransform(index, local_translation, local_basis,
-                                       &revision)) {
+      bool have_transform = false;
+      if (dynamic) {
+        skate::world::PhysicsObjectPose pose;
+        if (mechanics_sandbox::map::ActivePhysicsObjectPose(index, pose)) {
+          CopyPhysicsPose(pose, local_translation, local_basis);
+          revision = pose.revision;
+          have_transform = true;
+        }
+      } else {
+        have_transform = map_editor::ObjectTransform(
+            index, local_translation, local_basis, &revision);
+      }
+      if (!have_transform) {
         g_editor_collision_failures.fetch_add(1, std::memory_order_relaxed);
         continue;
       }
@@ -4559,6 +4750,8 @@ bool UpdateExactRetailEditableObjects(
       g_editor_auxiliary_addresses[index].store(0, std::memory_order_relaxed);
       g_editor_matrix_addresses[index].store(0, std::memory_order_relaxed);
       g_editor_collision_active[index].store(false, std::memory_order_relaxed);
+      g_editor_collision_dynamic[index].store(
+          false, std::memory_order_relaxed);
       g_editor_collision_detached[index].store(false,
                                                std::memory_order_relaxed);
       g_editor_translation_x_bits[index].store(
@@ -4582,9 +4775,13 @@ bool UpdateExactRetailEditableObjects(
       // not represented in the retail archive, so they need native
       // collision immediately. Imported University objects stay entirely
       // exact until their first committed transform.
-      const skate::world::MapObject &object =
-          definition.editable_objects[index];
-      if (object.source_collision_triangle_count == 0 &&
+      if (dynamic) {
+        if (object.source_collision_triangle_count != 0) {
+          g_editor_collision_detached[index].store(
+              true, std::memory_order_release);
+        }
+      }
+      if ((dynamic || object.source_collision_triangle_count == 0) &&
           !object.collision_triangles.empty() &&
           !InstallEditableObjectCollision(ctx, base, collection, definition,
                                           index, map_origin, local_translation,
@@ -4595,6 +4792,36 @@ bool UpdateExactRetailEditableObjects(
                      object.id, object.name);
       }
     }
+    std::vector<std::uint8_t> detached(object_count, 0);
+    std::unordered_set<std::uint16_t> dynamic_resources;
+    for (std::size_t index = 0; index < object_count; ++index) {
+      detached[index] =
+          g_editor_collision_detached[index].load(
+              std::memory_order_acquire)
+              ? 1
+              : 0;
+      if (detached[index] == 0) {
+        continue;
+      }
+      for (const std::uint16_t resource :
+           skate::world::RetailCollisionResourcesForObject(
+               definition, definition.editable_objects[index])) {
+        dynamic_resources.insert(resource);
+      }
+    }
+    for (const std::uint16_t resource : dynamic_resources) {
+      if (!ReplaceRetailResourceCollision(
+              ctx, base, collection, definition, resource, detached)) {
+        g_editor_exact_resource_failures.fetch_add(
+            1, std::memory_order_relaxed);
+        g_editor_collision_failures.fetch_add(
+            1, std::memory_order_relaxed);
+        REXLOG_ERROR(
+            "box3d: failed to remove dynamic object from exact retail "
+            "collision resource={}",
+            resource);
+      }
+    }
     REXLOG_INFO("map-editor: exact-retail collision ownership initialized "
                 "objects={} dynamic={} archive_resources={}",
                 object_count,
@@ -4602,21 +4829,48 @@ bool UpdateExactRetailEditableObjects(
                 g_static_resource_names.size());
   }
 
-  if (map_editor::ActiveGizmoHandle() != 0) {
-    return true;
-  }
-
+  bool any_dynamic_update = false;
+  const bool gizmo_dragging = map_editor::ActiveGizmoHandle() != 0;
   for (std::size_t index = 0; index < object_count; ++index) {
+    const skate::world::MapObject &object = definition.editable_objects[index];
+    const bool dynamic =
+        object.physics.type == skate::world::ObjectPhysicsType::Dynamic;
+    if (!dynamic && gizmo_dragging) {
+      continue;
+    }
     float local_translation[3] = {};
     float local_basis[9] = {};
     std::uint64_t revision = 0;
-    if (!map_editor::ObjectTransform(index, local_translation, local_basis,
-                                     &revision) ||
+    bool have_transform = false;
+    if (dynamic) {
+      skate::world::PhysicsObjectPose pose;
+      if (mechanics_sandbox::map::ActivePhysicsObjectPose(index, pose)) {
+        CopyPhysicsPose(pose, local_translation, local_basis);
+        revision = pose.revision;
+        have_transform = true;
+      }
+    } else {
+      have_transform = map_editor::ObjectTransform(
+          index, local_translation, local_basis, &revision);
+    }
+    if (!have_transform ||
         revision ==
             g_editor_applied_revisions[index].load(std::memory_order_acquire)) {
       continue;
     }
-    const skate::world::MapObject &object = definition.editable_objects[index];
+    if (dynamic) {
+      if (!any_dynamic_update) {
+        WaitForCollectionJobs(ctx, base, collection);
+        any_dynamic_update = true;
+      }
+      if (!UpdateDynamicEditableObjectCollisionPose(
+              ctx, base, collection, definition, index, map_origin,
+              local_translation, local_basis, revision)) {
+        g_editor_collision_failures.fetch_add(
+            1, std::memory_order_relaxed);
+      }
+      continue;
+    }
     if (object.collision_triangles.empty()) {
       g_editor_applied_revisions[index].store(revision,
                                               std::memory_order_release);
@@ -4686,6 +4940,48 @@ bool UpdateExactRetailEditableObjects(
   return true;
 }
 
+void UpdateBox3DPlayerProxy(const float map_origin[3]) {
+  float player_world[3] = {};
+  const std::uint64_t frame =
+      input_history_watch::CurrentFrameSequence();
+  if (frame == 0 ||
+      !trick_pipeline::CurrentLocalBoardPosition(player_world)) {
+    g_box3d_player_proxy_previous_valid = false;
+    mechanics_sandbox::map::UpdateOwnedPhysicsPlayerProxy(
+        {}, {}, false);
+    return;
+  }
+
+  const skate::world::Vec3 position{
+      player_world[0] - map_origin[0],
+      player_world[1] - map_origin[1],
+      player_world[2] - map_origin[2],
+  };
+  skate::world::Vec3 velocity{};
+  if (g_box3d_player_proxy_previous_valid &&
+      frame > g_box3d_player_proxy_frame) {
+    const std::uint64_t frame_delta =
+        std::min<std::uint64_t>(
+            frame - g_box3d_player_proxy_frame, 4);
+    const skate::world::Vec3 displacement =
+        position - g_box3d_player_proxy_previous_position;
+    if (skate::world::LengthSquared(displacement) < 9.0f) {
+      velocity =
+          displacement /
+          (static_cast<float>(frame_delta) / 60.0f);
+      const float speed = skate::world::Length(velocity);
+      if (speed > 14.0f) {
+        velocity = velocity * (14.0f / speed);
+      }
+    }
+  }
+  mechanics_sandbox::map::UpdateOwnedPhysicsPlayerProxy(
+      position, velocity, true);
+  g_box3d_player_proxy_frame = frame;
+  g_box3d_player_proxy_previous_position = position;
+  g_box3d_player_proxy_previous_valid = true;
+}
+
 void UpdateEditableObjects(PPCContext& ctx,
                            std::uint8_t* base) noexcept {
   map_editor::ApplyPendingSpawn();
@@ -4694,6 +4990,10 @@ void UpdateEditableObjects(PPCContext& ctx,
   if (!Enabled() || base == nullptr ||
       definition.editable_objects.empty()) {
     g_editor_collision_count.store(0, std::memory_order_release);
+    g_editor_collision_dynamic_count.store(0, std::memory_order_release);
+    g_box3d_player_proxy_previous_valid = false;
+    mechanics_sandbox::map::UpdateOwnedPhysicsPlayerProxy(
+        {}, {}, false);
     return;
   }
 
@@ -4728,6 +5028,7 @@ void UpdateEditableObjects(PPCContext& ctx,
       !MapWorldOrigin(map_origin)) {
     return;
   }
+  UpdateBox3DPlayerProxy(map_origin);
 
   if (UpdateExactRetailEditableObjects(ctx, base, collection, definition,
                                        map_origin)) {
@@ -4787,6 +5088,8 @@ void UpdateEditableObjects(PPCContext& ctx,
     if (installed_object_count == 0) {
       g_editor_collision_active_count.store(
           0, std::memory_order_release);
+      g_editor_collision_dynamic_count.store(
+          0, std::memory_order_release);
     }
     for (std::size_t index = installed_object_count;
          index < object_count; ++index) {
@@ -4798,6 +5101,8 @@ void UpdateEditableObjects(PPCContext& ctx,
          index < object_count; ++index) {
       const skate::world::MapObject& object =
           definition.editable_objects[index];
+      const bool dynamic =
+          object.physics.type == skate::world::ObjectPhysicsType::Dynamic;
       if (object.collision_triangles.empty()) {
         continue;
       }
@@ -4805,8 +5110,19 @@ void UpdateEditableObjects(PPCContext& ctx,
       float local_translation[3] = {};
       float local_basis[9] = {};
       std::uint64_t revision = 0;
-      if (!map_editor::ObjectTransform(
-              index, local_translation, local_basis, &revision)) {
+      bool have_transform = false;
+      if (dynamic) {
+        skate::world::PhysicsObjectPose pose;
+        if (mechanics_sandbox::map::ActivePhysicsObjectPose(index, pose)) {
+          CopyPhysicsPose(pose, local_translation, local_basis);
+          revision = pose.revision;
+          have_transform = true;
+        }
+      } else {
+        have_transform = map_editor::ObjectTransform(
+            index, local_translation, local_basis, &revision);
+      }
+      if (!have_transform) {
         g_editor_collision_failures.fetch_add(
             1, std::memory_order_relaxed);
         return;
@@ -4819,8 +5135,16 @@ void UpdateEditableObjects(PPCContext& ctx,
 
       skate::world::RwCollisionBuildResult build;
       try {
+        const float identity_basis[9] = {
+            1.0f, 0.0f, 0.0f,
+            0.0f, 1.0f, 0.0f,
+            0.0f, 0.0f, 1.0f,
+        };
+        const float local_origin[3] = {};
         build = CompileEditableObject(
-            object, definition, world_translation, local_basis);
+            object, definition,
+            dynamic ? local_origin : world_translation,
+            dynamic ? identity_basis : local_basis);
       } catch (const std::exception& error) {
         g_editor_collision_failures.fetch_add(
             1, std::memory_order_relaxed);
@@ -4908,8 +5232,18 @@ void UpdateEditableObjects(PPCContext& ctx,
         return;
       }
 
-      const float identity_translation[3] = {};
-      WriteMapTransform(base, matrix, identity_translation);
+      if (dynamic) {
+        WriteBasisTransform(
+            base, matrix,
+            {local_basis[0], local_basis[1], local_basis[2]},
+            {local_basis[3], local_basis[4], local_basis[5]},
+            {local_basis[6], local_basis[7], local_basis[8]},
+            {world_translation[0], world_translation[1],
+             world_translation[2]});
+      } else {
+        const float identity_translation[3] = {};
+        WriteMapTransform(base, matrix, identity_translation);
+      }
 
       std::uint32_t count_after = count;
       if (desired[index]) {
@@ -4970,6 +5304,8 @@ void UpdateEditableObjects(PPCContext& ctx,
       }
       g_editor_applied_revisions[index].store(
           revision, std::memory_order_relaxed);
+      g_editor_collision_dynamic[index].store(
+          dynamic, std::memory_order_relaxed);
       // Publish the mesh address last. Readers that observe it are
       // guaranteed to observe the complete initial transform above.
       g_editor_mesh_addresses[index].store(
@@ -4980,11 +5316,12 @@ void UpdateEditableObjects(PPCContext& ctx,
       REXLOG_INFO(
           "map-editor: collision allocated id={} name='{}' active={} "
           "triangles={} translation=({:.3f},{:.3f},{:.3f}) "
-          "revision={} mode=baked_identity",
+          "revision={} mode={}",
           object.id, object.name, desired[index] ? 1 : 0,
           build.mesh.triangle_count,
           local_translation[0], local_translation[1],
-          local_translation[2], revision);
+          local_translation[2], revision,
+          dynamic ? "moving_proxy" : "baked_identity");
     }
     g_editor_collision_active_count.store(
         desired_collision_count, std::memory_order_release);
@@ -5068,6 +5405,11 @@ void UpdateEditableObjects(PPCContext& ctx,
       rebuild.r8.u64 = UINT32_MAX;
       rebuild.r9.u64 = 0;
       sub_8276CB18(rebuild, base);
+      if (g_editor_collision_dynamic[index].load(
+              std::memory_order_acquire)) {
+        WriteEntryLocalBounds(
+            base, write_entry, definition.editable_objects[index]);
+      }
       const std::uint32_t read_entry =
           final_read_entries +
           read_index * kCollectionEntrySize;
@@ -5080,6 +5422,16 @@ void UpdateEditableObjects(PPCContext& ctx,
     }
     g_collection_count_after.store(
         final_count, std::memory_order_release);
+    g_editor_collision_dynamic_count.store(
+        static_cast<std::uint32_t>(std::count_if(
+            definition.editable_objects.begin(),
+            definition.editable_objects.end(),
+            [](const skate::world::MapObject& object) {
+              return object.physics.type ==
+                         skate::world::ObjectPhysicsType::Dynamic &&
+                     !object.collision_triangles.empty();
+            })),
+        std::memory_order_release);
     REXLOG_INFO(
         "map-editor: collision broadphase published "
         "objects={} active={} added={} collection_count={}",
@@ -5091,18 +5443,35 @@ void UpdateEditableObjects(PPCContext& ctx,
   bool any_update = false;
   const bool gizmo_dragging =
       map_editor::ActiveGizmoHandle() != 0;
-  if (!gizmo_dragging) {
+  {
     for (std::size_t index = 0; index < object_count; ++index) {
       if (g_editor_mesh_addresses[index].load(
               std::memory_order_acquire) == 0) {
         continue;
       }
+      const skate::world::MapObject& object =
+          definition.editable_objects[index];
+      const bool dynamic =
+          object.physics.type == skate::world::ObjectPhysicsType::Dynamic;
+      if (!dynamic && gizmo_dragging) {
+        continue;
+      }
       float local_translation[3] = {};
       float local_basis[9] = {};
       std::uint64_t desired_revision = 0;
-      if (!map_editor::ObjectTransform(
-              index, local_translation, local_basis,
-              &desired_revision) ||
+      bool have_transform = false;
+      if (dynamic) {
+        skate::world::PhysicsObjectPose pose;
+        if (mechanics_sandbox::map::ActivePhysicsObjectPose(index, pose)) {
+          CopyPhysicsPose(pose, local_translation, local_basis);
+          desired_revision = pose.revision;
+          have_transform = true;
+        }
+      } else {
+        have_transform = map_editor::ObjectTransform(
+            index, local_translation, local_basis, &desired_revision);
+      }
+      if (!have_transform ||
           desired_revision ==
               g_editor_applied_revisions[index].load(
                   std::memory_order_acquire)) {
@@ -5112,10 +5481,15 @@ void UpdateEditableObjects(PPCContext& ctx,
         WaitForCollectionJobs(ctx, base, collection);
         any_update = true;
       }
-      if (!RebuildEditableObjectCollision(
-              ctx, base, collection, definition, index,
-              map_origin, local_translation, local_basis,
-              desired_revision)) {
+      const bool synchronized =
+          dynamic
+              ? UpdateDynamicEditableObjectCollisionPose(
+                    ctx, base, collection, definition, index, map_origin,
+                    local_translation, local_basis, desired_revision)
+              : RebuildEditableObjectCollision(
+                    ctx, base, collection, definition, index, map_origin,
+                    local_translation, local_basis, desired_revision);
+      if (!synchronized) {
         g_editor_collision_failures.fetch_add(
             1, std::memory_order_relaxed);
       }
@@ -5858,10 +6232,17 @@ void AppendTelemetry(std::ostream& out) {
       << " map_editor_collision_active="
       << g_editor_collision_active_count.load(
              std::memory_order_acquire)
+      << " map_editor_collision_dynamic="
+      << g_editor_collision_dynamic_count.load(
+             std::memory_order_acquire)
       << " map_editor_collision_installs="
       << g_editor_collision_installs.load(std::memory_order_relaxed)
       << " map_editor_collision_updates="
       << g_editor_collision_updates.load(std::memory_order_relaxed)
+      << " map_editor_dynamic_pose_updates="
+      << g_editor_dynamic_pose_updates.load(std::memory_order_relaxed)
+      << " map_editor_dynamic_query_batches="
+      << g_editor_dynamic_query_batches.load(std::memory_order_relaxed)
       << " map_editor_broadphase_refreshes="
       << g_editor_broadphase_refreshes.load(
              std::memory_order_relaxed)

@@ -1,4 +1,4 @@
-"""Human-friendly Blender authoring and export tools for SKATE v13.
+"""Human-friendly Blender authoring and export tools for SKATE v14.
 
 This addon and exporter are original project code. They do not import,
 invoke, redistribute, or depend on ArenaBuilder.
@@ -44,7 +44,7 @@ exporter = importlib.reload(_exporter)
 bl_info = {
     "name": "Owned World Authoring",
     "author": "Skate 3 Custom Engine Layer contributors",
-    "version": (1, 10, 1),
+    "version": (1, 12, 0),
     "blender": (5, 0, 0),
     "location": "3D View > Sidebar > Skate 3 Map",
     "description": "Create, validate, and export Skate 3 Custom Engine maps",
@@ -179,11 +179,39 @@ PRESETS = {
 }
 
 PHYSICS_TYPE_ITEMS = [
-    ("STATIC", "Static", "Ordinary static world geometry"),
+    (
+        "STATIC",
+        "Not Simulated",
+        "Ordinary static world geometry; Box3D is disabled",
+    ),
+    (
+        "BOX3D_STATIC",
+        "Box3D Static",
+        "A fixed Box3D collision body for dynamic owned-world objects",
+    ),
+    (
+        "BOX3D_DYNAMIC",
+        "Box3D Dynamic",
+        "An independently falling and colliding Box3D rigid body",
+    ),
     (
         "HINGED_DOOR",
         "Hinged Door",
         "Contact-driven rigid door constrained to one hinge axis",
+    ),
+]
+
+BOX3D_SHAPE_ITEMS = [
+    ("BOX", "Box", "Fast box fitted to this object's local bounds"),
+    (
+        "SPHERE",
+        "Sphere",
+        "Sphere fitted around this object's local bounds",
+    ),
+    (
+        "CONVEX_HULL",
+        "Convex Hull",
+        "Convex hull generated from this object's collision vertices",
     ),
 ]
 
@@ -236,6 +264,28 @@ def _sync_physics(settings: "OwnedWorldPhysicsSettings") -> None:
     if not isinstance(obj, Object):
         return
     obj["ow_physics_type"] = settings.physics_type
+    obj["ow_box3d_collision_shape"] = settings.box3d_collision_shape
+    obj["ow_box3d_density"] = float(settings.box3d_density)
+    obj["ow_box3d_friction"] = float(settings.box3d_friction)
+    obj["ow_box3d_restitution"] = float(settings.box3d_restitution)
+    obj["ow_box3d_linear_damping"] = float(settings.box3d_linear_damping)
+    obj["ow_box3d_angular_damping"] = float(settings.box3d_angular_damping)
+    obj["ow_box3d_gravity_scale"] = float(settings.box3d_gravity_scale)
+    obj["ow_box3d_enable_sleep"] = bool(settings.box3d_enable_sleep)
+    obj["ow_box3d_initially_awake"] = bool(settings.box3d_initially_awake)
+    obj["ow_box3d_break_group"] = int(settings.box3d_break_group)
+    obj["ow_box3d_break_speed_threshold"] = float(
+        settings.box3d_break_speed_threshold
+    )
+    obj["ow_box3d_break_impulse_scale"] = float(
+        settings.box3d_break_impulse_scale
+    )
+    obj["ow_box3d_break_angular_impulse"] = float(
+        settings.box3d_break_angular_impulse
+    )
+    obj["ow_box3d_break_gravity_scale"] = float(
+        settings.box3d_break_gravity_scale
+    )
     if settings.collision_material is not None:
         obj["ow_material"] = settings.collision_material.name
     obj["ow_upward_surface"] = bool(settings.upward_surface)
@@ -416,6 +466,116 @@ class OwnedWorldPhysicsSettings(PropertyGroup):
         name="Physics Type",
         items=PHYSICS_TYPE_ITEMS,
         default="STATIC",
+        update=_physics_updated,
+    )
+    box3d_collision_shape: EnumProperty(
+        name="Collision Shape",
+        description="Safe collision approximation used by Box3D",
+        items=BOX3D_SHAPE_ITEMS,
+        default="BOX",
+        update=_physics_updated,
+    )
+    box3d_density: FloatProperty(
+        name="Density",
+        description=(
+            "Mass per cubic metre; Box3D derives mass from density and shape"
+        ),
+        default=100.0,
+        min=1.0,
+        max=5000.0,
+        update=_physics_updated,
+    )
+    box3d_friction: FloatProperty(
+        name="Friction",
+        default=0.55,
+        min=0.0,
+        max=2.0,
+        update=_physics_updated,
+    )
+    box3d_restitution: FloatProperty(
+        name="Bounce",
+        default=0.05,
+        min=0.0,
+        max=1.0,
+        update=_physics_updated,
+    )
+    box3d_linear_damping: FloatProperty(
+        name="Linear Damping",
+        description="Drag applied to straight-line motion",
+        default=0.05,
+        min=0.0,
+        max=20.0,
+        update=_physics_updated,
+    )
+    box3d_angular_damping: FloatProperty(
+        name="Angular Damping",
+        description="Drag applied to rotation",
+        default=0.15,
+        min=0.0,
+        max=20.0,
+        update=_physics_updated,
+    )
+    box3d_gravity_scale: FloatProperty(
+        name="Gravity",
+        description="Multiplier for world gravity; zero makes the body float",
+        default=1.0,
+        min=0.0,
+        max=4.0,
+        update=_physics_updated,
+    )
+    box3d_enable_sleep: BoolProperty(
+        name="Allow Sleep",
+        description="Let settled dynamic bodies stop consuming solver time",
+        default=True,
+        update=_physics_updated,
+    )
+    box3d_initially_awake: BoolProperty(
+        name="Start Awake",
+        description="Begin active instead of waiting for another body",
+        default=True,
+        update=_physics_updated,
+    )
+    box3d_break_group: IntProperty(
+        name="Break Group",
+        description=(
+            "Zero disables breaking; matching nonzero groups release together"
+        ),
+        default=0,
+        min=0,
+        max=65535,
+        update=_physics_updated,
+    )
+    box3d_break_speed_threshold: FloatProperty(
+        name="Impact Speed",
+        description="Minimum player impact speed needed to shatter the group",
+        default=2.5,
+        min=0.1,
+        max=30.0,
+        unit="VELOCITY",
+        update=_physics_updated,
+    )
+    box3d_break_impulse_scale: FloatProperty(
+        name="Shatter Force",
+        description="How strongly the player's motion scatters released pieces",
+        default=0.45,
+        min=0.0,
+        max=10.0,
+        update=_physics_updated,
+    )
+    box3d_break_angular_impulse: FloatProperty(
+        name="Shard Spin",
+        description="Deterministic rotational kick applied on shatter",
+        default=0.08,
+        min=0.0,
+        max=10.0,
+        update=_physics_updated,
+    )
+    box3d_break_gravity_scale: FloatProperty(
+        name="Released Gravity",
+        description="Gravity applied after the break group is released",
+        default=1.0,
+        min=0.0,
+        max=4.0,
         update=_physics_updated,
     )
     hinge_axis: FloatVectorProperty(
@@ -3051,6 +3211,31 @@ class OWPHYSICS_PT_object(Panel):
         collision.prop(settings, "collision_material")
         collision.prop(settings, "upward_surface")
         layout.prop(settings, "physics_type")
+        if settings.physics_type in {"BOX3D_STATIC", "BOX3D_DYNAMIC"}:
+            body = layout.box()
+            body.label(text="Box3D Body")
+            body.prop(settings, "box3d_collision_shape")
+            if settings.physics_type == "BOX3D_DYNAMIC":
+                body.prop(settings, "box3d_density")
+                body.prop(settings, "box3d_linear_damping")
+                body.prop(settings, "box3d_angular_damping")
+                body.prop(settings, "box3d_gravity_scale")
+                body.prop(settings, "box3d_enable_sleep")
+                if settings.box3d_enable_sleep:
+                    body.prop(settings, "box3d_initially_awake")
+                breaking = layout.box()
+                breaking.label(text="Breakable Group")
+                breaking.prop(settings, "box3d_break_group")
+                if settings.box3d_break_group > 0:
+                    breaking.prop(settings, "box3d_break_speed_threshold")
+                    breaking.prop(settings, "box3d_break_impulse_scale")
+                    breaking.prop(settings, "box3d_break_angular_impulse")
+                    breaking.prop(settings, "box3d_break_gravity_scale")
+            contact = layout.box()
+            contact.label(text="Box3D Contact")
+            contact.prop(settings, "box3d_friction")
+            contact.prop(settings, "box3d_restitution")
+            return
         if settings.physics_type != "HINGED_DOOR":
             return
         hinge = layout.box()
@@ -3388,7 +3573,64 @@ def _hydrate_physics(obj: Object) -> None:
     settings.upward_surface = bool(obj.get("ow_upward_surface", False))
     physics_type = str(obj.get("ow_physics_type", "STATIC"))
     settings.physics_type = (
-        physics_type if physics_type in {"STATIC", "HINGED_DOOR"} else "STATIC"
+        physics_type
+        if physics_type
+        in {"STATIC", "BOX3D_STATIC", "BOX3D_DYNAMIC", "HINGED_DOOR"}
+        else "STATIC"
+    )
+    shape = str(obj.get("ow_box3d_collision_shape", "BOX"))
+    settings.box3d_collision_shape = (
+        shape if shape in {"BOX", "SPHERE", "CONVEX_HULL"} else "BOX"
+    )
+    settings.box3d_density = max(
+        1.0, min(5000.0, float(obj.get("ow_box3d_density", 100.0)))
+    )
+    settings.box3d_friction = max(
+        0.0, min(2.0, float(obj.get("ow_box3d_friction", 0.55)))
+    )
+    settings.box3d_restitution = max(
+        0.0, min(1.0, float(obj.get("ow_box3d_restitution", 0.05)))
+    )
+    settings.box3d_linear_damping = max(
+        0.0, min(
+            20.0, float(obj.get("ow_box3d_linear_damping", 0.05))
+        )
+    )
+    settings.box3d_angular_damping = max(
+        0.0, min(
+            20.0, float(obj.get("ow_box3d_angular_damping", 0.15))
+        )
+    )
+    settings.box3d_gravity_scale = max(
+        0.0, min(4.0, float(obj.get("ow_box3d_gravity_scale", 1.0)))
+    )
+    settings.box3d_enable_sleep = bool(
+        obj.get("ow_box3d_enable_sleep", True)
+    )
+    settings.box3d_initially_awake = bool(
+        obj.get("ow_box3d_initially_awake", True)
+    )
+    settings.box3d_break_group = max(
+        0, min(65535, int(obj.get("ow_box3d_break_group", 0)))
+    )
+    settings.box3d_break_speed_threshold = max(
+        0.1,
+        min(
+            30.0,
+            float(obj.get("ow_box3d_break_speed_threshold", 2.5)),
+        ),
+    )
+    settings.box3d_break_impulse_scale = max(
+        0.0,
+        min(10.0, float(obj.get("ow_box3d_break_impulse_scale", 0.45))),
+    )
+    settings.box3d_break_angular_impulse = max(
+        0.0,
+        min(10.0, float(obj.get("ow_box3d_break_angular_impulse", 0.08))),
+    )
+    settings.box3d_break_gravity_scale = max(
+        0.0,
+        min(4.0, float(obj.get("ow_box3d_break_gravity_scale", 1.0))),
     )
     settings.hinge_axis = tuple(obj.get("ow_hinge_axis", (0.0, 0.0, 1.0)))
     settings.minimum_angle = math.radians(

@@ -57,6 +57,14 @@ def main() -> None:
         material = bpy.data.materials.new("TestConcrete")
         floor.data.materials.append(material)
         material.owned_world.roughness = 0.67
+        floor.owned_world_physics.physics_type = "BOX3D_DYNAMIC"
+        floor.owned_world_physics.box3d_collision_shape = "BOX"
+        floor.owned_world_physics.box3d_density = 240.0
+        floor.owned_world_physics.box3d_friction = 0.72
+        floor.owned_world_physics.box3d_restitution = 0.11
+        floor.owned_world_physics.box3d_linear_damping = 0.08
+        floor.owned_world_physics.box3d_angular_damping = 0.21
+        floor.owned_world_physics.box3d_gravity_scale = 0.9
 
         alpha_image = bpy.data.images.new(
             "RoadMarking_A.tga", width=1, height=1, alpha=True
@@ -489,7 +497,7 @@ def main() -> None:
         require(output.is_file(), "Quick Export did not create an SKATE")
         require(cache.is_file(), "Quick Export did not create its cache")
         require(
-            output.read_bytes()[:8] == b"SKATE13\0",
+            output.read_bytes()[:8] == b"SKATE14\0",
             "Exported package has the wrong magic",
         )
         analysis = analyze_package(output, include_payloads=True)
@@ -522,6 +530,27 @@ def main() -> None:
             and object_records[0]["collision_count"] == 2,
             "Visual/collision ownership was not associated with TestFloor",
         )
+        require(
+            object_records[0]["physics"]["type"] == 2
+            and object_records[0]["physics"]["shape"] == 0
+            and abs(object_records[0]["physics"]["density"] - 240.0)
+            < 1.0e-5
+            and abs(object_records[0]["physics"]["friction"] - 0.72)
+            < 1.0e-5
+            and abs(object_records[0]["physics"]["restitution"] - 0.11)
+            < 1.0e-5
+            and abs(
+                object_records[0]["physics"]["linear_damping"] - 0.08
+            )
+            < 1.0e-5
+            and abs(
+                object_records[0]["physics"]["angular_damping"] - 0.21
+            )
+            < 1.0e-5
+            and abs(object_records[0]["physics"]["gravity_scale"] - 0.9)
+            < 1.0e-5,
+            "Box3D object metadata did not survive export and analysis",
+        )
         proxy_record = next(
             record
             for record in object_records
@@ -532,6 +561,10 @@ def main() -> None:
             and proxy_record["collision_count"] == 1,
             "Face-level collision ownership was not associated with its "
             "visual MOBJ owner",
+        )
+        require(
+            proxy_record["physics"]["type"] == 0,
+            "Physics was not disabled by default for an ordinary object",
         )
         retail_frame_records = []
         vertex_bytes = analysis["_vertex_bytes"]

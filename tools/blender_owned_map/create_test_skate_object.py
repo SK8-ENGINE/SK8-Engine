@@ -94,7 +94,8 @@ def build() -> None:
         scene["ow_map_name"] = "Test Grind Ledge"
         spawn = bpy.data.objects.get("OW_SPAWN")
         if spawn is not None:
-            spawn.location = (0.0, -4.0, 1.0)
+            # SKATEOBJ v2 uses OW_SPAWN as the package pivot.
+            spawn.location = (0.0, 0.0, 0.0)
 
         bpy.ops.wm.save_as_mainfile(filepath=str(BLEND_PATH))
         export_scene(PACKAGE_PATH, force_rebuild=True)

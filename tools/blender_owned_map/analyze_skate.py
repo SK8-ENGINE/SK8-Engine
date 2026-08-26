@@ -101,9 +101,10 @@ def analyze_package(
         b"SKATE11\0",
         b"SKATE12\0",
         b"SKATE13\0",
+        b"SKATE14\0",
     ):
         raise PackageError(
-            f"unsupported magic {magic!r}; expected SKATE v8-v13"
+            f"unsupported magic {magic!r}; expected SKATE v8-v14"
         )
     version = int(magic[5:7])
     if reader.u32("endian marker") != 0x12345678:
@@ -435,6 +436,7 @@ def analyze_package(
 
     extension_tags: list[str] = []
     map_objects: list[dict[str, object]] = []
+    break_groups: dict[int, dict[str, object]] = {}
     if version >= 12:
         start = reader.offset
         extension_count = reader.u32("extension count")
@@ -450,7 +452,14 @@ def analyze_package(
                 decoded_size, f"extension {extension_index}"
             )
             extension_tags.append(tag)
-            if tag == "MOBJ" and schema in (1, 2):
+            if tag == "MOBJ":
+                if schema not in (1, 2, 3) or (
+                    schema == 3 and version < 14
+                ):
+                    raise PackageError(
+                        f"MOBJ schema {schema} is incompatible with "
+                        f"SKATE v{version}"
+                    )
                 object_reader = Reader(payload)
                 object_count = object_reader.u32("MOBJ object count")
                 for object_index in range(object_count):
@@ -489,6 +498,64 @@ def analyze_package(
                             )
                             for grind in range(grind_count)
                         ]
+                    physics = {
+                        "type": 0,
+                        "shape": 0,
+                        "density": 100.0,
+                        "friction": 0.55,
+                        "restitution": 0.05,
+                        "linear_damping": 0.05,
+                        "angular_damping": 0.15,
+                        "gravity_scale": 1.0,
+                        "enable_sleep": True,
+                        "initially_awake": True,
+                        "break_group": 0,
+                        "break_speed_threshold": 2.5,
+                        "break_impulse_scale": 0.45,
+                        "break_angular_impulse": 0.08,
+                        "break_gravity_scale": 1.0,
+                    }
+                    if schema >= 3:
+                        values = struct.unpack(
+                            "<II6fII",
+                            object_reader.take(
+                                40,
+                                f"MOBJ object {object_index} physics",
+                            ),
+                        )
+                        if (
+                            values[0] > 2
+                            or values[1] > 2
+                            or values[8] > 1
+                            or values[9] > 1
+                            or not 0.0 < values[2] <= 100000.0
+                            or not 0.0 <= values[3] <= 2.0
+                            or not 0.0 <= values[4] <= 1.0
+                            or not 0.0 <= values[5] <= 100.0
+                            or not 0.0 <= values[6] <= 100.0
+                            or not -10.0 <= values[7] <= 10.0
+                        ):
+                            raise PackageError(
+                                f"MOBJ object {object_index} has invalid "
+                                "physics metadata"
+                            )
+                        physics = {
+                            "type": values[0],
+                            "shape": values[1],
+                            "density": values[2],
+                            "friction": values[3],
+                            "restitution": values[4],
+                            "linear_damping": values[5],
+                            "angular_damping": values[6],
+                            "gravity_scale": values[7],
+                            "enable_sleep": bool(values[8]),
+                            "initially_awake": bool(values[9]),
+                            "break_group": 0,
+                            "break_speed_threshold": 2.5,
+                            "break_impulse_scale": 0.45,
+                            "break_angular_impulse": 0.08,
+                            "break_gravity_scale": 1.0,
+                        }
                     map_objects.append(
                         {
                             "id": object_id,
@@ -499,10 +566,55 @@ def analyze_package(
                             "first_collision": object_first_collision,
                             "collision_count": object_collision_count,
                             "grind_indices": grind_indices,
+                            "physics": physics,
                         }
                     )
                 if object_reader.offset != len(payload):
                     raise PackageError("MOBJ has trailing bytes")
+            elif tag == "BGRP":
+                if schema != 1:
+                    raise PackageError(
+                        f"BGRP schema {schema} is unsupported"
+                    )
+                break_reader = Reader(payload)
+                break_count = break_reader.u32("BGRP object count")
+                for break_index in range(break_count):
+                    object_id, group, speed, impulse, spin, gravity = (
+                        struct.unpack(
+                            "<II4f",
+                            break_reader.take(
+                                24, f"BGRP object {break_index}"
+                            ),
+                        )
+                    )
+                    if (
+                        object_id in break_groups
+                        or group == 0
+                        or not 0.1 <= speed <= 30.0
+                        or not 0.0 <= impulse <= 10.0
+                        or not 0.0 <= spin <= 10.0
+                        or not 0.0 <= gravity <= 4.0
+                    ):
+                        raise PackageError(
+                            f"BGRP object {break_index} is invalid"
+                        )
+                    break_groups[object_id] = {
+                        "break_group": group,
+                        "break_speed_threshold": speed,
+                        "break_impulse_scale": impulse,
+                        "break_angular_impulse": spin,
+                        "break_gravity_scale": gravity,
+                    }
+                if break_reader.offset != len(payload):
+                    raise PackageError("BGRP has trailing bytes")
+        objects_by_id = {record["id"]: record for record in map_objects}
+        for object_id, breakable in break_groups.items():
+            record = objects_by_id.get(object_id)
+            if record is None or record["physics"]["type"] != 2:
+                raise PackageError(
+                    "BGRP references a missing or non-dynamic object"
+                )
+            record["physics"].update(breakable)
         _section(sections, reader, "extensions", start)
 
     if reader.offset != len(reader.data):

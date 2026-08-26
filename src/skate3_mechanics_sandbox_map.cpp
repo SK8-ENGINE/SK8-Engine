@@ -1,5 +1,6 @@
 #include "skate3_mechanics_sandbox_map.h"
 
+#include "skate/world/box3d_physics.h"
 #include "skate/world/maps.h"
 #include "skate/world/owned_map_package.h"
 #include "skate/world/render_world.h"
@@ -55,6 +56,11 @@ VisualMesh g_rain_visual;
 VisualMesh g_lightning_visual;
 
 skate::world::WorldMap& ActiveWorld();
+skate::world::OwnedPhysicsWorld g_owned_physics;
+bool g_owned_physics_initialized = false;
+std::uint64_t g_owned_physics_last_log_step = 0;
+std::uint64_t g_owned_physics_last_sound_break_event = 0;
+std::mutex g_owned_physics_mutex;
 
 constexpr float kRadiansToDegrees = 57.29577951308232f;
 constexpr float kDegreesToRadians = 0.017453292519943295f;
@@ -301,8 +307,72 @@ void PlayProceduralThunder() {
       reinterpret_cast<LPCSTR>(wave.data()), nullptr,
       SND_ASYNC | SND_MEMORY | SND_NODEFAULT);
 }
+
+const std::vector<std::uint8_t>& GlassBreakWave() {
+  static const std::vector<std::uint8_t> wave = [] {
+    constexpr std::uint32_t sample_rate = 22050;
+    constexpr std::uint32_t sample_count = sample_rate * 3 / 5;
+    constexpr std::uint32_t data_bytes = sample_count * 2;
+    std::vector<std::uint8_t> bytes(44 + data_bytes, 0);
+    const auto write16 = [&bytes](std::size_t offset, std::uint16_t value) {
+      bytes[offset + 0] = static_cast<std::uint8_t>(value);
+      bytes[offset + 1] = static_cast<std::uint8_t>(value >> 8);
+    };
+    const auto write32 = [&bytes](std::size_t offset, std::uint32_t value) {
+      bytes[offset + 0] = static_cast<std::uint8_t>(value);
+      bytes[offset + 1] = static_cast<std::uint8_t>(value >> 8);
+      bytes[offset + 2] = static_cast<std::uint8_t>(value >> 16);
+      bytes[offset + 3] = static_cast<std::uint8_t>(value >> 24);
+    };
+    std::memcpy(bytes.data() + 0, "RIFF", 4);
+    write32(4, 36 + data_bytes);
+    std::memcpy(bytes.data() + 8, "WAVEfmt ", 8);
+    write32(16, 16);
+    write16(20, 1);
+    write16(22, 1);
+    write32(24, sample_rate);
+    write32(28, sample_rate * 2);
+    write16(32, 2);
+    write16(34, 16);
+    std::memcpy(bytes.data() + 36, "data", 4);
+    write32(40, data_bytes);
+
+    std::uint32_t noise_state = 0xa17e51d3u;
+    float low_noise = 0.0f;
+    for (std::uint32_t index = 0; index < sample_count; ++index) {
+      noise_state ^= noise_state << 13;
+      noise_state ^= noise_state >> 17;
+      noise_state ^= noise_state << 5;
+      const float white =
+          (static_cast<float>(noise_state & 0xffffu) / 32767.5f) - 1.0f;
+      low_noise += (white - low_noise) * 0.11f;
+      const float high_noise = white - low_noise;
+      const float time = static_cast<float>(index) / sample_rate;
+      const float burst = high_noise * std::exp(-time * 9.5f) * 0.72f;
+      const float chime =
+          (std::sin(time * 2.0f * 3.14159265f * 2410.0f) * 0.20f +
+           std::sin(time * 2.0f * 3.14159265f * 3270.0f) * 0.13f +
+           std::sin(time * 2.0f * 3.14159265f * 4180.0f) * 0.08f) *
+          std::exp(-time * 7.0f);
+      const float sample = std::clamp(burst + chime, -1.0f, 1.0f);
+      const std::int16_t pcm =
+          static_cast<std::int16_t>(sample * 26000.0f);
+      write16(44 + index * 2, static_cast<std::uint16_t>(pcm));
+    }
+    return bytes;
+  }();
+  return wave;
+}
+
+void PlayProceduralGlassBreak() {
+  const std::vector<std::uint8_t>& wave = GlassBreakWave();
+  PlaySoundA(
+      reinterpret_cast<LPCSTR>(wave.data()), nullptr,
+      SND_ASYNC | SND_MEMORY | SND_NODEFAULT);
+}
 #else
 void PlayProceduralThunder() {}
+void PlayProceduralGlassBreak() {}
 #endif
 
 struct WeatherRuntime {
@@ -419,6 +489,48 @@ skate::world::WorldMap& ActiveWorld() {
     }
   }());
   return world;
+}
+
+bool HasOwnedPhysics(const skate::world::MapDefinition& definition) {
+  return std::any_of(
+      definition.editable_objects.begin(),
+      definition.editable_objects.end(),
+      [](const skate::world::MapObject& object) {
+        return object.physics.type !=
+               skate::world::ObjectPhysicsType::Disabled;
+      });
+}
+
+void ReloadOwnedPhysicsLocked() {
+  g_owned_physics.Reset();
+  const skate::world::MapDefinition& definition =
+      ActiveWorld().Definition();
+  if (HasOwnedPhysics(definition)) {
+    g_owned_physics.Load(definition);
+    const skate::world::PhysicsTelemetry telemetry =
+        g_owned_physics.Telemetry();
+    REXLOG_INFO(
+        "box3d: loaded generation={} static_bodies={} dynamic_bodies={} "
+        "objects={} fixed_hz=60 substeps=4 skate_metres_per_unit={:.3f}",
+        telemetry.world_generation, telemetry.static_body_count,
+        telemetry.dynamic_body_count, definition.editable_objects.size(),
+        skate::world::kSkateMetresPerBox3DUnit);
+  }
+  g_owned_physics_initialized = true;
+  g_owned_physics_last_log_step = 0;
+  g_owned_physics_last_sound_break_event =
+      g_owned_physics.Telemetry().glass_break_events;
+}
+
+void ReloadOwnedPhysics() {
+  std::scoped_lock lock(g_owned_physics_mutex);
+  ReloadOwnedPhysicsLocked();
+}
+
+void EnsureOwnedPhysicsInitializedLocked() {
+  if (!g_owned_physics_initialized) {
+    ReloadOwnedPhysicsLocked();
+  }
 }
 
 const skate::world::SurfaceMaterial* FindMaterial(
@@ -1520,6 +1632,7 @@ std::size_t AppendSpawnedObject(
     skate::world::Vec3 map_position) {
   skate::world::MapDefinition& definition =
       ActiveWorld().MutableDefinition();
+  skate::world::RemapSkateObjectBreakGroups(asset, definition);
 
   skate::world::TextureId next_texture = 1;
   for (const auto& texture : definition.textures) {
@@ -1578,31 +1691,32 @@ std::size_t AppendSpawnedObject(
         id = found->second;
       };
 
-  skate::world::MapObject object = std::move(asset.object);
-  for (auto& vertex : object.render_mesh.vertices) {
-    remap_material(vertex.material);
-  }
-  for (auto& triangle : object.collision_triangles) {
-    remap_material(triangle.material);
-    const auto surface = material_ids.find(triangle.surface);
-    triangle.surface =
-        surface == material_ids.end() ? triangle.material
-                                      : surface->second;
+  for (auto& object : asset.objects) {
+    for (auto& vertex : object.render_mesh.vertices) {
+      remap_material(vertex.material);
+    }
+    for (auto& triangle : object.collision_triangles) {
+      remap_material(triangle.material);
+      const auto surface = material_ids.find(triangle.surface);
+      triangle.surface =
+          surface == material_ids.end() ? triangle.material
+                                        : surface->second;
+    }
   }
 
   skate::world::GrindRailId next_rail = 1;
   for (const auto& rail : definition.grind_rails) {
     next_rail = std::max(next_rail, rail.id + 1);
   }
-  object.grind_rail_indices.clear();
+  std::vector<std::uint32_t> rail_remap;
+  rail_remap.reserve(asset.grind_rails.size());
   for (auto& rail : asset.grind_rails) {
     rail.id = next_rail++;
     for (auto& point : rail.points) {
       point = point + map_position;
     }
-    object.grind_rail_indices.push_back(
-        static_cast<std::uint32_t>(
-            definition.grind_rails.size()));
+    rail_remap.push_back(static_cast<std::uint32_t>(
+        definition.grind_rails.size()));
     definition.grind_rails.push_back(std::move(rail));
   }
 
@@ -1611,22 +1725,118 @@ std::size_t AppendSpawnedObject(
     next_object = std::max(next_object, existing.id + 1);
   }
   const std::size_t index = definition.editable_objects.size();
-  object.id = next_object;
-  object.name = asset.name + " #" + std::to_string(index + 1);
-  object.origin = map_position;
-  object.source_first_index = 0;
-  object.source_index_count = 0;
-  object.source_first_collision_triangle = 0;
-  object.source_collision_triangle_count = 0;
-  definition.editable_objects.push_back(std::move(object));
+  const std::size_t instance_number = index + 1;
+  for (auto& object : asset.objects) {
+    std::vector<std::uint32_t> remapped_grinds;
+    remapped_grinds.reserve(object.grind_rail_indices.size());
+    for (const std::uint32_t source_rail :
+         object.grind_rail_indices) {
+      if (source_rail >= rail_remap.size()) {
+        throw std::runtime_error(
+            "SKATEOBJ root references a missing grind rail");
+      }
+      remapped_grinds.push_back(rail_remap[source_rail]);
+    }
+    object.grind_rail_indices = std::move(remapped_grinds);
+    object.id = next_object++;
+    object.name =
+        asset.name + " #" + std::to_string(instance_number) + "/" +
+        object.name;
+    object.origin = object.origin + map_position;
+    object.source_first_index = 0;
+    object.source_index_count = 0;
+    object.source_first_collision_triangle = 0;
+    object.source_collision_triangle_count = 0;
+    definition.editable_objects.push_back(std::move(object));
+  }
+  {
+    std::scoped_lock lock(g_owned_physics_mutex);
+    EnsureOwnedPhysicsInitializedLocked();
+    if (HasOwnedPhysics(definition)) {
+      g_owned_physics.AppendBodies(definition, index);
+    }
+  }
+  const std::size_t root_count =
+      definition.editable_objects.size() - index;
   REXLOG_INFO(
-      "map-editor: spawned asset='{}' instance={} object_index={} "
-      "position=({:.3f},{:.3f},{:.3f}) rails={} total_objects={}",
-      asset.name, next_object, index, map_position.x, map_position.y,
-      map_position.z,
-      definition.editable_objects.back().grind_rail_indices.size(),
+      "map-editor: spawned asset='{}' format={} first_object_index={} "
+      "roots={} position=({:.3f},{:.3f},{:.3f}) rails={} total_objects={}",
+      asset.name, asset.format_version, index, root_count, map_position.x,
+      map_position.y, map_position.z, rail_remap.size(),
       definition.editable_objects.size());
   return index;
+}
+
+void AdvanceOwnedPhysics(double frame_seconds) {
+  std::scoped_lock lock(g_owned_physics_mutex);
+  EnsureOwnedPhysicsInitializedLocked();
+  if (!g_owned_physics.IsLoaded()) {
+    return;
+  }
+  g_owned_physics.Step(frame_seconds);
+  const skate::world::PhysicsTelemetry telemetry =
+      g_owned_physics.Telemetry();
+  if (telemetry.glass_break_events >
+      g_owned_physics_last_sound_break_event) {
+    g_owned_physics_last_sound_break_event =
+        telemetry.glass_break_events;
+    PlayProceduralGlassBreak();
+    REXLOG_INFO(
+        "box3d: glass break sound event={} group={} impact_speed={:.3f}",
+        telemetry.glass_break_events, telemetry.last_broken_group,
+        telemetry.last_break_speed);
+  }
+  if (telemetry.world_steps >= g_owned_physics_last_log_step + 300) {
+    g_owned_physics_last_log_step = telemetry.world_steps;
+    const auto& pose = telemetry.representative_dynamic_pose;
+    REXLOG_INFO(
+        "box3d: generation={} steps={} static={} dynamic={} contacts={} "
+        "sleeping={} player_proxy={} player_contacts={} "
+        "player_proxy_updates={} updates={} dropped_batches={} "
+        "breakable={} broken_groups={} break_events={} "
+        "last_break_group={} last_break_speed={:.3f} "
+        "accumulator={:.6f} "
+        "representative_valid={} representative_position="
+        "({:.3f},{:.3f},{:.3f}) representative_awake={}",
+        telemetry.world_generation, telemetry.world_steps,
+        telemetry.static_body_count, telemetry.dynamic_body_count,
+        telemetry.contact_count, telemetry.sleeping_body_count,
+        telemetry.player_proxy_active, telemetry.player_contact_count,
+        telemetry.player_proxy_updates,
+        telemetry.transform_updates, telemetry.dropped_step_batches,
+        telemetry.breakable_body_count, telemetry.broken_group_count,
+        telemetry.glass_break_events, telemetry.last_broken_group,
+        telemetry.last_break_speed,
+        telemetry.accumulator_seconds, pose.valid, pose.position.x,
+        pose.position.y, pose.position.z, pose.awake);
+  }
+}
+
+bool ActivePhysicsObjectPose(
+    std::size_t index,
+    skate::world::PhysicsObjectPose& out) {
+  std::scoped_lock lock(g_owned_physics_mutex);
+  EnsureOwnedPhysicsInitializedLocked();
+  out = g_owned_physics.ObjectPose(index);
+  return out.valid;
+}
+
+skate::world::PhysicsTelemetry ActivePhysicsTelemetry() {
+  std::scoped_lock lock(g_owned_physics_mutex);
+  EnsureOwnedPhysicsInitializedLocked();
+  return g_owned_physics.Telemetry();
+}
+
+void UpdateOwnedPhysicsPlayerProxy(
+    skate::world::Vec3 position,
+    skate::world::Vec3 linear_velocity,
+    bool active) {
+  std::scoped_lock lock(g_owned_physics_mutex);
+  EnsureOwnedPhysicsInitializedLocked();
+  if (g_owned_physics.IsLoaded()) {
+    g_owned_physics.SetPlayerProxy(
+        position, linear_velocity, active);
+  }
 }
 
 const skate::world::ImageTexture* ActiveImageTexture(

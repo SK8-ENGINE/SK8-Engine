@@ -11,7 +11,7 @@ if(SKATE3_STATIC_MSVC_RUNTIME)
     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 endif()
 
-project(Skate3CustomEngineLayer VERSION 0.1.0 LANGUAGES CXX)
+project(Skate3CustomEngineLayer VERSION 0.1.0 LANGUAGES C CXX)
 
 if(WIN32)
     enable_language(RC)

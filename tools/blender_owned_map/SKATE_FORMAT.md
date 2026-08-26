@@ -1,10 +1,10 @@
-# SKATE v13 binary format
+# SKATE v14 binary format
 
 All integers and IEEE-754 floats are little-endian. Strings are a `u32` byte
 length followed by UTF-8 bytes. Coordinates are right-handed Y-up metres.
 
 ```text
-char[8] magic = "SKATE13\0"
+char[8] magic = "SKATE14\0"
 u32 endian_marker = 0x12345678
 string map_name
 f32 spawn_position[3]
@@ -199,10 +199,11 @@ DEFLATE-compressed extraction manifest JSON. It preserves source archives,
 stream cells, RX2 declarations and offsets, bounds, simulation/collision/grind
 provenance, and texture decode metadata that do not belong in hot render
 records. Unknown extension tags are safely skipped after their stored payload
-has been validated.
+has been validated. A known `MOBJ` tag with an unsupported schema is rejected
+instead of being guessed.
 
-The `MOBJ` extension uses schema version 2 and preserves independently
-editable Blender mesh objects without changing the SKATE12 base layout. Its
+The `MOBJ` extension uses schema version 3 and preserves independently
+editable Blender mesh objects without changing the base layout. Its
 decoded payload is:
 
 ```text
@@ -217,6 +218,16 @@ object[object_count]:
   u32 collision_triangle_count
   u32 grind_rail_count
   u32 grind_rail_indices[grind_rail_count]
+  u32 physics_type               # 0 disabled, 1 static, 2 dynamic
+  u32 collision_shape            # 0 box, 1 sphere, 2 convex hull
+  f32 density_kg_per_cubic_metre
+  f32 friction
+  f32 restitution
+  f32 linear_damping
+  f32 angular_damping
+  f32 gravity_scale
+  u32 enable_sleep               # exactly 0 or 1
+  u32 initially_awake            # exactly 0 or 1
 ```
 
 Render and collision ranges refer to the unchanged flattened base arrays.
@@ -226,8 +237,43 @@ collision worlds. A session transform therefore drives both the per-object
 draw and its native collision aggregate. Objects linked to both `OW_VISUAL`
 and `OW_COLLISION` retain collision ownership; render-only objects keep a
 zero collision count. Grind indices associate parented Blender grind curves
-with the same runtime object pose. Schema-1 MOBJ records and older SKATE12
-packages with no `MOBJ` extension continue to load unchanged.
+with the same runtime object pose.
+
+Physics is opt-in per object and disabled by default. Box3D derives mass from
+the validated density and chosen shape. Dynamic object render transforms are
+driven by the fixed-step simulation; their source collision ranges are not
+also registered as legacy static collision, and attached grind rails are not
+registered while the object is dynamic. SKATE and Box3D both use
+right-handed, Y-up metres, so the current conversion is explicitly 1 SKATE
+metre to 1 Box3D unit.
+
+Schema-1 and schema-2 MOBJ records default to physics disabled. SKATE v12 and
+v13 packages with no physics fields continue to load unchanged.
+
+### Optional `BGRP` schema 1 extension
+
+`BGRP` adds deterministic pre-fractured break groups without changing
+SKATE14 or MOBJ schema 3. Unknown-extension compatibility therefore remains
+intact. Its decoded payload is:
+
+```text
+u32 object_count
+object[object_count]:
+  u32 map_object_id
+  u32 break_group                 # nonzero; matching groups release together
+  f32 player_impact_speed         # 0.1..30 metres/second
+  f32 linear_impulse_scale        # 0..10
+  f32 angular_impulse             # 0..10
+  f32 released_gravity_scale      # 0..4
+```
+
+Every referenced object must exist and use Box3D Dynamic physics. Authors
+normally set initial gravity to zero and Start Awake off so pre-fractured
+pieces remain locked in place. A player-proxy contact at or above the impact
+threshold arms a 50 ms resistance window before the complete group releases
+once, applies released gravity, and receives deterministic linear and angular
+impulses. Spawned prefab instances remap their local groups to unused runtime
+IDs. Group zero is the backward-compatible non-breakable default.
 
 `day_night_duration_seconds == 0` freezes celestial lighting at
 `day_night_start_hour`. With a positive duration and
@@ -297,7 +343,7 @@ partners used for intentional two-sided foliage. Exporters infer a default
 from alpha mode and common sign/decal material names, while `ow_depth_layer`
 can explicitly select 0 through 3.
 
-The loader retains read compatibility with SKATE v1 through v13. Missing v2
+The loader retains read compatibility with SKATE v1 through v14. Missing v2
 material fields use opaque, polished-concrete/smooth defaults with no
 additional PBR maps. Missing v3 cycle fields retain the original full-day
 behavior. Missing v6 environment fields use the engine's neutral sky grading

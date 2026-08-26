@@ -1129,6 +1129,8 @@ bool RequestReset() {
 
 void AppendTelemetry(std::ostream& out) {
   const map::WaterTelemetry water = map::ActiveWaterTelemetry();
+  const skate::world::PhysicsTelemetry physics =
+      map::ActivePhysicsTelemetry();
   const map::WeatherSnapshot weather =
       map::ActiveWeatherSnapshot();
   const skate::world::DayNightState celestial =
@@ -1218,6 +1220,56 @@ void AppendTelemetry(std::ostream& out) {
       << " sandbox_local_light_count=" << map::ActiveMovingLightCount()
       << " sandbox_map_ramp_count="
       << map::ActiveRampCount()
+      << " sandbox_box3d_generation="
+      << physics.world_generation
+      << " sandbox_box3d_steps="
+      << physics.world_steps
+      << " sandbox_box3d_dropped_step_batches="
+      << physics.dropped_step_batches
+      << " sandbox_box3d_transform_updates="
+      << physics.transform_updates
+      << " sandbox_box3d_static_bodies="
+      << physics.static_body_count
+      << " sandbox_box3d_dynamic_bodies="
+      << physics.dynamic_body_count
+      << " sandbox_box3d_contacts="
+      << physics.contact_count
+      << " sandbox_box3d_sleeping_bodies="
+      << physics.sleeping_body_count
+      << " sandbox_box3d_player_proxy_active="
+      << (physics.player_proxy_active ? 1 : 0)
+      << " sandbox_box3d_player_contacts="
+      << physics.player_contact_count
+      << " sandbox_box3d_player_proxy_updates="
+      << physics.player_proxy_updates
+      << " sandbox_box3d_breakable_bodies="
+      << physics.breakable_body_count
+      << " sandbox_box3d_broken_groups="
+      << physics.broken_group_count
+      << " sandbox_box3d_glass_break_events="
+      << physics.glass_break_events
+      << " sandbox_box3d_last_broken_group="
+      << physics.last_broken_group
+      << " sandbox_box3d_last_break_speed_bits="
+      << std::bit_cast<std::uint32_t>(physics.last_break_speed)
+      << " sandbox_box3d_accumulator_bits="
+      << std::bit_cast<std::uint64_t>(physics.accumulator_seconds)
+      << " sandbox_box3d_representative_valid="
+      << (physics.representative_dynamic_pose.valid ? 1 : 0)
+      << " sandbox_box3d_representative_x_bits="
+      << std::bit_cast<std::uint32_t>(
+             physics.representative_dynamic_pose.position.x)
+      << " sandbox_box3d_representative_y_bits="
+      << std::bit_cast<std::uint32_t>(
+             physics.representative_dynamic_pose.position.y)
+      << " sandbox_box3d_representative_z_bits="
+      << std::bit_cast<std::uint32_t>(
+             physics.representative_dynamic_pose.position.z)
+      << " sandbox_box3d_representative_basis_xx_bits="
+      << std::bit_cast<std::uint32_t>(
+             physics.representative_dynamic_pose.x_axis.x)
+      << " sandbox_box3d_representative_awake="
+      << (physics.representative_dynamic_pose.awake ? 1 : 0)
       << " sandbox_water_basin_count="
       << map::ActiveWaterBasinCount()
       << " sandbox_raytraced_mirror_count="
