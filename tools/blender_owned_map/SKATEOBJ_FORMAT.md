@@ -58,7 +58,11 @@ extension tags retain the normal SKATE validation/skip behavior; a future
 feature does not require changing the base geometry layout.
 
 The tracked `objects/box3d_glass_smash.skateobj` fixture contains 48
-pre-fractured, texture-free glass shards forming one flat frameless panel.
+pre-fractured glass shards forming one flat frameless panel with no visible
+texture pattern. Two uniform 1x1 RGBA swatches provide constant pane opacity
+and fully transparent internal edge faces without procedural noise.
+Each shard retains a closed collision prism, but its internal side faces use
+a zero-alpha material so the fracture seams are not visible before impact.
 Regenerate it deterministically with Blender 5 using
 `tools/blender_owned_map/create_box3d_glass_smash.py`; the generated `.blend`
 and export cache remain local-only.

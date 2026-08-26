@@ -24,6 +24,16 @@ PACKAGE_PATH = OBJECT_ROOT / "box3d_glass_smash.skateobj"
 BREAK_GROUP = 1
 
 
+def make_uniform_rgba(
+    name: str, rgba: tuple[float, float, float, float]
+) -> bpy.types.Image:
+    image = bpy.data.images.new(name, width=1, height=1, alpha=True)
+    image.colorspace_settings.name = "sRGB"
+    image.pixels.foreach_set(rgba)
+    image.update()
+    return image
+
+
 def reset_scene() -> None:
     bpy.ops.object.select_all(action="SELECT")
     bpy.ops.object.delete(use_global=False)
@@ -72,6 +82,7 @@ def add_shard(
         tuple[float, float],
     ],
     material: bpy.types.Material,
+    hidden_edge_material: bpy.types.Material,
 ) -> bpy.types.Object:
     center_x = sum(point[0] for point in triangle) / 3.0
     center_z = sum(point[1] for point in triangle) / 3.0
@@ -99,6 +110,12 @@ def add_shard(
     bpy.context.collection.objects.link(obj)
     obj.location = (center_x, 0.0, center_z)
     obj.data.materials.append(material)
+    obj.data.materials.append(hidden_edge_material)
+    # The first two polygons are the pane-facing triangles. The remaining
+    # three close the collision prism but must not reveal the pre-fracture
+    # pattern through alpha blending while the pane is intact.
+    for polygon in obj.data.polygons[2:]:
+        polygon.material_index = 1
     assign_owned_object(
         obj,
         physics_type="BOX3D_DYNAMIC",
@@ -181,20 +198,38 @@ def build() -> None:
             raise RuntimeError("unable to prepare glass SKATEOBJ scene")
 
         glass = bpy.data.materials.new("Breakable_Glass")
-        # Deliberately texture-free and nearly colourless: the assembled
-        # shards should read as one simple flat pane before impact.
+        # Uniform 1x1 RGBA swatches select the imported-material path without
+        # adding any visible texture pattern. That path supports real opacity;
+        # the procedural path deliberately adds surface noise and is opaque.
+        glass_swatch = make_uniform_rgba(
+            "Glass_Uniform_RGBA", (1.0, 1.0, 1.0, 0.28)
+        )
+        hidden_swatch = make_uniform_rgba(
+            "Glass_Hidden_RGBA", (1.0, 1.0, 1.0, 0.0)
+        )
+
         glass.diffuse_color = (0.78, 0.91, 0.96, 0.17)
+        glass["ow_albedo_image"] = glass_swatch.name
+        glass.owned_world.albedo_image = glass_swatch
         glass.owned_world.alpha_mode = "2"
         glass.owned_world.roughness = 0.04
         glass.owned_world.metallic = 0.0
         glass.owned_world.friction = 0.25
         glass.owned_world.restitution = 0.02
 
+        hidden_edges = bpy.data.materials.new("Glass_Hidden_Shard_Edges")
+        hidden_edges.diffuse_color = (0.0, 0.0, 0.0, 0.0)
+        hidden_edges["ow_albedo_image"] = hidden_swatch.name
+        hidden_edges.owned_world.albedo_image = hidden_swatch
+        hidden_edges.owned_world.alpha_mode = "2"
+        hidden_edges.owned_world.roughness = 1.0
+        hidden_edges.owned_world.metallic = 0.0
+
         shard_count = 0
         for shard_count, triangle in enumerate(
             fracture_triangles(), start=1
         ):
-            add_shard(shard_count, triangle, glass)
+            add_shard(shard_count, triangle, glass, hidden_edges)
 
         scene = bpy.context.scene
         scene["ow_map_name"] = "Box3D Glass Smash"
@@ -207,7 +242,8 @@ def build() -> None:
         export_scene(PACKAGE_PATH, force_rebuild=True)
         print(
             "SKATEOBJ_BOX3D_GLASS_OK "
-            f"shards={shard_count} frame_parts=0 textures=0 "
+            f"shards={shard_count} frame_parts=0 "
+            "visible_patterns=0 uniform_rgba_swatches=2 "
             f"{BLEND_PATH} {PACKAGE_PATH}"
         )
     finally:

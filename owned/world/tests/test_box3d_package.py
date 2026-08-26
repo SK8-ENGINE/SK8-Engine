@@ -254,10 +254,24 @@ def main() -> int:
         glass_analysis["version"] == 14
         and len(glass_roots) == 48
         and len(breakable) == 48
-        and glass_analysis["counts"]["textures"] == 0
+        and glass_analysis["counts"]["textures"] == 2
+        and [
+            (
+                texture["name"],
+                texture["width"],
+                texture["height"],
+                texture["alpha_min"],
+                texture["alpha_max"],
+            )
+            for texture in glass_analysis["texture_dimensions"]
+        ]
+        == [
+            ("Glass_Uniform_RGBA", 1, 1, 71, 71),
+            ("Glass_Hidden_RGBA", 1, 1, 0, 0),
+        ]
         and all(root["physics"]["break_group"] == 1 for root in breakable)
         and all(root["physics"]["gravity_scale"] == 0.0 for root in breakable),
-        "glass sample is not one texture-free panel of 48 locked shards",
+        "glass sample is not one uniformly shaded panel of 48 locked shards",
     )
     runtime_glass = subprocess.run(
         [str(validator), str(glass_sample), "--object-profile"],
