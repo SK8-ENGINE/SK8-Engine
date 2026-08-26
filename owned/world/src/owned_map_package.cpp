@@ -68,6 +68,7 @@ constexpr std::uint32_t kMaximumStringBytes = 64u * 1024u;
 constexpr std::uint32_t kMaximumMetadataBytes = 128u * 1024u * 1024u;
 constexpr std::uint64_t kMaximumPackageBytes = 4ull * 1024ull * 1024ull * 1024ull;
 constexpr float kAreaEpsilon = 1.0e-10f;
+constexpr std::uint32_t kTexturedSkyVertexBytes = sizeof(float) * 5u;
 
 std::uint32_t InferPresentationDepthLayer(
     const SurfaceMaterial& material) {
@@ -826,6 +827,42 @@ void Validate(MapDefinition& map) {
           texture.height > kMaximumTextureDimension)) ||
         (!empty_placeholder && !decoded && !package_backed)) {
       throw std::runtime_error("SKATE embedded texture is invalid");
+    }
+  }
+
+  const TexturedSkyDefinition& textured_sky = map.textured_sky;
+  if (textured_sky.enabled) {
+    if (textured_sky.mesh.vertices.empty() ||
+        textured_sky.mesh.indices.empty() ||
+        textured_sky.mesh.indices.size() % 3 != 0 ||
+        textured_sky.gradient_texture == 0 ||
+        textured_sky.detail_texture == 0 ||
+        textured_sky.sun_texture == 0 ||
+        !texture_ids.contains(textured_sky.gradient_texture) ||
+        !texture_ids.contains(textured_sky.detail_texture) ||
+        !texture_ids.contains(textured_sky.sun_texture) ||
+        !std::isfinite(textured_sky.elevation) ||
+        !Finite(textured_sky.gradient_tint) ||
+        !std::isfinite(textured_sky.gradient_chromaticity) ||
+        textured_sky.gradient_chromaticity < 0.0f ||
+        textured_sky.gradient_chromaticity > 1.0f ||
+        !std::isfinite(textured_sky.sun_angular_scale) ||
+        textured_sky.sun_angular_scale <= 0.0f ||
+        !std::isfinite(textured_sky.exposure_multiplier) ||
+        textured_sky.exposure_multiplier <= 0.0f) {
+      throw std::runtime_error("SKATE textured sky is invalid");
+    }
+    for (const RenderVertex& vertex : textured_sky.mesh.vertices) {
+      if (!Finite(vertex.position) || !Finite(vertex.normal) ||
+          !Finite(vertex.uv)) {
+        throw std::runtime_error("SKATE textured-sky vertex is invalid");
+      }
+    }
+    for (std::uint32_t index : textured_sky.mesh.indices) {
+      if (index >= textured_sky.mesh.vertices.size()) {
+        throw std::runtime_error(
+            "SKATE textured-sky index is out of range");
+      }
     }
   }
 
@@ -1670,6 +1707,104 @@ MapDefinition LoadOwnedMapPackage(const std::filesystem::path& path) {
         map.retail_world_metadata_json.assign(
             reinterpret_cast<const char*>(payload.data()),
             payload.size());
+      } else if (
+          tag == std::array<char, 4>{'S', 'K', 'Y', 'B'} &&
+          schema == 1) {
+        Reader sky_reader(std::move(payload));
+        const std::uint32_t vertex_count =
+            sky_reader.Scalar<std::uint32_t>();
+        const std::uint32_t index_count =
+            sky_reader.Scalar<std::uint32_t>();
+        RequireCount(
+            vertex_count, "textured-sky vertex",
+            kMaximumGeometryCount);
+        RequireCount(
+            index_count, "textured-sky index",
+            kMaximumIndexCount);
+        if (vertex_count == 0 || index_count == 0 ||
+            index_count % 3 != 0) {
+          throw std::runtime_error(
+              "SKATE textured-sky geometry is invalid");
+        }
+
+        TexturedSkyDefinition sky;
+        sky.enabled = true;
+        sky.elevation = sky_reader.Scalar<float>();
+        sky.gradient_tint = sky_reader.Vector3();
+        sky.gradient_chromaticity = sky_reader.Scalar<float>();
+        sky.sun_angular_scale = sky_reader.Scalar<float>();
+        sky.exposure_multiplier = sky_reader.Scalar<float>();
+
+        const auto read_sky_texture =
+            [&map, &sky_reader](const char* label) {
+              ImageTexture texture;
+              texture.id =
+                  static_cast<TextureId>(map.textures.size() + 1u);
+              texture.name = sky_reader.String();
+              texture.width = sky_reader.Scalar<std::uint32_t>();
+              texture.height = sky_reader.Scalar<std::uint32_t>();
+              texture.color_space = static_cast<TextureColorSpace>(
+                  sky_reader.Scalar<std::uint32_t>());
+              if (texture.width == 0 || texture.height == 0 ||
+                  texture.width > kMaximumTextureDimension ||
+                  texture.height > kMaximumTextureDimension) {
+                throw std::runtime_error(
+                    std::string("SKATE ") + label +
+                    " texture dimensions are invalid");
+              }
+              const std::uint64_t expected =
+                  std::uint64_t(texture.width) *
+                  texture.height * 4u;
+              if (expected > kMaximumTextureBytes) {
+                throw std::runtime_error(
+                    std::string("SKATE ") + label +
+                    " texture exceeds the format limit");
+              }
+              StoredPayload stored = ReadStoredPayload(
+                  sky_reader, static_cast<std::size_t>(expected), label);
+              texture.stored_rgba8_method = stored.method;
+              texture.stored_rgba8 = std::move(stored.bytes);
+              const TextureId id = texture.id;
+              map.textures.push_back(std::move(texture));
+              return id;
+            };
+        sky.gradient_texture =
+            read_sky_texture("sky-gradient");
+        sky.detail_texture = read_sky_texture("sky-detail");
+        sky.sun_texture = read_sky_texture("sky-sun");
+
+        Reader vertex_reader(ReadStoredBytes(
+            sky_reader,
+            std::size_t(vertex_count) * kTexturedSkyVertexBytes,
+            "textured-sky vertex block"));
+        sky.mesh.vertices.reserve(vertex_count);
+        for (std::uint32_t index = 0; index < vertex_count; ++index) {
+          RenderVertex vertex;
+          vertex.position = vertex_reader.Vector3();
+          vertex.uv = vertex_reader.Vector2();
+          const float length_squared =
+              Dot(vertex.position, vertex.position);
+          if (length_squared > kAreaEpsilon) {
+            vertex.normal =
+                vertex.position *
+                (-1.0f / std::sqrt(length_squared));
+          }
+          vertex.lightmap_uv = vertex.uv;
+          vertex.decal_uv = vertex.uv;
+          sky.mesh.vertices.push_back(vertex);
+        }
+        vertex_reader.RequireEnd();
+
+        Reader index_reader(ReadStoredBytes(
+            sky_reader,
+            std::size_t(index_count) * sizeof(std::uint32_t),
+            "textured-sky index block"));
+        ReadIndices(
+            index_reader, index_count, sky.mesh.indices);
+        index_reader.RequireEnd();
+        sky_reader.RequireEnd();
+        map.textured_sky = std::move(sky);
+        map.sky.enabled = true;
       } else if (tag == std::array<char, 4>{'M', 'O', 'B', 'J'}) {
         if (map.map_object_schema_version != 0) {
           throw std::runtime_error(

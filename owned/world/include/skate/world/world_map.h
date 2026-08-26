@@ -320,6 +320,22 @@ struct RenderMesh {
   std::vector<std::uint32_t> indices;
 };
 
+// Optional textured retail sky dome carried by the extensible SKYB package
+// record. The mesh remains separate from world geometry so the renderer can
+// keep it camera-relative without polluting collision or chunk bounds.
+struct TexturedSkyDefinition {
+  bool enabled = false;
+  RenderMesh mesh;
+  TextureId gradient_texture = 0;
+  TextureId detail_texture = 0;
+  TextureId sun_texture = 0;
+  float elevation = 0.0f;
+  Vec3 gradient_tint{1.0f, 1.0f, 1.0f};
+  float gradient_chromaticity = 1.0f;
+  float sun_angular_scale = 0.035f;
+  float exposure_multiplier = 1.0f;
+};
+
 struct CollisionTriangle {
   Vec3 a;
   Vec3 b;
@@ -595,6 +611,7 @@ struct MapDefinition {
   std::string retail_world_metadata_json;
   SpawnPoint spawn;
   SkyDefinition sky;
+  TexturedSkyDefinition textured_sky;
   DirectionalLightDefinition sun;
   DayNightCycleDefinition day_night_cycle;
   WeatherDefinition weather;

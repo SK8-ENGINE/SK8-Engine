@@ -1014,10 +1014,43 @@ VisualMesh BuildEditorGizmoVisualMesh() {
 }
 
 VisualMesh BuildSkyMesh() {
-  const skate::world::SkyDefinition& sky =
-      ActiveWorld().Definition().sky;
+  const skate::world::MapDefinition& definition =
+      ActiveWorld().Definition();
+  const skate::world::SkyDefinition& sky = definition.sky;
   VisualMesh mesh;
   if (!sky.enabled) {
+    return mesh;
+  }
+  const skate::world::TexturedSkyDefinition& textured =
+      definition.textured_sky;
+  if (textured.enabled) {
+    if (textured.mesh.vertices.size() >
+        std::numeric_limits<std::uint16_t>::max()) {
+      throw std::runtime_error(
+          "textured sky exceeds the renderer vertex limit");
+    }
+    mesh.vertices.reserve(textured.mesh.vertices.size());
+    for (const skate::world::RenderVertex& vertex :
+         textured.mesh.vertices) {
+      mesh.vertices.push_back(ConvertVertex(vertex));
+    }
+    mesh.indices.reserve(textured.mesh.indices.size());
+    for (std::uint32_t index : textured.mesh.indices) {
+      mesh.indices.push_back(static_cast<std::uint16_t>(index));
+    }
+    VisualDraw draw;
+    draw.index_count =
+        static_cast<std::uint32_t>(mesh.indices.size());
+    draw.color[3] = 1.0f;
+    draw.albedo_texture = textured.gradient_texture;
+    draw.retail_detail_texture = textured.detail_texture;
+    draw.retail_specular_texture = textured.sun_texture;
+    draw.retail_shader_family = static_cast<std::uint32_t>(
+        skate::world::RetailShaderFamily::Sky);
+    draw.retail_render_flags = static_cast<std::uint32_t>(
+        skate::world::RetailRenderFlags::Unlit);
+    draw.cull_backfaces = false;
+    mesh.draws.push_back(draw);
     return mesh;
   }
   constexpr int kSegments = 48;
