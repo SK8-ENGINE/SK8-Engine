@@ -42,8 +42,6 @@
 # Reviewed first-party example map and its self-contained Blender source.
 !/maps/blender_bake_showcase.skate
 !/maps/blender_bake_showcase.blend
-!/maps/map_editor_mvp.skate
-!/maps/map_editor_mvp.blend
 !/objects/test_grind_ledge.skateobj
 /maps/blender_bake_showcase_textures/
 
@@ -71,6 +69,8 @@ steam_api64.dll
 /RUN_MULTIPLAYER_*.bat
 /RELAUNCH_MULTIPLAYER_*.bat
 /Run-University-*.bat
+/Run-MapEditorVisualCheck.bat
+/Run-University*PerformanceCheck.bat
 
 # Editor and CMake scratch
 /.vs/

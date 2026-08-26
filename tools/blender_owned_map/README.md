@@ -342,7 +342,7 @@ In the development workspace this creates:
 - `maps/blender_bake_showcase.blend`
 - `maps/blender_bake_showcase.skate`
 
-The current SKATE v12 build preserves the park's static Blender features as
+The current SKATE v13 build preserves the park's static Blender features as
 independent editor objects. Each collision proxy is associated with its
 visual owner, and each complete rail owns its matching grind spline.
 

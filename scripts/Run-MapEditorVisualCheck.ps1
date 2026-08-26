@@ -218,14 +218,21 @@ try {
         }
     }
 
+    $releaseBaseline = '8c0769b3ac7923f89c021da6ca60d20361b12935'
     $head = (& git rev-parse HEAD).Trim()
-    if ($LASTEXITCODE -ne 0 -or
-        $head -ne '8c0769b3ac7923f89c021da6ca60d20361b12935') {
-        throw "Wrong map-editor baseline: $head"
+    & git merge-base --is-ancestor $releaseBaseline $head
+    if ($LASTEXITCODE -ne 0) {
+        throw "Map-editor HEAD $head does not descend from $releaseBaseline"
     }
     $runtimeHead = (& git -C third_party/rexglue-sdk rev-parse HEAD).Trim()
-    if ($runtimeHead -ne '3818a4832e2bd03ff5a1a2e93c52b855dc181096') {
-        throw "Wrong runtime submodule baseline: $runtimeHead"
+    $expectedRuntimeHead = (
+        & git rev-parse 'HEAD:third_party/rexglue-sdk'
+    ).Trim()
+    if ($runtimeHead -ne $expectedRuntimeHead) {
+        throw (
+            "Runtime submodule checkout $runtimeHead does not match " +
+            "the recorded Git pointer $expectedRuntimeHead."
+        )
     }
 
     $codegenXex = Join-Path $CodegenGameDataRoot 'default.xex'
@@ -501,7 +508,7 @@ try {
     Write-Host 'Space up; Q/C down; Shift fast; Ctrl slow; E opens the object list;'
     Write-Host 'LMB selects; drag red/green/blue arrows to move on X/Y/Z;'
     Write-Host 'drag the matching coloured rings to rotate; release LMB to commit; G exits.'
-    Write-Host 'F6 screenshot; Alt+F6 draw-distance marker.'
+    Write-Host 'F6 native menu; Shift+F6 screenshot; Alt+F6 draw-distance marker.'
     Write-Host ''
     if ($UniversityPerformanceMode -ne 'None') {
         if ($UniversityPerformanceMode -eq 'Editable') {

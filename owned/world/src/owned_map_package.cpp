@@ -482,13 +482,6 @@ const SurfaceMaterial* FindMaterial(const MapDefinition& map,
   return found == map.materials.end() ? nullptr : &*found;
 }
 
-const ImageTexture* FindTexture(const MapDefinition& map, TextureId id) {
-  const auto found = std::find_if(
-      map.textures.begin(), map.textures.end(),
-      [id](const ImageTexture& texture) { return texture.id == id; });
-  return found == map.textures.end() ? nullptr : &*found;
-}
-
 void ReadMapObjects(std::vector<std::uint8_t> payload,
                     std::uint32_t schema, MapDefinition& map) {
   Reader reader(std::move(payload));

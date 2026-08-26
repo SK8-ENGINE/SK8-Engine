@@ -221,16 +221,17 @@ the game is not the foreground window. Changes affect rendering, native
 collision, and associated grind rails for the current run only and are not
 saved.
 
-The release F6 screenshot bind remains available on F6. The draw-distance
-debug marker is Alt+F6 (or LB+B), and the standalone drone camera remains on
-End outside editor mode.
+The native vanilla-style menu remains on F6. Screenshots use Shift+F6, the
+draw-distance debug marker is Alt+F6 (or LB+B), and the standalone drone
+camera remains on End outside editor mode.
 
-Use `Run-MapEditorVisualCheck.bat` for the dedicated three-object validation
-map. The script performs incremental Release/test builds, stages an isolated
-portable run, launches the game only when invoked by the user, and writes
-timestamped event and STATUS telemetry logs under `out/map-editor-runs`.
-`Run-MapEditorVisualCheck.bat -FullRebuild` is the optional troubleshooting
-path; ordinary checks should remain incremental.
+Use `scripts/Run-MapEditorVisualCheck.ps1 -UseGeneratedEditorMap` for the
+dedicated three-object validation map. The script performs incremental
+Release/test builds, generates the validation asset locally, stages an
+isolated portable run, launches the game only when invoked by the user, and
+writes timestamped event and STATUS telemetry logs under
+`out/map-editor-runs`. Add `-FullRebuild` only for troubleshooting; ordinary
+checks should remain incremental.
 
 The visual-check build verifies the expanded retail codegen image separately
 from the packaged runtime `game` directory, and restores the reviewed

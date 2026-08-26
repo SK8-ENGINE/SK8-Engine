@@ -9,7 +9,7 @@
 namespace skate::world {
 
 // A spawnable prefab extracted from the constrained .skateobj profile of the
-// SKATE12 package. Geometry, collision, and authored grind points are all in
+// supported SKATE package. Geometry, collision, and authored grind points are
 // the prefab root's local space.
 struct SkateObjectAsset {
   std::string name;
