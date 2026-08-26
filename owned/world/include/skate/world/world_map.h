@@ -320,9 +320,10 @@ struct RenderMesh {
   std::vector<std::uint32_t> indices;
 };
 
-// Optional textured retail sky dome carried by the extensible SKYB package
-// record. The mesh remains separate from world geometry so the renderer can
-// keep it camera-relative without polluting collision or chunk bounds.
+// Optional textured retail sky carried by the extensible SKYB package
+// record. Retail stores a four-vertex projection surface that its sky vertex
+// shader expands around the camera; we retain that source mesh for validation
+// and provenance while the native renderer reconstructs the equivalent dome.
 struct TexturedSkyDefinition {
   bool enabled = false;
   RenderMesh mesh;

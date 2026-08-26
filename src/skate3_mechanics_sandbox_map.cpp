@@ -1023,36 +1023,12 @@ VisualMesh BuildSkyMesh() {
   }
   const skate::world::TexturedSkyDefinition& textured =
       definition.textured_sky;
-  if (textured.enabled) {
-    if (textured.mesh.vertices.size() >
-        std::numeric_limits<std::uint16_t>::max()) {
-      throw std::runtime_error(
-          "textured sky exceeds the renderer vertex limit");
-    }
-    mesh.vertices.reserve(textured.mesh.vertices.size());
-    for (const skate::world::RenderVertex& vertex :
-         textured.mesh.vertices) {
-      mesh.vertices.push_back(ConvertVertex(vertex));
-    }
-    mesh.indices.reserve(textured.mesh.indices.size());
-    for (std::uint32_t index : textured.mesh.indices) {
-      mesh.indices.push_back(static_cast<std::uint16_t>(index));
-    }
-    VisualDraw draw;
-    draw.index_count =
-        static_cast<std::uint32_t>(mesh.indices.size());
-    draw.color[3] = 1.0f;
-    draw.albedo_texture = textured.gradient_texture;
-    draw.retail_detail_texture = textured.detail_texture;
-    draw.retail_specular_texture = textured.sun_texture;
-    draw.retail_shader_family = static_cast<std::uint32_t>(
-        skate::world::RetailShaderFamily::Sky);
-    draw.retail_render_flags = static_cast<std::uint32_t>(
-        skate::world::RetailRenderFlags::Unlit);
-    draw.cull_backfaces = false;
-    mesh.draws.push_back(draw);
-    return mesh;
-  }
+  // Retail's four authored vertices are inputs to sky_defaultVS, not literal
+  // world geometry. That shader expands the projection surface around the
+  // camera and supplies a direction for every sky pixel. Feeding the tiny
+  // source quad through our ordinary scene VS leaves only the clear colour
+  // visible. Reconstruct the equivalent camera-centred projection surface as
+  // a sphere; its UVs map the complete 360-degree gradient/detail panoramas.
   constexpr int kSegments = 48;
   constexpr int kBands = 16;
   constexpr float kPi = 3.14159265358979323846f;
@@ -1096,6 +1072,15 @@ VisualMesh BuildSkyMesh() {
   // zenith/horizon/nadir palette. One draw avoids visible latitude bands.
   draw.index_count = static_cast<uint32_t>(mesh.indices.size());
   draw.color[3] = 1.0f;
+  if (textured.enabled) {
+    draw.albedo_texture = textured.gradient_texture;
+    draw.retail_detail_texture = textured.detail_texture;
+    draw.retail_specular_texture = textured.sun_texture;
+    draw.retail_shader_family = static_cast<std::uint32_t>(
+        skate::world::RetailShaderFamily::Sky);
+    draw.retail_render_flags = static_cast<std::uint32_t>(
+        skate::world::RetailRenderFlags::Unlit);
+  }
   mesh.draws.push_back(draw);
   return mesh;
 }
