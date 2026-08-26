@@ -168,8 +168,18 @@ set(SKATE3_PATCHED_EAWEBKIT_XEX_LINE "")
 # control-flow edges. Release generation intentionally preserves the existing
 # guarded stubs instead of requiring an incremental generated cache.
 set(SKATE3_CODEGEN_ARGS "--force")
-set(SKATE3_FUNCTION_CONFIG_INCLUDES
-    "  \"${SKATE3_SOURCE_DIR_CONFIG}/config/skate3_functions.toml\",")
+if(NOT SKATE3_EFFECTIVE_TITLE_UPDATE_PACKAGE STREQUAL ""
+   OR SKATE3_HAS_LOOSE_TITLE_UPDATE
+   OR SKATE3_RUNTIME_TITLE_UPDATE)
+    # TU3 adds valid alternate entry points even when host code is deliberately
+    # generated from the stable retail image. The TU boundary config describes
+    # those entry points; it does not opt into patched-image code generation.
+    set(SKATE3_FUNCTION_CONFIG_INCLUDES
+        "  \"${SKATE3_SOURCE_DIR_CONFIG}/config/skate3_tu_functions.toml\",")
+else()
+    set(SKATE3_FUNCTION_CONFIG_INCLUDES
+        "  \"${SKATE3_SOURCE_DIR_CONFIG}/config/skate3_functions.toml\",")
+endif()
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 if(NOT SKATE3_EFFECTIVE_TITLE_UPDATE_PACKAGE STREQUAL "")
     if(NOT EXISTS "${SKATE3_EFFECTIVE_TITLE_UPDATE_PACKAGE}")
@@ -224,8 +234,6 @@ if(NOT SKATE3_EFFECTIVE_TITLE_UPDATE_PACKAGE STREQUAL "")
             "patched_file_path = \"${SKATE3_TITLE_UPDATE_DEFAULT_XEX_CONFIG}\"")
         set(SKATE3_PATCHED_EAWEBKIT_XEX_LINE
             "patched_file_path = \"${SKATE3_TITLE_UPDATE_EAWEBKIT_XEX_CONFIG}\"")
-        set(SKATE3_FUNCTION_CONFIG_INCLUDES
-            "  \"${SKATE3_SOURCE_DIR_CONFIG}/config/skate3_functions.toml\",\n  \"${SKATE3_SOURCE_DIR_CONFIG}/config/skate3_tu_functions.toml\",")
         message(STATUS
             "Skate 3 TU3-patched codegen enabled: ${SKATE3_EFFECTIVE_TITLE_UPDATE_PACKAGE}")
     else()
@@ -459,6 +467,18 @@ endif()
 
 target_link_libraries(skate3 PRIVATE rex::runtime skate_owned_world snappy)
 rexglue_configure_target(skate3)
+
+if(NOT SKATE3_EFFECTIVE_TITLE_UPDATE_PACKAGE STREQUAL ""
+   OR SKATE3_HAS_LOOSE_TITLE_UPDATE
+   OR SKATE3_RUNTIME_TITLE_UPDATE)
+    add_custom_target(skate3_validate_generated_tu_functions
+        COMMAND ${CMAKE_COMMAND}
+            -DGENERATED_INIT=${CMAKE_CURRENT_SOURCE_DIR}/generated/skate3_init.cpp
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/ValidateSkate3GeneratedTuFunctions.cmake
+        COMMENT "Validating TU3 generated function boundaries"
+        VERBATIM)
+    add_dependencies(skate3 skate3_validate_generated_tu_functions)
+endif()
 
 if(APPLE)
     target_link_options(skate3 PRIVATE -Wl,-stack_size,0x4000000)
