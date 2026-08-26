@@ -1,3 +1,4 @@
+#include "skate/world/box3d_physics.h"
 #include "skate/world/grind_spline.h"
 #include "skate/world/owned_map_package.h"
 #include "skate/world/render_world.h"
@@ -55,11 +56,21 @@ int main(int argc, char** argv) {
               std::filesystem::path(argv[1]));
       std::cout << "SKATEOBJ_PROFILE_OK"
                 << " name=" << object.name
-                << " vertices=" << object.object.render_mesh.vertices.size()
-                << " collision="
-                << object.object.collision_triangles.size()
+                << " version=" << object.format_version
+                << " roots=" << object.objects.size()
                 << " rails=" << object.grind_rails.size()
                 << '\n';
+      for (const skate::world::MapObject& root : object.objects) {
+        std::cout << "SKATEOBJ_ROOT"
+                  << " name=" << root.name
+                  << " vertices=" << root.render_mesh.vertices.size()
+                  << " collision=" << root.collision_triangles.size()
+                  << " physics="
+                  << static_cast<std::uint32_t>(root.physics.type)
+                  << " shape="
+                  << static_cast<std::uint32_t>(root.physics.shape)
+                  << '\n';
+      }
       for (const skate::world::GrindRail& rail : object.grind_rails) {
         std::cout << "SKATEOBJ_GRIND"
                   << " name=" << rail.name
@@ -73,6 +84,23 @@ int main(int argc, char** argv) {
                     << last.z;
         }
         std::cout << '\n';
+      }
+      const bool has_physics = std::any_of(
+          map.editable_objects.begin(), map.editable_objects.end(),
+          [](const skate::world::MapObject& root) {
+            return root.physics.type !=
+                   skate::world::ObjectPhysicsType::Disabled;
+          });
+      if (has_physics) {
+        skate::world::OwnedPhysicsWorld physics;
+        physics.Load(map);
+        const skate::world::PhysicsTelemetry telemetry =
+            physics.Telemetry();
+        std::cout << "SKATEOBJ_PHYSICS_OK"
+                  << " static=" << telemetry.static_body_count
+                  << " dynamic=" << telemetry.dynamic_body_count
+                  << " generation=" << telemetry.world_generation
+                  << '\n';
       }
     }
     skate::world::Vec3 minimum{

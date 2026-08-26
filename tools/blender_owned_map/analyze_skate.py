@@ -101,9 +101,10 @@ def analyze_package(
         b"SKATE11\0",
         b"SKATE12\0",
         b"SKATE13\0",
+        b"SKATE14\0",
     ):
         raise PackageError(
-            f"unsupported magic {magic!r}; expected SKATE v8-v13"
+            f"unsupported magic {magic!r}; expected SKATE v8-v14"
         )
     version = int(magic[5:7])
     if reader.u32("endian marker") != 0x12345678:
@@ -450,7 +451,14 @@ def analyze_package(
                 decoded_size, f"extension {extension_index}"
             )
             extension_tags.append(tag)
-            if tag == "MOBJ" and schema in (1, 2):
+            if tag == "MOBJ":
+                if schema not in (1, 2, 3) or (
+                    schema == 3 and version < 14
+                ):
+                    raise PackageError(
+                        f"MOBJ schema {schema} is incompatible with "
+                        f"SKATE v{version}"
+                    )
                 object_reader = Reader(payload)
                 object_count = object_reader.u32("MOBJ object count")
                 for object_index in range(object_count):
@@ -489,6 +497,54 @@ def analyze_package(
                             )
                             for grind in range(grind_count)
                         ]
+                    physics = {
+                        "type": 0,
+                        "shape": 0,
+                        "density": 100.0,
+                        "friction": 0.55,
+                        "restitution": 0.05,
+                        "linear_damping": 0.05,
+                        "angular_damping": 0.15,
+                        "gravity_scale": 1.0,
+                        "enable_sleep": True,
+                        "initially_awake": True,
+                    }
+                    if schema >= 3:
+                        values = struct.unpack(
+                            "<II6fII",
+                            object_reader.take(
+                                40,
+                                f"MOBJ object {object_index} physics",
+                            ),
+                        )
+                        if (
+                            values[0] > 2
+                            or values[1] > 2
+                            or values[8] > 1
+                            or values[9] > 1
+                            or not 0.0 < values[2] <= 100000.0
+                            or not 0.0 <= values[3] <= 2.0
+                            or not 0.0 <= values[4] <= 1.0
+                            or not 0.0 <= values[5] <= 100.0
+                            or not 0.0 <= values[6] <= 100.0
+                            or not -10.0 <= values[7] <= 10.0
+                        ):
+                            raise PackageError(
+                                f"MOBJ object {object_index} has invalid "
+                                "physics metadata"
+                            )
+                        physics = {
+                            "type": values[0],
+                            "shape": values[1],
+                            "density": values[2],
+                            "friction": values[3],
+                            "restitution": values[4],
+                            "linear_damping": values[5],
+                            "angular_damping": values[6],
+                            "gravity_scale": values[7],
+                            "enable_sleep": bool(values[8]),
+                            "initially_awake": bool(values[9]),
+                        }
                     map_objects.append(
                         {
                             "id": object_id,
@@ -499,6 +555,7 @@ def analyze_package(
                             "first_collision": object_first_collision,
                             "collision_count": object_collision_count,
                             "grind_indices": grind_indices,
+                            "physics": physics,
                         }
                     )
                 if object_reader.offset != len(payload):

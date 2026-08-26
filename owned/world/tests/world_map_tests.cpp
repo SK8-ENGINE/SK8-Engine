@@ -1,3 +1,4 @@
+#include "skate/world/box3d_physics.h"
 #include "skate/world/maps.h"
 #include "skate/world/grind_spline.h"
 #include "skate/world/map_editor.h"
@@ -78,6 +79,46 @@ float ReadBeF32(const std::vector<std::uint8_t>& bytes,
   return std::bit_cast<float>(ReadBeU32(bytes, offset));
 }
 
+skate::world::MapDefinition MakePhysicsTestMap(
+    std::size_t cube_count) {
+  using namespace skate::world;
+  MapDefinition map;
+  map.name = "box3d_test";
+  map.collision_triangles = {
+      {
+          .a = {-20.0f, 0.0f, -20.0f},
+          .b = {20.0f, 0.0f, 20.0f},
+          .c = {20.0f, 0.0f, -20.0f},
+      },
+      {
+          .a = {-20.0f, 0.0f, -20.0f},
+          .b = {-20.0f, 0.0f, 20.0f},
+          .c = {20.0f, 0.0f, 20.0f},
+      },
+  };
+  for (std::size_t index = 0; index < cube_count; ++index) {
+    MapObject cube;
+    cube.id = static_cast<MapObjectId>(index + 1);
+    cube.name = "cube_" + std::to_string(index);
+    cube.origin = {
+        index % 2 == 0 ? 0.0f : 0.08f,
+        0.55f + static_cast<float>(index) * 1.05f,
+        0.0f,
+    };
+    cube.local_bounds_min = {-0.5f, -0.5f, -0.5f};
+    cube.local_bounds_max = {0.5f, 0.5f, 0.5f};
+    cube.physics.type = ObjectPhysicsType::Dynamic;
+    cube.physics.shape = ObjectCollisionShape::Box;
+    cube.physics.density = 120.0f;
+    cube.physics.friction = 0.7f;
+    cube.physics.restitution = 0.0f;
+    cube.physics.linear_damping = 0.05f;
+    cube.physics.angular_damping = 0.2f;
+    map.editable_objects.push_back(std::move(cube));
+  }
+  return map;
+}
+
 }  // namespace
 
 int main() {
@@ -88,7 +129,7 @@ int main() {
         std::filesystem::temp_directory_path() /
         "skate_owned_world_future_format_test.skate";
     const std::array<std::uint8_t, 12> header = {
-        'S', 'K', 'A', 'T', 'E', '1', '4', '\0',
+        'S', 'K', 'A', 'T', 'E', '1', '5', '\0',
         0x78, 0x56, 0x34, 0x12};
     {
       std::ofstream output(
@@ -108,6 +149,67 @@ int main() {
     std::filesystem::remove(future_package, ec);
     Require(rejected_as_future,
             "future SKATE versions must request a newer runtime");
+  }
+
+  {
+    MapDefinition physics_map = MakePhysicsTestMap(3);
+    OwnedPhysicsWorld physics;
+    physics.Load(physics_map);
+    Require(
+        physics.IsLoaded() && physics.HasBody(0) &&
+            physics.HasBody(1) && physics.HasBody(2),
+        "Box3D did not create one body per enabled owned object");
+    PhysicsTelemetry telemetry = physics.Telemetry();
+    Require(
+        telemetry.static_body_count == 1 &&
+            telemetry.dynamic_body_count == 3 &&
+            telemetry.world_steps == 0,
+        "Box3D initial body telemetry is incorrect");
+
+    const float initial_top = physics.ObjectPose(2).position.y;
+    physics.Step(kBox3DFixedTimeStepSeconds * 0.49);
+    Require(
+        physics.Telemetry().world_steps == 0,
+        "Box3D fixed-step accumulator advanced too early");
+    physics.Step(kBox3DFixedTimeStepSeconds * 0.51);
+    Require(
+        physics.Telemetry().world_steps == 1,
+        "Box3D fixed-step accumulator did not advance at 60 Hz");
+
+    for (int frame = 0; frame < 12 * 120; ++frame) {
+      physics.Step(1.0 / 120.0);
+    }
+    const PhysicsObjectPose bottom = physics.ObjectPose(0);
+    const PhysicsObjectPose middle = physics.ObjectPose(1);
+    const PhysicsObjectPose top = physics.ObjectPose(2);
+    Require(
+        bottom.valid && middle.valid && top.valid &&
+            top.position.y < initial_top &&
+            bottom.position.y > 0.35f &&
+            bottom.position.y < 0.75f &&
+            middle.position.y > bottom.position.y + 0.75f &&
+            top.position.y > middle.position.y + 0.75f,
+        "Box3D cube stack did not fall onto static owned-world collision "
+        "and settle independently");
+    Require(
+        std::abs(Length(bottom.x_axis) - 1.0f) < 0.01f &&
+            std::abs(Length(bottom.y_axis) - 1.0f) < 0.01f &&
+            physics.Telemetry().contact_count >= 3,
+        "Box3D transform propagation or contact telemetry is invalid");
+
+    const std::uint64_t generation =
+        physics.Telemetry().world_generation;
+    physics.Load(MakePhysicsTestMap(1));
+    Require(
+        physics.Telemetry().world_generation == generation + 1 &&
+            physics.Telemetry().dynamic_body_count == 1 &&
+            physics.HasBody(0) && !physics.HasBody(1),
+        "Box3D map reload left stale owned bodies behind");
+    physics.Reset();
+    Require(
+        !physics.IsLoaded() && !physics.HasBody(0) &&
+            physics.Telemetry().dynamic_body_count == 0,
+        "Box3D reset did not destroy the owned world");
   }
 
   {
@@ -165,14 +267,57 @@ int main() {
     SkateObjectAsset asset =
         ExtractSkateObjectAsset(std::move(prefab_package));
     Require(asset.name == "Manual Pad" &&
-                asset.object.origin.x == 0.0f &&
-                asset.object.grind_rail_indices ==
+                asset.objects.size() == 1 &&
+                asset.objects[0].origin.x == 0.0f &&
+                asset.objects[0].grind_rail_indices ==
                     std::vector<std::uint32_t>{0} &&
                 NearlyEqual(asset.grind_rails[0].points[0].x, 0.0f) &&
                 NearlyEqual(asset.grind_rails[0].points[0].z, 0.5f) &&
                 NearlyEqual(asset.grind_rails[0].points[1].x, 2.0f) &&
                 NearlyEqual(asset.grind_rails[0].points[1].z, 0.5f),
             "SKATEOBJ profile did not normalize its root and grind spline");
+  }
+
+  {
+    MapDefinition prefab_package;
+    prefab_package.package_version = 14;
+    prefab_package.map_object_schema_version = 3;
+    prefab_package.name = "Box3D Pair";
+    prefab_package.spawn.position = {10.0f, 0.0f, -2.0f};
+    prefab_package.render_mesh.indices = {0, 1, 2, 3, 4, 5};
+    prefab_package.collision_triangles.resize(2);
+    for (std::size_t index = 0; index < 2; ++index) {
+      MapObject root;
+      root.id = static_cast<MapObjectId>(index + 1);
+      root.name = "Cube" + std::to_string(index + 1);
+      root.origin = {
+          10.0f + static_cast<float>(index) * 2.0f, 1.0f, -2.0f};
+      root.source_first_index =
+          static_cast<std::uint32_t>(index * 3);
+      root.source_index_count = 3;
+      root.source_first_collision_triangle =
+          static_cast<std::uint32_t>(index);
+      root.source_collision_triangle_count = 1;
+      root.render_mesh.indices = {0, 1, 2};
+      root.collision_triangles.resize(1);
+      root.physics.type = ObjectPhysicsType::Dynamic;
+      root.physics.shape = ObjectCollisionShape::Box;
+      prefab_package.editable_objects.push_back(std::move(root));
+    }
+
+    SkateObjectAsset asset =
+        ExtractSkateObjectAsset(std::move(prefab_package));
+    Require(
+        asset.format_version == 2 && asset.objects.size() == 2 &&
+            NearlyEqual(asset.objects[0].origin.x, 0.0f) &&
+            NearlyEqual(asset.objects[0].origin.y, 1.0f) &&
+            NearlyEqual(asset.objects[1].origin.x, 2.0f) &&
+            asset.objects[0].physics.type ==
+                ObjectPhysicsType::Dynamic &&
+            asset.objects[1].physics.shape ==
+                ObjectCollisionShape::Box,
+        "SKATEOBJ v2 did not preserve independent physics roots in "
+        "prefab-pivot space");
   }
 
   {

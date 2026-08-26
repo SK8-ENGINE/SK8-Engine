@@ -232,6 +232,7 @@ std::vector<GrindRail> TransformEditorGrindRails(
         "editor grind transforms do not match object count");
   }
   std::vector<GrindRail> rails = map.grind_rails;
+  std::vector<bool> dynamic_owned_rails(rails.size(), false);
   for (std::size_t object_index = 0;
        object_index < map.editable_objects.size(); ++object_index) {
     const MapObject& object = map.editable_objects[object_index];
@@ -242,11 +243,21 @@ std::vector<GrindRail> TransformEditorGrindRails(
         throw std::invalid_argument(
             "editor object references an invalid grind rail");
       }
+      if (object.physics.type == ObjectPhysicsType::Dynamic) {
+        dynamic_owned_rails[rail_index] = true;
+        continue;
+      }
       for (Vec3& point : rails[rail_index].points) {
         point = TransformEditorPoint(transform, point - object.origin);
       }
     }
   }
+  std::size_t source_index = 0;
+  std::erase_if(
+      rails,
+      [&dynamic_owned_rails, &source_index](const GrindRail&) {
+        return dynamic_owned_rails[source_index++];
+      });
   return rails;
 }
 

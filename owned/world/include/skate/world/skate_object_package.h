@@ -10,12 +10,14 @@ namespace skate::world {
 
 // A spawnable prefab extracted from the constrained .skateobj profile of the
 // supported SKATE package. Geometry, collision, and authored grind points are
-// the prefab root's local space.
+// in prefab-pivot space. v1 has one root; v2 may contain multiple independent
+// roots such as a Box3D cube stack.
 struct SkateObjectAsset {
+  std::uint32_t format_version = 1;
   std::string name;
   std::vector<SurfaceMaterial> materials;
   std::vector<ImageTexture> textures;
-  MapObject object;
+  std::vector<MapObject> objects;
   std::vector<GrindRail> grind_rails;
 };
 

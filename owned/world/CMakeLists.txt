@@ -17,7 +17,16 @@ if(NOT TARGET ZLIB::ZLIBSTATIC)
   )
 endif()
 
+if(NOT TARGET box3d::box3d)
+  add_subdirectory(
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../third_party/box3d"
+    "${CMAKE_CURRENT_BINARY_DIR}/box3d"
+    EXCLUDE_FROM_ALL
+  )
+endif()
+
 add_library(skate_owned_world STATIC
+  src/box3d_physics.cpp
   src/grind_spline.cpp
   src/map_editor.cpp
   src/owned_map_package.cpp
@@ -29,7 +38,11 @@ add_library(skate_owned_world STATIC
   src/world_map.cpp
 )
 
-target_link_libraries(skate_owned_world PRIVATE ZLIB::ZLIBSTATIC)
+target_link_libraries(
+  skate_owned_world
+  PRIVATE ZLIB::ZLIBSTATIC
+  PUBLIC box3d::box3d
+)
 
 target_include_directories(skate_owned_world
   PUBLIC
@@ -47,6 +60,8 @@ endif()
 option(SKATE_OWNED_WORLD_BUILD_TESTS "Build owned world tests" ON)
 
 if(SKATE_OWNED_WORLD_BUILD_TESTS)
+  find_package(Python3 REQUIRED COMPONENTS Interpreter)
+
   add_executable(skate_owned_world_tests
     tests/world_map_tests.cpp
   )
@@ -95,4 +110,14 @@ if(SKATE_OWNED_WORLD_BUILD_TESTS)
   )
 
   add_test(NAME skate_owned_world_tests COMMAND skate_owned_world_tests)
+  add_test(
+    NAME skate_box3d_package_tests
+    COMMAND
+      ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_box3d_package.py
+      ${CMAKE_CURRENT_SOURCE_DIR}/../../objects/box3d_cube_pyramid.skateobj
+      $<TARGET_FILE:skate_owned_map_validate>
+      ${CMAKE_CURRENT_SOURCE_DIR}/../../objects/test_grind_ledge.skateobj
+      ${CMAKE_CURRENT_SOURCE_DIR}/../../maps/blender_bake_showcase.skate
+  )
 endif()

@@ -1,5 +1,6 @@
 #include "skate3_mechanics_sandbox_map.h"
 
+#include "skate/world/box3d_physics.h"
 #include "skate/world/maps.h"
 #include "skate/world/owned_map_package.h"
 #include "skate/world/render_world.h"
@@ -55,6 +56,9 @@ VisualMesh g_rain_visual;
 VisualMesh g_lightning_visual;
 
 skate::world::WorldMap& ActiveWorld();
+skate::world::OwnedPhysicsWorld g_owned_physics;
+bool g_owned_physics_initialized = false;
+std::uint64_t g_owned_physics_last_log_step = 0;
 
 constexpr float kRadiansToDegrees = 57.29577951308232f;
 constexpr float kDegreesToRadians = 0.017453292519943295f;
@@ -419,6 +423,41 @@ skate::world::WorldMap& ActiveWorld() {
     }
   }());
   return world;
+}
+
+bool HasOwnedPhysics(const skate::world::MapDefinition& definition) {
+  return std::any_of(
+      definition.editable_objects.begin(),
+      definition.editable_objects.end(),
+      [](const skate::world::MapObject& object) {
+        return object.physics.type !=
+               skate::world::ObjectPhysicsType::Disabled;
+      });
+}
+
+void ReloadOwnedPhysics() {
+  g_owned_physics.Reset();
+  const skate::world::MapDefinition& definition =
+      ActiveWorld().Definition();
+  if (HasOwnedPhysics(definition)) {
+    g_owned_physics.Load(definition);
+    const skate::world::PhysicsTelemetry telemetry =
+        g_owned_physics.Telemetry();
+    REXLOG_INFO(
+        "box3d: loaded generation={} static_bodies={} dynamic_bodies={} "
+        "objects={} fixed_hz=60 substeps=4 skate_metres_per_unit={:.3f}",
+        telemetry.world_generation, telemetry.static_body_count,
+        telemetry.dynamic_body_count, definition.editable_objects.size(),
+        skate::world::kSkateMetresPerBox3DUnit);
+  }
+  g_owned_physics_initialized = true;
+  g_owned_physics_last_log_step = 0;
+}
+
+void EnsureOwnedPhysicsInitialized() {
+  if (!g_owned_physics_initialized) {
+    ReloadOwnedPhysics();
+  }
 }
 
 const skate::world::SurfaceMaterial* FindMaterial(
@@ -1578,31 +1617,32 @@ std::size_t AppendSpawnedObject(
         id = found->second;
       };
 
-  skate::world::MapObject object = std::move(asset.object);
-  for (auto& vertex : object.render_mesh.vertices) {
-    remap_material(vertex.material);
-  }
-  for (auto& triangle : object.collision_triangles) {
-    remap_material(triangle.material);
-    const auto surface = material_ids.find(triangle.surface);
-    triangle.surface =
-        surface == material_ids.end() ? triangle.material
-                                      : surface->second;
+  for (auto& object : asset.objects) {
+    for (auto& vertex : object.render_mesh.vertices) {
+      remap_material(vertex.material);
+    }
+    for (auto& triangle : object.collision_triangles) {
+      remap_material(triangle.material);
+      const auto surface = material_ids.find(triangle.surface);
+      triangle.surface =
+          surface == material_ids.end() ? triangle.material
+                                        : surface->second;
+    }
   }
 
   skate::world::GrindRailId next_rail = 1;
   for (const auto& rail : definition.grind_rails) {
     next_rail = std::max(next_rail, rail.id + 1);
   }
-  object.grind_rail_indices.clear();
+  std::vector<std::uint32_t> rail_remap;
+  rail_remap.reserve(asset.grind_rails.size());
   for (auto& rail : asset.grind_rails) {
     rail.id = next_rail++;
     for (auto& point : rail.points) {
       point = point + map_position;
     }
-    object.grind_rail_indices.push_back(
-        static_cast<std::uint32_t>(
-            definition.grind_rails.size()));
+    rail_remap.push_back(static_cast<std::uint32_t>(
+        definition.grind_rails.size()));
     definition.grind_rails.push_back(std::move(rail));
   }
 
@@ -1611,22 +1651,78 @@ std::size_t AppendSpawnedObject(
     next_object = std::max(next_object, existing.id + 1);
   }
   const std::size_t index = definition.editable_objects.size();
-  object.id = next_object;
-  object.name = asset.name + " #" + std::to_string(index + 1);
-  object.origin = map_position;
-  object.source_first_index = 0;
-  object.source_index_count = 0;
-  object.source_first_collision_triangle = 0;
-  object.source_collision_triangle_count = 0;
-  definition.editable_objects.push_back(std::move(object));
+  const std::size_t instance_number = index + 1;
+  for (auto& object : asset.objects) {
+    std::vector<std::uint32_t> remapped_grinds;
+    remapped_grinds.reserve(object.grind_rail_indices.size());
+    for (const std::uint32_t source_rail :
+         object.grind_rail_indices) {
+      if (source_rail >= rail_remap.size()) {
+        throw std::runtime_error(
+            "SKATEOBJ root references a missing grind rail");
+      }
+      remapped_grinds.push_back(rail_remap[source_rail]);
+    }
+    object.grind_rail_indices = std::move(remapped_grinds);
+    object.id = next_object++;
+    object.name =
+        asset.name + " #" + std::to_string(instance_number) + "/" +
+        object.name;
+    object.origin = object.origin + map_position;
+    object.source_first_index = 0;
+    object.source_index_count = 0;
+    object.source_first_collision_triangle = 0;
+    object.source_collision_triangle_count = 0;
+    definition.editable_objects.push_back(std::move(object));
+  }
+  ReloadOwnedPhysics();
+  const std::size_t root_count =
+      definition.editable_objects.size() - index;
   REXLOG_INFO(
-      "map-editor: spawned asset='{}' instance={} object_index={} "
-      "position=({:.3f},{:.3f},{:.3f}) rails={} total_objects={}",
-      asset.name, next_object, index, map_position.x, map_position.y,
-      map_position.z,
-      definition.editable_objects.back().grind_rail_indices.size(),
+      "map-editor: spawned asset='{}' format={} first_object_index={} "
+      "roots={} position=({:.3f},{:.3f},{:.3f}) rails={} total_objects={}",
+      asset.name, asset.format_version, index, root_count, map_position.x,
+      map_position.y, map_position.z, rail_remap.size(),
       definition.editable_objects.size());
   return index;
+}
+
+void AdvanceOwnedPhysics(double frame_seconds) {
+  EnsureOwnedPhysicsInitialized();
+  if (!g_owned_physics.IsLoaded()) {
+    return;
+  }
+  g_owned_physics.Step(frame_seconds);
+  const skate::world::PhysicsTelemetry telemetry =
+      g_owned_physics.Telemetry();
+  if (telemetry.world_steps >= g_owned_physics_last_log_step + 300) {
+    g_owned_physics_last_log_step = telemetry.world_steps;
+    const auto& pose = telemetry.representative_dynamic_pose;
+    REXLOG_INFO(
+        "box3d: generation={} steps={} static={} dynamic={} contacts={} "
+        "sleeping={} updates={} dropped_batches={} accumulator={:.6f} "
+        "representative_valid={} representative_position="
+        "({:.3f},{:.3f},{:.3f}) representative_awake={}",
+        telemetry.world_generation, telemetry.world_steps,
+        telemetry.static_body_count, telemetry.dynamic_body_count,
+        telemetry.contact_count, telemetry.sleeping_body_count,
+        telemetry.transform_updates, telemetry.dropped_step_batches,
+        telemetry.accumulator_seconds, pose.valid, pose.position.x,
+        pose.position.y, pose.position.z, pose.awake);
+  }
+}
+
+bool ActivePhysicsObjectPose(
+    std::size_t index,
+    skate::world::PhysicsObjectPose& out) {
+  EnsureOwnedPhysicsInitialized();
+  out = g_owned_physics.ObjectPose(index);
+  return out.valid;
+}
+
+skate::world::PhysicsTelemetry ActivePhysicsTelemetry() {
+  EnsureOwnedPhysicsInitialized();
+  return g_owned_physics.Telemetry();
 }
 
 const skate::world::ImageTexture* ActiveImageTexture(

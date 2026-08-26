@@ -43,6 +43,7 @@
 !/maps/blender_bake_showcase.skate
 !/maps/blender_bake_showcase.blend
 !/objects/test_grind_ledge.skateobj
+!/objects/box3d_cube_pyramid.skateobj
 /maps/blender_bake_showcase_textures/
 
 # Local runtime/config overrides

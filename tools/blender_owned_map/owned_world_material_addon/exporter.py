@@ -1,4 +1,4 @@
-"""Original Blender -> SKATE v13 exporter.
+"""Original Blender -> SKATE v14 exporter.
 
 This module intentionally targets the narrow project-owned scene contract
 documented beside it. It has no ArenaBuilder imports or runtime dependency.
@@ -28,7 +28,7 @@ except ImportError:
     numpy = None
 
 
-MAGIC = b"SKATE13\0"
+MAGIC = b"SKATE14\0"
 ENDIAN_MARKER = 0x12345678
 STORAGE_RAW = 0
 STORAGE_DEFLATE = 1
@@ -61,7 +61,7 @@ _HELPER_OBJECT_MARKERS = (
     "scale_reference",
     "scale reference",
 )
-CACHE_SCHEMA = 19
+CACHE_SCHEMA = 20
 METADATA_FLOAT_COUNT = 49
 METADATA_BYTE_COUNT = METADATA_FLOAT_COUNT * 4
 RETAIL_NORMAL_ATTRIBUTE = "skate3_retail_normal"
@@ -140,6 +140,16 @@ class ExportMapObject:
     first_index: int
     index_count: int
     editor_editable: bool
+    physics_type: int
+    collision_shape: int
+    density: float
+    friction: float
+    restitution: float
+    linear_damping: float
+    angular_damping: float
+    gravity_scale: float
+    enable_sleep: bool
+    initially_awake: bool
 
 
 @dataclass
@@ -316,6 +326,16 @@ def _map_object_extension(
         _write_u32(payload, len(grind_indices))
         for grind_index in grind_indices:
             _write_u32(payload, grind_index)
+        _write_u32(payload, record.physics_type)
+        _write_u32(payload, record.collision_shape)
+        _write_f32(payload, record.density)
+        _write_f32(payload, record.friction)
+        _write_f32(payload, record.restitution)
+        _write_f32(payload, record.linear_damping)
+        _write_f32(payload, record.angular_damping)
+        _write_f32(payload, record.gravity_scale)
+        _write_u32(payload, 1 if record.enable_sleep else 0)
+        _write_u32(payload, 1 if record.initially_awake else 0)
     return payload.getvalue()
 
 
@@ -525,6 +545,15 @@ def _hash_mesh(
                 "ow_export_visual",
                 "ow_editor_editable",
                 "ow_physics_type",
+                "ow_box3d_collision_shape",
+                "ow_box3d_density",
+                "ow_box3d_friction",
+                "ow_box3d_restitution",
+                "ow_box3d_linear_damping",
+                "ow_box3d_angular_damping",
+                "ow_box3d_gravity_scale",
+                "ow_box3d_enable_sleep",
+                "ow_box3d_initially_awake",
                 "ow_hinge_position",
                 "ow_hinge_axis",
                 "ow_door_min_angle_degrees",
@@ -902,7 +931,7 @@ def _sun_metadata() -> tuple[tuple[float, float, float], float, float]:
 def _read_package_header(output: Path) -> tuple[str, int, tuple[int, ...]]:
     with output.open("rb") as stream:
         if stream.read(len(MAGIC)) != MAGIC:
-            raise ValueError(f"{output} is not an SKATE v13 package")
+            raise ValueError(f"{output} is not an SKATE v14 package")
         marker = struct.unpack("<I", stream.read(4))[0]
         if marker != ENDIAN_MARKER:
             raise ValueError(f"{output} has an invalid endian marker")
@@ -1086,6 +1115,71 @@ def _stable_object_id(name: str) -> int:
         value ^= byte
         value = (value * 16777619) & 0xFFFFFFFF
     return value or 1
+
+
+def _box3d_properties(
+    source_object: bpy.types.Object,
+) -> tuple[int, int, float, float, float, float, float, float, bool, bool]:
+    physics_name = str(source_object.get("ow_physics_type", "STATIC"))
+    physics_type = {
+        "STATIC": 0,
+        "PRESENTATION_ONLY": 0,
+        "BOX3D_STATIC": 1,
+        "BOX3D_DYNAMIC": 2,
+    }.get(physics_name)
+    if physics_type is None:
+        # Hinged doors are exported through their existing dedicated runtime
+        # path and never become MOBJ records.
+        if physics_name == "HINGED_DOOR":
+            return (0, 0, 100.0, 0.55, 0.05, 0.05, 0.15, 1.0, True, True)
+        raise ValueError(
+            f"object {source_object.name!r} has unknown physics mode "
+            f"{physics_name!r}"
+        )
+
+    shape_name = str(
+        source_object.get("ow_box3d_collision_shape", "BOX")
+    )
+    collision_shape = {
+        "BOX": 0,
+        "SPHERE": 1,
+        "CONVEX_HULL": 2,
+    }.get(shape_name)
+    if collision_shape is None:
+        raise ValueError(
+            f"object {source_object.name!r} has unknown Box3D collision "
+            f"shape {shape_name!r}"
+        )
+
+    values = (
+        float(source_object.get("ow_box3d_density", 100.0)),
+        float(source_object.get("ow_box3d_friction", 0.55)),
+        float(source_object.get("ow_box3d_restitution", 0.05)),
+        float(source_object.get("ow_box3d_linear_damping", 0.05)),
+        float(source_object.get("ow_box3d_angular_damping", 0.15)),
+        float(source_object.get("ow_box3d_gravity_scale", 1.0)),
+    )
+    labels_and_ranges = (
+        ("density", values[0], 0.001, 100000.0),
+        ("friction", values[1], 0.0, 2.0),
+        ("restitution", values[2], 0.0, 1.0),
+        ("linear damping", values[3], 0.0, 100.0),
+        ("angular damping", values[4], 0.0, 100.0),
+        ("gravity scale", values[5], -10.0, 10.0),
+    )
+    for label, value, minimum, maximum in labels_and_ranges:
+        if not math.isfinite(value) or not minimum <= value <= maximum:
+            raise ValueError(
+                f"object {source_object.name!r} Box3D {label} must be "
+                f"between {minimum:g} and {maximum:g}"
+            )
+    return (
+        physics_type,
+        collision_shape,
+        *values,
+        bool(source_object.get("ow_box3d_enable_sleep", True)),
+        bool(source_object.get("ow_box3d_initially_awake", True)),
+    )
 
 
 def _pack_snorm8(value: float) -> int:
@@ -2327,6 +2421,18 @@ def _export_visual_geometry(
 
         object_index_count = index_count - object_first_index
         if object_index_count:
+            (
+                physics_type,
+                collision_shape,
+                density,
+                friction,
+                restitution,
+                linear_damping,
+                angular_damping,
+                gravity_scale,
+                enable_sleep,
+                initially_awake,
+            ) = _box3d_properties(source_object)
             objects.append(
                 ExportMapObject(
                     source_identity=source_object.as_pointer(),
@@ -2340,6 +2446,16 @@ def _export_visual_geometry(
                     editor_editable=bool(
                         source_object.get("ow_editor_editable", True)
                     ),
+                    physics_type=physics_type,
+                    collision_shape=collision_shape,
+                    density=density,
+                    friction=friction,
+                    restitution=restitution,
+                    linear_damping=linear_damping,
+                    angular_damping=angular_damping,
+                    gravity_scale=gravity_scale,
+                    enable_sleep=enable_sleep,
+                    initially_awake=initially_awake,
                 )
             )
         completed_weight += object_weight
@@ -3879,7 +3995,7 @@ def export_scene(
         )
         _write_u32(stream, 1 + (1 if retail_manifest is not None else 0))
         stream.write(b"MOBJ")
-        _write_u32(stream, 2)
+        _write_u32(stream, 3)
         _write_u32(stream, len(map_objects))
         _write_stored_bytes(stream, map_objects)
         if retail_manifest is not None:

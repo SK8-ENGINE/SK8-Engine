@@ -1,42 +1,49 @@
-# SKATEOBJ v1 prefab profile
+# SKATEOBJ v2 prefab profile
 
 `.skateobj` is the spawnable-object profile of the normal SKATE binary
-package. Current exports use `SKATE13`; existing `SKATE12` objects remain
-supported. It deliberately reuses SKATE's material, texture, render vertex,
-collision triangle, grind-rail, compression, and extension records. This
-keeps one serializer and one set of compatibility rules for map and prefab
-geometry.
+package. v2 uses `SKATE14` plus `MOBJ` schema 3. It reuses SKATE's material,
+texture, render vertex, collision triangle, grind-rail, compression, physics,
+and extension records, keeping one serializer and one compatibility boundary
+for map and prefab geometry.
 
-A v1 `.skateobj` package must:
+A v2 `.skateobj` package must:
 
-- use the `.skateobj` filename extension and a supported SKATE package magic;
-- contain exactly one `MOBJ` prefab root;
-- have that root own every base render index and collision triangle;
-- have that root own every authored grind rail in the package;
+- use the `.skateobj` filename extension, `SKATE14`, and MOBJ schema 3;
+- contain one or more `MOBJ` prefab roots;
+- have those roots collectively own every base render index, collision
+  triangle, and authored grind rail exactly once;
 - contain no NPC routes, kinematic boxes, hinged doors, water basins,
   mirrors, puddles, or moving lights;
 - use authored-point grind rails rather than extracted retail-native spline
-  payloads.
+  payloads;
+- contain only finite, bounded physics values accepted by the shared SKATE
+  validator.
 
-Spawn-time geometry, collision, bounds, and grind points are local to the
-prefab root. The root's authored origin is the pivot: loading normalizes the
-root origin to zero and subtracts it from attached grind points. Each runtime
-spawn receives a separate instance ID and authoritative transform; asset IDs
-must never be used as instance IDs.
+Each MOBJ root is a separate runtime object and, when physics is enabled, a
+separate Box3D body. Multi-root assets therefore support structures such as a
+cube pyramid whose cubes fall, collide, sleep, and topple independently.
+Roots are never silently combined into a compound rigid body.
+
+`OW_SPAWN` is the v2 prefab pivot. Loading subtracts its package-space
+position from every root origin and authored grind point. Spawn-time placement
+then adds one map-space position to the whole prefab while retaining each
+root's relative transform. Every runtime root receives a new instance ID;
+asset IDs must never be reused as instance IDs.
+
+## v1 compatibility
+
+Existing v1 files remain supported. They use SKATE12 or SKATE13, contain
+exactly one MOBJ root, and use that root's authored origin as the implicit
+prefab pivot. MOBJ schema 1 and 2 contain no physics fields, so the loader
+always defaults those objects to physics disabled. The tracked
+`objects/test_grind_ledge.skateobj` is retained as a deterministic v12/v1
+backward-compatibility fixture.
 
 The map-wide environment fields physically present in the SKATE container are
 ignored by the object-profile loader and should be emitted as deterministic
-neutral defaults. They are tiny compared with mesh and texture payloads,
-while reusing them avoids a second incompatible parser. Exporters should
-include only materials and textures referenced by the prefab.
+neutral defaults. Exporters should include only materials and textures
+referenced by the prefab.
 
-Future prefab behavior belongs in optional tagged extensions. Planned examples
-include:
-
-- `SNAP`: named placement/snap points and orientation;
-- `TAGS`: category, search tags, author, and description;
-- `THMB`: spawn-menu thumbnail;
-- `COMP`: versioned gameplay component descriptors.
-
-Unknown extensions retain the normal SKATE validation/skip behavior. A future
+Future prefab behavior belongs in optional tagged extensions. Unknown
+extension tags retain the normal SKATE validation/skip behavior; a future
 feature does not require changing the base geometry layout.

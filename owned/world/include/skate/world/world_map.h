@@ -348,6 +348,35 @@ struct RetailCollisionAssociation {
   std::uint8_t unit_flags = 0;
 };
 
+// Optional Box3D participation for one independently owned map object.
+// Disabled is the compatibility default for every package before SKATE v14.
+enum class ObjectPhysicsType : std::uint32_t {
+  Disabled = 0,
+  Static = 1,
+  Dynamic = 2,
+};
+
+// Safe first-pass authoring shapes. All are derived from validated local
+// object bounds/collision vertices; no opaque Box3D data enters the package.
+enum class ObjectCollisionShape : std::uint32_t {
+  Box = 0,
+  Sphere = 1,
+  ConvexHull = 2,
+};
+
+struct ObjectPhysicsDefinition {
+  ObjectPhysicsType type = ObjectPhysicsType::Disabled;
+  ObjectCollisionShape shape = ObjectCollisionShape::Box;
+  float density = 100.0f;
+  float friction = 0.55f;
+  float restitution = 0.05f;
+  float linear_damping = 0.05f;
+  float angular_damping = 0.15f;
+  float gravity_scale = 1.0f;
+  bool enable_sleep = true;
+  bool initially_awake = true;
+};
+
 // One independently editable Blender object. Ordinary SKATE render and
 // collision records remain flattened for backward compatibility; the MOBJ
 // extension materializes the object's referenced ranges into this local-space
@@ -367,6 +396,7 @@ struct MapObject {
   // Indices into MapDefinition::grind_rails whose authored points are
   // transformed with this object during an editor session.
   std::vector<std::uint32_t> grind_rail_indices;
+  ObjectPhysicsDefinition physics;
   RenderMesh render_mesh;
   std::vector<CollisionTriangle> collision_triangles;
 };
@@ -546,6 +576,10 @@ struct MovingLightOrbPose {
 
 struct MapDefinition {
   std::string name;
+  // Loader provenance used by constrained profiles such as SKATEOBJ. These
+  // fields are runtime metadata and are not part of the flattened base table.
+  std::uint32_t package_version = 0;
+  std::uint32_t map_object_schema_version = 0;
   // Canonical extraction manifest carried by SKATE v12's extensible WMET
   // section. Runtime code need not understand every retail record for the
   // package to preserve it through Blender and future tool revisions.

@@ -1,4 +1,4 @@
-"""Build the large Blender-authored SKATE v13 feature park.
+"""Build the large Blender-authored SKATE v14 feature park.
 
 The park deliberately contains only features represented by the current
 Blender addon and SKATE package: static visuals/collision, PBR and alpha

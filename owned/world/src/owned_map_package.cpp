@@ -53,6 +53,8 @@ constexpr std::array<char, 8> kMagicV12 = {
     'S', 'K', 'A', 'T', 'E', '1', '2', '\0'};
 constexpr std::array<char, 8> kMagicV13 = {
     'S', 'K', 'A', 'T', 'E', '1', '3', '\0'};
+constexpr std::array<char, 8> kMagicV14 = {
+    'S', 'K', 'A', 'T', 'E', '1', '4', '\0'};
 constexpr std::uint32_t kEndianMarker = 0x12345678u;
 constexpr std::uint32_t kStorageRaw = 0;
 constexpr std::uint32_t kStorageDeflate = 1;
@@ -484,6 +486,10 @@ const SurfaceMaterial* FindMaterial(const MapDefinition& map,
 
 void ReadMapObjects(std::vector<std::uint8_t> payload,
                     std::uint32_t schema, MapDefinition& map) {
+  if (schema < 1 || schema > 3) {
+    throw std::runtime_error(
+        "SKATE MOBJ extension uses an unsupported schema");
+  }
   Reader reader(std::move(payload));
   const std::uint32_t object_count = reader.Scalar<std::uint32_t>();
   RequireCount(object_count, "map object");
@@ -523,6 +529,40 @@ void ReadMapObjects(std::vector<std::uint8_t> payload,
         claimed_grinds[rail_index] = true;
         object.grind_rail_indices.push_back(rail_index);
       }
+    }
+    if (schema >= 3) {
+      const std::uint32_t physics_type =
+          reader.Scalar<std::uint32_t>();
+      const std::uint32_t collision_shape =
+          reader.Scalar<std::uint32_t>();
+      if (physics_type >
+              static_cast<std::uint32_t>(ObjectPhysicsType::Dynamic) ||
+          collision_shape >
+              static_cast<std::uint32_t>(
+                  ObjectCollisionShape::ConvexHull)) {
+        throw std::runtime_error(
+            "SKATE map object physics enum is invalid");
+      }
+      object.physics.type =
+          static_cast<ObjectPhysicsType>(physics_type);
+      object.physics.shape =
+          static_cast<ObjectCollisionShape>(collision_shape);
+      object.physics.density = reader.Scalar<float>();
+      object.physics.friction = reader.Scalar<float>();
+      object.physics.restitution = reader.Scalar<float>();
+      object.physics.linear_damping = reader.Scalar<float>();
+      object.physics.angular_damping = reader.Scalar<float>();
+      object.physics.gravity_scale = reader.Scalar<float>();
+      const std::uint32_t enable_sleep =
+          reader.Scalar<std::uint32_t>();
+      const std::uint32_t initially_awake =
+          reader.Scalar<std::uint32_t>();
+      if (enable_sleep > 1 || initially_awake > 1) {
+        throw std::runtime_error(
+            "SKATE map object physics boolean is invalid");
+      }
+      object.physics.enable_sleep = enable_sleep != 0;
+      object.physics.initially_awake = initially_awake != 0;
     }
 
     const std::uint64_t index_end =
@@ -893,6 +933,34 @@ void Validate(MapDefinition& map) {
   std::unordered_set<MapObjectId> object_ids;
   std::unordered_set<std::string> object_names;
   for (MapObject& object : map.editable_objects) {
+    const std::uint32_t physics_type =
+        static_cast<std::uint32_t>(object.physics.type);
+    const std::uint32_t collision_shape =
+        static_cast<std::uint32_t>(object.physics.shape);
+    const bool valid_physics =
+        physics_type <=
+            static_cast<std::uint32_t>(ObjectPhysicsType::Dynamic) &&
+        collision_shape <=
+            static_cast<std::uint32_t>(
+                ObjectCollisionShape::ConvexHull) &&
+        std::isfinite(object.physics.density) &&
+        object.physics.density > 0.0f &&
+        object.physics.density <= 100000.0f &&
+        std::isfinite(object.physics.friction) &&
+        object.physics.friction >= 0.0f &&
+        object.physics.friction <= 2.0f &&
+        std::isfinite(object.physics.restitution) &&
+        object.physics.restitution >= 0.0f &&
+        object.physics.restitution <= 1.0f &&
+        std::isfinite(object.physics.linear_damping) &&
+        object.physics.linear_damping >= 0.0f &&
+        object.physics.linear_damping <= 100.0f &&
+        std::isfinite(object.physics.angular_damping) &&
+        object.physics.angular_damping >= 0.0f &&
+        object.physics.angular_damping <= 100.0f &&
+        std::isfinite(object.physics.gravity_scale) &&
+        object.physics.gravity_scale >= -10.0f &&
+        object.physics.gravity_scale <= 10.0f;
     if (object.id == 0 || object.name.empty() ||
         !object_ids.insert(object.id).second ||
         !object_names.insert(object.name).second ||
@@ -904,7 +972,8 @@ void Validate(MapDefinition& map) {
         object.local_bounds_min.z > object.local_bounds_max.z ||
         object.render_mesh.vertices.empty() ||
         object.render_mesh.indices.empty() ||
-        object.render_mesh.indices.size() % 3u != 0) {
+        object.render_mesh.indices.size() % 3u != 0 ||
+        !valid_physics) {
       throw std::runtime_error("SKATE editable map object is invalid");
     }
     for (const RenderVertex& vertex : object.render_mesh.vertices) {
@@ -1116,8 +1185,10 @@ MapDefinition LoadOwnedMapPackage(const std::filesystem::path& path) {
   const bool version_11 = magic == kMagicV11;
   const bool version_12 = magic == kMagicV12;
   const bool version_13 = magic == kMagicV13;
+  const bool version_14 = magic == kMagicV14;
   const bool version_10_or_newer =
-      version_10 || version_11 || version_12 || version_13;
+      version_10 || version_11 || version_12 || version_13 ||
+      version_14;
   const bool skate_magic =
       std::memcmp(magic.data(), "SKATE", 5) == 0 &&
       std::isdigit(static_cast<unsigned char>(magic[5])) &&
@@ -1125,20 +1196,22 @@ MapDefinition LoadOwnedMapPackage(const std::filesystem::path& path) {
       magic[7] == '\0';
   const int package_version =
       skate_magic ? (magic[5] - '0') * 10 + (magic[6] - '0') : 0;
-  if (skate_magic && package_version > 13) {
+  if (skate_magic && package_version > 14) {
     throw std::runtime_error(
         "SKATE v" + std::to_string(package_version) +
         " requires a newer Custom Engine Layer release");
   }
   if ((!version_1 && !version_2 && !version_3 && !version_4 && !version_5 &&
        !version_6 && !version_7 && !version_8 && !version_9 &&
-       !version_10 && !version_11 && !version_12 && !version_13) ||
+       !version_10 && !version_11 && !version_12 && !version_13 &&
+       !version_14) ||
       reader.Scalar<std::uint32_t>() != kEndianMarker) {
     throw std::runtime_error(
-        "file is not a supported little-endian SKATE v1-v13 package");
+        "file is not a supported little-endian SKATE v1-v14 package");
   }
 
   MapDefinition map;
+  map.package_version = static_cast<std::uint32_t>(package_version);
   map.name = reader.String();
   map.spawn.position = reader.Vector3();
   map.spawn.heading_radians = reader.Scalar<float>();
@@ -1541,8 +1614,17 @@ MapDefinition LoadOwnedMapPackage(const std::filesystem::path& path) {
         map.retail_world_metadata_json.assign(
             reinterpret_cast<const char*>(payload.data()),
             payload.size());
-      } else if (tag == std::array<char, 4>{'M', 'O', 'B', 'J'} &&
-                 (schema == 1 || schema == 2)) {
+      } else if (tag == std::array<char, 4>{'M', 'O', 'B', 'J'}) {
+        if (map.map_object_schema_version != 0) {
+          throw std::runtime_error(
+              "SKATE package contains duplicate MOBJ extensions");
+        }
+        if (schema < 1 || schema > 3 ||
+            (schema == 3 && package_version < 14)) {
+          throw std::runtime_error(
+              "SKATE MOBJ extension schema is incompatible with the package");
+        }
+        map.map_object_schema_version = schema;
         ReadMapObjects(std::move(payload), schema, map);
       } else if (tag == std::array<char, 4>{'R', 'C', 'I', 'D'}) {
         ReadRetailCollisionIdentity(std::move(payload), schema, map);

@@ -13545,6 +13545,14 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
   // translation shared with native collision. They are excluded from the
   // static chunks above, so moving one never leaves a rendered copy behind
   // and never rebuilds or reuploads the world mesh.
+  static auto owned_physics_clock = std::chrono::steady_clock::now();
+  const auto owned_physics_now = std::chrono::steady_clock::now();
+  const double owned_physics_frame_seconds =
+      std::chrono::duration<double>(
+          owned_physics_now - owned_physics_clock).count();
+  owned_physics_clock = owned_physics_now;
+  mechanics_sandbox::map::AdvanceOwnedPhysics(
+      owned_physics_frame_seconds);
   const skate::world::MapDefinition& definition =
       mechanics_sandbox::map::ActiveDefinition();
   uint32_t editor_pose_ready = 0;
@@ -13564,7 +13572,26 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
     const bool previewing_selected_drag =
         map_editor::ActiveGizmoHandle() != 0 &&
         map_editor::IsSelected(object_index);
-    if (has_collision) {
+    skate::world::PhysicsObjectPose physics_pose;
+    const bool physics_pose_ready =
+        object.physics.type !=
+            skate::world::ObjectPhysicsType::Disabled &&
+        mechanics_sandbox::map::ActivePhysicsObjectPose(
+            object_index, physics_pose);
+    if (physics_pose_ready) {
+      translation[0] = physics_pose.position.x;
+      translation[1] = physics_pose.position.y;
+      translation[2] = physics_pose.position.z;
+      basis[0] = physics_pose.x_axis.x;
+      basis[1] = physics_pose.x_axis.y;
+      basis[2] = physics_pose.x_axis.z;
+      basis[3] = physics_pose.y_axis.x;
+      basis[4] = physics_pose.y_axis.y;
+      basis[5] = physics_pose.y_axis.z;
+      basis[6] = physics_pose.z_axis.x;
+      basis[7] = physics_pose.z_axis.y;
+      basis[8] = physics_pose.z_axis.z;
+    } else if (has_collision) {
       // Exact-retail objects deliberately have no dynamic collision
       // allocation until their first committed edit.  Their editor pose is
       // still authoritative for rendering before that detachment; requiring

@@ -1501,8 +1501,12 @@ std::vector<bool> EditableCollisionObjects(
           kMaximumEditableObjects);
   std::vector<bool> desired(object_count, false);
   for (std::size_t index = 0; index < object_count; ++index) {
-    desired[index] = !definition.editable_objects[index]
-                          .collision_triangles.empty();
+    const skate::world::MapObject& object =
+        definition.editable_objects[index];
+    desired[index] =
+        object.physics.type !=
+            skate::world::ObjectPhysicsType::Dynamic &&
+        !object.collision_triangles.empty();
   }
   return desired;
 }
@@ -4584,6 +4588,14 @@ bool UpdateExactRetailEditableObjects(
       // exact until their first committed transform.
       const skate::world::MapObject &object =
           definition.editable_objects[index];
+      if (object.physics.type ==
+          skate::world::ObjectPhysicsType::Dynamic) {
+        if (object.source_collision_triangle_count != 0) {
+          g_editor_collision_detached[index].store(
+              true, std::memory_order_release);
+        }
+        continue;
+      }
       if (object.source_collision_triangle_count == 0 &&
           !object.collision_triangles.empty() &&
           !InstallEditableObjectCollision(ctx, base, collection, definition,
@@ -4593,6 +4605,36 @@ bool UpdateExactRetailEditableObjects(
         REXLOG_ERROR("map-editor: spawned collision install failed "
                      "id={} name='{}'",
                      object.id, object.name);
+      }
+    }
+    std::vector<std::uint8_t> detached(object_count, 0);
+    std::unordered_set<std::uint16_t> dynamic_resources;
+    for (std::size_t index = 0; index < object_count; ++index) {
+      detached[index] =
+          g_editor_collision_detached[index].load(
+              std::memory_order_acquire)
+              ? 1
+              : 0;
+      if (detached[index] == 0) {
+        continue;
+      }
+      for (const std::uint16_t resource :
+           skate::world::RetailCollisionResourcesForObject(
+               definition, definition.editable_objects[index])) {
+        dynamic_resources.insert(resource);
+      }
+    }
+    for (const std::uint16_t resource : dynamic_resources) {
+      if (!ReplaceRetailResourceCollision(
+              ctx, base, collection, definition, resource, detached)) {
+        g_editor_exact_resource_failures.fetch_add(
+            1, std::memory_order_relaxed);
+        g_editor_collision_failures.fetch_add(
+            1, std::memory_order_relaxed);
+        REXLOG_ERROR(
+            "box3d: failed to remove dynamic object from exact retail "
+            "collision resource={}",
+            resource);
       }
     }
     REXLOG_INFO("map-editor: exact-retail collision ownership initialized "
@@ -4617,6 +4659,12 @@ bool UpdateExactRetailEditableObjects(
       continue;
     }
     const skate::world::MapObject &object = definition.editable_objects[index];
+    if (object.physics.type ==
+        skate::world::ObjectPhysicsType::Dynamic) {
+      g_editor_applied_revisions[index].store(
+          revision, std::memory_order_release);
+      continue;
+    }
     if (object.collision_triangles.empty()) {
       g_editor_applied_revisions[index].store(revision,
                                               std::memory_order_release);
@@ -4798,7 +4846,9 @@ void UpdateEditableObjects(PPCContext& ctx,
          index < object_count; ++index) {
       const skate::world::MapObject& object =
           definition.editable_objects[index];
-      if (object.collision_triangles.empty()) {
+      if (object.physics.type ==
+              skate::world::ObjectPhysicsType::Dynamic ||
+          object.collision_triangles.empty()) {
         continue;
       }
 

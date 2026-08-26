@@ -1,5 +1,6 @@
 #pragma once
 
+#include "skate/world/box3d_physics.h"
 #include "skate/world/world_map.h"
 #include "skate/world/skate_object_package.h"
 
@@ -159,6 +160,11 @@ const skate::world::MapDefinition& ActiveDefinition();
 std::size_t AppendSpawnedObject(
     skate::world::SkateObjectAsset asset,
     skate::world::Vec3 map_position);
+void AdvanceOwnedPhysics(double frame_seconds);
+bool ActivePhysicsObjectPose(
+    std::size_t index,
+    skate::world::PhysicsObjectPose& out);
+skate::world::PhysicsTelemetry ActivePhysicsTelemetry();
 const skate::world::ImageTexture* ActiveImageTexture(
     skate::world::TextureId id);
 const char* ActiveMapName();
