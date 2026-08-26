@@ -8,6 +8,8 @@
 #include <sstream>
 #include <unordered_map>
 
+#include <zlib.h>
+
 namespace skate3::cac_archive {
 namespace {
 
@@ -269,8 +271,36 @@ bool DecompressChunkRef(
         return false;
       }
       output.insert(output.end(), unpacked.begin(), unpacked.end());
+    } else if (method == 3) {
+      std::vector<std::uint8_t> unpacked(expected_chunk);
+      uLongf unpacked_size =
+          static_cast<uLongf>(unpacked.size());
+      const int status = uncompress(
+          reinterpret_cast<Bytef*>(unpacked.data()),
+          &unpacked_size,
+          reinterpret_cast<const Bytef*>(source.data() + payload),
+          static_cast<uLong>(packed_size));
+      if (status != Z_OK ||
+          unpacked_size != expected_chunk) {
+        error = "chunkref zlib stream is invalid";
+        return false;
+      }
+      output.insert(
+          output.end(), unpacked.begin(), unpacked.end());
+    } else if (method == 4) {
+      // Retail parkassets uses method 4 for an exact-size aligned
+      // passthrough block. Reject any other shape instead of guessing.
+      if (packed_size != expected_chunk) {
+        error = "method-4 chunkref chunk size mismatch";
+        return false;
+      }
+      output.insert(
+          output.end(), source.begin() + payload,
+          source.begin() + payload + packed_size);
     } else {
-      error = "unsupported chunkref compression method";
+      error =
+          "unsupported chunkref compression method " +
+          std::to_string(method);
       return false;
     }
     cursor = payload + packed_size;
@@ -470,6 +500,38 @@ std::string Archive::CacheKey() const {
   key << "ebv3-" << impl_->archive_size << '-' << std::hex << std::setw(16)
       << std::setfill('0') << impl_->index_hash;
   return key.str();
+}
+
+bool Archive::Read(
+    std::string_view archive_path,
+    std::vector<std::uint8_t>& bytes,
+    std::string& error) const {
+  error.clear();
+  bytes.clear();
+  const auto found = impl_->entries.find(std::string(archive_path));
+  if (found == impl_->entries.end()) {
+    error = "CAC asset is not present in the archive";
+    return false;
+  }
+  const Impl::Entry& entry = found->second;
+  std::ifstream stream(impl_->path, std::ios::binary);
+  stream.seekg(static_cast<std::streamoff>(entry.offset));
+  std::vector<std::uint8_t> packed(entry.packed_size);
+  if (!stream.read(
+          reinterpret_cast<char*>(packed.data()), packed.size())) {
+    error = "failed to read CAC asset payload";
+    return false;
+  }
+  if (entry.method == 0) {
+    if (entry.packed_size != entry.unpacked_size) {
+      error = "raw CAC asset size mismatch";
+      return false;
+    }
+    bytes = std::move(packed);
+    return true;
+  }
+  return DecompressChunkRef(
+      packed, entry.unpacked_size, bytes, error);
 }
 
 bool Archive::Extract(

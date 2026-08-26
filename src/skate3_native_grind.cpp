@@ -43,7 +43,10 @@ enum class State : std::uint8_t {
 };
 
 std::atomic<State> g_state{State::Disabled};
-std::atomic<std::uint32_t> g_grind_data{0};
+// r3 on tSplineData load is a 64-bit retail asset identity, not a guest
+// pointer. Preserving only its low word produced runtime objects under an
+// invalid identity even though the spline payload itself was intact.
+std::atomic<std::uint64_t> g_grind_data{0};
 std::atomic<std::uint32_t> g_memory_group{0};
 std::atomic<std::uint32_t> g_spline_data_address{0};
 std::atomic<std::uint32_t> g_spline_data_bytes{0};
@@ -110,6 +113,19 @@ bool ReadRuntimeVector(std::uint8_t* base,
   const std::uint32_t begin = LoadU32(base, owner);
   const std::uint32_t end = LoadU32(base, owner + 4);
   const std::uint32_t capacity = LoadU32(base, owner + 8);
+  // Suppressing the retail world's first registration deliberately leaves
+  // the vector in its native empty state. sub_82C1ED60 grows that state on
+  // the first owned append; rejecting it here prevented the append from
+  // ever being attempted.
+  if (begin == 0 && end == 0 && capacity == 0) {
+    result = {
+        .owner = owner,
+        .begin = 0,
+        .end = 0,
+        .count = 0,
+    };
+    return true;
+  }
   if (!IsGuestDataAddress(begin) || end < begin ||
       capacity < end || (end - begin) % 4 != 0 ||
       end - begin > 16384u * 4u) {
@@ -125,7 +141,7 @@ bool ReadRuntimeVector(std::uint8_t* base,
 }
 
 bool RegisterOwnedSpline(PPCContext& ctx, std::uint8_t* base,
-                         std::uint32_t grind_data,
+                         std::uint64_t grind_data,
                          std::uint32_t spline_data,
                          std::uint32_t expected_rails,
                          std::uint32_t& runtime_object) {
@@ -257,9 +273,9 @@ bool Enabled() {
 
 void ObserveSplineDataLoad(const PPCContext& ctx,
                            std::uint8_t* base) noexcept {
-  const std::uint32_t grind_data = ctx.r3.u32;
+  const std::uint64_t grind_data = ctx.r3.u64;
   const std::uint32_t spline_data = ctx.r4.u32;
-  if (!base || !IsGuestDataAddress(grind_data) ||
+  if (!base || grind_data == 0 ||
       !IsGuestDataAddress(spline_data) ||
       LoadU16(base, spline_data + 2) == 0 ||
       !IsGuestDataAddress(LoadU32(base, spline_data + 8))) {
@@ -320,7 +336,15 @@ void EnsureInstalled(PPCContext& ctx, std::uint8_t* base) noexcept {
     g_state.store(State::Disabled, std::memory_order_release);
     return;
   }
-  if (g_state.load(std::memory_order_acquire) == State::Installed) {
+  const State current_state =
+      g_state.load(std::memory_order_acquire);
+  // A failed native append may have retained pointers into the persistent
+  // blob. Do not allocate another blob every player-collision frame.
+  // Restarting the local test cleanly retries after a code/data fix.
+  if (current_state == State::RegistrationFailed) {
+    return;
+  }
+  if (current_state == State::Installed) {
     const std::uint64_t commit_serial =
         map_editor::TransformCommitSerial();
     if (commit_serial ==
@@ -366,11 +390,11 @@ void EnsureInstalled(PPCContext& ctx, std::uint8_t* base) noexcept {
       std::memcpy(
           base + replacement_spline_data, updated.blob.bytes.data(),
           updated.blob.bytes.size());
-      const std::uint32_t grind_data =
+      const std::uint64_t grind_data =
           g_grind_data.load(std::memory_order_acquire);
       const std::uint32_t previous_runtime =
           g_runtime_object.load(std::memory_order_acquire);
-      if (!IsGuestDataAddress(grind_data) ||
+      if (grind_data == 0 ||
           !RegisterOwnedSpline(
               ctx, base, grind_data, replacement_spline_data,
               updated.blob.rail_count, replacement_runtime)) {
@@ -446,9 +470,9 @@ void EnsureInstalled(PPCContext& ctx, std::uint8_t* base) noexcept {
     return;
   }
 
-  const std::uint32_t grind_data =
+  const std::uint64_t grind_data =
       g_grind_data.load(std::memory_order_acquire);
-  if (!IsGuestDataAddress(grind_data)) {
+  if (grind_data == 0) {
     g_state.store(State::WaitingForRuntime, std::memory_order_release);
     return;
   }
@@ -473,13 +497,25 @@ void EnsureInstalled(PPCContext& ctx, std::uint8_t* base) noexcept {
         runtime,
         {translation_values[0], translation_values[1],
          translation_values[2]});
+  } catch (const std::exception& error) {
+    g_state.store(State::BuildFailed, std::memory_order_release);
+    REXLOG_ERROR(
+        "map-editor: grind install build failed reason='{}'",
+        error.what());
+    return;
   } catch (...) {
     g_state.store(State::BuildFailed, std::memory_order_release);
+    REXLOG_ERROR(
+        "map-editor: grind install build failed reason='unknown'");
     return;
   }
   if (!build.ok || build.blob.bytes.empty() ||
       build.blob.rail_count == 0 || build.blob.segment_count == 0) {
     g_state.store(State::BuildFailed, std::memory_order_release);
+    REXLOG_ERROR(
+        "map-editor: grind install build failed reason='{}'",
+        build.error.empty() ? "empty native grind payload"
+                            : build.error);
     return;
   }
 
@@ -488,12 +524,18 @@ void EnsureInstalled(PPCContext& ctx, std::uint8_t* base) noexcept {
           static_cast<std::uint32_t>(build.blob.bytes.size()), 16);
   if (!spline_data) {
     g_state.store(State::AllocationFailed, std::memory_order_release);
+    REXLOG_ERROR(
+        "map-editor: grind install allocation failed bytes={}",
+        build.blob.bytes.size());
     return;
   }
   if (!skate::world::FixupGrindSplineDataForGuest(
           build.blob.bytes, spline_data)) {
     REX_KERNEL_MEMORY()->SystemHeapFree(spline_data);
     g_state.store(State::BuildFailed, std::memory_order_release);
+    REXLOG_ERROR(
+        "map-editor: grind install guest fixup failed bytes={}",
+        build.blob.bytes.size());
     return;
   }
   std::memcpy(base + spline_data, build.blob.bytes.data(),
@@ -512,6 +554,11 @@ void EnsureInstalled(PPCContext& ctx, std::uint8_t* base) noexcept {
         std::memory_order_release);
     g_state.store(State::RegistrationFailed,
                   std::memory_order_release);
+    REXLOG_ERROR(
+        "map-editor: grind install registration failed "
+        "identity=0x{:016X} rails={} segments={} bytes={}",
+        grind_data, build.blob.rail_count, build.blob.segment_count,
+        build.blob.bytes.size());
     return;
   }
 
@@ -528,6 +575,11 @@ void EnsureInstalled(PPCContext& ctx, std::uint8_t* base) noexcept {
   g_state.store(State::Installed, std::memory_order_release);
   g_applied_commit_serial.store(
       map_editor::TransformCommitSerial(), std::memory_order_release);
+  REXLOG_INFO(
+      "map-editor: grind runtime installed identity=0x{:016X} "
+      "rails={} segments={} bytes={} runtime=0x{:08X}",
+      grind_data, build.blob.rail_count, build.blob.segment_count,
+      build.blob.bytes.size(), runtime_object);
 }
 
 void AppendTelemetry(std::ostream& out) {

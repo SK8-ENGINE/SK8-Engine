@@ -9,6 +9,8 @@
 #include <string>
 #include <vector>
 
+#include <zlib.h>
+
 namespace {
 
 void WriteBe16(
@@ -27,7 +29,7 @@ void WriteBe32(
 
 bool WriteSyntheticArchive(
     const std::filesystem::path& path, std::string_view directory,
-    bool compressed = true) {
+    bool compressed = true, std::uint32_t chunk_method = 2) {
   constexpr std::size_t kNameOffset = 80;
   constexpr std::size_t kNameBytes = 96;
   constexpr std::size_t kDataOffset = 192;
@@ -39,7 +41,7 @@ bool WriteSyntheticArchive(
   }
   std::vector<std::uint8_t> stored;
   if (compressed) {
-    // One literal-only RefPack stream inside one aligned chunkref chunk.
+    // One compressed stream inside one aligned chunkref chunk.
     stored.resize(48);
     constexpr std::string_view kChunkMagic = "chunkref";
     std::copy(
@@ -49,17 +51,43 @@ bool WriteSyntheticArchive(
     WriteBe32(stored, 16, 128 * 1024);
     WriteBe32(stored, 20, 1);
     WriteBe32(stored, 24, 16);
-    WriteBe32(stored, 40, 5 + 1 + kPayload.size() + 1);
-    WriteBe32(stored, 44, 2);
-    stored.push_back(0x10);
-    stored.push_back(0xFB);
-    stored.push_back(0);
-    stored.push_back(0);
-    stored.push_back(
-        static_cast<std::uint8_t>(kPayload.size()));
-    stored.push_back(0xE3);
-    stored.insert(stored.end(), kPayload.begin(), kPayload.end());
-    stored.push_back(0xFC);
+    if (chunk_method == 3) {
+      std::vector<std::uint8_t> packed(
+          static_cast<std::size_t>(compressBound(kPayload.size())));
+      uLongf packed_size = static_cast<uLongf>(packed.size());
+      if (compress2(
+              reinterpret_cast<Bytef*>(packed.data()),
+              &packed_size,
+              reinterpret_cast<const Bytef*>(kPayload.data()),
+              static_cast<uLong>(kPayload.size()),
+              Z_BEST_COMPRESSION) != Z_OK) {
+        return false;
+      }
+      packed.resize(static_cast<std::size_t>(packed_size));
+      WriteBe32(
+          stored, 40,
+          static_cast<std::uint32_t>(packed.size()));
+      WriteBe32(stored, 44, 3);
+      stored.insert(stored.end(), packed.begin(), packed.end());
+    } else if (chunk_method == 4) {
+      WriteBe32(stored, 40, kPayload.size());
+      WriteBe32(stored, 44, 4);
+      stored.insert(
+          stored.end(), kPayload.begin(), kPayload.end());
+    } else {
+      // Literal-only RefPack.
+      WriteBe32(stored, 40, 5 + 1 + kPayload.size() + 1);
+      WriteBe32(stored, 44, 2);
+      stored.push_back(0x10);
+      stored.push_back(0xFB);
+      stored.push_back(0);
+      stored.push_back(0);
+      stored.push_back(
+          static_cast<std::uint8_t>(kPayload.size()));
+      stored.push_back(0xE3);
+      stored.insert(stored.end(), kPayload.begin(), kPayload.end());
+      stored.push_back(0xFC);
+    }
   } else {
     stored.assign(kPayload.begin(), kPayload.end());
   }
@@ -134,10 +162,54 @@ bool RunSyntheticTests(
   }
   const std::filesystem::path extracted =
       root / "synthetic-output" / "fixture.rx2";
+  std::vector<std::uint8_t> in_memory;
+  if (!archive.Read(paths.front(), in_memory, archive_error) ||
+      in_memory.size() != 16 || in_memory[0] != 0x89) {
+    std::cerr << "synthetic in-memory read failed: "
+              << archive_error << '\n';
+    return false;
+  }
   if (!archive.Extract(paths.front(), extracted, archive_error) ||
       !HasRx2Magic(extracted) ||
       !archive.Extract(paths.front(), extracted, archive_error)) {
     std::cerr << "synthetic extraction failed: " << archive_error << '\n';
+    return false;
+  }
+
+  const std::filesystem::path zlib_path =
+      root / "synthetic-zlib-cac.big";
+  if (!WriteSyntheticArchive(
+          zlib_path, kDirectory, true, 3)) {
+    std::cerr << "failed to write synthetic zlib archive\n";
+    return false;
+  }
+  skate3::cac_archive::Archive zlib_archive;
+  if (!zlib_archive.Open(zlib_path, archive_error) ||
+      !zlib_archive.Read(
+          std::string(kDirectory) + "/fixture.rx2",
+          in_memory, archive_error) ||
+      in_memory.size() != 16 || in_memory[0] != 0x89) {
+    std::cerr << "synthetic zlib read failed: "
+              << archive_error << '\n';
+    return false;
+  }
+
+  const std::filesystem::path method_four_path =
+      root / "synthetic-method-four-cac.big";
+  if (!WriteSyntheticArchive(
+          method_four_path, kDirectory, true, 4)) {
+    std::cerr << "failed to write synthetic method-four archive\n";
+    return false;
+  }
+  skate3::cac_archive::Archive method_four_archive;
+  if (!method_four_archive.Open(
+          method_four_path, archive_error) ||
+      !method_four_archive.Read(
+          std::string(kDirectory) + "/fixture.rx2",
+          in_memory, archive_error) ||
+      in_memory.size() != 16 || in_memory[0] != 0x89) {
+    std::cerr << "synthetic method-four read failed: "
+              << archive_error << '\n';
     return false;
   }
 

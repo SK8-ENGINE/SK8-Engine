@@ -14,7 +14,7 @@ A v2 `.skateobj` package must:
   triangle, and authored grind rail exactly once;
 - contain no NPC routes, kinematic boxes, hinged doors, water basins,
   mirrors, puddles, or moving lights;
-- use authored-point grind rails rather than extracted retail-native spline
+- use authored-point grind rails or complete retail-native cubic spline
   payloads;
 - contain only finite, bounded physics values accepted by the shared SKATE
   validator.
@@ -34,10 +34,13 @@ Box3D world and does not rebuild or repair existing instances.
 Files without `BGRP` remain non-breakable and load exactly as before.
 
 `OW_SPAWN` is the v2 prefab pivot. Loading subtracts its package-space
-position from every root origin and authored grind point. Spawn-time placement
-then adds one map-space position to the whole prefab while retaining each
-root's relative transform. Every runtime root receives a new instance ID;
-asset IDs must never be reused as instance IDs.
+position from every root origin and grind rail. For native cubic splines this
+adjusts the constant term and bounds while retaining the curve coefficients.
+Spawn-time placement then adds one map-space position to the whole prefab
+while retaining each root's relative transform. Editor rotation applies to
+all native spline coefficients and recomputes their axis bounds from the
+cubic extrema. Every runtime root receives a new instance ID; asset IDs must
+never be reused as instance IDs.
 
 ## v1 compatibility
 

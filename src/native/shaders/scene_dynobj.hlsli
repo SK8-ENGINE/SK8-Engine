@@ -14,7 +14,7 @@
 float4 ShadeDynObject(VSOut i, float4 albedo) {
 // dynobj variants only:
   // -21/-22; the exact water family (-30) and sky (-40) pass through.
-  if (cam_pos.w < -21.5) {
+  if (cam_pos.w < -21.5 && cam_pos.w > -22.5) {
     clip(albedo.a - 0.1176);  // dynamicobject.alphatest: ALPHAREF 30
   }
   float3 dlin = albedo.rgb * albedo.rgb;

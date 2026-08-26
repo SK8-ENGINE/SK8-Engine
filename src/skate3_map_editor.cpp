@@ -1,5 +1,7 @@
 #include "skate3_map_editor.h"
 
+#include "skate3_drop_item_import.h"
+#include "skate3_drop_item_library.h"
 #include "skate3_mechanics_sandbox_map.h"
 #include "skate3_native_collision.h"
 #include "skate3_trick_pipeline.h"
@@ -15,7 +17,9 @@
 #include <bit>
 #include <chrono>
 #include <cmath>
+#include <exception>
 #include <filesystem>
+#include <future>
 #include <limits>
 #include <mutex>
 #include <ostream>
@@ -48,6 +52,10 @@ std::atomic<std::size_t> g_selected{
 std::mutex g_mutex;
 std::vector<ObjectState> g_objects;
 std::vector<skate::world::SkateObjectAsset> g_spawn_assets;
+std::vector<SpawnObjectEntry> g_spawn_entries;
+std::filesystem::path g_game_data_root;
+std::filesystem::path g_object_library_root;
+std::filesystem::path g_legacy_object_library_root;
 bool g_spawn_assets_scanned = false;
 std::atomic<std::size_t> g_spawn_asset_count{0};
 std::atomic<bool> g_spawn_menu_visible{false};
@@ -95,6 +103,9 @@ std::atomic<std::uint64_t> g_spawn_successes{0};
 std::atomic<std::uint64_t> g_spawn_failures{0};
 std::atomic<std::uint64_t> g_spawn_library_refreshes{0};
 bool g_spawn_position_dirty = true;
+std::mutex g_import_mutex;
+DefaultLibraryStatus g_import_status;
+std::future<void> g_import_future;
 
 void EnsureObjectsLocked() {
   const std::size_t count =
@@ -115,41 +126,64 @@ void LoadSpawnAssetsLocked(bool force_refresh = false) {
   }
   g_spawn_assets_scanned = true;
   std::vector<skate::world::SkateObjectAsset> loaded_assets;
-  std::vector<std::filesystem::path> paths;
-  std::error_code ec;
-  const std::filesystem::path root = "objects";
-  if (!std::filesystem::is_directory(root, ec)) {
+  std::vector<SpawnObjectEntry> loaded_entries;
+  std::vector<drop_item_library::Category> categories;
+  std::string discovery_error;
+  if (!drop_item_library::Discover(
+          g_object_library_root, categories, discovery_error)) {
     g_spawn_assets.clear();
+    g_spawn_entries.clear();
     g_spawn_asset_count.store(0, std::memory_order_release);
-    REXLOG_WARN(
-        "map-editor: object library folder '{}' is unavailable",
-        root.string());
+    REXLOG_ERROR(
+        "map-editor: object library discovery failed root='{}': {}",
+        g_object_library_root.string(), discovery_error);
     return;
   }
-  for (const auto& entry :
-       std::filesystem::directory_iterator(root, ec)) {
-    if (!entry.is_regular_file() ||
-        entry.path().extension() != ".skateobj") {
-      continue;
+  if (!g_legacy_object_library_root.empty() &&
+      g_legacy_object_library_root != g_object_library_root) {
+    std::error_code legacy_error;
+    if (std::filesystem::is_directory(
+            g_legacy_object_library_root, legacy_error)) {
+      auto custom = std::find_if(
+          categories.begin(), categories.end(),
+          [](const drop_item_library::Category& category) {
+            return category.name == drop_item_library::kCustomCategory;
+          });
+      if (custom != categories.end()) {
+        for (const auto& entry :
+             std::filesystem::directory_iterator(
+                 g_legacy_object_library_root, legacy_error)) {
+          if (!legacy_error && entry.is_regular_file() &&
+              entry.path().extension() == ".skateobj") {
+            custom->files.push_back(
+                {drop_item_library::kCustomCategory, entry.path()});
+          }
+        }
+      }
     }
-    paths.push_back(entry.path());
   }
-  std::sort(paths.begin(), paths.end());
-  for (const auto& path : paths) {
-    try {
-      loaded_assets.push_back(
-          skate::world::LoadSkateObjectPackage(path));
-      REXLOG_INFO(
-          "map-editor: object library loaded '{}' from '{}'",
-          loaded_assets.back().name, path.string());
-    } catch (const std::exception& error) {
-      g_spawn_failures.fetch_add(1, std::memory_order_relaxed);
-      REXLOG_ERROR(
-          "map-editor: object library rejected '{}': {}",
-          path.string(), error.what());
+  for (const drop_item_library::Category& category : categories) {
+    for (const drop_item_library::File& file : category.files) {
+      const std::filesystem::path& path = file.path;
+      try {
+        loaded_assets.push_back(
+            skate::world::LoadSkateObjectPackage(path));
+        loaded_entries.push_back(
+            {loaded_assets.size() - 1, category.name,
+             loaded_assets.back().name});
+        REXLOG_INFO(
+            "map-editor: object library loaded category='{}' '{}' from '{}'",
+            category.name, loaded_assets.back().name, path.string());
+      } catch (const std::exception& error) {
+        g_spawn_failures.fetch_add(1, std::memory_order_relaxed);
+        REXLOG_ERROR(
+            "map-editor: object library rejected '{}': {}",
+            path.string(), error.what());
+      }
     }
   }
   g_spawn_assets = std::move(loaded_assets);
+  g_spawn_entries = std::move(loaded_entries);
   g_spawn_asset_count.store(
       g_spawn_assets.size(), std::memory_order_release);
   REXLOG_INFO(
@@ -244,6 +278,17 @@ void RecordInteractionTime(
 void SetWindowHandle(void* window) {
   g_window.store(window, std::memory_order_release);
   g_input_focused.store(false, std::memory_order_release);
+}
+
+void ConfigureObjectLibrary(
+    std::filesystem::path game_data_root,
+    std::filesystem::path user_object_root,
+    std::filesystem::path legacy_object_root) {
+  std::scoped_lock lock(g_mutex);
+  g_game_data_root = std::move(game_data_root);
+  g_object_library_root = std::move(user_object_root);
+  g_legacy_object_library_root = std::move(legacy_object_root);
+  g_spawn_assets_scanned = false;
 }
 
 void Toggle() {
@@ -345,15 +390,93 @@ bool SpawnMenuVisible() {
          g_spawn_menu_visible.load(std::memory_order_acquire);
 }
 
-std::vector<std::string> SpawnObjectNames() {
+std::vector<SpawnObjectEntry> SpawnObjectEntries() {
   std::scoped_lock lock(g_mutex);
   LoadSpawnAssetsLocked();
-  std::vector<std::string> names;
-  names.reserve(g_spawn_assets.size());
-  for (const auto& asset : g_spawn_assets) {
-    names.push_back(asset.name);
+  return g_spawn_entries;
+}
+
+bool StartDefaultLibraryImport() {
+  std::filesystem::path game_data_root;
+  std::filesystem::path object_library_root;
+  {
+    std::scoped_lock lock(g_mutex);
+    game_data_root = g_game_data_root;
+    object_library_root = g_object_library_root;
   }
-  return names;
+  if (game_data_root.empty() || object_library_root.empty()) {
+    std::scoped_lock lock(g_import_mutex);
+    g_import_status.state = DefaultLibraryState::Failed;
+    g_import_status.message =
+        "The editor's game-data or user-data path is not configured.";
+    g_import_status.errors = {g_import_status.message};
+    return false;
+  }
+  {
+    std::scoped_lock lock(g_import_mutex);
+    if (g_import_status.state == DefaultLibraryState::Running) {
+      return false;
+    }
+    g_import_status = {};
+    g_import_status.state = DefaultLibraryState::Running;
+    g_import_status.message =
+        "Starting local default-item conversion";
+  }
+  g_import_future = std::async(
+      std::launch::async,
+      [game_data_root = std::move(game_data_root),
+       object_library_root = std::move(object_library_root)] {
+        try {
+          const drop_item_import::Result result =
+              drop_item_import::ImportDefaults(
+                  game_data_root, object_library_root,
+                  [](const drop_item_import::Progress& progress) {
+                    std::scoped_lock lock(g_import_mutex);
+                    g_import_status.completed = progress.completed;
+                    g_import_status.total = progress.total;
+                    g_import_status.written = progress.written;
+                    g_import_status.reused = progress.reused;
+                    g_import_status.unsupported =
+                        progress.unsupported;
+                    g_import_status.message = progress.message;
+                  });
+          std::scoped_lock lock(g_import_mutex);
+          g_import_status.completed = result.completed;
+          g_import_status.total = result.total;
+          g_import_status.written = result.written;
+          g_import_status.reused = result.reused;
+          g_import_status.unsupported = result.unsupported;
+          g_import_status.message = result.message;
+          g_import_status.errors = result.errors;
+          g_import_status.state =
+              result.errors.empty()
+                  ? DefaultLibraryState::Complete
+                  : DefaultLibraryState::Failed;
+        } catch (const std::exception& exception) {
+          std::scoped_lock lock(g_import_mutex);
+          g_import_status.state = DefaultLibraryState::Failed;
+          g_import_status.message =
+              "Default-item conversion stopped unexpectedly: " +
+              std::string(exception.what());
+          g_import_status.errors = {g_import_status.message};
+        } catch (...) {
+          std::scoped_lock lock(g_import_mutex);
+          g_import_status.state = DefaultLibraryState::Failed;
+          g_import_status.message =
+              "Default-item conversion stopped unexpectedly.";
+          g_import_status.errors = {g_import_status.message};
+        }
+        {
+          std::scoped_lock lock(g_mutex);
+          g_spawn_assets_scanned = false;
+        }
+      });
+  return true;
+}
+
+DefaultLibraryStatus GetDefaultLibraryStatus() {
+  std::scoped_lock lock(g_import_mutex);
+  return g_import_status;
 }
 
 bool RefreshSpawnObjects() {

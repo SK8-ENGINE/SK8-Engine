@@ -761,8 +761,16 @@ float4 ShadePixel(VSOut i) {
     return ToneOut(xe, 1.0, false);
   }
   // dynamicobject.fx props: scene_dynobj.hlsli. Variants -21/-22 only;
-  // the exact water families (-30..) and the sky (-40) pass through.
+  // -23 is the portable environmentPark decal variant, lit as a prop after
+  // compositing its retained decal artwork. The exact water families
+  // (-30..) and the sky (-40) pass through.
   if (cam_pos.w < -20.5 && cam_pos.w > -25.5) {
+    if (cam_pos.w < -22.5 && cam_pos.w > -23.5) {
+      float4 park_decal =
+          decal_art.Sample(smp_clamp, i.uv3);
+      albedo.rgb =
+          lerp(albedo.rgb, park_decal.rgb, park_decal.a);
+    }
     return ShadeDynObject(i, albedo);
   }
   // Character families (defaultcharacter / CAC / livingworld / hair /

@@ -36,4 +36,11 @@ void RemapSkateObjectBreakGroups(
 SkateObjectAsset LoadSkateObjectPackage(
     const std::filesystem::path& path);
 
+// Writes one portable SKATE14/MOBJ3 prefab package atomically. Geometry and
+// collision remain local to each root object while origins and grind rails
+// are relative to the package pivot, matching LoadSkateObjectPackage().
+void SaveSkateObjectPackage(
+    const std::filesystem::path& path,
+    const SkateObjectAsset& asset);
+
 }  // namespace skate::world

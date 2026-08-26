@@ -1740,6 +1740,19 @@ std::size_t AppendSpawnedObject(
     for (auto& point : rail.points) {
       point = point + map_position;
     }
+    for (auto& segment : rail.native_segments) {
+      for (const std::size_t word : {12u, 20u, 24u}) {
+        segment.words[word] = std::bit_cast<std::uint32_t>(
+            std::bit_cast<float>(segment.words[word]) +
+            map_position.x);
+        segment.words[word + 1] = std::bit_cast<std::uint32_t>(
+            std::bit_cast<float>(segment.words[word + 1]) +
+            map_position.y);
+        segment.words[word + 2] = std::bit_cast<std::uint32_t>(
+            std::bit_cast<float>(segment.words[word + 2]) +
+            map_position.z);
+      }
+    }
     rail_remap.push_back(static_cast<std::uint32_t>(
         definition.grind_rails.size()));
     definition.grind_rails.push_back(std::move(rail));

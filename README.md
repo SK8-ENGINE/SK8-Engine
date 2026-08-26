@@ -211,8 +211,19 @@ to fly, Space to rise, Q or C to descend, Shift for fast movement, and
 Ctrl for slow movement. LMB selects an authored map object; drag a coloured
 world-space axis arrow to move it, or drag one of the three rings to rotate it. Releasing LMB
 commits the pose. The selected object has a subtle cyan outer contour. The
-E key opens the spawn-object list populated from top-level `objects/*.skateobj`;
-the list's **Refresh objects** button rescans that folder without restarting;
+E key opens the spawn-object list, which groups `.skateobj` files in the
+current user's object library by their immediate parent folder. Use
+**Build defaults from installed Skate 3** on first setup to convert the
+supported built-in drop items from your own local `game/data/content/parkassets.big`.
+The converter takes the category names and item membership from Skate 3's
+retail park-asset recipes, writes the resulting files only to the current
+user's object library, and can safely be rerun to reuse valid packages or
+repair incomplete ones. No extracted game asset is bundled with the editor.
+Non-model recipe helpers such as teleport and spawner markers are reported
+as unsupported rather than emitted as unusable objects. Put personal files in
+the separate `Custom` folder; a file's folder is its category and the
+`.skateobj` format is unchanged. The list's **Refresh objects** button rescans
+all category folders without restarting;
 select an entry and click **Spawn selected** or press Enter to place it on the
 surface under the camera aim. Spawned render geometry, collision, and attached
 grind splines use the same runtime transform as authored objects. The

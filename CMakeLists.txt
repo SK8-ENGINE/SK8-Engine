@@ -291,6 +291,8 @@ set(SKATE3_COMMON_SOURCES
     src/skate3_custom_trick.cpp
     src/skate3_demo_path.cpp
     src/skate3_draw_distance.cpp
+    src/skate3_drop_item_import.cpp
+    src/skate3_drop_item_library.cpp
     src/skate3_fov.cpp
     src/skate3_function_coverage.cpp
     src/skate3_input_history_watch.cpp
@@ -465,7 +467,9 @@ else()
     message(STATUS "generated/eawebkit/sources.cmake not found; run the generate-all target before building skate3")
 endif()
 
-target_link_libraries(skate3 PRIVATE rex::runtime skate_owned_world snappy)
+target_link_libraries(
+    skate3 PRIVATE
+    rex::runtime skate_owned_world snappy ZLIB::ZLIBSTATIC)
 rexglue_configure_target(skate3)
 
 if(NOT SKATE3_EFFECTIVE_TITLE_UPDATE_PACKAGE STREQUAL ""

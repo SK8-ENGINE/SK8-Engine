@@ -27,6 +27,13 @@ class Archive {
       std::string_view prefix) const;
   [[nodiscard]] std::string CacheKey() const;
 
+  // Reads one archive member directly into memory. This lets local importers
+  // convert the user's assets without publishing intermediate extracted
+  // game files.
+  bool Read(std::string_view archive_path,
+            std::vector<std::uint8_t>& bytes,
+            std::string& error) const;
+
   // Extracts one indexed archive-relative path using an atomic file replace.
   // A complete existing file with the expected uncompressed size is reused.
   bool Extract(std::string_view archive_path,

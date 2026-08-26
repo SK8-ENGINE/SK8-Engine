@@ -3,6 +3,8 @@
 #include "skate/world/owned_map_package.h"
 
 #include <algorithm>
+#include <bit>
+#include <cctype>
 #include <limits>
 #include <numeric>
 #include <stdexcept>
@@ -10,6 +12,31 @@
 #include <utility>
 
 namespace skate::world {
+namespace {
+
+bool IsSkateObjectPath(const std::filesystem::path& path) {
+  std::string extension = path.extension().string();
+  std::transform(
+      extension.begin(), extension.end(), extension.begin(),
+      [](unsigned char character) {
+        return static_cast<char>(std::tolower(character));
+      });
+  return extension == ".skateobj";
+}
+
+void TranslateNativeSegment(
+    NativeGrindSegment& segment, Vec3 translation) {
+  for (const std::size_t word : {12u, 20u, 24u}) {
+    segment.words[word] = std::bit_cast<std::uint32_t>(
+        std::bit_cast<float>(segment.words[word]) + translation.x);
+    segment.words[word + 1] = std::bit_cast<std::uint32_t>(
+        std::bit_cast<float>(segment.words[word + 1]) + translation.y);
+    segment.words[word + 2] = std::bit_cast<std::uint32_t>(
+        std::bit_cast<float>(segment.words[word + 2]) + translation.z);
+  }
+}
+
+}  // namespace
 
 SkateObjectAsset ExtractSkateObjectAsset(MapDefinition package) {
   const bool version_2 =
@@ -87,14 +114,6 @@ SkateObjectAsset ExtractSkateObjectAsset(MapDefinition package) {
         "SKATEOBJ roots must collectively own all render, collision, and "
         "grind records");
   }
-  for (const GrindRail& rail : package.grind_rails) {
-    if (!rail.native_segments.empty()) {
-      throw std::runtime_error(
-          "SKATEOBJ supports authored grind points, not retail native "
-          "spline payloads");
-    }
-  }
-
   SkateObjectAsset asset;
   asset.format_version = version_2 ? 2u : 1u;
   asset.name = package.name;
@@ -120,6 +139,11 @@ SkateObjectAsset ExtractSkateObjectAsset(MapDefinition package) {
   for (GrindRail& rail : asset.grind_rails) {
     for (Vec3& point : rail.points) {
       point = point - authored_pivot;
+    }
+    for (NativeGrindSegment& segment : rail.native_segments) {
+      TranslateNativeSegment(
+          segment,
+          {-authored_pivot.x, -authored_pivot.y, -authored_pivot.z});
     }
   }
   return asset;
@@ -155,7 +179,7 @@ void RemapSkateObjectBreakGroups(
 
 SkateObjectAsset LoadSkateObjectPackage(
     const std::filesystem::path& path) {
-  if (path.extension() != ".skateobj") {
+  if (!IsSkateObjectPath(path)) {
     throw std::runtime_error(
         "spawnable object package must use the .skateobj extension");
   }

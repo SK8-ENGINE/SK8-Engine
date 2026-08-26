@@ -2,6 +2,8 @@
 
 #include <rex/ui/imgui_dialog.h>
 
+#include <array>
+
 namespace skate3 {
 
 class MapEditorSpawnDialog final : public rex::ui::ImGuiDialog {
@@ -14,6 +16,7 @@ class MapEditorSpawnDialog final : public rex::ui::ImGuiDialog {
 
  private:
   int selected_ = 0;
+  std::array<char, 128> search_{};
 };
 
 }  // namespace skate3
