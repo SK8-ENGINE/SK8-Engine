@@ -14,6 +14,11 @@ import numpy
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 from retail_collision_mesh import decode_rx2_clustered_meshes
+from retail_grind_splines import (
+    classify_grind_coordinate_frame,
+    grind_cell_translation,
+    translate_native_segment_payload,
+)
 
 
 RETAIL_NORMAL_ATTRIBUTE = "skate3_retail_normal"
@@ -332,14 +337,57 @@ def _retail_grind_controls(
 def _import_retail_grinds(
     manifest: dict[str, object],
     collection: bpy.types.Collection,
-) -> tuple[int, int]:
+) -> tuple[int, int, int, int]:
     rail_count = 0
     segment_count = 0
+    cell_local_count = 0
+    ambiguous_count = 0
+    coordinate_policy = manifest.get("grind_coordinate_policy", {})
+    default_coordinate_mode = (
+        "mixed_cell_local"
+        if manifest.get("format") == "skate2-bam-cache-v1"
+        else "world_space"
+    )
+    coordinate_mode = str(
+        coordinate_policy.get("mode", default_coordinate_mode)
+    )
+    classification_margin = float(
+        coordinate_policy.get("classification_margin", 40.0)
+    )
     for entry in manifest.get("grind_splines", []):
-        payloads = entry["native_segment_payloads"]
+        source_payloads = entry["native_segment_payloads"]
         expected_segments = int(entry["segment_count"])
-        if len(payloads) != expected_segments or expected_segments == 0:
+        if (
+            len(source_payloads) != expected_segments
+            or expected_segments == 0
+        ):
             raise ValueError("retail grind manifest has invalid segment count")
+        source_coordinate_frame = "world_space"
+        payloads = source_payloads
+        translation = None
+        if coordinate_mode == "mixed_cell_local":
+            source_coordinate_frame = classify_grind_coordinate_frame(
+                entry["stream_file"],
+                source_payloads,
+                margin=classification_margin,
+            )
+            if source_coordinate_frame == "cell_local":
+                translation = grind_cell_translation(entry["stream_file"])
+                if translation is None:
+                    raise ValueError(
+                        "cell-local grind has no stream-cell translation"
+                    )
+                payloads = [
+                    translate_native_segment_payload(payload, translation)
+                    for payload in source_payloads
+                ]
+                cell_local_count += 1
+            elif source_coordinate_frame == "ambiguous":
+                ambiguous_count += 1
+        elif coordinate_mode != "world_space":
+            raise ValueError(
+                f"unsupported grind coordinate mode {coordinate_mode!r}"
+            )
         controls = [_retail_grind_controls(payload) for payload in payloads]
         closed = bool(entry["closed"])
         point_count = expected_segments if closed else expected_segments + 1
@@ -370,6 +418,13 @@ def _import_retail_grinds(
             following.handle_left = point_2
             if not closed or next_index != 0:
                 following.co = point_3
+        if not closed:
+            spline.bezier_points[0].handle_left = (
+                spline.bezier_points[0].co
+            )
+            spline.bezier_points[-1].handle_right = (
+                spline.bezier_points[-1].co
+            )
 
         obj = bpy.data.objects.new(curve_name, curve_data)
         collection.objects.link(obj)
@@ -386,9 +441,14 @@ def _import_retail_grinds(
         )
         obj["skate3_retail_grind_segment_count"] = expected_segments
         obj["skate3_retail_grind_segment_payload"] = "".join(payloads)
+        obj["skate3_retail_grind_source_coordinate_frame"] = (
+            source_coordinate_frame
+        )
+        if translation is not None:
+            obj["skate3_retail_grind_cell_translation"] = translation
         rail_count += 1
         segment_count += expected_segments
-    return rail_count, segment_count
+    return rail_count, segment_count, cell_local_count, ambiguous_count
 
 
 def _retail_collision_material(surface: int) -> bpy.types.Material:
@@ -562,8 +622,24 @@ def build_scene(manifest_path: Path) -> dict[str, int]:
     lightmapped_object_count = 0
     used_lightmap_texture_ids: set[str] = set()
     retail_world_frame_object_count = 0
+    default_excluded_static_model_asset_ids = (
+        {"0xd4538d2e1da5434f"}
+        if manifest.get("format") == "skate2-bam-cache-v1"
+        else set()
+    )
+    excluded_static_model_asset_ids = default_excluded_static_model_asset_ids | {
+        str(asset_id).lower()
+        for asset_id in manifest.get("presentation_model_policy", {}).get(
+            "excluded_asset_ids",
+            [],
+        )
+    }
+    excluded_static_mesh_parts = 0
     for model_entry in manifest["models"]:
         asset_id = model_entry["asset_id"]
+        if str(asset_id).lower() in excluded_static_model_asset_ids:
+            excluded_static_mesh_parts += len(model_entry["meshes"])
+            continue
         source_stem = Path(model_entry["stream_file"]).stem
         cell_collection = presentation.children.get(source_stem)
         if cell_collection is None:
@@ -876,10 +952,12 @@ def build_scene(manifest_path: Path) -> dict[str, int]:
                 vertex_count += len(vertices)
                 triangle_count += len(faces)
 
-    grind_rail_count, grind_segment_count = _import_retail_grinds(
-        manifest,
-        retail_grinds,
-    )
+    (
+        grind_rail_count,
+        grind_segment_count,
+        cell_local_grind_count,
+        ambiguous_grind_count,
+    ) = _import_retail_grinds(manifest, retail_grinds)
     (
         collision_mesh_count,
         collision_surface_count,
@@ -922,7 +1000,14 @@ def build_scene(manifest_path: Path) -> dict[str, int]:
         f"across {collision_surface_count} packed surfaces"
     )
     scene["skate3_grind_status"] = (
-        f"{grind_rail_count} retail native cubic splines imported"
+        f"{grind_rail_count} exact retail grind rails with "
+        f"{grind_segment_count} native cubic segments; "
+        f"{cell_local_grind_count} cell-local rails placed in world space; "
+        f"{ambiguous_grind_count} boundary rails preserved unchanged"
+    )
+    scene["skate3_excluded_static_model_status"] = (
+        f"{excluded_static_mesh_parts} unplaced static prop mesh parts "
+        "excluded by import policy"
     )
     scene["skate3_normal_status"] = (
         f"{normal_mapped_object_count} mesh parts use "
@@ -953,7 +1038,10 @@ def build_scene(manifest_path: Path) -> dict[str, int]:
         "collision_surfaces": collision_surface_count,
         "collision_triangles": collision_triangle_count,
         "simulation_assets": len(manifest["simulation_assets"]),
-        "expected_objects": manifest["summary"]["mesh_parts"],
+        "expected_objects": (
+            manifest["summary"]["mesh_parts"]
+            - excluded_static_mesh_parts
+        ),
     }
 
 

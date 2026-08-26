@@ -113,9 +113,9 @@ def _source_frame_digests(
 def _package_frame_digests(
     package: dict[str, object],
 ) -> dict[tuple[str, int], tuple[int, str]]:
-    if int(package["version"]) != 12:
+    if int(package["version"]) not in (12, 13):
         raise RuntimeError(
-            f"expected SKATE v12, found v{package['version']}"
+            f"expected SKATE v12 or v13, found v{package['version']}"
         )
     material_keys: dict[int, tuple[str, int]] = {}
     for material_id, material in enumerate(

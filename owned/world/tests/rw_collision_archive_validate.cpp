@@ -121,6 +121,13 @@ int main(int argc, char** argv) {
         ReadBeU32(serialized, kd_offset + 4);
     const std::uint32_t first_cluster_offset =
         ReadBeU32(serialized, cluster_table_offset);
+    skate::world::Vec3 applied_translation{};
+    std::string translation_error;
+    if (!skate::world::TranslateSerializedRwCollisionMesh(
+            loaded.mesh, {123.456f, -78.9f, 42.125f},
+            &applied_translation, &translation_error)) {
+      Fail(name + ": rigid translation failed: " + translation_error);
+    }
     std::vector<std::uint8_t> fixed = loaded.mesh.bytes;
     constexpr std::uint32_t kGuestAddress = 0x50000000u;
     if (!skate::world::FixupRwCollisionMeshForGuest(

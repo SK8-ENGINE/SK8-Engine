@@ -19,9 +19,11 @@ endif()
 
 add_library(skate_owned_world STATIC
   src/grind_spline.cpp
+  src/map_editor.cpp
   src/owned_map_package.cpp
   src/render_world.cpp
   src/rw_collision_mesh.cpp
+  src/skate_object_package.cpp
   src/starter_flatground.cpp
   src/water_simulation.cpp
   src/world_map.cpp
@@ -68,6 +70,28 @@ if(SKATE_OWNED_WORLD_BUILD_TESTS)
   )
   target_compile_features(
     skate_rw_collision_archive_validate PRIVATE cxx_std_20
+  )
+
+  add_executable(skate_rw_collision_archive_build
+    tools/build_collision_archive.cpp
+  )
+
+  target_link_libraries(
+    skate_rw_collision_archive_build PRIVATE skate_owned_world
+  )
+  target_compile_features(
+    skate_rw_collision_archive_build PRIVATE cxx_std_20
+  )
+
+  add_executable(skate_owned_map_crop
+    tools/crop_owned_map.cpp
+  )
+
+  target_link_libraries(
+    skate_owned_map_crop PRIVATE skate_owned_world ZLIB::ZLIBSTATIC
+  )
+  target_compile_features(
+    skate_owned_map_crop PRIVATE cxx_std_20
   )
 
   add_test(NAME skate_owned_world_tests COMMAND skate_owned_world_tests)

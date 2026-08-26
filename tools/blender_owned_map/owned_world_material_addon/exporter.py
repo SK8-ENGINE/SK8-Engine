@@ -1,4 +1,4 @@
-"""Original Blender -> SKATE v12 exporter.
+"""Original Blender -> SKATE v13 exporter.
 
 This module intentionally targets the narrow project-owned scene contract
 documented beside it. It has no ArenaBuilder imports or runtime dependency.
@@ -10,6 +10,7 @@ from array import array
 from dataclasses import dataclass
 from pathlib import Path
 import hashlib
+import io
 import json
 import math
 import os
@@ -27,7 +28,7 @@ except ImportError:
     numpy = None
 
 
-MAGIC = b"SKATE12\0"
+MAGIC = b"SKATE13\0"
 ENDIAN_MARKER = 0x12345678
 STORAGE_RAW = 0
 STORAGE_DEFLATE = 1
@@ -60,7 +61,7 @@ _HELPER_OBJECT_MARKERS = (
     "scale_reference",
     "scale reference",
 )
-CACHE_SCHEMA = 16
+CACHE_SCHEMA = 19
 METADATA_FLOAT_COUNT = 49
 METADATA_BYTE_COUNT = METADATA_FLOAT_COUNT * 4
 RETAIL_NORMAL_ATTRIBUTE = "skate3_retail_normal"
@@ -73,6 +74,7 @@ RETAIL_HANDEDNESS_ATTRIBUTE = "skate3_retail_tangent_handedness"
 RETAIL_EDGE_CODE_ATTRIBUTES = tuple(
     f"skate3_retail_edge_code_{corner}" for corner in range(3)
 )
+EDITOR_COLLISION_OWNER_ATTRIBUTE = "ow_editor_collision_owner"
 
 
 @dataclass
@@ -126,6 +128,18 @@ class PackedVisualGeometry:
     index_chunks: list[bytes]
     vertex_count: int
     index_count: int
+    objects: list["ExportMapObject"]
+
+
+@dataclass
+class ExportMapObject:
+    source_identity: int
+    object_id: int
+    name: str
+    origin: tuple[float, float, float]
+    first_index: int
+    index_count: int
+    editor_editable: bool
 
 
 @dataclass
@@ -152,6 +166,7 @@ class ExportGrindRail:
     retail_flags: int = 0
     retail_trailing_word: int = 0
     native_segment_payload: bytes = b""
+    parent_source_identity: int = 0
 
 
 @dataclass
@@ -265,6 +280,45 @@ def _write_stored_chunks(
     return STORAGE_DEFLATE, stored_size
 
 
+def _map_object_extension(
+    geometry: PackedVisualGeometry,
+    collision_ranges: dict[int, tuple[int, int]],
+    rails: list[ExportGrindRail],
+    export_editable_objects: bool,
+) -> bytes:
+    payload = io.BytesIO()
+    editable_objects = (
+        [
+            record
+            for record in geometry.objects
+            if record.editor_editable
+        ]
+        if export_editable_objects
+        else []
+    )
+    _write_u32(payload, len(editable_objects))
+    for record in editable_objects:
+        first_collision, collision_count = collision_ranges.get(
+            record.source_identity, (0, 0)
+        )
+        _write_u32(payload, record.object_id)
+        _write_string(payload, record.name)
+        _write_vec(payload, record.origin)
+        _write_u32(payload, record.first_index)
+        _write_u32(payload, record.index_count)
+        _write_u32(payload, first_collision)
+        _write_u32(payload, collision_count)
+        grind_indices = [
+            index
+            for index, rail in enumerate(rails)
+            if rail.parent_source_identity == record.source_identity
+        ]
+        _write_u32(payload, len(grind_indices))
+        for grind_index in grind_indices:
+            _write_u32(payload, grind_index)
+    return payload.getvalue()
+
+
 def _cache_manifest_path(output: Path) -> Path:
     return output.with_name(output.name + ".export-cache.json")
 
@@ -368,6 +422,19 @@ def _mesh_for_export(
     return mesh, evaluated
 
 
+def _visual_uv_layers(
+    mesh: bpy.types.Mesh, source_name: str
+) -> tuple[bpy.types.MeshUVLoopLayer, bpy.types.MeshUVLoopLayer]:
+    uv0 = mesh.uv_layers.get("UVMap")
+    if uv0 is None:
+        raise ValueError(
+            f"visual mesh {source_name!r} requires a UVMap UV layer"
+        )
+    # The package always stores two UV streams, but unlit maps do not need
+    # authors to manufacture a duplicate Blender lightmap layer.
+    return uv0, mesh.uv_layers.get("Lightmap") or uv0
+
+
 def _retail_world_frame_attributes(mesh):
     normal = mesh.attributes.get(RETAIL_NORMAL_ATTRIBUTE)
     tangent = mesh.attributes.get(RETAIL_TANGENT_ATTRIBUTE)
@@ -456,6 +523,7 @@ def _hash_mesh(
         if visual:
             for property_name in (
                 "ow_export_visual",
+                "ow_editor_editable",
                 "ow_physics_type",
                 "ow_hinge_position",
                 "ow_hinge_axis",
@@ -475,13 +543,7 @@ def _hash_mesh(
                     digest,
                     repr(source_object.get(property_name, None)),
                 )
-            uv0 = mesh.uv_layers.get("UVMap")
-            uv1 = mesh.uv_layers.get("Lightmap")
-            if uv0 is None or uv1 is None:
-                raise ValueError(
-                    f"visual mesh {source_object.name!r} requires UVMap and "
-                    "Lightmap UV layers"
-                )
+            uv0, uv1 = _visual_uv_layers(mesh, source_object.name)
             _hash_foreach(digest, mesh.loops, "normal", 3, "f")
             _hash_foreach(digest, uv0.data, "uv", 2, "f")
             _hash_foreach(digest, uv1.data, "uv", 2, "f")
@@ -516,6 +578,7 @@ def _scene_content_fingerprint(
     materials: list[bpy.types.Material],
     images: list[bpy.types.Image],
     collision_triangle_count: int,
+    export_editable_objects: bool,
     progress: ProgressCallback | None = None,
 ) -> SceneContentFingerprint:
     started = time.perf_counter()
@@ -527,6 +590,10 @@ def _scene_content_fingerprint(
     )
     digest = hashlib.sha256()
     digest.update(f"SKATE_EXPORT_CACHE_{CACHE_SCHEMA}".encode("ascii"))
+    _hash_text(
+        digest,
+        f"EXPORT_EDITABLE_OBJECTS={int(export_editable_objects)}",
+    )
 
     material_properties = (
         "ow_flags",
@@ -547,6 +614,7 @@ def _scene_content_fingerprint(
         "ow_audio_surface",
         "ow_physics_surface",
         "ow_surface_pattern",
+        "ow_depth_layer",
         "ow_collision_enabled",
         "skate3_shader_name",
         "skate3_retail_material_guid",
@@ -633,6 +701,22 @@ def _scene_content_fingerprint(
             obj.get("ow_preserve_retail_edge_codes", False)
         )
         _hash_text(digest, int(preserve_retail_codes))
+        editor_owner = obj.data.attributes.get(
+            EDITOR_COLLISION_OWNER_ATTRIBUTE
+        )
+        _hash_text(digest, EDITOR_COLLISION_OWNER_ATTRIBUTE)
+        if editor_owner is None:
+            _hash_text(digest, "MISSING")
+        else:
+            _hash_text(digest, editor_owner.domain)
+            _hash_text(digest, editor_owner.data_type)
+            _hash_foreach(
+                digest,
+                editor_owner.data,
+                "value",
+                1,
+                "i",
+            )
         if preserve_retail_codes:
             for attribute_name in RETAIL_EDGE_CODE_ATTRIBUTES:
                 attribute = obj.data.attributes.get(attribute_name)
@@ -687,6 +771,12 @@ def _scene_content_fingerprint(
             "skate3_retail_grind_segment_payload",
         ):
             _hash_text(digest, repr(obj.get(property_name, None)))
+        _hash_text(
+            digest,
+            obj.parent.name_full
+            if obj.parent is not None and obj.parent.type == "MESH"
+            else "",
+        )
         object_complete(f"Hashing grind paths: {obj.name}")
 
     npc_routes = 0
@@ -812,7 +902,7 @@ def _sun_metadata() -> tuple[tuple[float, float, float], float, float]:
 def _read_package_header(output: Path) -> tuple[str, int, tuple[int, ...]]:
     with output.open("rb") as stream:
         if stream.read(len(MAGIC)) != MAGIC:
-            raise ValueError(f"{output} is not an SKATE v12 package")
+            raise ValueError(f"{output} is not an SKATE v13 package")
         marker = struct.unpack("<I", stream.read(4))[0]
         if marker != ENDIAN_MARKER:
             raise ValueError(f"{output} has an invalid endian marker")
@@ -989,6 +1079,15 @@ def _to_runtime(value) -> tuple[float, float, float]:
     return float(value.x), float(value.z), float(-value.y)
 
 
+def _stable_object_id(name: str) -> int:
+    """Return a deterministic non-zero FNV-1a ID for one Blender object."""
+    value = 2166136261
+    for byte in name.encode("utf-8"):
+        value ^= byte
+        value = (value * 16777619) & 0xFFFFFFFF
+    return value or 1
+
+
 def _pack_snorm8(value: float) -> int:
     return max(-127, min(127, round(max(-1.0, min(1.0, value)) * 127.0)))
 
@@ -1112,15 +1211,11 @@ def _image_rgba8(
     return bytes(result)
 
 
-def _require_nonblank_rgb(name: str, rgba8: bytes) -> None:
-    if not any(
+def _has_nonblank_rgb(rgba8: bytes) -> bool:
+    return any(
         rgba8[index] or rgba8[index + 1] or rgba8[index + 2]
         for index in range(0, len(rgba8), 4)
-    ):
-        raise ValueError(
-            f"referenced texture {name!r} contains no RGB data; refusing "
-            "to export a black SKATE package"
-        )
+    )
 
 
 def _collection(name: str) -> bpy.types.Collection:
@@ -1272,6 +1367,25 @@ def _retail_render_flags(shader_name: str, alpha_mode: int) -> int:
     return flags
 
 
+def _effective_alpha_mode(material: bpy.types.Material) -> int:
+    authored_mode = _bounded_int(material, "ow_alpha_mode", 0, 2)
+    if authored_mode != 0 or bool(material.get("ow_force_opaque", False)):
+        return authored_mode
+
+    material_name = material.name.casefold()
+    image_name = str(material.get("ow_albedo_image", ""))
+    image_stem = image_name.casefold().rsplit(".", 1)[0]
+    alpha_named = (
+        material_name.endswith("_a")
+        or image_stem.endswith("_a")
+        or "alpha" in material_name
+    )
+    image = bpy.data.images.get(image_name)
+    if alpha_named and image is not None and image.channels >= 4:
+        return 1
+    return authored_mode
+
+
 def _retail_material_data(
     material: bpy.types.Material,
     image_ids: dict[int, int],
@@ -1314,10 +1428,12 @@ def _retail_material_data(
             raise ValueError(
                 f"retail image {image.name!r} was not collected for export"
             )
-        uv_set = 1 if semantic in {"lightmap", "alpha"} else (
+        uv_set = 1 if semantic in {
+            "lightmap", "chromaticity", "alpha"
+        } else (
             2 if semantic == "decal" else 0
         )
-        clamp = semantic == "lightmap" or (
+        clamp = semantic in {"lightmap", "chromaticity"} or (
             semantic == "decal" and not tileable_decal
         )
         address = 1 if clamp else 0
@@ -1338,7 +1454,7 @@ def _retail_material_data(
             parameters.append((name, encoded_values))
     parameters.sort(key=lambda item: item[0])
 
-    alpha_mode = _bounded_int(material, "ow_alpha_mode", 0, 2)
+    alpha_mode = _effective_alpha_mode(material)
     source = _json_object_property(
         material, "skate3_retail_source"
     )
@@ -1361,6 +1477,13 @@ def _retail_material_data(
     )
 
 
+def _is_placeholder_image_name(name: str) -> bool:
+    return name.strip().casefold().rsplit(".", 1)[0] in {
+        "none",
+        "null",
+    }
+
+
 def _referenced_images(
     materials: list[bpy.types.Material],
 ) -> tuple[list[bpy.types.Image], dict[int, int]]:
@@ -1375,7 +1498,7 @@ def _referenced_images(
             "ow_emissive_image",
         ):
             image_name = str(material.get(property_name, ""))
-            if not image_name:
+            if not image_name or _is_placeholder_image_name(image_name):
                 continue
             image = bpy.data.images.get(image_name)
             if image is None:
@@ -1390,7 +1513,10 @@ def _referenced_images(
         for source_id in _json_object_property(
             material, "skate3_retail_texture_ids"
         ).values():
-            image = bpy.data.images.get(str(source_id).lower())
+            source_name = str(source_id).lower()
+            if _is_placeholder_image_name(source_name):
+                continue
+            image = bpy.data.images.get(source_name)
             if image is None:
                 raise ValueError(
                     f"material {material.name!r} references missing retail "
@@ -1437,6 +1563,208 @@ def _material_color(material: bpy.types.Material) -> tuple[float, float, float]:
     return tuple(float(material.diffuse_color[index]) for index in range(3))
 
 
+def _presentation_depth_layer(material: bpy.types.Material) -> int:
+    authored = material.get("ow_depth_layer")
+    if authored is not None:
+        value = int(authored)
+        if value < 0 or value > 3:
+            raise ValueError(
+                f"material {material.name!r} has invalid ow_depth_layer={value}"
+            )
+        return value
+    alpha_mode = _effective_alpha_mode(material)
+    if alpha_mode == 2:
+        return 3
+    lower_name = material.name.casefold()
+    overlay_tokens = (
+        "sign",
+        "_sgn",
+        "sgn_",
+        "sgns",
+        "poster",
+        "billboard",
+        "adbord",
+        "advert",
+        "banner",
+        "logo",
+        "decal",
+        "graffiti",
+        "sticker",
+        "plaque",
+        "letter",
+        "neon",
+        "marking",
+        "videowall",
+        "vwall",
+        "branding",
+    )
+    if any(token in lower_name for token in overlay_tokens):
+        return 2
+    return 1 if alpha_mode == 1 else 0
+
+
+def _duplicate_visual_surface_keep_mask(
+    mesh: bpy.types.Mesh,
+    triangle_vertices,
+    triangle_polygons,
+    source_positions,
+):
+    """Discard redundant dense copies of the same authored visual surface.
+
+    Some retail rips contain both a conventional static billboard quad and a
+    densely tessellated video-wall copy in separate material slots that point
+    at the same material. Rendering both produces persistent triangle-shaped
+    depth fighting. This detects only geometrically coincident connected
+    surfaces with the same material name, retaining the simpler copy.
+    """
+    triangle_count = len(triangle_polygons)
+    keep = numpy.ones(triangle_count, dtype=numpy.bool_)
+    if triangle_count < 2:
+        return keep
+
+    material_names = [
+        material.name if material is not None else None
+        for material in mesh.materials
+    ]
+    slots_by_name: dict[str, list[int]] = {}
+    for slot, name in enumerate(material_names):
+        if name is not None:
+            slots_by_name.setdefault(name, []).append(slot)
+    duplicated_slots = {
+        slot
+        for slots in slots_by_name.values()
+        if len(slots) > 1
+        for slot in slots
+    }
+    if not duplicated_slots:
+        return keep
+
+    polygon_materials = numpy.empty(
+        len(mesh.polygons), dtype=numpy.int32
+    )
+    mesh.polygons.foreach_get("material_index", polygon_materials)
+    triangle_materials = polygon_materials[triangle_polygons]
+    candidate_indices = numpy.flatnonzero(
+        numpy.isin(
+            triangle_materials,
+            numpy.fromiter(duplicated_slots, dtype=numpy.int32),
+        )
+    )
+    if len(candidate_indices) < 2:
+        return keep
+
+    parent = {int(index): int(index) for index in candidate_indices}
+
+    def find(index: int) -> int:
+        root = index
+        while parent[root] != root:
+            root = parent[root]
+        while parent[index] != index:
+            next_index = parent[index]
+            parent[index] = root
+            index = next_index
+        return root
+
+    def union(left: int, right: int) -> None:
+        left_root = find(left)
+        right_root = find(right)
+        if left_root != right_root:
+            parent[right_root] = left_root
+
+    first_triangle_by_slot_vertex: dict[tuple[int, int], int] = {}
+    for index_value in candidate_indices:
+        index = int(index_value)
+        slot = int(triangle_materials[index])
+        for vertex_value in triangle_vertices[index]:
+            key = (slot, int(vertex_value))
+            previous = first_triangle_by_slot_vertex.get(key)
+            if previous is None:
+                first_triangle_by_slot_vertex[key] = index
+            else:
+                union(index, previous)
+
+    component_indices: dict[int, list[int]] = {}
+    for index_value in candidate_indices:
+        index = int(index_value)
+        component_indices.setdefault(find(index), []).append(index)
+
+    components_by_name: dict[str, list[dict]] = {}
+    for indices in component_indices.values():
+        slot = int(triangle_materials[indices[0]])
+        points = source_positions[triangle_vertices[indices]].astype(
+            numpy.float64, copy=False
+        )
+        edge_a = points[:, 1] - points[:, 0]
+        edge_b = points[:, 2] - points[:, 0]
+        crosses = numpy.cross(edge_a, edge_b)
+        double_areas = numpy.linalg.norm(crosses, axis=1)
+        area = float(double_areas.sum() * 0.5)
+        if area <= 1.0e-10:
+            continue
+        centroids = points.mean(axis=1)
+        centroid = (
+            centroids * double_areas[:, None]
+        ).sum(axis=0) / double_areas.sum()
+        normal_sum = crosses.sum(axis=0)
+        normal_length = float(numpy.linalg.norm(normal_sum))
+        if normal_length <= 1.0e-10:
+            continue
+        flattened = points.reshape((-1, 3))
+        minimum = flattened.min(axis=0)
+        maximum = flattened.max(axis=0)
+        components_by_name.setdefault(material_names[slot], []).append(
+            {
+                "indices": indices,
+                "slot": slot,
+                "area": area,
+                "centroid": centroid,
+                "normal": normal_sum / normal_length,
+                "minimum": minimum,
+                "maximum": maximum,
+                "extent": float((maximum - minimum).max()),
+            }
+        )
+
+    removed = set()
+    for components in components_by_name.values():
+        for left_index, left in enumerate(components):
+            if left_index in removed:
+                continue
+            for right_index in range(left_index + 1, len(components)):
+                if right_index in removed:
+                    continue
+                right = components[right_index]
+                if left["slot"] == right["slot"]:
+                    continue
+                scale = max(left["extent"], right["extent"], 1.0)
+                position_tolerance = max(0.030, scale * 2.0e-4)
+                if (
+                    numpy.max(
+                        numpy.abs(left["minimum"] - right["minimum"])
+                    )
+                    > position_tolerance
+                    or numpy.max(
+                        numpy.abs(left["maximum"] - right["maximum"])
+                    )
+                    > position_tolerance
+                    or abs(left["area"] - right["area"])
+                    > max(0.005, max(left["area"], right["area"]) * 5.0e-4)
+                    or numpy.dot(left["normal"], right["normal"]) < 0.999
+                ):
+                    continue
+                left_key = (len(left["indices"]), left["slot"])
+                right_key = (len(right["indices"]), right["slot"])
+                discard_index = (
+                    right_index if left_key <= right_key else left_index
+                )
+                discard = components[discard_index]
+                keep[discard["indices"]] = False
+                removed.add(discard_index)
+                if discard_index == left_index:
+                    break
+    return keep
+
+
 def _export_visual_geometry(
     visual_objects: list[bpy.types.Object],
     material_name_ids: dict[str, int],
@@ -1447,6 +1775,7 @@ def _export_visual_geometry(
     index_chunks: list[bytes] = []
     vertex_count = 0
     index_count = 0
+    objects: list[ExportMapObject] = []
     mesh_objects = [
         obj for obj in visual_objects if obj.type == "MESH"
     ]
@@ -1463,6 +1792,7 @@ def _export_visual_geometry(
     ):
         if source_object.type != "MESH":
             continue
+        object_first_index = index_count
         mesh, evaluated = _mesh_for_export(
             source_object,
             depsgraph,
@@ -1470,13 +1800,7 @@ def _export_visual_geometry(
         )
         try:
             mesh.calc_loop_triangles()
-            uv0 = mesh.uv_layers.get("UVMap")
-            uv1 = mesh.uv_layers.get("Lightmap")
-            if uv0 is None or uv1 is None:
-                raise ValueError(
-                    f"visual mesh {source_object.name!r} requires UVMap and "
-                    "Lightmap UV layers"
-                )
+            uv0, uv1 = _visual_uv_layers(mesh, source_object.name)
             loop_count = len(mesh.loops)
             if len(uv0.data) != loop_count or len(uv1.data) != loop_count:
                 raise ValueError(
@@ -1499,10 +1823,9 @@ def _export_visual_geometry(
             # Blender 5 can replace implicitly shared UV storage while
             # calculating tangents. Reacquire every layer so the references
             # below cannot alias the active UVMap after that mutation.
-            uv0 = mesh.uv_layers.get("UVMap")
-            uv1 = mesh.uv_layers.get("Lightmap")
+            uv0, uv1 = _visual_uv_layers(mesh, source_object.name)
             decal_uv = mesh.uv_layers.get("Decal") or uv0
-            if uv0 is None or uv1 is None or decal_uv is None:
+            if decal_uv is None:
                 raise ValueError(
                     f"visual mesh {source_object.name!r} lost an export UV "
                     "layer while calculating tangents"
@@ -1605,7 +1928,37 @@ def _export_visual_geometry(
                         material_name_ids[material.name]
                     )
 
-                corner_vertices = loop_vertices[triangle_loops]
+                triangle_loops = triangle_loops.reshape((-1, 3))
+                triangle_vertices = loop_vertices[triangle_loops]
+                if not bool(
+                    source_object.get(
+                        "ow_preserve_duplicate_visual_surfaces", False
+                    )
+                ):
+                    keep_triangles = _duplicate_visual_surface_keep_mask(
+                        mesh,
+                        triangle_vertices,
+                        triangle_polygons,
+                        source_positions,
+                    )
+                    removed_triangles = int(
+                        len(keep_triangles) - keep_triangles.sum()
+                    )
+                    if removed_triangles:
+                        print(
+                            "SKATE visual cleanup:"
+                            f" {source_object.name!r} omitted"
+                            f" {removed_triangles} redundant coincident"
+                            " triangle(s)",
+                            flush=True,
+                        )
+                        triangle_loops = triangle_loops[keep_triangles]
+                        triangle_polygons = triangle_polygons[keep_triangles]
+                        triangle_vertices = triangle_vertices[keep_triangles]
+                        triangle_count = len(triangle_polygons)
+                        corner_count = triangle_count * 3
+                triangle_loops = triangle_loops.reshape(-1)
+                corner_vertices = triangle_vertices.reshape(-1)
                 positions = source_positions[corner_vertices].astype(
                     numpy.float64
                 )
@@ -1972,6 +2325,23 @@ def _export_visual_geometry(
             if evaluated is not None:
                 evaluated.to_mesh_clear()
 
+        object_index_count = index_count - object_first_index
+        if object_index_count:
+            objects.append(
+                ExportMapObject(
+                    source_identity=source_object.as_pointer(),
+                    object_id=_stable_object_id(source_object.name_full),
+                    name=source_object.name_full,
+                    origin=_to_runtime(
+                        source_object.matrix_world.translation
+                    ),
+                    first_index=object_first_index,
+                    index_count=object_index_count,
+                    editor_editable=bool(
+                        source_object.get("ow_editor_editable", True)
+                    ),
+                )
+            )
         completed_weight += object_weight
         _report_progress(
             progress,
@@ -1982,11 +2352,18 @@ def _export_visual_geometry(
 
     if not vertex_count:
         raise ValueError("presentation groups contain no exportable triangles")
+    object_ids = [record.object_id for record in objects]
+    if len(set(object_ids)) != len(object_ids):
+        raise ValueError(
+            "Blender object names produced a stable-ID collision; rename "
+            "one of the colliding objects"
+        )
     return PackedVisualGeometry(
         vertex_chunks,
         index_chunks,
         vertex_count,
         index_count,
+        objects,
     )
 
 
@@ -1994,9 +2371,23 @@ def audit_collision_geometry(
     collision_objects: list[bpy.types.Object],
     material_name_ids: dict[str, int] | None = None,
     progress: ProgressCallback | None = None,
+    object_ranges: dict[int, tuple[int, int]] | None = None,
+    include_editor_ownership: bool = True,
 ) -> tuple[list[tuple], CollisionGeometryAudit]:
     depsgraph = bpy.context.evaluated_depsgraph_get()
     triangles: list[tuple] = []
+    partitioned_triangles: dict[int, list[tuple]] = {}
+    partitioned_owners: dict[int, bpy.types.Object] = {}
+    editable_owner_ids = (
+        {
+            _stable_object_id(obj.name_full): obj
+            for obj in bpy.data.objects
+            if obj.type == "MESH"
+            and bool(obj.get("ow_editor_editable", True))
+        }
+        if include_editor_ownership
+        else {}
+    )
     triangle_owners: dict[tuple, str] = {}
     issues: list[str] = []
     warnings: list[str] = []
@@ -2010,6 +2401,7 @@ def audit_collision_geometry(
     for object_index, source_object in enumerate(
         mesh_objects, start=1
     ):
+        object_first_triangle = len(triangles)
         _report_progress(
             progress,
             (object_index - 1) / max(1, len(mesh_objects)),
@@ -2048,6 +2440,20 @@ def audit_collision_geometry(
             preserve_all_data_layers=preserve_retail_codes,
         )
         edge_attributes = []
+        editor_owner_attribute = (
+            mesh.attributes.get(EDITOR_COLLISION_OWNER_ATTRIBUTE)
+            if include_editor_ownership
+            else None
+        )
+        if editor_owner_attribute is not None and (
+            editor_owner_attribute.domain != "FACE"
+            or editor_owner_attribute.data_type != "INT"
+        ):
+            issues.append(
+                f"{source_object.name}: editor collision owner attribute "
+                f"{EDITOR_COLLISION_OWNER_ATTRIBUTE!r} must be a FACE INT."
+            )
+            editor_owner_attribute = None
         if preserve_retail_codes:
             for attribute_name in RETAIL_EDGE_CODE_ATTRIBUTES:
                 attribute = mesh.attributes.get(attribute_name)
@@ -2194,16 +2600,40 @@ def audit_collision_geometry(
                         polygon_codes[(rotation + corner) % 3]
                         for corner in range(3)
                     )
-                triangles.append(
-                    (
-                        points[0],
-                        points[1],
-                        points[2],
-                        surface_id,
-                        material_id,
-                        native_edge_codes,
-                    )
+                exported_triangle = (
+                    points[0],
+                    points[1],
+                    points[2],
+                    surface_id,
+                    material_id,
+                    native_edge_codes,
                 )
+                editor_owner = None
+                if editor_owner_attribute is not None:
+                    owner_id = (
+                        int(
+                            editor_owner_attribute.data[
+                                triangle.polygon_index
+                            ].value
+                        )
+                        & 0xFFFFFFFF
+                    )
+                    if owner_id != 0:
+                        editor_owner = editable_owner_ids.get(owner_id)
+                        if editor_owner is None:
+                            issues.append(
+                                f"{source_object.name}: collision face "
+                                f"references missing editable object ID "
+                                f"0x{owner_id:08X}."
+                            )
+                if editor_owner is None:
+                    triangles.append(exported_triangle)
+                else:
+                    owner_identity = editor_owner.as_pointer()
+                    partitioned_owners[owner_identity] = editor_owner
+                    partitioned_triangles.setdefault(
+                        owner_identity, []
+                    ).append(exported_triangle)
         finally:
             if evaluated is not None:
                 evaluated.to_mesh_clear()
@@ -2241,7 +2671,66 @@ def audit_collision_geometry(
                 "face downward or vertically, but this object is marked "
                 "Rideable Top Surface."
             )
+        if (
+            include_editor_ownership
+            and object_ranges is not None
+            and editor_owner_attribute is None
+        ):
+            owner_identity = source_object.as_pointer()
+            owner_name = str(
+                source_object.get("ow_map_object_owner", "")
+            ).strip()
+            if owner_name:
+                owner = bpy.data.objects.get(owner_name)
+                if owner is None or owner.type != "MESH":
+                    issues.append(
+                        f"{source_object.name}: editable collision owner "
+                        f"{owner_name!r} is missing or is not a mesh."
+                    )
+                else:
+                    owner_identity = owner.as_pointer()
+            object_triangle_count = len(triangles) - object_first_triangle
+            previous_range = object_ranges.get(owner_identity)
+            if previous_range is None:
+                object_ranges[owner_identity] = (
+                    object_first_triangle,
+                    object_triangle_count,
+                )
+            elif (
+                previous_range[0] + previous_range[1]
+                == object_first_triangle
+            ):
+                object_ranges[owner_identity] = (
+                    previous_range[0],
+                    previous_range[1] + object_triangle_count,
+                )
+            else:
+                issues.append(
+                    f"{source_object.name}: collision proxies for editable "
+                    f"owner {owner_name or source_object.name!r} are not "
+                    "contiguous in OW_COLLISION."
+                )
         surface_id += 1
+    for owner_identity in sorted(
+        partitioned_triangles,
+        key=lambda identity: partitioned_owners[identity].name_full,
+    ):
+        owned = partitioned_triangles[owner_identity]
+        if not owned:
+            continue
+        if object_ranges is not None and owner_identity in object_ranges:
+            issues.append(
+                f"{partitioned_owners[owner_identity].name}: collision is "
+                "owned by both a proxy object and face-level partitions."
+            )
+            continue
+        first_triangle = len(triangles)
+        triangles.extend(owned)
+        if object_ranges is not None:
+            object_ranges[owner_identity] = (
+                first_triangle,
+                len(owned),
+            )
     if not triangles:
         issues.append("collision groups contain no usable collision triangles.")
     audit = CollisionGeometryAudit(
@@ -2259,18 +2748,28 @@ def audit_collision_geometry(
 def _export_collision(
     collision_objects: list[bpy.types.Object],
     material_name_ids: dict[str, int],
+    export_editable_objects: bool,
     progress: ProgressCallback | None = None,
-) -> tuple[list[tuple], CollisionGeometryAudit]:
+) -> tuple[
+    list[tuple],
+    CollisionGeometryAudit,
+    dict[int, tuple[int, int]],
+]:
     global LAST_COLLISION_AUDIT
+    object_ranges: dict[int, tuple[int, int]] = {}
     triangles, audit = audit_collision_geometry(
-        collision_objects, material_name_ids, progress
+        collision_objects,
+        material_name_ids,
+        progress,
+        object_ranges,
+        export_editable_objects,
     )
     LAST_COLLISION_AUDIT = audit
     if audit.issues:
         raise CollisionGeometryError(audit.issues, audit.warnings)
     for warning in audit.warnings:
         print(f"SKATE collision cleanup: {warning}", flush=True)
-    return triangles, audit
+    return triangles, audit, object_ranges
 
 
 def _retail_grind_controls(
@@ -2390,6 +2889,11 @@ def _export_retail_grind(
             obj["skate3_retail_grind_trailing_word"]
         ),
         native_segment_payload=payload,
+        parent_source_identity=(
+            obj.parent.as_pointer()
+            if obj.parent is not None and obj.parent.type == "MESH"
+            else 0
+        ),
     )
 
 
@@ -2425,6 +2929,12 @@ def _export_grinds(
                     name=name,
                     closed=bool(spline.use_cyclic_u),
                     points=points,
+                    parent_source_identity=(
+                        obj.parent.as_pointer()
+                        if obj.parent is not None
+                        and obj.parent.type == "MESH"
+                        else 0
+                    ),
                 )
             )
     return rails
@@ -2767,6 +3277,7 @@ def export_scene(
     force_rebuild: bool = False,
     metadata_only: bool = False,
     adopt_existing_cache: bool = False,
+    export_editable_objects: bool = True,
     progress: ProgressCallback | None = None,
 ) -> Path:
     started = time.perf_counter()
@@ -2879,9 +3390,10 @@ def export_scene(
     # duplicate triangles are omitted from the package without modifying the
     # Blender mesh (or its visual UVs).
     _report_progress(progress, 0.05, "Auditing collision geometry")
-    collision, _collision_audit = _export_collision(
+    collision, _collision_audit, collision_object_ranges = _export_collision(
         collision_objects,
         material_name_ids,
+        export_editable_objects,
         progress=lambda fraction, stage: _report_progress(
             progress,
             0.05 + fraction * 0.20,
@@ -2905,6 +3417,7 @@ def export_scene(
             materials,
             images,
             len(collision),
+            export_editable_objects,
             progress=lambda fraction, stage: _report_progress(
                 progress,
                 0.25 + fraction * 0.05,
@@ -2961,6 +3474,7 @@ def export_scene(
             materials,
             images,
             len(collision),
+            export_editable_objects,
             progress=lambda fraction, stage: _report_progress(
                 progress,
                 0.25 + fraction * 0.05,
@@ -3107,7 +3621,7 @@ def export_scene(
             _write_u32(stream, exported.emissive_texture)
             _write_u32(
                 stream,
-                _bounded_int(material, "ow_alpha_mode", 0, 2),
+                _effective_alpha_mode(material),
             )
             alpha_cutoff = float(material.get("ow_alpha_cutoff", 0.5))
             if not 0.0 <= alpha_cutoff <= 1.0:
@@ -3127,6 +3641,7 @@ def export_scene(
                 stream,
                 _bounded_int(material, "ow_surface_pattern", 0, 15),
             )
+            _write_u32(stream, _presentation_depth_layer(material))
             retail_enabled = bool(exported.retail_shader_name)
             _write_u32(stream, 1 if retail_enabled else 0)
             if retail_enabled:
@@ -3175,6 +3690,8 @@ def export_scene(
                     f"lightmap image {lightmap_name!r} is referenced with "
                     "conflicting encodings"
                 )
+        checked_rgb_images = 0
+        any_checked_rgb = False
         for image_index, image in enumerate(images, start=1):
             lightmap_encoding = lightmap_encodings.get(image.name, "")
             rgba8 = _image_rgba8(
@@ -3182,13 +3699,17 @@ def export_scene(
                 lightmap=image.name in lightmap_encodings,
                 lightmap_encoding=lightmap_encoding,
             )
-            if (
+            check_rgb = (
                 not bool(image.get("skate3_allow_blank_rgb", False))
                 and not str(
                     image.get("skate3_retail_texture_id", "")
                 )
-            ):
-                _require_nonblank_rgb(image.name, rgba8)
+            )
+            if check_rgb:
+                checked_rgb_images += 1
+                any_checked_rgb = (
+                    any_checked_rgb or _has_nonblank_rgb(rgba8)
+                )
             _write_string(stream, image.name)
             _write_u32(stream, int(image.size[0]))
             _write_u32(stream, int(image.size[1]))
@@ -3204,6 +3725,11 @@ def export_scene(
                 + 0.06 * image_index / max(1, len(images)),
                 f"Packing textures ({image_index}/{len(images)}): "
                 f"{image.name}",
+            )
+        if checked_rgb_images and not any_checked_rgb:
+            raise ValueError(
+                "every referenced non-retail texture contains no RGB data; "
+                "refusing to export a black SKATE package"
             )
 
         _write_stored_chunks(stream, geometry.vertex_chunks)
@@ -3345,11 +3871,19 @@ def export_scene(
             for point in points:
                 _write_vec(stream, point)
         retail_manifest = bpy.data.texts.get("SKATE3_RETAIL_MANIFEST")
-        if retail_manifest is None:
-            _write_u32(stream, 0)
-        else:
+        map_objects = _map_object_extension(
+            geometry,
+            collision_object_ranges,
+            rails,
+            export_editable_objects,
+        )
+        _write_u32(stream, 1 + (1 if retail_manifest is not None else 0))
+        stream.write(b"MOBJ")
+        _write_u32(stream, 2)
+        _write_u32(stream, len(map_objects))
+        _write_stored_bytes(stream, map_objects)
+        if retail_manifest is not None:
             metadata = retail_manifest.as_string().encode("utf-8")
-            _write_u32(stream, 1)
             stream.write(b"WMET")
             _write_u32(stream, 1)
             _write_u32(stream, len(metadata))
@@ -3378,6 +3912,7 @@ def export_scene(
             materials,
             images,
             len(collision),
+            export_editable_objects,
             progress=lambda fraction, stage: _report_progress(
                 progress,
                 0.94 + fraction * 0.05,
@@ -3406,12 +3941,14 @@ def main(arguments: list[str] | None = None) -> Path:
     if not arguments:
         raise SystemExit("usage: blender --background file.blend --python "
                          "export_skate.py -- output.skate "
-                         "[--force|--metadata-only|--adopt-existing-cache]")
+                         "[--force|--metadata-only|--adopt-existing-cache] "
+                         "[--no-editable-objects]")
     flags = set(arguments[1:])
     allowed_flags = {
         "--force",
         "--metadata-only",
         "--adopt-existing-cache",
+        "--no-editable-objects",
     }
     unknown_flags = flags - allowed_flags
     if unknown_flags:
@@ -3433,6 +3970,7 @@ def main(arguments: list[str] | None = None) -> Path:
         force_rebuild="--force" in flags,
         metadata_only="--metadata-only" in flags,
         adopt_existing_cache="--adopt-existing-cache" in flags,
+        export_editable_objects="--no-editable-objects" not in flags,
     )
 
 

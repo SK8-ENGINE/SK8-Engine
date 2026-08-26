@@ -484,6 +484,10 @@ struct RendererState {
   // environment.transparent sub-pass: straight alpha blend, depth test on,
   // z-write OFF; items drawn back-to-front after all opaque items.
   nrhi::Pipeline* pso_transparent = nullptr;
+  // Same blend state with Blender/D3D front faces culled. Owned-map
+  // materials with explicit opposite-wound twins use this so only the
+  // camera-facing authored sheet contributes.
+  nrhi::Pipeline* pso_transparent_cullback = nullptr;
   // Entity-fade variant of the transparent PSO: same straight alpha blend
   // but z-write ON. A fading character/vehicle is a solid object at partial
   // opacity; z-write-off blending composites every overlapping piece (skin

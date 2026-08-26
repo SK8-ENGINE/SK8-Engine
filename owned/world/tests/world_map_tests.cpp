@@ -1,8 +1,10 @@
 #include "skate/world/maps.h"
 #include "skate/world/grind_spline.h"
+#include "skate/world/map_editor.h"
 #include "skate/world/owned_map_package.h"
 #include "skate/world/render_world.h"
 #include "skate/world/rw_collision_mesh.h"
+#include "skate/world/skate_object_package.h"
 #include "skate/world/water_simulation.h"
 
 #include <algorithm>
@@ -15,6 +17,7 @@
 #include <iostream>
 #include <limits>
 #include <string_view>
+#include <utility>
 
 namespace {
 
@@ -55,6 +58,15 @@ std::uint32_t ReadBeU32(const std::vector<std::uint8_t>& bytes,
          bytes.at(offset + 3);
 }
 
+void WriteBeU32(std::vector<std::uint8_t>& bytes,
+                std::size_t offset,
+                std::uint32_t value) {
+  bytes.at(offset) = static_cast<std::uint8_t>(value >> 24u);
+  bytes.at(offset + 1) = static_cast<std::uint8_t>(value >> 16u);
+  bytes.at(offset + 2) = static_cast<std::uint8_t>(value >> 8u);
+  bytes.at(offset + 3) = static_cast<std::uint8_t>(value);
+}
+
 std::uint64_t ReadBeU64(const std::vector<std::uint8_t>& bytes,
                         std::size_t offset) {
   return (static_cast<std::uint64_t>(ReadBeU32(bytes, offset)) << 32u) |
@@ -76,7 +88,7 @@ int main() {
         std::filesystem::temp_directory_path() /
         "skate_owned_world_future_format_test.skate";
     const std::array<std::uint8_t, 12> header = {
-        'S', 'K', 'A', 'T', 'E', '1', '3', '\0',
+        'S', 'K', 'A', 'T', 'E', '1', '4', '\0',
         0x78, 0x56, 0x34, 0x12};
     {
       std::ofstream output(
@@ -96,6 +108,379 @@ int main() {
     std::filesystem::remove(future_package, ec);
     Require(rejected_as_future,
             "future SKATE versions must request a newer runtime");
+  }
+
+  {
+    MapDefinition duplicate_faces;
+    duplicate_faces.render_mesh.vertices.resize(3);
+    duplicate_faces.render_mesh.vertices[0].position = {1.0f, 0.0f, 1.0f};
+    duplicate_faces.render_mesh.vertices[1].position = {2.0f, 0.0f, 1.0f};
+    duplicate_faces.render_mesh.vertices[2].position = {1.0f, 0.0f, 2.0f};
+    for (RenderVertex& vertex :
+         duplicate_faces.render_mesh.vertices) {
+      vertex.material = 1;
+      vertex.normal = {0.0f, 1.0f, 0.0f};
+    }
+    duplicate_faces.render_mesh.indices = {
+        0, 1, 2,  // first oriented face
+        0, 1, 2,  // exact same-winding duplicate: remove
+        0, 2, 1,  // reverse-wound two-sided partner: retain
+    };
+    RenderWorldBuildOptions options;
+    options.chunk_size = 16.0f;
+    const RenderWorld duplicate_world =
+        BuildRenderWorld(duplicate_faces, options);
+    Require(
+        duplicate_world.source_triangle_count == 3 &&
+            duplicate_world.output_triangle_count == 2,
+        "render compiler did not distinguish duplicate and reverse faces");
+    Require(
+        duplicate_world.backface_culled_material_count == 1 &&
+            duplicate_world.chunks.size() == 1 &&
+            duplicate_world.chunks[0].batches.size() == 1 &&
+            duplicate_world.chunks[0].batches[0].cull_backfaces,
+        "reverse-wound presentation twins did not enable backface culling");
+  }
+
+  {
+    MapDefinition prefab_package;
+    prefab_package.name = "Manual Pad";
+    prefab_package.render_mesh.indices = {0, 1, 2};
+    prefab_package.collision_triangles.resize(1);
+    GrindRail rail;
+    rail.name = "Top Edge";
+    rail.points = {{10.0f, 1.0f, 0.5f}, {12.0f, 1.0f, 0.5f}};
+    prefab_package.grind_rails.push_back(rail);
+    MapObject root;
+    root.id = 7;
+    root.name = "ManualPadRoot";
+    root.origin = {10.0f, 0.0f, 0.0f};
+    root.source_index_count = 3;
+    root.source_collision_triangle_count = 1;
+    root.render_mesh.indices = {0, 1, 2};
+    root.collision_triangles.resize(1);
+    root.grind_rail_indices = {0};
+    prefab_package.editable_objects.push_back(root);
+
+    SkateObjectAsset asset =
+        ExtractSkateObjectAsset(std::move(prefab_package));
+    Require(asset.name == "Manual Pad" &&
+                asset.object.origin.x == 0.0f &&
+                asset.object.grind_rail_indices ==
+                    std::vector<std::uint32_t>{0} &&
+                NearlyEqual(asset.grind_rails[0].points[0].x, 0.0f) &&
+                NearlyEqual(asset.grind_rails[0].points[0].z, 0.5f) &&
+                NearlyEqual(asset.grind_rails[0].points[1].x, 2.0f) &&
+                NearlyEqual(asset.grind_rails[0].points[1].z, 0.5f),
+            "SKATEOBJ profile did not normalize its root and grind spline");
+  }
+
+  {
+    MapDefinition retail_map;
+    retail_map.name = "retail_collision_identity";
+    retail_map.collision_triangles = {
+        CollisionTriangle{.a = {0.0f, 0.0f, 0.0f}},
+        CollisionTriangle{.a = {1.0f, 0.0f, 0.0f}},
+        CollisionTriangle{.a = {2.0f, 0.0f, 0.0f}},
+    };
+    retail_map.retail_collision_resource_names = {"cell_a#0", "cell_b#0"};
+    retail_map.retail_collision_associations = {
+        {.triangle_index = 0, .resource_index = 0, .cluster_index = 2},
+        {.triangle_index = 1, .resource_index = 0, .cluster_index = 3},
+        {.triangle_index = 1, .resource_index = 1, .cluster_index = 0},
+        {.triangle_index = 2, .resource_index = 1, .cluster_index = 1},
+    };
+    retail_map.editable_objects = {
+        MapObject{
+            .id = 1,
+            .name = "Detached",
+            .source_first_collision_triangle = 0,
+            .source_collision_triangle_count = 1,
+        },
+        MapObject{
+            .id = 2,
+            .name = "Unchanged",
+            .source_first_collision_triangle = 2,
+            .source_collision_triangle_count = 1,
+        },
+    };
+    Require(HasRetailCollisionIdentity(retail_map),
+            "valid many-to-many retail collision identity was rejected");
+    Require(RetailCollisionResourcesForObject(retail_map,
+                                              retail_map.editable_objects[0]) ==
+                std::vector<std::uint16_t>{0},
+            "editable object did not resolve its exact retail resource");
+    const std::array<std::uint8_t, 2> detached{1, 0};
+    const MapDefinition fallback_a =
+        BuildRetailCollisionResourceFallback(retail_map, 0, detached);
+    const MapDefinition fallback_b =
+        BuildRetailCollisionResourceFallback(retail_map, 1, detached);
+    Require(fallback_a.collision_triangles.size() == 1 &&
+                NearlyEqual(fallback_a.collision_triangles.front().a.x, 1.0f),
+            "retail fallback retained a detached object's old collision");
+    Require(fallback_b.collision_triangles.size() == 2 &&
+                NearlyEqual(fallback_b.collision_triangles.back().a.x, 2.0f),
+            "retail fallback dropped unchanged resource collision");
+    retail_map.retail_collision_associations.erase(
+        retail_map.retail_collision_associations.begin());
+    Require(!HasRetailCollisionIdentity(retail_map),
+            "retail collision identity accepted a triangle coverage gap");
+  }
+
+  {
+    constexpr float identity_view[16] = {
+        1.0f, 0.0f, 0.0f, 0.0f,
+        0.0f, 1.0f, 0.0f, 0.0f,
+        0.0f, 0.0f, 1.0f, 0.0f,
+        0.0f, 0.0f, 0.0f, 1.0f,
+    };
+    constexpr float projection[16] = {
+        2.0f, 0.0f, 0.0f, 0.0f,
+        0.0f, 2.0f, 0.0f, 0.0f,
+        0.0f, 0.0f, 1.0f, 0.0f,
+        0.0f, 0.0f, 0.0f, 1.0f,
+    };
+    constexpr float camera[3] = {0.0f, 0.0f, 0.0f};
+    const EditorRay center_ray = BuildEditorCameraRay(
+        identity_view, projection, camera, 0.0f, 0.0f);
+    Require(NearlyEqual(center_ray.direction.x, 0.0f) &&
+                NearlyEqual(center_ray.direction.y, 0.0f) &&
+                NearlyEqual(center_ray.direction.z, 1.0f),
+            "editor center ray does not follow camera forward");
+    const EditorRay corner_ray = BuildEditorCameraRay(
+        identity_view, projection, camera, 1.0f, -1.0f);
+    Require(corner_ray.direction.x > 0.0f &&
+                corner_ray.direction.y < 0.0f &&
+                corner_ray.direction.z > 0.0f &&
+                NearlyEqual(Length(corner_ray.direction), 1.0f),
+            "editor off-center ray is not normalized camera-space motion");
+
+    MapDefinition pick_map;
+    MapObject farther;
+    farther.id = 11;
+    farther.name = "Farther";
+    farther.render_mesh.vertices = {
+        {{-1.0f, -1.0f, 0.0f}},
+        {{1.0f, -1.0f, 0.0f}},
+        {{0.0f, 1.0f, 0.0f}},
+    };
+    farther.render_mesh.indices = {0, 1, 2};
+    farther.local_bounds_min = {-1.0f, -1.0f, 0.0f};
+    farther.local_bounds_max = {1.0f, 1.0f, 0.0f};
+    MapObject nearer = farther;
+    nearer.id = 12;
+    nearer.name = "Nearer";
+    pick_map.editable_objects = {farther, nearer};
+    const std::array<EditorObjectTransform, 2> transforms = {
+        EditorObjectTransform{.translation = {0.0f, 0.0f, 8.0f}},
+        EditorObjectTransform{.translation = {0.0f, 0.0f, 5.0f}},
+    };
+    const MapObjectHit hit =
+        PickMapObject(pick_map, transforms, center_ray);
+    Require(hit.hit && hit.object_index == 1 &&
+                NearlyEqual(hit.distance, 5.0f) &&
+                NearlyEqual(hit.point.z, 5.0f),
+            "editor picking did not choose the nearest transformed object");
+    std::array<EditorObjectTransform, 2> moved_transforms = transforms;
+    moved_transforms[1].translation = {4.0f, 0.0f, 5.0f};
+    const MapObjectHit moved_hit =
+        PickMapObject(pick_map, moved_transforms, center_ray);
+    Require(moved_hit.hit && moved_hit.object_index == 0,
+            "editor picking retained an object's old transform");
+
+    std::array<EditorObjectTransform, 2> rotated_transforms = transforms;
+    rotated_transforms[1].x_axis = {0.0f, 0.0f, -1.0f};
+    rotated_transforms[1].z_axis = {1.0f, 0.0f, 0.0f};
+    rotated_transforms[1].translation = {-5.0f, 0.0f, 0.0f};
+    const EditorRay side_ray{{0.0f, 0.0f, 0.0f}, {-1.0f, 0.0f, 0.0f}};
+    const MapObjectHit rotated_hit =
+        PickMapObject(pick_map, rotated_transforms, side_ray);
+    Require(rotated_hit.hit && rotated_hit.object_index == 1 &&
+                NearlyEqual(rotated_hit.distance, 5.0f),
+            "editor picking did not follow object rotation");
+
+    Vec3 plane_hit;
+    Require(IntersectEditorDragPlane(
+                center_ray, {0.0f, 0.0f, 3.0f},
+                {0.0f, 0.0f, 1.0f}, plane_hit) &&
+                NearlyEqual(plane_hit.z, 3.0f),
+            "editor drag-plane intersection is wrong");
+
+    float axis_parameter = 0.0f;
+    Require(EditorAxisDragParameter(
+                {{2.0f, 1.0f, -5.0f}, {0.0f, 0.0f, 1.0f}},
+                {}, {1.0f, 0.0f, 0.0f}, axis_parameter) &&
+                NearlyEqual(axis_parameter, 2.0f),
+            "editor axis drag parameter is wrong");
+    const Vec3 quarter_turn = RotateEditorVector(
+        {1.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f},
+        3.14159265358979323846f * 0.5f);
+    Require(NearlyEqual(quarter_turn.x, 0.0f) &&
+                NearlyEqual(quarter_turn.z, -1.0f),
+            "editor axis rotation is wrong");
+    Require(NearlyEqual(
+                EditorSignedRotation(
+                    {1.0f, 0.0f, 0.0f}, {0.0f, 0.0f, -1.0f},
+                    {0.0f, 1.0f, 0.0f}),
+                3.14159265358979323846f * 0.5f),
+            "editor signed rotation is wrong");
+    const EditorObjectTransform point_transform{
+        .translation = {4.0f, 2.0f, -3.0f},
+        .x_axis = {0.0f, 0.0f, -1.0f},
+        .y_axis = {0.0f, 1.0f, 0.0f},
+        .z_axis = {1.0f, 0.0f, 0.0f},
+    };
+    const Vec3 transformed_point =
+        TransformEditorPoint(point_transform, {2.0f, 1.0f, 0.5f});
+    Require(NearlyEqual(transformed_point.x, 4.5f) &&
+                NearlyEqual(transformed_point.y, 3.0f) &&
+                NearlyEqual(transformed_point.z, -5.0f),
+            "editor point transform diverges from the object pose");
+    const CollisionTriangle transformed_collision =
+        TransformEditorCollisionTriangle(
+            point_transform,
+            CollisionTriangle{
+                .a = {0.0f, 0.0f, 0.0f},
+                .b = {2.0f, 0.0f, 0.0f},
+                .c = {0.0f, 1.0f, 0.0f},
+                .normal = {1.0f, 0.0f, 0.0f},
+                .surface = 7,
+                .material = 9,
+            });
+    Require(
+        NearlyEqual(transformed_collision.a.x, 4.0f) &&
+            NearlyEqual(transformed_collision.a.y, 2.0f) &&
+            NearlyEqual(transformed_collision.a.z, -3.0f) &&
+            NearlyEqual(transformed_collision.b.z, -5.0f) &&
+            NearlyEqual(transformed_collision.c.y, 3.0f) &&
+            NearlyEqual(transformed_collision.normal.x, 0.0f) &&
+            NearlyEqual(transformed_collision.normal.z, -1.0f) &&
+            transformed_collision.surface == 7 &&
+            transformed_collision.material == 9,
+        "editor collision bake did not preserve transformed geometry and "
+        "surface identity");
+
+    MapDefinition grind_map;
+    GrindRail authored_rail;
+    authored_rail.id = 31;
+    authored_rail.name = "AuthoredRail";
+    authored_rail.points = {
+        {10.0f, 1.0f, 0.0f}, {12.0f, 1.0f, 0.0f}};
+    grind_map.grind_rails.push_back(authored_rail);
+    MapObject grind_object;
+    grind_object.id = 41;
+    grind_object.name = "MovableRail";
+    grind_object.origin = {10.0f, 0.0f, 0.0f};
+    grind_object.grind_rail_indices = {0};
+    grind_map.editable_objects.push_back(grind_object);
+    const std::array<EditorObjectTransform, 1> grind_transforms = {
+        EditorObjectTransform{
+            .translation = {20.0f, 3.0f, 4.0f},
+            .x_axis = {0.0f, 0.0f, -1.0f},
+            .y_axis = {0.0f, 1.0f, 0.0f},
+            .z_axis = {1.0f, 0.0f, 0.0f},
+        },
+    };
+    std::vector<GrindRail> transformed_rails =
+        TransformEditorGrindRails(grind_map, grind_transforms);
+    Require(transformed_rails.size() == 1 &&
+                NearlyEqual(transformed_rails[0].points[0].x, 20.0f) &&
+                NearlyEqual(transformed_rails[0].points[0].y, 4.0f) &&
+                NearlyEqual(transformed_rails[0].points[0].z, 4.0f) &&
+                NearlyEqual(transformed_rails[0].points[1].x, 20.0f) &&
+                NearlyEqual(transformed_rails[0].points[1].z, 2.0f),
+            "editor grind spline did not follow object translation and "
+            "rotation");
+    grind_map.grind_rails.push_back(
+        GrindRail{
+            .id = 32,
+            .name = "SpawnedRail",
+            .points = {{0.0f, 1.0f, 0.0f}, {2.0f, 1.0f, 0.0f}},
+        });
+    grind_map.editable_objects.push_back(
+        MapObject{
+            .id = 42,
+            .name = "SpawnedObject",
+            .grind_rail_indices = {1},
+        });
+    const std::array<EditorObjectTransform, 2> spawned_transforms = {
+        grind_transforms[0],
+        EditorObjectTransform{.translation = {30.0f, 5.0f, 6.0f}},
+    };
+    transformed_rails =
+        TransformEditorGrindRails(grind_map, spawned_transforms);
+    const GrindSplineBuildResult spawned_grind =
+        BuildGrindSplineData(
+            MapDefinition{.grind_rails = transformed_rails}, {});
+    Require(spawned_grind.ok &&
+                spawned_grind.blob.rail_count == 2 &&
+                spawned_grind.blob.segment_count == 2 &&
+                NearlyEqual(transformed_rails[1].points[0].x, 30.0f) &&
+                NearlyEqual(transformed_rails[1].points[0].y, 6.0f) &&
+                NearlyEqual(transformed_rails[1].points[0].z, 6.0f),
+            "spawned grind spline topology or placement was not rebuilt");
+
+    const EditorGizmoHit gizmo_hit = PickEditorGizmo(
+        {{0.5f, 0.03f, -5.0f}, {0.0f, 0.0f, 1.0f}}, {}, 1.0f);
+    Require(gizmo_hit.handle == EditorGizmoHandle::TranslateX,
+            "editor gizmo did not pick the X translation arrow");
+  }
+
+  {
+    MapDefinition split_map;
+    split_map.name = "editor_exclusion_sync";
+    SurfaceMaterial split_material;
+    split_material.id = 1;
+    split_material.name = "EditorSplit";
+    split_map.materials.push_back(split_material);
+    split_map.render_mesh.vertices = {
+        {{-1.0f, 0.0f, 0.0f}, {}, {}, 1},
+        {{0.0f, 0.0f, 1.0f}, {}, {}, 1},
+        {{1.0f, 0.0f, 0.0f}, {}, {}, 1},
+        {{-1.0f, 1.0f, 0.0f}, {}, {}, 1},
+        {{0.0f, 1.0f, 1.0f}, {}, {}, 1},
+        {{1.0f, 1.0f, 0.0f}, {}, {}, 1},
+    };
+    split_map.render_mesh.indices = {0, 1, 2, 3, 4, 5};
+    split_map.collision_triangles = {
+        {{-1.0f, 0.0f, 0.0f},
+         {0.0f, 0.0f, 1.0f},
+         {1.0f, 0.0f, 0.0f},
+         {},
+         0,
+         1},
+        {{-1.0f, 1.0f, 0.0f},
+         {0.0f, 1.0f, 1.0f},
+         {1.0f, 1.0f, 0.0f},
+         {},
+         0,
+         1},
+    };
+    RenderWorldBuildOptions render_options;
+    render_options.excluded_index_ranges.push_back({3, 3});
+    const RenderWorld static_render =
+        BuildRenderWorld(split_map, render_options);
+    Require(static_render.source_triangle_count == 1 &&
+                static_render.output_triangle_count > 0 &&
+                std::all_of(
+                    static_render.chunks.begin(),
+                    static_render.chunks.end(),
+                    [](const RenderChunk& chunk) {
+                      return std::all_of(
+                          chunk.vertices.begin(), chunk.vertices.end(),
+                          [](const RenderVertex& vertex) {
+                            return NearlyEqual(vertex.position.y, 0.0f);
+                          });
+                    }),
+            "editable render span remained in the static world");
+
+    RwCollisionBuildOptions collision_options;
+    collision_options.excluded_triangle_ranges.push_back({1, 1});
+    const RwCollisionBuildResult static_collision =
+        BuildRwCollisionMesh(split_map, collision_options);
+    Require(static_collision.ok &&
+                static_collision.mesh.triangle_count == 1,
+            "editable collision span remained in the static broadphase");
   }
 
   ShallowWaterConfig water_config;
@@ -295,6 +680,19 @@ int main() {
               ping_evening.night_amount < 0.01f &&
               ping_morning.night_amount < 0.01f,
           "daylight ping-pong evaluation changed");
+  DayNightCycleDefinition zero_ambient_cycle =
+      definition.day_night_cycle;
+  zero_ambient_cycle.day_ambient = 0.0f;
+  zero_ambient_cycle.night_ambient = 0.0f;
+  for (int second = 0; second < 96; ++second) {
+    Require(
+        NearlyEqual(
+            EvaluateDayNightCycle(
+                zero_ambient_cycle, static_cast<float>(second))
+                .ambient,
+            0.0f),
+        "zero day/night ambient settings must produce zero ambient light");
+  }
   Require(definition.raytraced_puddles.size() == 3,
           "starter map raytraced puddle count changed");
   const RaytracedPuddle& demo_puddle =
@@ -824,6 +1222,154 @@ int main() {
           adopted_retail_mesh.mesh.cluster_count ==
               retail_edge_mesh.mesh.cluster_count,
       "serialized retail collision mesh adoption changed the resource");
+
+  RwCollisionMeshBlob translated_retail = rw.mesh;
+  const std::vector<std::uint8_t> untranslated_bytes =
+      translated_retail.bytes;
+  constexpr Vec3 requested_retail_translation{
+      10.125f, -3.250f, 7.375f};
+  Vec3 applied_retail_translation{};
+  std::string retail_translation_error;
+  Require(
+      TranslateSerializedRwCollisionMesh(
+          translated_retail, requested_retail_translation,
+          &applied_retail_translation, &retail_translation_error),
+      retail_translation_error);
+  Require(
+      NearlyEqual(applied_retail_translation.x,
+                  requested_retail_translation.x) &&
+          NearlyEqual(applied_retail_translation.y,
+                      requested_retail_translation.y) &&
+          NearlyEqual(applied_retail_translation.z,
+                      requested_retail_translation.z) &&
+          NearlyEqual(
+              translated_retail.bounds_min.x,
+              rw.mesh.bounds_min.x + applied_retail_translation.x) &&
+          NearlyEqual(
+              ReadBeF32(translated_retail.bytes, 16),
+              ReadBeF32(untranslated_bytes, 16) +
+                  applied_retail_translation.x),
+      "retail collision translation did not update mesh bounds");
+  const std::uint32_t translated_kd =
+      ReadBeU32(untranslated_bytes, 48);
+  const std::uint32_t translated_branches =
+      ReadBeU32(untranslated_bytes, translated_kd);
+  const std::uint32_t translated_branch_count =
+      ReadBeU32(untranslated_bytes, translated_kd + 4);
+  for (std::uint32_t branch = 0;
+       branch < translated_branch_count; ++branch) {
+    const std::size_t record =
+        translated_branches + static_cast<std::size_t>(branch) * 32u;
+    const std::uint32_t axis = ReadBeU32(untranslated_bytes, record + 4);
+    const float axis_translation =
+        axis == 0 ? applied_retail_translation.x
+                  : (axis == 1 ? applied_retail_translation.y
+                               : applied_retail_translation.z);
+    Require(
+        NearlyEqual(
+            ReadBeF32(translated_retail.bytes, record + 24),
+            ReadBeF32(untranslated_bytes, record + 24) +
+                axis_translation) &&
+            NearlyEqual(
+                ReadBeF32(translated_retail.bytes, record + 28),
+                ReadBeF32(untranslated_bytes, record + 28) +
+                    axis_translation),
+        "retail collision translation did not update KD extents");
+  }
+  for (std::uint32_t cluster = 0; cluster < cluster_count; ++cluster) {
+    const std::uint32_t cluster_offset =
+        ReadBeU32(untranslated_bytes,
+                  cluster_table_offset + cluster * 4);
+    const std::uint16_t vertex_blocks =
+        ReadBeU16(untranslated_bytes, cluster_offset + 4);
+    const std::uint8_t vertex_count =
+        untranslated_bytes.at(cluster_offset + 10);
+    Require(untranslated_bytes.at(cluster_offset + 12) == 0,
+            "rebuilt collision test unexpectedly uses compression");
+    for (std::uint32_t vertex = 0; vertex < vertex_count; ++vertex) {
+      const std::size_t vertex_offset =
+          cluster_offset + 16u +
+          static_cast<std::size_t>(vertex) * 16u;
+      Require(
+          NearlyEqual(
+              ReadBeF32(translated_retail.bytes, vertex_offset),
+              ReadBeF32(untranslated_bytes, vertex_offset) +
+                  applied_retail_translation.x) &&
+              NearlyEqual(
+                  ReadBeF32(translated_retail.bytes, vertex_offset + 4),
+                  ReadBeF32(untranslated_bytes, vertex_offset + 4) +
+                      applied_retail_translation.y) &&
+              NearlyEqual(
+                  ReadBeF32(translated_retail.bytes, vertex_offset + 8),
+                  ReadBeF32(untranslated_bytes, vertex_offset + 8) +
+                      applied_retail_translation.z),
+          "retail collision translation did not update vertices");
+    }
+    const std::size_t unit_offset =
+        cluster_offset +
+        (static_cast<std::size_t>(vertex_blocks) + 1u) * 16u;
+    const std::uint16_t unit_bytes =
+        ReadBeU16(untranslated_bytes, cluster_offset + 2);
+    Require(
+        std::equal(
+            untranslated_bytes.begin() + unit_offset,
+            untranslated_bytes.begin() + unit_offset + unit_bytes,
+            translated_retail.bytes.begin() + unit_offset),
+        "retail collision translation changed native unit metadata");
+  }
+
+  for (std::uint8_t compression : {std::uint8_t{1},
+                                   std::uint8_t{2}}) {
+    RwCollisionMeshBlob compressed = retail_edge_mesh.mesh;
+    const std::uint32_t compressed_table =
+        ReadBeU32(compressed.bytes, 52);
+    const std::uint32_t compressed_cluster =
+        ReadBeU32(compressed.bytes, compressed_table);
+    const std::uint8_t compressed_vertices =
+        compressed.bytes.at(compressed_cluster + 10);
+    compressed.bytes.at(compressed_cluster + 12) = compression;
+    if (compression == 1) {
+      for (std::size_t axis = 0; axis < 3; ++axis) {
+        WriteBeU32(compressed.bytes,
+                   compressed_cluster + 16u + axis * 4u,
+                   static_cast<std::uint32_t>(100 + axis));
+      }
+    } else {
+      for (std::uint32_t vertex = 0;
+           vertex < compressed_vertices; ++vertex) {
+        for (std::size_t axis = 0; axis < 3; ++axis) {
+          WriteBeU32(
+              compressed.bytes,
+              compressed_cluster + 16u +
+                  static_cast<std::size_t>(vertex) * 12u + axis * 4u,
+              static_cast<std::uint32_t>(
+                  100 + vertex * 10u + axis));
+        }
+      }
+    }
+    Vec3 compressed_translation{};
+    Require(
+        TranslateSerializedRwCollisionMesh(
+            compressed, {2.0f, -1.0f, 3.0f},
+            &compressed_translation, &retail_translation_error),
+        retail_translation_error);
+    const std::array<std::int32_t, 3> quantized_translation{
+        2000, -1000, 3000};
+    for (std::size_t axis = 0; axis < 3; ++axis) {
+      const std::size_t offset =
+          compressed_cluster + 16u + axis * 4u;
+      const std::int32_t expected =
+          static_cast<std::int32_t>(100 + axis) +
+          quantized_translation[axis];
+      Require(
+          std::bit_cast<std::int32_t>(
+              ReadBeU32(compressed.bytes, offset)) == expected,
+          compression == 1
+              ? "16-bit compressed retail base was not translated"
+              : "32-bit compressed retail vertex was not translated");
+    }
+  }
+
   std::vector<std::uint8_t> branchless_retail =
       adopted_retail_mesh.mesh.bytes;
   const std::uint32_t branchless_kd =

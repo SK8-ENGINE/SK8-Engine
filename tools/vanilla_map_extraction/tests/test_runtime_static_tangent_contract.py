@@ -23,8 +23,27 @@ class RuntimeStaticTangentContractTests(unittest.TestCase):
             condition,
             "negative owned-world material families must disable skinning",
         )
+        self.assertIn(
+            "!owned_static_vertex",
+            condition,
+            "owned vertex markers must independently disable skinning",
+        )
         self.assertIn("tint.g > 0.0", condition)
         self.assertIn("wsum > 0.001", condition)
+
+    def test_owned_visual_vertices_carry_static_marker(self) -> None:
+        source = (
+            ROOT / "src" / "skate3_mechanics_sandbox_map.cpp"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            "vertex.blend_index[0] = source_vertex.presentation_rank;",
+            source,
+        )
+        for lane in range(1, 4):
+            self.assertIn(
+                f"vertex.blend_index[{lane}] = 0xFF;",
+                source,
+            )
 
     def test_tangent_frame_uses_the_same_skinning_decision(self) -> None:
         source = SCENE_SHADER.read_text(encoding="utf-8")

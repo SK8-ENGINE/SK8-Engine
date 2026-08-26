@@ -9,7 +9,12 @@ import unittest
 TOOLS = Path(__file__).resolve().parents[1] / "tools"
 sys.path.insert(0, str(TOOLS))
 
-from retail_grind_splines import decode_grind_splines  # noqa: E402
+from retail_grind_splines import (  # noqa: E402
+    classify_grind_coordinate_frame,
+    decode_grind_splines,
+    grind_cell_translation,
+    translate_native_segment_payload,
+)
 
 
 def _fixture() -> bytes:
@@ -92,6 +97,56 @@ class GrindPipelineTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "discontinuous"):
             decode_grind_splines(bytes(data))
+
+    def test_classifies_and_translates_cell_local_skate2_rail(self) -> None:
+        payload = bytearray(120)
+        struct.pack_into(">3f", payload, 48, 2.0, 3.0, 4.0)
+        struct.pack_into(">3f", payload, 80, 1.0, 2.0, 3.0)
+        struct.pack_into(">3f", payload, 96, 3.0, 4.0, 5.0)
+        payload_hex = payload.hex()
+
+        self.assertEqual(
+            grind_cell_translation("cSim_900_-1700_high.xsf"),
+            (900.0, 0.0, -1700.0),
+        )
+        self.assertEqual(
+            classify_grind_coordinate_frame(
+                "cSim_900_-1700_high.xsf",
+                [payload_hex],
+            ),
+            "cell_local",
+        )
+
+        translated = bytes.fromhex(
+            translate_native_segment_payload(
+                payload_hex,
+                (900.0, 0.0, -1700.0),
+            )
+        )
+        self.assertEqual(
+            struct.unpack_from(">3f", translated, 48),
+            (902.0, 3.0, -1696.0),
+        )
+        self.assertEqual(
+            struct.unpack_from(">3f", translated, 80),
+            (901.0, 2.0, -1697.0),
+        )
+        self.assertEqual(
+            struct.unpack_from(">3f", translated, 96),
+            (903.0, 4.0, -1695.0),
+        )
+
+    def test_preserves_ambiguous_central_rail(self) -> None:
+        payload = bytearray(120)
+        struct.pack_into(">3f", payload, 48, 50.0, 0.0, 50.0)
+
+        self.assertEqual(
+            classify_grind_coordinate_frame(
+                "cSim_100_100_high.xsf",
+                [payload.hex()],
+            ),
+            "ambiguous",
+        )
 
 
 if __name__ == "__main__":

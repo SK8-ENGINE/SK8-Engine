@@ -139,13 +139,18 @@ work is Blender data extraction and binary file packing, where avoiding Python
 scalar overhead is substantially more useful than transferring the data to a
 graphics device. Complete float32 vertex records are indexed exactly, so
 shared corners no longer duplicate position, normal, UV, lightmap UV, and
-material data. SKATE v12 then applies bounded lossless DEFLATE to RGBA8
+material data. SKATE v13 then applies bounded lossless DEFLATE to RGBA8
 textures, vertices, indices, and collision. The loader reconstructs and
 validates the original runtime records; export does not simplify meshes,
 reduce texture resolution, omit maps, quantize attributes, or merge UV/hard
-normal seams. V12 adds a third decal UV, a compact SNORM8 tangent frame,
+normal seams. V12 added a third decal UV, a compact SNORM8 tangent frame,
 complete named retail shader bindings/parameters, and an extensible world
-metadata table. Extracted retail collision can additionally carry exact
+metadata table. V13 adds semantic presentation depth layers for coplanar
+cutouts, signs, decals, and blended surfaces. These layers alter only raster
+depth ordering, never authored transforms or collision. Every material remains
+dynamically lit; a lightmap contributes additive static indirect illumination
+rather than selecting a baked-only mode. Extracted retail collision can
+additionally carry exact
 per-triangle RenderWare edge/corner feature codes as face attributes; ordinary
 authored maps continue to generate those codes automatically.
 
@@ -154,7 +159,7 @@ Retail-imported meshes may carry the hidden point attributes
 `skate3_retail_tangent_handedness`. When the complete validated set is
 present, the exporter uses the authored tangent rather than recalculating it
 from Blender UVs, then reconstructs the compact runtime binormal expected by
-SKATE v12. This preserves the game's authored per-island lighting
+SKATE v13. This preserves the game's authored per-island lighting
 orientation. Existing University working files whose tangent was stored under
 the old `skate3_retail_binormal` name remain supported as a migration path.
 Ordinary custom maps do not need these attributes and continue to use
@@ -168,6 +173,11 @@ geometry and the skater.
 
 ### Export modes
 
+- **Editable Map Objects** is enabled by default and writes stable per-object
+  ownership used by the in-game editor. Disable it to export a fully static
+  map: rendering, collision, materials, and grind paths are unchanged, but
+  existing map geometry cannot be selected or moved. Spawned `.skateobj`
+  items remain available at runtime.
 - **Fast / Automatic** fingerprints the scene, reuses unchanged geometry,
   and performs a full rebuild only when content changed. This is the normal
   choice.
@@ -329,8 +339,12 @@ From the canonical development workspace root:
 
 In the development workspace this creates:
 
-- `owned/maps/source/blender_bake_showcase.blend`
-- `owned/maps/blender_bake_showcase.skate`
+- `maps/blender_bake_showcase.blend`
+- `maps/blender_bake_showcase.skate`
+
+The current SKATE v13 build preserves the park's static Blender features as
+independent editor objects. Each collision proxy is associated with its
+visual owner, and each complete rail owns its matching grind spline.
 
 The generator performs a real 1024-square Cycles indirect-light bake and
 builds the 360 by 336 metre `blender_feature_park`. The feature zones remain
@@ -377,9 +391,9 @@ Example fast lighting-only update:
 
 ```powershell
 & 'C:\Program Files\Blender Foundation\Blender 5.0\blender.exe' `
-  --background owned\maps\source\blender_bake_showcase.blend `
+  --background maps\blender_bake_showcase.blend `
   --python tools\blender_owned_map\export_skate.py -- `
-  owned\maps\blender_bake_showcase.skate --metadata-only
+  maps\blender_bake_showcase.skate --metadata-only
 ```
 
 Cache manifests are generated and gitignored. If a package changes outside

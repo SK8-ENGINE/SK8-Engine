@@ -5,6 +5,7 @@
 // skate3_native_scene_state.h.
 
 #include "skate3_native_scene.h"
+#include "skate3_map_editor.h"
 #include "skate3_mechanics_sandbox.h"
 
 #include "generated/skate3_init.h"
@@ -6316,9 +6317,11 @@ bool UpdateFreecam(FrameScene& scene, const float cam_view[16], double now) {
     fc.engaged = true;
     REXLOG_INFO(
         "native-scene freecam: ENGAGED at ({:.1f}, {:.1f}, {:.1f}); WASD fly, "
-        "E/Space up, Q/C down, arrows/right-drag look, Z/X zoom, Shift fast, "
-        "Ctrl slow",
-        fc.pos[0], fc.pos[1], fc.pos[2]);
+        "{} up, Q/C down, arrows/right-drag look, Z/X zoom, Shift fast, "
+        "Ctrl slow{}",
+        fc.pos[0], fc.pos[1], fc.pos[2],
+        skate3::map_editor::Active() ? "Space" : "E/Space",
+        skate3::map_editor::Active() ? ", E object list" : "");
   }
   const double dt = std::clamp(now - fc.last_t, 0.0, 0.1);
   fc.last_t = now;
@@ -6329,31 +6332,46 @@ bool UpdateFreecam(FrameScene& scene, const float cam_view[16], double now) {
   double speed_mult = 1.0, zoom_dir = 0.0;
 #if defined(_WIN32)
   const auto down = [](int vk) { return (GetAsyncKeyState(vk) & 0x8000) != 0; };
-  mv_f = (down('W') ? 1.0 : 0.0) - (down('S') ? 1.0 : 0.0);
-  mv_r = (down('D') ? 1.0 : 0.0) - (down('A') ? 1.0 : 0.0);
-  mv_u = ((down('E') || down(VK_SPACE)) ? 1.0 : 0.0) -
-         ((down('Q') || down('C')) ? 1.0 : 0.0);
-  lk_yaw = (down(VK_RIGHT) ? 1.0 : 0.0) - (down(VK_LEFT) ? 1.0 : 0.0);
-  lk_pitch = (down(VK_UP) ? 1.0 : 0.0) - (down(VK_DOWN) ? 1.0 : 0.0);
-  zoom_dir = (down('Z') ? 1.0 : 0.0) - (down('X') ? 1.0 : 0.0);
-  if (down(VK_SHIFT)) {
-    speed_mult = 4.0;
-  } else if (down(VK_CONTROL)) {
-    speed_mult = 0.2;
-  }
-  if (down(VK_RBUTTON)) {
-    POINT p;
-    if (GetCursorPos(&p)) {
-      if (fc.mouse_anchored) {
-        constexpr double kRadPerPixel = 0.0022;  // ~0.13 deg per pixel
-        mouse_yaw = (p.x - fc.mouse_last.x) * kRadPerPixel;
-        mouse_pitch = -(p.y - fc.mouse_last.y) * kRadPerPixel;
+  const bool input_focused =
+      skate3::map_editor::HasInputFocus() &&
+      !skate3::map_editor::SpawnMenuVisible();
+  if (input_focused) {
+    mv_f = (down('W') ? 1.0 : 0.0) - (down('S') ? 1.0 : 0.0);
+    mv_r = (down('D') ? 1.0 : 0.0) - (down('A') ? 1.0 : 0.0);
+    mv_u = ((down('E') || down(VK_SPACE)) ? 1.0 : 0.0) -
+           ((down('Q') || down('C')) ? 1.0 : 0.0);
+    lk_yaw =
+        (down(VK_RIGHT) ? 1.0 : 0.0) - (down(VK_LEFT) ? 1.0 : 0.0);
+    lk_pitch =
+        (down(VK_UP) ? 1.0 : 0.0) - (down(VK_DOWN) ? 1.0 : 0.0);
+    zoom_dir = (down('Z') ? 1.0 : 0.0) - (down('X') ? 1.0 : 0.0);
+    if (down(VK_SHIFT)) {
+      speed_mult = 4.0;
+    } else if (down(VK_CONTROL)) {
+      speed_mult = 0.2;
+    }
+    const bool editor_mouse =
+        skate3::map_editor::ConsumeMouseLook(mouse_yaw, mouse_pitch);
+    if (!editor_mouse && down(VK_RBUTTON)) {
+      POINT p;
+      if (GetCursorPos(&p)) {
+        if (fc.mouse_anchored) {
+          constexpr double kRadPerPixel = 0.0022;  // ~0.13 deg per pixel
+          mouse_yaw = (p.x - fc.mouse_last.x) * kRadPerPixel;
+          mouse_pitch = -(p.y - fc.mouse_last.y) * kRadPerPixel;
+        }
+        fc.mouse_last = p;
+        fc.mouse_anchored = true;
       }
-      fc.mouse_last = p;
-      fc.mouse_anchored = true;
+    } else if (!editor_mouse) {
+      fc.mouse_anchored = false;
     }
   } else {
     fc.mouse_anchored = false;
+    fc.vel[0] = fc.vel[1] = fc.vel[2] = 0.0;
+    fc.yaw_vel = fc.pitch_vel = 0.0;
+    // Also releases a held editor capture if focus changed this frame.
+    skate3::map_editor::ConsumeMouseLook(mouse_yaw, mouse_pitch);
   }
 #endif
 
@@ -6441,6 +6459,7 @@ bool UpdateFreecam(FrameScene& scene, const float cam_view[16], double now) {
     }
   }
   std::memcpy(scene.cam_pos, posf, sizeof(posf));
+  skate3::map_editor::UpdateInteraction(view, pr, posf);
   return true;
 }
 

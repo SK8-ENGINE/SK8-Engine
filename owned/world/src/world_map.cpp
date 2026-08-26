@@ -124,6 +124,103 @@ bool RayTriangle(Vec3 origin,
 
 }  // namespace
 
+bool HasRetailCollisionIdentity(const MapDefinition &map) {
+  if (map.collision_triangles.empty() ||
+      map.retail_collision_resource_names.empty() ||
+      map.retail_collision_associations.size() <
+          map.collision_triangles.size()) {
+    return false;
+  }
+  std::size_t next_triangle = 0;
+  for (const RetailCollisionAssociation &association :
+       map.retail_collision_associations) {
+    if (association.triangle_index >= map.collision_triangles.size() ||
+        association.resource_index >=
+            map.retail_collision_resource_names.size()) {
+      return false;
+    }
+    if (next_triangle < association.triangle_index) {
+      return false;
+    }
+    if (next_triangle == association.triangle_index) {
+      ++next_triangle;
+    }
+  }
+  return next_triangle == map.collision_triangles.size();
+}
+
+std::vector<std::uint16_t>
+RetailCollisionResourcesForObject(const MapDefinition &map,
+                                  const MapObject &object) {
+  std::vector<std::uint16_t> resources;
+  if (!HasRetailCollisionIdentity(map) ||
+      object.source_collision_triangle_count == 0) {
+    return resources;
+  }
+  const std::uint64_t end =
+      static_cast<std::uint64_t>(object.source_first_collision_triangle) +
+      object.source_collision_triangle_count;
+  for (const RetailCollisionAssociation &association :
+       map.retail_collision_associations) {
+    if (association.triangle_index < object.source_first_collision_triangle) {
+      continue;
+    }
+    if (association.triangle_index >= end) {
+      break;
+    }
+    resources.push_back(association.resource_index);
+  }
+  std::sort(resources.begin(), resources.end());
+  resources.erase(std::unique(resources.begin(), resources.end()),
+                  resources.end());
+  return resources;
+}
+
+MapDefinition BuildRetailCollisionResourceFallback(
+    const MapDefinition &map, std::uint16_t resource_index,
+    std::span<const std::uint8_t> detached_objects) {
+  MapDefinition fallback;
+  fallback.name = "retail_collision_resource_" +
+                  std::to_string(resource_index) + "_fallback";
+  if (!HasRetailCollisionIdentity(map) ||
+      resource_index >= map.retail_collision_resource_names.size() ||
+      detached_objects.size() < map.editable_objects.size()) {
+    return fallback;
+  }
+
+  std::vector<bool> excluded(map.collision_triangles.size(), false);
+  for (std::size_t object_index = 0; object_index < map.editable_objects.size();
+       ++object_index) {
+    if (!detached_objects[object_index]) {
+      continue;
+    }
+    const MapObject &object = map.editable_objects[object_index];
+    const std::uint64_t end =
+        static_cast<std::uint64_t>(object.source_first_collision_triangle) +
+        object.source_collision_triangle_count;
+    if (end > excluded.size()) {
+      fallback.collision_triangles.clear();
+      return fallback;
+    }
+    std::fill(excluded.begin() + object.source_first_collision_triangle,
+              excluded.begin() + static_cast<std::size_t>(end), true);
+  }
+
+  std::vector<bool> included(map.collision_triangles.size(), false);
+  for (const RetailCollisionAssociation &association :
+       map.retail_collision_associations) {
+    if (association.resource_index != resource_index ||
+        excluded[association.triangle_index] ||
+        included[association.triangle_index]) {
+      continue;
+    }
+    included[association.triangle_index] = true;
+    fallback.collision_triangles.push_back(
+        map.collision_triangles[association.triangle_index]);
+  }
+  return fallback;
+}
+
 KinematicPose EvaluateKinematicBox(const KinematicBox& object,
                                    float elapsed_seconds) {
   KinematicPose pose;
@@ -296,8 +393,7 @@ DayNightState EvaluateDayNightCycle(
   state.ambient =
       cycle.night_ambient +
       (cycle.day_ambient - cycle.night_ambient) *
-          state.daylight_amount +
-      state.twilight_amount * 0.035f;
+          state.daylight_amount;
   return state;
 }
 
@@ -862,6 +958,10 @@ WorldMap::WorldMap(MapDefinition definition)
 }
 
 const MapDefinition& WorldMap::Definition() const {
+  return definition_;
+}
+
+MapDefinition& WorldMap::MutableDefinition() {
   return definition_;
 }
 

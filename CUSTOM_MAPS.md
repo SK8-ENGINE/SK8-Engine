@@ -29,8 +29,8 @@ The Maps tab always shows and opens the exact folder currently in use.
 
 ## Package compatibility
 
-The runtime accepts little-endian SKATE v1-v8 packages. Current Blender
-exports use v8 and can contain:
+The runtime accepts little-endian SKATE v1-v12 packages. Current Blender
+exports use v12 and can contain:
 
 - chunked visual geometry and embedded image textures;
 - albedo, normal, ORM, emissive and baked-indirect maps;
@@ -41,6 +41,8 @@ exports use v8 and can contain:
 - contact-driven hinged rigid doors;
 - ordinary Blender Point, Spot, Area, and Sun lights;
 - spawn, sky, day/night, weather, water, mirror and moving-light metadata.
+- stable per-object identity, render/collision ownership, transforms, and
+  grind associations used by the in-game editor.
 
 NPC route records are an experimental preview. The exporter retains them for
 future testing, but map authors should not currently rely on AI skaters
@@ -88,6 +90,12 @@ and experimental NPC controls remain available as overrides.
 Full UI guidance, scene conventions, and optional command-line automation are
 documented in `tools/blender_owned_map/README.md`; the binary specification
 is in `SKATE_FORMAT.md`.
+
+The export panel enables **Editable Map Objects** by default. Disable that
+option when a map should keep all of its normal rendering, collision,
+materials, and grind paths but expose none of its existing geometry to the
+in-game editor. This avoids per-object editor records without changing the
+playable static map.
 
 The exporter and runtime are original code and do not invoke, bundle, or
 depend on ArenaBuilder.

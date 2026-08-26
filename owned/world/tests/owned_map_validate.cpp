@@ -2,6 +2,7 @@
 #include "skate/world/owned_map_package.h"
 #include "skate/world/render_world.h"
 #include "skate/world/rw_collision_mesh.h"
+#include "skate/world/skate_object_package.h"
 
 #include <algorithm>
 #include <array>
@@ -20,11 +21,14 @@
 
 int main(int argc, char** argv) {
   bool compile_world = false;
+  bool object_profile = false;
   std::optional<std::filesystem::path> collision_output;
   for (int argument = 2; argument < argc; ++argument) {
     const std::string_view option = argv[argument];
     if (option == "--compile-world") {
       compile_world = true;
+    } else if (option == "--object-profile") {
+      object_profile = true;
     } else if (option == "--collision-output" &&
                argument + 1 < argc) {
       collision_output = std::filesystem::path(argv[++argument]);
@@ -45,6 +49,32 @@ int main(int argc, char** argv) {
   try {
     const skate::world::MapDefinition map =
         skate::world::LoadOwnedMapPackage(std::filesystem::path(argv[1]));
+    if (object_profile) {
+      skate::world::SkateObjectAsset object =
+          skate::world::LoadSkateObjectPackage(
+              std::filesystem::path(argv[1]));
+      std::cout << "SKATEOBJ_PROFILE_OK"
+                << " name=" << object.name
+                << " vertices=" << object.object.render_mesh.vertices.size()
+                << " collision="
+                << object.object.collision_triangles.size()
+                << " rails=" << object.grind_rails.size()
+                << '\n';
+      for (const skate::world::GrindRail& rail : object.grind_rails) {
+        std::cout << "SKATEOBJ_GRIND"
+                  << " name=" << rail.name
+                  << " points=" << rail.points.size();
+        if (!rail.points.empty()) {
+          const skate::world::Vec3& first = rail.points.front();
+          const skate::world::Vec3& last = rail.points.back();
+          std::cout << " first=" << first.x << "," << first.y << ","
+                    << first.z
+                    << " last=" << last.x << "," << last.y << ","
+                    << last.z;
+        }
+        std::cout << '\n';
+      }
+    }
     skate::world::Vec3 minimum{
         std::numeric_limits<float>::max(),
         std::numeric_limits<float>::max(),
@@ -64,9 +94,19 @@ int main(int argc, char** argv) {
     }
     std::uint64_t texture_bytes = 0;
     for (const skate::world::ImageTexture& texture : map.textures) {
+      std::string texture_error;
+      if (!skate::world::DecodeOwnedMapTexture(
+              texture, &texture_error)) {
+        std::cerr
+            << "SKATE_PACKAGE_FAIL texture " << texture.id << " '"
+            << texture.name << "' could not be decoded: "
+            << texture_error << '\n';
+        return 1;
+      }
       texture_bytes += texture.rgba8.size();
     }
     std::array<std::uint64_t, 3> alpha_modes{};
+    std::array<std::uint64_t, 4> depth_layers{};
     for (const skate::world::SurfaceMaterial& material : map.materials) {
       const std::size_t alpha_mode =
           static_cast<std::size_t>(material.alpha_mode);
@@ -75,6 +115,11 @@ int main(int argc, char** argv) {
         return 1;
       }
       ++alpha_modes[alpha_mode];
+      if (material.presentation_depth_layer >= depth_layers.size()) {
+        std::cerr << "SKATE_PACKAGE_FAIL invalid material depth layer\n";
+        return EXIT_FAILURE;
+      }
+      ++depth_layers[material.presentation_depth_layer];
     }
     std::cout
         << "SKATE_PACKAGE_OK"
@@ -83,12 +128,17 @@ int main(int argc, char** argv) {
         << " alpha_opaque=" << alpha_modes[0]
         << " alpha_mask=" << alpha_modes[1]
         << " alpha_blend=" << alpha_modes[2]
+        << " depth_base=" << depth_layers[0]
+        << " depth_cutout=" << depth_layers[1]
+        << " depth_overlay=" << depth_layers[2]
+        << " depth_blend=" << depth_layers[3]
         << " textures=" << map.textures.size()
         << " texture_rgba8_bytes=" << texture_bytes
         << " vertices=" << map.render_mesh.vertices.size()
         << " indices=" << map.render_mesh.indices.size()
         << " triangles=" << map.render_mesh.indices.size() / 3
         << " collision=" << map.collision_triangles.size()
+        << " editable_objects=" << map.editable_objects.size()
         << " rails=" << map.grind_rails.size()
         << " doors=" << map.hinged_doors.size()
         << " lights=" << map.moving_light_orbs.size()
@@ -98,6 +148,33 @@ int main(int argc, char** argv) {
         << " bounds_max=" << maximum.x << "," << maximum.y << ","
         << maximum.z
         << '\n';
+    if (!map.retail_collision_resource_names.empty()) {
+      if (!skate::world::HasRetailCollisionIdentity(map)) {
+        std::cerr << "SKATE_RETAIL_COLLISION_IDENTITY_FAIL invalid_table\n";
+        return 1;
+      }
+      std::size_t collision_objects = 0;
+      std::size_t maximum_resources = 0;
+      for (const skate::world::MapObject &object : map.editable_objects) {
+        if (object.source_collision_triangle_count == 0) {
+          continue;
+        }
+        const std::vector<std::uint16_t> resources =
+            skate::world::RetailCollisionResourcesForObject(map, object);
+        if (resources.empty()) {
+          std::cerr << "SKATE_RETAIL_COLLISION_IDENTITY_FAIL object="
+                    << object.name << '\n';
+          return 1;
+        }
+        ++collision_objects;
+        maximum_resources = std::max(maximum_resources, resources.size());
+      }
+      std::cout << "SKATE_RETAIL_COLLISION_IDENTITY_OK"
+                << " resources=" << map.retail_collision_resource_names.size()
+                << " associations=" << map.retail_collision_associations.size()
+                << " collision_objects=" << collision_objects
+                << " max_resources_per_object=" << maximum_resources << '\n';
+    }
     if (compile_world) {
       {
         const skate::world::RenderWorld render_world =
@@ -106,6 +183,10 @@ int main(int argc, char** argv) {
             << "SKATE_RENDER_WORLD_OK"
             << " source_triangles=" << render_world.source_triangle_count
             << " output_triangles=" << render_world.output_triangle_count
+            << " backface_culled_materials="
+            << render_world.backface_culled_material_count
+            << " presentation_surfaces="
+            << render_world.presentation_surface_count
             << " chunks=" << render_world.chunks.size()
             << '\n';
       }

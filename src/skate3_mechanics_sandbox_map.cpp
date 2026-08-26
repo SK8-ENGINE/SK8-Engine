@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <atomic>
 #include <bit>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -20,6 +21,7 @@
 #include <set>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #if defined(_WIN32)
@@ -52,7 +54,7 @@ WeatherSnapshot g_weather_snapshot;
 VisualMesh g_rain_visual;
 VisualMesh g_lightning_visual;
 
-const skate::world::WorldMap& ActiveWorld();
+skate::world::WorldMap& ActiveWorld();
 
 constexpr float kRadiansToDegrees = 57.29577951308232f;
 constexpr float kDegreesToRadians = 0.017453292519943295f;
@@ -371,24 +373,42 @@ WeatherRuntime& ActiveWeatherRuntime() {
   return runtime;
 }
 
-const skate::world::WorldMap& ActiveWorld() {
-  static const skate::world::WorldMap world([] {
+const std::string& ActivePackagePath() {
+  static const std::string package_path([] {
+    const char* selected_map = std::getenv("SKATE3_OWNED_MAP");
+    return selected_map != nullptr && selected_map[0] != '\0'
+               ? std::string(selected_map)
+               : std::string("owned_maps/blender_bake_showcase.skate");
+  }());
+  return package_path;
+}
+
+skate::world::WorldMap& ActiveWorld() {
+  static skate::world::WorldMap world([] {
     try {
-      const char* selected_map = std::getenv("SKATE3_OWNED_MAP");
-      const std::string package_path =
-          selected_map != nullptr && selected_map[0] != '\0'
-              ? selected_map
-              : "owned_maps/blender_bake_showcase.skate";
+      const std::string& package_path = ActivePackagePath();
+      REXLOG_INFO(
+          "mechanics-sandbox: loading owned map package '{}'",
+          package_path);
+      const auto load_started = std::chrono::steady_clock::now();
       skate::world::MapDefinition imported =
           skate::world::LoadOwnedMapPackage(package_path);
+      const auto load_ms = std::chrono::duration_cast<
+          std::chrono::milliseconds>(
+          std::chrono::steady_clock::now() - load_started);
+      imported.materials.reserve(4096);
+      imported.textures.reserve(4096);
+      imported.editable_objects.reserve(20000);
+      imported.grind_rails.reserve(4096);
       REXLOG_INFO(
           "mechanics-sandbox: loaded owned Blender map package '{}' from '{}' "
           "(vertices={} collision={} textures={} rails={} doors={} lights={} "
-          "npc_routes={})",
+          "npc_routes={} load_ms={})",
           imported.name, package_path, imported.render_mesh.vertices.size(),
           imported.collision_triangles.size(), imported.textures.size(),
           imported.grind_rails.size(), imported.hinged_doors.size(),
-          imported.moving_light_orbs.size(), imported.npc_routes.size());
+          imported.moving_light_orbs.size(), imported.npc_routes.size(),
+          load_ms.count());
       return imported;
     } catch (const std::exception& error) {
       REXLOG_ERROR(
@@ -415,6 +435,17 @@ const skate::world::SurfaceMaterial* FindMaterial(
 VisualVertex ConvertVertex(
     const skate::world::RenderVertex& source_vertex) {
   VisualVertex vertex{};
+  // Owned geometry shares the retained renderer's legacy vertex layout, but
+  // it is never bone-skinned. Reserve the last three blend-index lanes as
+  // the static marker so the first can carry the connected-surface
+  // presentation rank. This lets the shader reject skinning even if a later
+  // draw variant accidentally loses the owned-material constant sentinel.
+  // Leaving the marker lanes at zero makes an authored tangent frame look
+  // like weights for player bone 0.
+  vertex.blend_index[0] = source_vertex.presentation_rank;
+  vertex.blend_index[1] = 0xFF;
+  vertex.blend_index[2] = 0xFF;
+  vertex.blend_index[3] = 0xFF;
   vertex.position[0] = source_vertex.position.x;
   vertex.position[1] = source_vertex.position.y;
   vertex.position[2] = source_vertex.position.z;
@@ -503,6 +534,13 @@ void PopulateVisualDrawMaterial(
   draw.baked_indirect_strength = material.baked_indirect_strength;
   draw.alpha_mode = material.alpha_mode;
   draw.alpha_cutoff = material.alpha_cutoff;
+  draw.presentation_depth_layer =
+      material.presentation_depth_layer;
+  // Break ties between coplanar materials in the same semantic layer. The
+  // stable package material ID is sufficient. Eight bits sharply reduce
+  // collisions in large imported worlds while remaining exactly encodable
+  // in the float-backed owned-material flag word.
+  draw.presentation_depth_order = material.id & 255u;
   if (!material.retail.enabled) {
     return;
   }
@@ -516,6 +554,8 @@ void PopulateVisualDrawMaterial(
       RetailTexture(material, "transparent");
   const skate::world::TextureId retail_lightmap =
       RetailTexture(material, "lightmap");
+  draw.retail_chromaticity_texture =
+      RetailTexture(material, "chromaticity");
   if (draw.albedo_texture == 0) {
     draw.albedo_texture =
         retail_diffuse != 0 ? retail_diffuse : retail_transparent;
@@ -552,13 +592,38 @@ void PopulateVisualDrawMaterial(
       RetailParameter(material, "uAnimationSpeed", 0.0f);
   draw.retail_scroll_v =
       RetailParameter(material, "vAnimationSpeed", 0.0f);
+  draw.skate2_lightmap_component =
+      RetailParameter(material, "skate2_lightmap_component", -1.0f);
 }
 
 VisualWorld BuildVisualWorld() {
   const skate::world::MapDefinition& definition =
       ActiveWorld().Definition();
+  const auto build_started = std::chrono::steady_clock::now();
+  skate::world::RenderWorldBuildOptions build_options;
+  build_options.progress = [](std::size_t completed,
+                              std::size_t total) {
+    REXLOG_INFO(
+        "mechanics-sandbox: visual chunking progress {}/{} ({}%)",
+        completed, total,
+        total == 0 ? 100 : completed * 100 / total);
+  };
+  build_options.excluded_index_ranges.reserve(
+      definition.editable_objects.size());
+  for (const skate::world::MapObject& object :
+       definition.editable_objects) {
+    build_options.excluded_index_ranges.push_back(
+        {object.source_first_index, object.source_index_count});
+  }
+  std::sort(
+      build_options.excluded_index_ranges.begin(),
+      build_options.excluded_index_ranges.end(),
+      [](const auto& left, const auto& right) {
+        return left.first < right.first;
+      });
   const skate::world::RenderWorld source =
-      skate::world::BuildRenderWorld(definition);
+      skate::world::BuildRenderWorld(definition, build_options);
+  const auto partition_finished = std::chrono::steady_clock::now();
   VisualWorld world;
   world.chunk_size = source.chunk_size;
   world.source_triangle_count = source.source_triangle_count;
@@ -604,6 +669,7 @@ VisualWorld BuildVisualWorld() {
       VisualDraw draw;
       draw.first_index = source_draw.first_index;
       draw.index_count = source_draw.index_count;
+      draw.cull_backfaces = source_draw.cull_backfaces;
       PopulateVisualDrawMaterial(draw, *material);
       chunk.draws.push_back(draw);
     }
@@ -621,7 +687,218 @@ VisualWorld BuildVisualWorld() {
       ++world.cells.back().chunk_count;
     }
   }
+  const auto build_finished = std::chrono::steady_clock::now();
+  REXLOG_INFO(
+      "mechanics-sandbox: visual world ready chunks={} cells={} "
+      "source_triangles={} output_triangles={} culled_materials={} "
+      "presentation_surfaces={} partition_ms={} adapter_ms={} total_ms={}",
+      world.chunks.size(), world.cells.size(),
+      world.source_triangle_count, world.output_triangle_count,
+      source.backface_culled_material_count,
+      source.presentation_surface_count,
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          partition_finished - build_started).count(),
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          build_finished - partition_finished).count(),
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          build_finished - build_started).count());
   return world;
+}
+
+std::vector<VisualMesh> BuildEditableObjectVisualMeshes() {
+  const skate::world::MapDefinition& definition =
+      ActiveWorld().Definition();
+  std::vector<VisualMesh> meshes;
+  meshes.reserve(definition.editable_objects.size());
+  for (const skate::world::MapObject& object :
+       definition.editable_objects) {
+    if (object.render_mesh.vertices.size() >
+        std::numeric_limits<std::uint16_t>::max()) {
+      throw std::runtime_error(
+          "editable map object exceeds the 16-bit GPU adapter limit");
+    }
+    VisualMesh mesh;
+    mesh.vertices.reserve(object.render_mesh.vertices.size());
+    for (const skate::world::RenderVertex& vertex :
+         object.render_mesh.vertices) {
+      mesh.vertices.push_back(ConvertVertex(vertex));
+    }
+
+    std::map<skate::world::MaterialId, std::vector<std::uint16_t>>
+        material_indices;
+    for (std::size_t index = 0;
+         index < object.render_mesh.indices.size(); index += 3) {
+      const std::uint32_t a = object.render_mesh.indices[index];
+      const std::uint32_t b = object.render_mesh.indices[index + 1];
+      const std::uint32_t c = object.render_mesh.indices[index + 2];
+      if (a >= object.render_mesh.vertices.size() ||
+          b >= object.render_mesh.vertices.size() ||
+          c >= object.render_mesh.vertices.size()) {
+        throw std::runtime_error(
+            "editable map object contains an invalid index");
+      }
+      const skate::world::MaterialId material =
+          object.render_mesh.vertices[a].material;
+      if (material == 0 ||
+          object.render_mesh.vertices[b].material != material ||
+          object.render_mesh.vertices[c].material != material) {
+        throw std::runtime_error(
+            "editable map object triangle has mixed materials");
+      }
+      auto& indices = material_indices[material];
+      indices.push_back(static_cast<std::uint16_t>(a));
+      indices.push_back(static_cast<std::uint16_t>(b));
+      indices.push_back(static_cast<std::uint16_t>(c));
+    }
+    for (const auto& [material_id, indices] : material_indices) {
+      const skate::world::SurfaceMaterial* material =
+          FindMaterial(definition, material_id);
+      if (material == nullptr) {
+        throw std::runtime_error(
+            "editable map object references an unknown material");
+      }
+      VisualDraw draw;
+      draw.first_index =
+          static_cast<std::uint32_t>(mesh.indices.size());
+      draw.index_count = static_cast<std::uint32_t>(indices.size());
+      PopulateVisualDrawMaterial(draw, *material);
+      mesh.indices.insert(
+          mesh.indices.end(), indices.begin(), indices.end());
+      mesh.draws.push_back(draw);
+    }
+    meshes.push_back(std::move(mesh));
+  }
+  return meshes;
+}
+
+VisualMesh BuildEditorGizmoVisualMesh() {
+  using skate::world::Vec3;
+  VisualMesh mesh;
+  const auto vertex = [&mesh](Vec3 position, Vec3 normal) {
+    skate::world::RenderVertex source;
+    source.position = position;
+    source.normal = normal;
+    mesh.vertices.push_back(ConvertVertex(source));
+    return static_cast<std::uint16_t>(mesh.vertices.size() - 1);
+  };
+  const auto triangle = [&mesh](std::uint16_t a, std::uint16_t b,
+                                std::uint16_t c) {
+    mesh.indices.insert(mesh.indices.end(), {a, b, c});
+  };
+  const auto prism = [&](Vec3 axis, Vec3 side, Vec3 up) {
+    constexpr float kStart = 0.16f;
+    constexpr float kEnd = 1.03f;
+    constexpr float kWidth = 0.024f;
+    const Vec3 center0 = axis * kStart;
+    const Vec3 center1 = axis * kEnd;
+    const Vec3 s = side * kWidth;
+    const Vec3 u = up * kWidth;
+    const std::uint16_t base = static_cast<std::uint16_t>(
+        mesh.vertices.size());
+    for (Vec3 point : {
+             center0 - s - u, center0 + s - u,
+             center0 + s + u, center0 - s + u,
+             center1 - s - u, center1 + s - u,
+             center1 + s + u, center1 - s + u,
+         }) {
+      vertex(point, Normalize(point - axis * Dot(point, axis)));
+    }
+    constexpr std::uint16_t faces[][6] = {
+        {0, 1, 2, 0, 2, 3}, {4, 6, 5, 4, 7, 6},
+        {0, 4, 5, 0, 5, 1}, {1, 5, 6, 1, 6, 2},
+        {2, 6, 7, 2, 7, 3}, {3, 7, 4, 3, 4, 0},
+    };
+    for (const auto& face : faces) {
+      for (std::uint16_t index : face) {
+        mesh.indices.push_back(base + index);
+      }
+    }
+
+    const Vec3 tip = axis * 1.28f;
+    const Vec3 tip_base = axis * 1.01f;
+    const Vec3 wide_s = side * 0.09f;
+    const Vec3 wide_u = up * 0.09f;
+    const std::uint16_t p0 = vertex(tip_base - wide_s - wide_u, axis);
+    const std::uint16_t p1 = vertex(tip_base + wide_s - wide_u, axis);
+    const std::uint16_t p2 = vertex(tip_base + wide_s + wide_u, axis);
+    const std::uint16_t p3 = vertex(tip_base - wide_s + wide_u, axis);
+    const std::uint16_t peak = vertex(tip, axis);
+    triangle(p0, p1, peak);
+    triangle(p1, p2, peak);
+    triangle(p2, p3, peak);
+    triangle(p3, p0, peak);
+    triangle(p0, p3, p2);
+    triangle(p0, p2, p1);
+  };
+  const auto ring = [&](Vec3 side, Vec3 up, Vec3 normal) {
+    constexpr int kSegments = 64;
+    constexpr float kPi = 3.14159265358979323846f;
+    constexpr float kRadius = 0.78f;
+    constexpr float kHalfWidth = 0.022f;
+    const std::uint16_t base = static_cast<std::uint16_t>(
+        mesh.vertices.size());
+    for (int segment = 0; segment <= kSegments; ++segment) {
+      const float angle =
+          2.0f * kPi * static_cast<float>(segment) / kSegments;
+      const Vec3 radial =
+          side * std::cos(angle) + up * std::sin(angle);
+      vertex(radial * (kRadius - kHalfWidth), normal);
+      vertex(radial * (kRadius + kHalfWidth), normal);
+    }
+    for (int segment = 0; segment < kSegments; ++segment) {
+      const std::uint16_t a = base + segment * 2;
+      const std::uint16_t b = a + 1;
+      const std::uint16_t c = a + 3;
+      const std::uint16_t d = a + 2;
+      triangle(a, b, c);
+      triangle(a, c, d);
+      triangle(c, b, a);
+      triangle(d, c, a);
+    }
+  };
+  const auto draw = [&mesh](std::uint32_t first,
+                            float red, float green, float blue) {
+    VisualDraw result;
+    result.first_index = first;
+    result.index_count =
+        static_cast<std::uint32_t>(mesh.indices.size()) - first;
+    result.color[0] = red;
+    result.color[1] = green;
+    result.color[2] = blue;
+    result.color[3] = 1.0f;
+    result.material[0] = 0.0f;
+    result.material[1] = 1.0f;
+    result.material[2] = 0.18f;
+    result.material[3] = 0.0f;
+    mesh.draws.push_back(result);
+  };
+
+  std::uint32_t first = static_cast<std::uint32_t>(mesh.indices.size());
+  prism({1.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f},
+        {0.0f, 0.0f, 1.0f});
+  draw(first, 0.95f, 0.06f, 0.04f);
+  first = static_cast<std::uint32_t>(mesh.indices.size());
+  prism({0.0f, 1.0f, 0.0f}, {1.0f, 0.0f, 0.0f},
+        {0.0f, 0.0f, 1.0f});
+  draw(first, 0.08f, 0.82f, 0.13f);
+  first = static_cast<std::uint32_t>(mesh.indices.size());
+  prism({0.0f, 0.0f, 1.0f}, {1.0f, 0.0f, 0.0f},
+        {0.0f, 1.0f, 0.0f});
+  draw(first, 0.06f, 0.28f, 1.0f);
+
+  first = static_cast<std::uint32_t>(mesh.indices.size());
+  ring({0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f},
+       {1.0f, 0.0f, 0.0f});
+  draw(first, 0.95f, 0.06f, 0.04f);
+  first = static_cast<std::uint32_t>(mesh.indices.size());
+  ring({1.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 1.0f},
+       {0.0f, 1.0f, 0.0f});
+  draw(first, 0.08f, 0.82f, 0.13f);
+  first = static_cast<std::uint32_t>(mesh.indices.size());
+  ring({1.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f},
+       {0.0f, 0.0f, 1.0f});
+  draw(first, 0.06f, 0.28f, 1.0f);
+  return mesh;
 }
 
 VisualMesh BuildSkyMesh() {
@@ -1168,6 +1445,25 @@ const VisualMesh& ActiveSkyMesh() {
   return sky;
 }
 
+const VisualMesh& ActiveEditorGizmoVisualMesh() {
+  static const VisualMesh gizmo = BuildEditorGizmoVisualMesh();
+  return gizmo;
+}
+
+const VisualMesh& ActiveEditableObjectVisualMesh(std::size_t index) {
+  static std::vector<VisualMesh> meshes =
+      BuildEditableObjectVisualMeshes();
+  if (meshes.size() !=
+      ActiveWorld().Definition().editable_objects.size()) {
+    meshes = BuildEditableObjectVisualMeshes();
+  }
+  if (index >= meshes.size()) {
+    throw std::out_of_range(
+        "editable map object visual index is out of range");
+  }
+  return meshes[index];
+}
+
 const VisualMesh& ActiveKinematicVisualMesh(std::size_t index) {
   static const std::vector<VisualMesh> meshes =
       BuildKinematicVisualMeshes();
@@ -1219,6 +1515,120 @@ const skate::world::MapDefinition& ActiveDefinition() {
   return ActiveWorld().Definition();
 }
 
+std::size_t AppendSpawnedObject(
+    skate::world::SkateObjectAsset asset,
+    skate::world::Vec3 map_position) {
+  skate::world::MapDefinition& definition =
+      ActiveWorld().MutableDefinition();
+
+  skate::world::TextureId next_texture = 1;
+  for (const auto& texture : definition.textures) {
+    next_texture = std::max(next_texture, texture.id + 1);
+  }
+  std::unordered_map<skate::world::TextureId,
+                     skate::world::TextureId>
+      texture_ids;
+  for (auto& texture : asset.textures) {
+    const skate::world::TextureId old = texture.id;
+    texture.id = next_texture++;
+    texture_ids.emplace(old, texture.id);
+    definition.textures.push_back(std::move(texture));
+  }
+  const auto remap_texture =
+      [&texture_ids](skate::world::TextureId& id) {
+        if (id == 0) {
+          return;
+        }
+        const auto found = texture_ids.find(id);
+        if (found == texture_ids.end()) {
+          throw std::runtime_error(
+              "SKATEOBJ material references a missing texture");
+        }
+        id = found->second;
+      };
+
+  skate::world::MaterialId next_material = 1;
+  for (const auto& material : definition.materials) {
+    next_material = std::max(next_material, material.id + 1);
+  }
+  std::unordered_map<skate::world::MaterialId,
+                     skate::world::MaterialId>
+      material_ids;
+  for (auto& material : asset.materials) {
+    const skate::world::MaterialId old = material.id;
+    material.id = next_material++;
+    remap_texture(material.albedo_texture);
+    remap_texture(material.indirect_lightmap);
+    remap_texture(material.normal_texture);
+    remap_texture(material.orm_texture);
+    remap_texture(material.emissive_texture);
+    for (auto& binding : material.retail.texture_bindings) {
+      remap_texture(binding.texture);
+    }
+    material_ids.emplace(old, material.id);
+    definition.materials.push_back(std::move(material));
+  }
+  const auto remap_material =
+      [&material_ids](skate::world::MaterialId& id) {
+        const auto found = material_ids.find(id);
+        if (found == material_ids.end()) {
+          throw std::runtime_error(
+              "SKATEOBJ geometry references a missing material");
+        }
+        id = found->second;
+      };
+
+  skate::world::MapObject object = std::move(asset.object);
+  for (auto& vertex : object.render_mesh.vertices) {
+    remap_material(vertex.material);
+  }
+  for (auto& triangle : object.collision_triangles) {
+    remap_material(triangle.material);
+    const auto surface = material_ids.find(triangle.surface);
+    triangle.surface =
+        surface == material_ids.end() ? triangle.material
+                                      : surface->second;
+  }
+
+  skate::world::GrindRailId next_rail = 1;
+  for (const auto& rail : definition.grind_rails) {
+    next_rail = std::max(next_rail, rail.id + 1);
+  }
+  object.grind_rail_indices.clear();
+  for (auto& rail : asset.grind_rails) {
+    rail.id = next_rail++;
+    for (auto& point : rail.points) {
+      point = point + map_position;
+    }
+    object.grind_rail_indices.push_back(
+        static_cast<std::uint32_t>(
+            definition.grind_rails.size()));
+    definition.grind_rails.push_back(std::move(rail));
+  }
+
+  skate::world::MapObjectId next_object = 1;
+  for (const auto& existing : definition.editable_objects) {
+    next_object = std::max(next_object, existing.id + 1);
+  }
+  const std::size_t index = definition.editable_objects.size();
+  object.id = next_object;
+  object.name = asset.name + " #" + std::to_string(index + 1);
+  object.origin = map_position;
+  object.source_first_index = 0;
+  object.source_index_count = 0;
+  object.source_first_collision_triangle = 0;
+  object.source_collision_triangle_count = 0;
+  definition.editable_objects.push_back(std::move(object));
+  REXLOG_INFO(
+      "map-editor: spawned asset='{}' instance={} object_index={} "
+      "position=({:.3f},{:.3f},{:.3f}) rails={} total_objects={}",
+      asset.name, next_object, index, map_position.x, map_position.y,
+      map_position.z,
+      definition.editable_objects.back().grind_rail_indices.size(),
+      definition.editable_objects.size());
+  return index;
+}
+
 const skate::world::ImageTexture* ActiveImageTexture(
     skate::world::TextureId id) {
   const auto& textures = ActiveWorld().Definition().textures;
@@ -1234,6 +1644,10 @@ const char* ActiveMapName() {
   return ActiveWorld().Definition().name.c_str();
 }
 
+const char* ActiveMapPackagePath() {
+  return ActivePackagePath().c_str();
+}
+
 std::size_t ActiveSurfaceCount() {
   static const std::size_t count = CollectSurfaces(false).size();
   return count;
@@ -1242,6 +1656,10 @@ std::size_t ActiveSurfaceCount() {
 std::size_t ActiveRampCount() {
   static const std::size_t count = CollectSurfaces(true).size();
   return count;
+}
+
+std::size_t ActiveEditableObjectCount() {
+  return ActiveWorld().Definition().editable_objects.size();
 }
 
 std::size_t ActiveKinematicObjectCount() {

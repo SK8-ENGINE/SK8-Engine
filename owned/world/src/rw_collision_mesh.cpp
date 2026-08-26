@@ -40,6 +40,16 @@ std::uint32_t ReadBeU32(std::span<const std::uint8_t> bytes,
          static_cast<std::uint32_t>(bytes[offset + 3]);
 }
 
+std::int32_t ReadBeI32(std::span<const std::uint8_t> bytes,
+                       std::size_t offset) {
+  return std::bit_cast<std::int32_t>(ReadBeU32(bytes, offset));
+}
+
+float ReadBeF32(std::span<const std::uint8_t> bytes,
+                std::size_t offset) {
+  return std::bit_cast<float>(ReadBeU32(bytes, offset));
+}
+
 void AppendU8(std::vector<std::uint8_t>& bytes, std::uint8_t value) {
   bytes.push_back(value);
 }
@@ -79,6 +89,18 @@ void WriteBeU32(std::span<std::uint8_t> bytes,
   bytes[offset + 1] = static_cast<std::uint8_t>(value >> 16u);
   bytes[offset + 2] = static_cast<std::uint8_t>(value >> 8u);
   bytes[offset + 3] = static_cast<std::uint8_t>(value);
+}
+
+void WriteBeI32(std::span<std::uint8_t> bytes,
+                std::size_t offset,
+                std::int32_t value) {
+  WriteBeU32(bytes, offset, std::bit_cast<std::uint32_t>(value));
+}
+
+void WriteBeF32(std::span<std::uint8_t> bytes,
+                std::size_t offset,
+                float value) {
+  WriteBeU32(bytes, offset, std::bit_cast<std::uint32_t>(value));
 }
 
 void PadTo16(std::vector<std::uint8_t>& bytes) {
@@ -435,6 +457,18 @@ RwCollisionBuildResult BuildRwCollisionMesh(
     result.error = "map has no collision triangles";
     return result;
   }
+  std::uint64_t previous_exclusion_end = 0;
+  for (const RwCollisionBuildOptions::TriangleRange& range :
+       options.excluded_triangle_ranges) {
+    const std::uint64_t end =
+        static_cast<std::uint64_t>(range.first) + range.count;
+    if (range.count == 0 || range.first < previous_exclusion_end ||
+        end > map.collision_triangles.size()) {
+      result.error = "excluded collision triangle ranges are invalid";
+      return result;
+    }
+    previous_exclusion_end = end;
+  }
 
   std::vector<Vec3> vertices;
   std::vector<Triangle> triangles;
@@ -459,7 +493,27 @@ RwCollisionBuildResult BuildRwCollisionMesh(
     return index;
   };
 
-  for (const CollisionTriangle& source : map.collision_triangles) {
+  std::size_t exclusion_index = 0;
+  for (std::size_t source_index = 0;
+       source_index < map.collision_triangles.size(); ++source_index) {
+    while (exclusion_index < options.excluded_triangle_ranges.size() &&
+           source_index >=
+               static_cast<std::uint64_t>(
+                   options.excluded_triangle_ranges[exclusion_index].first) +
+                   options.excluded_triangle_ranges[exclusion_index].count) {
+      ++exclusion_index;
+    }
+    if (exclusion_index < options.excluded_triangle_ranges.size()) {
+      const auto& range =
+          options.excluded_triangle_ranges[exclusion_index];
+      if (source_index >= range.first &&
+          source_index <
+              static_cast<std::uint64_t>(range.first) + range.count) {
+        continue;
+      }
+    }
+    const CollisionTriangle& source =
+        map.collision_triangles[source_index];
     if (!IsFinite(source.a) || !IsFinite(source.b) ||
         !IsFinite(source.c)) {
       result.error = "collision geometry contains a non-finite vertex";
@@ -882,6 +936,259 @@ RwCollisionBuildResult LoadSerializedRwCollisionMesh(
   result.mesh.maximum_cluster_vertex_count = maximum_cluster_vertices;
   result.ok = true;
   return result;
+}
+
+bool TranslateSerializedRwCollisionMesh(
+    RwCollisionMeshBlob& mesh,
+    Vec3 requested_translation,
+    Vec3* applied_translation,
+    std::string* error) {
+  const auto fail = [&](std::string message) {
+    if (error != nullptr) {
+      *error = std::move(message);
+    }
+    return false;
+  };
+  if (!IsFinite(requested_translation)) {
+    return fail("retail collision translation is non-finite");
+  }
+
+  std::span<std::uint8_t> bytes(mesh.bytes);
+  if (bytes.size() < kMeshHeaderSize) {
+    return fail("retail collision mesh is smaller than its header");
+  }
+  const std::uint32_t mesh_bytes = ReadBeU32(bytes, 80);
+  const std::uint32_t kd_offset = ReadBeU32(bytes, 48);
+  const std::uint32_t cluster_table_offset = ReadBeU32(bytes, 52);
+  const std::uint32_t cluster_count = ReadBeU32(bytes, 64);
+  const float granularity = ReadBeF32(bytes, 56);
+  if (mesh_bytes != bytes.size() ||
+      !std::isfinite(granularity) || granularity <= 0.0f ||
+      (kd_offset & 0x0fu) != 0 ||
+      kd_offset > bytes.size() - kKdHeaderSize ||
+      (cluster_table_offset & 0x0fu) != 0 ||
+      cluster_table_offset > bytes.size() ||
+      cluster_count >
+          (bytes.size() - cluster_table_offset) / sizeof(std::uint32_t)) {
+    return fail("retail collision mesh header is invalid");
+  }
+
+  const std::array<double, 3> requested{
+      requested_translation.x,
+      requested_translation.y,
+      requested_translation.z};
+  std::array<std::int32_t, 3> integer_translation{};
+  std::array<float, 3> snapped_translation{};
+  for (std::size_t axis = 0; axis < 3; ++axis) {
+    const double quantized =
+        std::round(requested[axis] / static_cast<double>(granularity));
+    if (!std::isfinite(quantized) ||
+        quantized <
+            static_cast<double>(std::numeric_limits<std::int32_t>::min()) ||
+        quantized >
+            static_cast<double>(std::numeric_limits<std::int32_t>::max())) {
+      return fail("retail collision translation exceeds compressed range");
+    }
+    integer_translation[axis] = static_cast<std::int32_t>(quantized);
+    snapped_translation[axis] = static_cast<float>(
+        quantized * static_cast<double>(granularity));
+  }
+  const Vec3 snapped{
+      snapped_translation[0],
+      snapped_translation[1],
+      snapped_translation[2]};
+
+  const auto translated_float_is_valid =
+      [&](std::size_t offset, std::size_t axis) {
+        return std::isfinite(
+            ReadBeF32(bytes, offset) + snapped_translation[axis]);
+      };
+  for (std::size_t bounds_offset : {std::size_t{0}, std::size_t{16},
+                                    static_cast<std::size_t>(kd_offset + 16),
+                                    static_cast<std::size_t>(kd_offset + 32)}) {
+    for (std::size_t axis = 0; axis < 3; ++axis) {
+      if (!translated_float_is_valid(bounds_offset + axis * 4, axis)) {
+        return fail("retail collision translated bounds are non-finite");
+      }
+    }
+  }
+
+  const std::uint32_t branch_offset = ReadBeU32(bytes, kd_offset);
+  const std::uint32_t branch_count = ReadBeU32(bytes, kd_offset + 4);
+  if (branch_count != 0 &&
+      ((branch_offset & 0x0fu) != 0 ||
+       branch_offset > bytes.size() ||
+       branch_count > (bytes.size() - branch_offset) / 32u)) {
+    return fail("retail collision KD branch array is invalid");
+  }
+  for (std::uint32_t branch = 0; branch < branch_count; ++branch) {
+    const std::size_t record =
+        branch_offset + static_cast<std::size_t>(branch) * 32u;
+    const std::uint32_t axis = ReadBeU32(bytes, record + 4);
+    if (axis > 2 ||
+        !translated_float_is_valid(record + 24, axis) ||
+        !translated_float_is_valid(record + 28, axis)) {
+      return fail("retail collision KD branch axis or extent is invalid");
+    }
+  }
+
+  for (std::uint32_t cluster = 0; cluster < cluster_count; ++cluster) {
+    const std::uint32_t cluster_offset =
+        ReadBeU32(bytes, cluster_table_offset +
+                            cluster * sizeof(std::uint32_t));
+    if (cluster_offset > bytes.size() - kClusterHeaderSize) {
+      return fail("retail collision cluster offset is invalid");
+    }
+    const std::uint32_t cluster_bytes =
+        (static_cast<std::uint32_t>(bytes[cluster_offset + 8]) << 8u) |
+        bytes[cluster_offset + 9];
+    const std::uint32_t vertex_blocks =
+        (static_cast<std::uint32_t>(bytes[cluster_offset + 4]) << 8u) |
+        bytes[cluster_offset + 5];
+    const std::uint32_t vertex_count = bytes[cluster_offset + 10];
+    const std::uint32_t compression = bytes[cluster_offset + 12];
+    const std::size_t vertex_end =
+        cluster_offset +
+        (static_cast<std::size_t>(vertex_blocks) + 1u) * 16u;
+    if (cluster_bytes < kClusterHeaderSize ||
+        cluster_bytes > bytes.size() - cluster_offset ||
+        vertex_end > cluster_offset + cluster_bytes) {
+      return fail("retail collision cluster vertex span is invalid");
+    }
+
+    if (compression == 1) {
+      if (cluster_offset + 28u > vertex_end) {
+        return fail("retail 16-bit cluster omits its compression base");
+      }
+      for (std::size_t axis = 0; axis < 3; ++axis) {
+        const std::int64_t translated =
+            static_cast<std::int64_t>(
+                ReadBeI32(bytes, cluster_offset + 16u + axis * 4u)) +
+            integer_translation[axis];
+        if (translated < std::numeric_limits<std::int32_t>::min() ||
+            translated > std::numeric_limits<std::int32_t>::max()) {
+          return fail("retail 16-bit cluster base translation overflowed");
+        }
+      }
+      const std::size_t required =
+          cluster_offset + 28u +
+          static_cast<std::size_t>(vertex_count) * 6u;
+      if (required > vertex_end) {
+        return fail("retail 16-bit cluster vertices are truncated");
+      }
+    } else if (compression == 2) {
+      const std::size_t required =
+          cluster_offset + kClusterHeaderSize +
+          static_cast<std::size_t>(vertex_count) * 12u;
+      if (required > vertex_end) {
+        return fail("retail 32-bit cluster vertices are truncated");
+      }
+      for (std::uint32_t vertex = 0; vertex < vertex_count; ++vertex) {
+        const std::size_t vertex_offset =
+            cluster_offset + kClusterHeaderSize +
+            static_cast<std::size_t>(vertex) * 12u;
+        for (std::size_t axis = 0; axis < 3; ++axis) {
+          const std::int64_t translated =
+              static_cast<std::int64_t>(
+                  ReadBeI32(bytes, vertex_offset + axis * 4u)) +
+              integer_translation[axis];
+          if (translated < std::numeric_limits<std::int32_t>::min() ||
+              translated > std::numeric_limits<std::int32_t>::max()) {
+            return fail("retail 32-bit vertex translation overflowed");
+          }
+        }
+      }
+    } else if (compression == 0) {
+      const std::size_t required =
+          cluster_offset + kClusterHeaderSize +
+          static_cast<std::size_t>(vertex_count) * 16u;
+      if (required > vertex_end) {
+        return fail("retail uncompressed cluster vertices are truncated");
+      }
+      for (std::uint32_t vertex = 0; vertex < vertex_count; ++vertex) {
+        const std::size_t vertex_offset =
+            cluster_offset + kClusterHeaderSize +
+            static_cast<std::size_t>(vertex) * 16u;
+        for (std::size_t axis = 0; axis < 3; ++axis) {
+          if (!translated_float_is_valid(vertex_offset + axis * 4u,
+                                         axis)) {
+            return fail(
+                "retail uncompressed vertex translation is non-finite");
+          }
+        }
+      }
+    } else {
+      return fail("retail collision uses unsupported vertex compression");
+    }
+  }
+
+  const auto translate_float =
+      [&](std::size_t offset, std::size_t axis) {
+        WriteBeF32(bytes, offset,
+                   ReadBeF32(bytes, offset) +
+                       snapped_translation[axis]);
+      };
+  for (std::size_t bounds_offset : {std::size_t{0}, std::size_t{16},
+                                    static_cast<std::size_t>(kd_offset + 16),
+                                    static_cast<std::size_t>(kd_offset + 32)}) {
+    for (std::size_t axis = 0; axis < 3; ++axis) {
+      translate_float(bounds_offset + axis * 4, axis);
+    }
+  }
+  for (std::uint32_t branch = 0; branch < branch_count; ++branch) {
+    const std::size_t record =
+        branch_offset + static_cast<std::size_t>(branch) * 32u;
+    const std::uint32_t axis = ReadBeU32(bytes, record + 4);
+    translate_float(record + 24, axis);
+    translate_float(record + 28, axis);
+  }
+  for (std::uint32_t cluster = 0; cluster < cluster_count; ++cluster) {
+    const std::uint32_t cluster_offset =
+        ReadBeU32(bytes, cluster_table_offset +
+                            cluster * sizeof(std::uint32_t));
+    const std::uint32_t vertex_count = bytes[cluster_offset + 10];
+    const std::uint32_t compression = bytes[cluster_offset + 12];
+    if (compression == 1) {
+      for (std::size_t axis = 0; axis < 3; ++axis) {
+        const std::size_t offset =
+            cluster_offset + 16u + axis * 4u;
+        WriteBeI32(bytes, offset,
+                   ReadBeI32(bytes, offset) +
+                       integer_translation[axis]);
+      }
+    } else if (compression == 2) {
+      for (std::uint32_t vertex = 0; vertex < vertex_count; ++vertex) {
+        const std::size_t vertex_offset =
+            cluster_offset + kClusterHeaderSize +
+            static_cast<std::size_t>(vertex) * 12u;
+        for (std::size_t axis = 0; axis < 3; ++axis) {
+          const std::size_t offset = vertex_offset + axis * 4u;
+          WriteBeI32(bytes, offset,
+                     ReadBeI32(bytes, offset) +
+                         integer_translation[axis]);
+        }
+      }
+    } else {
+      for (std::uint32_t vertex = 0; vertex < vertex_count; ++vertex) {
+        const std::size_t vertex_offset =
+            cluster_offset + kClusterHeaderSize +
+            static_cast<std::size_t>(vertex) * 16u;
+        for (std::size_t axis = 0; axis < 3; ++axis) {
+          translate_float(vertex_offset + axis * 4u, axis);
+        }
+      }
+    }
+  }
+
+  mesh.bounds_min = mesh.bounds_min + snapped;
+  mesh.bounds_max = mesh.bounds_max + snapped;
+  if (applied_translation != nullptr) {
+    *applied_translation = snapped;
+  }
+  if (error != nullptr) {
+    error->clear();
+  }
+  return true;
 }
 
 bool FixupRwCollisionMeshForGuest(std::span<std::uint8_t> bytes,

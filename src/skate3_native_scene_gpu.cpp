@@ -5,6 +5,7 @@
 
 #include "skate3_native_debug_dialog.h"
 #include "skate3_demo_path.h"
+#include "skate3_map_editor.h"
 #include "skate3_native_scene.h"
 
 #include "generated/skate3_init.h"
@@ -44,6 +45,7 @@
 #include "native/skate3_native_guest_read.h"
 #include "native/skate3_native_lw.h"
 #include "native/skate3_native_palette.h"
+#include "skate/world/owned_map_package.h"
 // Offline-compiled SPIR-V for the native shaders (compiled from the HLSL
 // sources with DXC): the Vulkan RHI backend consumes these blobs; the D3D12
 // backend runtime-compiles the embedded HLSL as before.
@@ -189,6 +191,24 @@ REXCVAR_DECLARE(std::string, skate3_native_render_snapshot_dir);
 
 namespace skate3::native_scene {
 namespace {
+
+// Owned worlds expose one intentional lighting switch in their World menu.
+// Persisted low-level retained-renderer cvars must not silently disable live
+// lighting or its caster resources for a SKATE package.
+bool SceneShadowsEnabled() {
+  if (mechanics_sandbox::VisualMapEnabled()) {
+    return mechanics_sandbox::map::DynamicWorldLightingEnabled();
+  }
+  return REXCVAR_GET(skate3_native_render_scene_shadows);
+}
+
+bool StaticSceneShadowsEnabled() {
+  if (mechanics_sandbox::VisualMapEnabled()) {
+    return mechanics_sandbox::map::DynamicWorldLightingEnabled();
+  }
+  return REXCVAR_GET(
+      skate3_native_render_scene_shadow_static_casters);
+}
 
 // Retire a guest texture's GPU resources AND its view. Destruction is
 // deferred inside the RHI against the CURRENT submission; the `submission`
@@ -753,6 +773,9 @@ constexpr uint32_t kSandboxKinematicMeshBase = 0xF2000000u;
 constexpr std::size_t kSandboxKinematicMeshCapacity = 0x0000FFFFu;
 constexpr uint32_t kSandboxHingedDoorMeshBase = 0xF2100000u;
 constexpr std::size_t kSandboxHingedDoorMeshCapacity = 0x0000FFFFu;
+constexpr uint32_t kSandboxEditorObjectMeshBase = 0xF2200000u;
+constexpr std::size_t kSandboxEditorObjectMeshCapacity = 0x0000FFFFu;
+constexpr uint32_t kSandboxEditorGizmoMesh = 0xF2210000u;
 constexpr uint32_t kSandboxWaterMesh = 0xF3000000u;
 constexpr uint32_t kSandboxWaterPusherMesh = 0xF3000001u;
 constexpr uint32_t kSandboxMovingLightMesh = 0xF4000000u;
@@ -870,6 +893,29 @@ bool EnsureSandboxHingedDoorMesh(nrhi::Device* device,
           static_cast<std::uint32_t>(door_index),
       mechanics_sandbox::map::ActiveHingedDoorVisualMesh(door_index),
       "hinged door");
+}
+
+bool EnsureSandboxEditorObjectMesh(nrhi::Device* device,
+                                   std::size_t object_index) {
+  if (object_index >=
+          mechanics_sandbox::map::ActiveEditableObjectCount() ||
+      object_index >= kSandboxEditorObjectMeshCapacity) {
+    return false;
+  }
+  return EnsureSandboxVisualMesh(
+      device,
+      kSandboxEditorObjectMeshBase +
+          static_cast<std::uint32_t>(object_index),
+      mechanics_sandbox::map::ActiveEditableObjectVisualMesh(
+          object_index),
+      "editable map object");
+}
+
+bool EnsureSandboxEditorGizmoMesh(nrhi::Device* device) {
+  return EnsureSandboxVisualMesh(
+      device, kSandboxEditorGizmoMesh,
+      mechanics_sandbox::map::ActiveEditorGizmoVisualMesh(),
+      "map editor transform gizmo");
 }
 
 bool EnsureSandboxSkyMesh(nrhi::Device* device) {
@@ -2982,11 +3028,11 @@ bool EnsureRootSignature(const NativeGuestOutputRenderContext& context) {
     // root-signature DWORD the v2 material table below needs.
     ld.params[7] = {nrhi::BindingParamKind::kTextureTable, 6, 2,
                     nrhi::Visibility::kPixel};
-    // World-shading v2 material maps: detail (t8), spec/ecc (t9), and three
-    // independent owned-world static-shadow cascades (t10..t12). Retained
-    // rendering continues to use its tiled atlas in t10. Extending this
-    // existing descriptor table costs no root-signature DWORDs.
-    ld.params[8] = {nrhi::BindingParamKind::kTextureTable, 8, 5,
+    // World-shading v2 material maps: detail (t8), spec/ecc (t9), three
+    // independent owned-world static-shadow cascades (t10..t12), and Skate
+    // 2 lightmap chromaticity (t13). Retained rendering leaves t13 white.
+    // Extending this table costs no root-signature DWORDs.
+    ld.params[8] = {nrhi::BindingParamKind::kTextureTable, 8, 6,
                     nrhi::Visibility::kPixel};
     // Character lighting block (b2): the canonical per-draw rows captured
     // from the guest PS bank (CaptureCharLighting), sliced out of the bone
@@ -3032,7 +3078,8 @@ bool EnsureScenePsoFamily(const NativeGuestOutputRenderContext& context) {
   // previous pipelines (in-flight frames keep them alive via the deferred
   // destruction queue).
   for (nrhi::Pipeline** p :
-       {&g_r.pso, &g_r.pso_cullback, &g_r.pso_transparent, &g_r.pso_fade,
+       {&g_r.pso, &g_r.pso_cullback, &g_r.pso_transparent,
+        &g_r.pso_transparent_cullback, &g_r.pso_fade,
         &g_r.pso_hair_a, &g_r.pso_hair_b, &g_r.pso_nodepth,
         &g_r.pso_outline_mask}) {
     if (*p != nullptr) {
@@ -3113,6 +3160,14 @@ bool EnsureScenePsoFamily(const NativeGuestOutputRenderContext& context) {
   pso.blend.dst_alpha = nrhi::BlendFactor::kInvSrcAlpha;
   pso.blend.op_alpha = nrhi::BlendOp::kAdd;
   g_r.pso_transparent = device->CreateGraphicsPipeline(pso);
+  pso.cull = nrhi::CullMode::kFront;
+  g_r.pso_transparent_cullback =
+      device->CreateGraphicsPipeline(pso);
+  if (g_r.pso_transparent_cullback == nullptr) {
+    REXLOG_WARN(
+        "native-scene: transparent cull-back PSO creation failed");
+  }
+  pso.cull = nrhi::CullMode::kNone;
   // Entity-fade variant: z-write ON (see RendererState::pso_fade). Drawn
   // at the head of the blended sub-pass so glass/hair still composite
   // over the faded body.
@@ -3846,7 +3901,7 @@ bool EnsureShadowResources(const NativeGuestOutputRenderContext& context) {
       }
     }
   }
-  if (!g_r.shadow_raw && REXCVAR_GET(skate3_native_render_scene_shadows)) {
+  if (!g_r.shadow_raw && SceneShadowsEnabled()) {
     // Dynamic-shadow atlas chain: raw casters -> hblur intermediate ->
     // blurred final (the texture the scene pass samples). Three fixed-size
     // R16G16_UNORM targets (the game's atlas is fmt 25 = 16_16 fixed point;
@@ -3979,7 +4034,7 @@ bool EnsureShadowResources(const NativeGuestOutputRenderContext& context) {
     }
   }
   if (!g_r.static_sun && g_r.shadow_raw != nullptr &&
-      REXCVAR_GET(skate3_native_render_scene_shadow_static_casters)) {
+      StaticSceneShadowsEnabled()) {
     // Native static sun-shadow map (see RendererState). THREE cascade
     // tiles side by side: inner (r/6, centimeter contact detail with
     // useful reach), mid (r/2) and far (full radius, large-caster
@@ -4049,7 +4104,7 @@ bool EnsureShadowResources(const NativeGuestOutputRenderContext& context) {
         g_r.static_sun_history != nullptr ? 1 : 0);
   }
   if (g_r.shadow_raw != nullptr &&
-      REXCVAR_GET(skate3_native_render_scene_shadow_static_casters)) {
+      StaticSceneShadowsEnabled()) {
     for (uint32_t cascade = 0; cascade < 3; ++cascade) {
       if (g_r.owned_static_sun[cascade] != nullptr) {
         continue;
@@ -4351,12 +4406,14 @@ nrhi::TextureView* ResolveOwnedMapTexture(
 
   const skate::world::ImageTexture* source =
       mechanics_sandbox::map::ActiveImageTexture(texture_id);
+  std::string decode_error;
   if (source == nullptr || source->width == 0 || source->height == 0 ||
+      !skate::world::DecodeOwnedMapTexture(*source, &decode_error) ||
       source->rgba8.size() !=
           std::size_t(source->width) * source->height * 4u) {
     REXLOG_ERROR(
-        "native-scene: owned map texture {} is missing or malformed",
-        texture_id);
+        "native-scene: owned map texture {} is missing or malformed ({})",
+        texture_id, decode_error);
     g_r.owned_map_textures.emplace(cache_key, GuestTexture{});
     return g_r.white.srv;
   }
@@ -4501,6 +4558,7 @@ nrhi::TextureView* ResolveOwnedMapTexture(
         "native-scene: GPU allocation failed for owned map texture {} "
         "({}x{})",
         source->name, source->width, source->height);
+    skate::world::ReleaseOwnedMapTexturePixels(*source);
     g_r.owned_map_textures.emplace(cache_key, GuestTexture{});
     return g_r.white.srv;
   }
@@ -4510,6 +4568,7 @@ nrhi::TextureView* ResolveOwnedMapTexture(
   if (destination == nullptr) {
     context.device->DestroyDeferred(texture.texture);
     context.device->DestroyDeferred(texture.upload);
+    skate::world::ReleaseOwnedMapTexturePixels(*source);
     g_r.owned_map_textures.emplace(cache_key, GuestTexture{});
     return g_r.white.srv;
   }
@@ -4551,6 +4610,7 @@ nrhi::TextureView* ResolveOwnedMapTexture(
   REXLOG_INFO(
       "native-scene: uploaded owned map texture {} '{}' ({}x{}, {} mips)",
       texture_id, source->name, source->width, source->height, mips.size());
+  skate::world::ReleaseOwnedMapTexturePixels(*source);
   return resolved;
 }
 
@@ -7266,8 +7326,8 @@ static void RenderStaticSunMap(const NativeGuestOutputRenderContext& context,
   if (g_r.static_sun == nullptr || g_r.pso_shadow_caster == nullptr ||
       g_r.pso_shadow_caster_clip == nullptr || debug_mode != 0 ||
       (!scene.shadow_valid && !owned_shadow) ||
-      !REXCVAR_GET(skate3_native_render_scene_shadows) ||
-      !REXCVAR_GET(skate3_native_render_scene_shadow_static_casters)) {
+      !SceneShadowsEnabled() ||
+      !StaticSceneShadowsEnabled()) {
     g_r.owned_nsm_active = false;
     return;
   }
@@ -7913,7 +7973,7 @@ bool RenderShadowAtlas(const NativeGuestOutputRenderContext& context,
         k, path.string());
     ++g_r.shadow_dump_written;
   }
-  if (REXCVAR_GET(skate3_native_render_scene_shadows) && shadow_rows_valid &&
+  if (SceneShadowsEnabled() && shadow_rows_valid &&
       g_r.shadow_raw != nullptr && g_r.pso_shadow_caster != nullptr &&
       g_r.pso_shadow_blur != nullptr && debug_mode == 0) {
     struct Caster {
@@ -8212,7 +8272,7 @@ bool RenderShadowAtlas(const NativeGuestOutputRenderContext& context,
   // re-primes it.
   if (g_r.world_shadow != nullptr && g_r.pso_shadow_caster != nullptr &&
       debug_mode == 0 && scene.dynobj_ws_valid &&
-      REXCVAR_GET(skate3_native_render_scene_shadows) &&
+      SceneShadowsEnabled() &&
       REXCVAR_GET(skate3_native_render_scene_dynobj_v2)) {
     bool changed = !g_r.world_shadow_primed;
     for (int k = 0; k < 12 && !changed; ++k) {
@@ -8723,7 +8783,7 @@ static void TickShowcase(uint32_t output_width, bool hdr_on) {
     const auto layer_available = [&](uint32_t bit) -> bool {
       switch (bit) {
         case 8u:
-          return REXCVAR_GET(skate3_native_render_scene_shadows);
+          return SceneShadowsEnabled();
         case 16u:
           return hdr_on && REXCVAR_GET(skate3_native_render_scene_ssao);
         case 32u:
@@ -13160,14 +13220,15 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
       shadow_ready ? g_r.shadow_srv_final : g_r.white.srv);
   // Keep both static sun maps on t10/t11 while the owned-map renderer
   // changes t8/t9 material resources.
-  nrhi::TextureView* t8_default[5] = {
+  nrhi::TextureView* t8_default[6] = {
       g_r.white.srv, g_r.white.srv,
       g_r.owned_nsm_active ? g_r.owned_static_sun_srv[0]
                            : (g_r.static_sun_valid ? g_r.static_sun_srv
                                                    : g_r.white.srv),
       g_r.owned_nsm_active ? g_r.owned_static_sun_srv[1] : g_r.white.srv,
-      g_r.owned_nsm_active ? g_r.owned_static_sun_srv[2] : g_r.white.srv};
-  cmd->SetTextures(8, t8_default, 5);
+      g_r.owned_nsm_active ? g_r.owned_static_sun_srv[2] : g_r.white.srv,
+      g_r.white.srv};
+  cmd->SetTextures(8, t8_default, 6);
   cmd->SetPrimitiveTopology(nrhi::PrimitiveTopology::kTriangleList);
 
   const mechanics_sandbox::map::VisualWorld& world =
@@ -13183,7 +13244,20 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
       std::ceil(kDetailRenderDistance / world.chunk_size));
   uint32_t candidate_chunks = 0;
   uint32_t visible_chunks = 0;
+  uint32_t occluded_chunks = 0;
   uint32_t draw_calls = 0;
+  bool owned_occlusion_active =
+      REXCVAR_GET(skate3_native_render_scene_occlusion_cull) &&
+      g_r.occl_grid_valid;
+  if (owned_occlusion_active) {
+    float camera_delta_squared = 0.0f;
+    for (int axis = 0; axis < 3; ++axis) {
+      const float delta =
+          scene.cam_pos[axis] - g_r.occl_grid_cam[axis];
+      camera_delta_squared += delta * delta;
+    }
+    owned_occlusion_active = camera_delta_squared < 1.0f;
+  }
   const auto draw_chunk = [&](std::size_t chunk_index) {
     const mechanics_sandbox::map::VisualChunk& chunk =
         world.chunks[chunk_index];
@@ -13204,6 +13278,26 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
       return;
     }
     ++visible_chunks;
+    if (owned_occlusion_active) {
+      DrawItem bounds_item{};
+      bounds_item.bbox_min[0] = chunk.bounds_min[0];
+      bounds_item.bbox_min[1] = chunk.bounds_min[1];
+      bounds_item.bbox_min[2] = chunk.bounds_min[2];
+      bounds_item.bbox_max[0] = chunk.bounds_max[0];
+      bounds_item.bbox_max[1] = chunk.bounds_max[1];
+      bounds_item.bbox_max[2] = chunk.bounds_max[2];
+      bounds_item.world[0] = 1.0f;
+      bounds_item.world[5] = 1.0f;
+      bounds_item.world[10] = 1.0f;
+      bounds_item.world[12] = origin[0];
+      bounds_item.world[13] = origin[1];
+      bounds_item.world[14] = origin[2];
+      bounds_item.world[15] = 1.0f;
+      if (ItemOccludedByGrid(bounds_item, 1.5f)) {
+        ++occluded_chunks;
+        return;
+      }
+    }
     if (!EnsureSandboxMapChunk(context.device, chunk_index)) {
       return;
     }
@@ -13237,16 +13331,26 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
       const bool imported =
           draw.albedo_texture != 0 || draw.indirect_lightmap != 0 ||
           draw.normal_texture != 0 || draw.orm_texture != 0 ||
-          draw.emissive_texture != 0;
+          draw.emissive_texture != 0 ||
+          draw.retail_chromaticity_texture != 0;
       const bool alpha_blend =
           draw.alpha_mode ==
               skate::world::SurfaceMaterial::AlphaMode::Blend ||
           (draw.retail_render_flags & 2u) != 0 ||
           draw.retail_shader_family == 13;
-      cmd->SetPipeline(
-          alpha_blend && g_r.pso_transparent != nullptr
-              ? g_r.pso_transparent
-              : (use_depth ? g_r.pso : g_r.pso_nodepth));
+      nrhi::Pipeline* owned_pipeline =
+          use_depth && draw.cull_backfaces &&
+                  g_r.pso_cullback != nullptr
+              ? g_r.pso_cullback
+              : (use_depth ? g_r.pso : g_r.pso_nodepth);
+      if (alpha_blend && g_r.pso_transparent != nullptr) {
+        owned_pipeline =
+            use_depth && draw.cull_backfaces &&
+                    g_r.pso_transparent_cullback != nullptr
+                ? g_r.pso_transparent_cullback
+                : g_r.pso_transparent;
+      }
+      cmd->SetPipeline(owned_pipeline);
       cmd->SetTexture(
           1, ResolveOwnedMapTexture(context, draw.albedo_texture));
       cmd->SetTexture(
@@ -13257,7 +13361,7 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
           ResolveOwnedMapTexture(context, draw.emissive_texture),
           ResolveOwnedMapTexture(
               context, draw.normal_texture, OwnedTextureRole::Normal));
-      nrhi::TextureView* owned_material_maps[5] = {
+      nrhi::TextureView* owned_material_maps[6] = {
           retail_exact
               ? ResolveOwnedMapTexture(
                     context, draw.retail_detail_texture,
@@ -13275,8 +13379,11 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
           g_r.owned_nsm_active ? g_r.owned_static_sun_srv[1]
                                : g_r.white.srv,
           g_r.owned_nsm_active ? g_r.owned_static_sun_srv[2]
-                               : g_r.white.srv};
-      cmd->SetTextures(8, owned_material_maps, 5);
+                               : g_r.white.srv,
+          ResolveOwnedMapTexture(
+              context, draw.retail_chromaticity_texture,
+              OwnedTextureRole::Data)};
+      cmd->SetTextures(8, owned_material_maps, 6);
       if (retail_exact) {
         nrhi::TextureView* macro_texture = ResolveOwnedMapTexture(
             context,
@@ -13317,6 +13424,21 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
       owned_flags |= draw.orm_texture != 0 ? 16u : 0u;
       owned_flags |= draw.emissive_texture != 0 ? 32u : 0u;
       owned_flags |= draw.indirect_lightmap != 0 ? 64u : 0u;
+      const bool has_skate2_lightmap =
+          draw.retail_chromaticity_texture != 0 &&
+          draw.skate2_lightmap_component >= 0.0f &&
+          draw.skate2_lightmap_component < 3.0f;
+      if (has_skate2_lightmap) {
+        owned_flags |=
+            (static_cast<std::uint32_t>(
+                 draw.skate2_lightmap_component) +
+             1u)
+            << 8u;
+      }
+      owned_flags |=
+          (draw.presentation_depth_layer & 3u) << 12u;
+      owned_flags |=
+          (draw.presentation_depth_order & 255u) << 14u;
       constants[48] =
           imported ? -static_cast<float>(owned_flags) : draw.material[0];
       constants[49] =
@@ -13345,8 +13467,14 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
         constants[39] = -static_cast<float>(family);
         constants[40] =
             draw.indirect_lightmap != 0 ? 1.0f : 0.0f;
-        constants[41] = 0.0f;
-        constants[42] = 0.0f;
+        constants[41] =
+            has_skate2_lightmap
+                ? draw.skate2_lightmap_component
+                : -1.0f;
+        // Exact retail materials always retain their baked lightmaps. This
+        // separately controls the live native sun-shadow layer so the World
+        // menu's Dynamic Lighting switch has a visible, honest effect.
+        constants[42] = dynamic_lighting ? 1.0f : 0.0f;
         constants[43] = 0.0f;
         constants[44] = draw.retail_macro_scale;
         constants[45] = draw.retail_macro_opacity;
@@ -13412,6 +13540,287 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
       }
     }
   }
+
+  // MOBJ records are immutable local meshes with one authoritative runtime
+  // translation shared with native collision. They are excluded from the
+  // static chunks above, so moving one never leaves a rendered copy behind
+  // and never rebuilds or reuploads the world mesh.
+  const skate::world::MapDefinition& definition =
+      mechanics_sandbox::map::ActiveDefinition();
+  uint32_t editor_pose_ready = 0;
+  uint32_t editor_pose_fallbacks = 0;
+  uint32_t editor_visible_objects = 0;
+  uint32_t editor_resident_objects = 0;
+  uint32_t editor_object_draws = 0;
+  for (std::size_t object_index = 0;
+       object_index < definition.editable_objects.size();
+       ++object_index) {
+    float translation[3] = {};
+    float basis[9] = {};
+    const skate::world::MapObject& object =
+        definition.editable_objects[object_index];
+    const bool has_collision =
+        !object.collision_triangles.empty();
+    const bool previewing_selected_drag =
+        map_editor::ActiveGizmoHandle() != 0 &&
+        map_editor::IsSelected(object_index);
+    if (has_collision) {
+      // Exact-retail objects deliberately have no dynamic collision
+      // allocation until their first committed edit.  Their editor pose is
+      // still authoritative for rendering before that detachment; requiring
+      // EditableObjectPose here removed their triangles from both the static
+      // chunks and the object pass, leaving visible holes in the map.
+      bool pose_ready = false;
+      if (previewing_selected_drag) {
+        pose_ready = map_editor::ObjectTransform(
+            object_index, translation, basis, nullptr);
+      } else {
+        pose_ready = native_collision::EditableObjectPose(
+            object_index, translation, basis, nullptr);
+        if (!pose_ready) {
+          pose_ready = map_editor::ObjectTransform(
+              object_index, translation, basis, nullptr);
+          editor_pose_fallbacks += pose_ready ? 1u : 0u;
+        }
+      }
+      if (!pose_ready) {
+        continue;
+      }
+    } else if (!map_editor::ObjectTransform(
+                   object_index, translation, basis, nullptr)) {
+      continue;
+    }
+    ++editor_pose_ready;
+    const skate::world::Vec3 x_axis{
+        basis[0], basis[1], basis[2]};
+    const skate::world::Vec3 y_axis{
+        basis[3], basis[4], basis[5]};
+    const skate::world::Vec3 z_axis{
+        basis[6], basis[7], basis[8]};
+    const float world_position[3] = {
+        origin[0] + translation[0],
+        origin[1] + translation[1],
+        origin[2] + translation[2],
+    };
+    float corners[8][3];
+    for (int corner = 0; corner < 8; ++corner) {
+      const skate::world::Vec3 local{
+          (corner & 1) ? object.local_bounds_max.x
+                       : object.local_bounds_min.x,
+          (corner & 2) ? object.local_bounds_max.y
+                       : object.local_bounds_min.y,
+          (corner & 4) ? object.local_bounds_max.z
+                       : object.local_bounds_min.z,
+      };
+      const skate::world::Vec3 transformed =
+          skate::world::Vec3{
+              world_position[0], world_position[1],
+              world_position[2]} +
+          x_axis * local.x + y_axis * local.y + z_axis * local.z;
+      corners[corner][0] = transformed.x;
+      corners[corner][1] = transformed.y;
+      corners[corner][2] = transformed.z;
+    }
+    if (CornersOutsideFrustum(corners, scene.view_proj, 1.05f)) {
+      continue;
+    }
+    ++editor_visible_objects;
+    if (!EnsureSandboxEditorObjectMesh(context.device, object_index)) {
+      continue;
+    }
+    const auto mesh = g_r.meshes.find(
+        kSandboxEditorObjectMeshBase +
+        static_cast<std::uint32_t>(object_index));
+    if (mesh == g_r.meshes.end()) {
+      continue;
+    }
+    ++editor_resident_objects;
+    const auto& visual =
+        mechanics_sandbox::map::ActiveEditableObjectVisualMesh(
+            object_index);
+    set_world_basis(
+        x_axis, y_axis, z_axis,
+        {world_position[0], world_position[1], world_position[2]});
+    constants[39] = -41.25f;
+    mesh->second.last_used_frame = frame_number;
+    cmd->SetVertexBuffer(
+        mesh->second.vb_view.buffer, mesh->second.vb_view.offset,
+        mesh->second.vb_view.size_bytes, mesh->second.vb_view.stride);
+    cmd->SetIndexBuffer(
+        mesh->second.ib_view.buffer, mesh->second.ib_view.offset,
+        mesh->second.ib_view.size_bytes);
+    for (const mechanics_sandbox::map::VisualDraw& draw :
+         visual.draws) {
+      constants[40] = celestial.light_direction_to_light.x;
+      constants[41] = celestial.light_direction_to_light.y;
+      constants[42] = celestial.light_direction_to_light.z;
+      constants[43] = dynamic_lighting ? celestial.ambient : -1.0f;
+      constants[44] = celestial.light_color.x;
+      constants[45] = celestial.light_color.y;
+      constants[46] = celestial.light_color.z;
+      constants[47] =
+          dynamic_lighting ? celestial.light_intensity : 0.0f;
+      const bool imported =
+          draw.albedo_texture != 0 || draw.indirect_lightmap != 0 ||
+          draw.normal_texture != 0 || draw.orm_texture != 0 ||
+          draw.emissive_texture != 0;
+      const bool alpha_blend =
+          draw.alpha_mode ==
+              skate::world::SurfaceMaterial::AlphaMode::Blend ||
+          (draw.retail_render_flags & 2u) != 0 ||
+          draw.retail_shader_family == 13;
+      cmd->SetPipeline(
+          alpha_blend && g_r.pso_transparent != nullptr
+              ? g_r.pso_transparent
+              : (use_depth ? g_r.pso : g_r.pso_nodepth));
+      cmd->SetTexture(
+          1, ResolveOwnedMapTexture(context, draw.albedo_texture));
+      cmd->SetTexture(
+          2, ResolveOwnedMapTexture(
+                 context, draw.indirect_lightmap,
+                 OwnedTextureRole::Data));
+      cmd->SetTexturePair(
+          5,
+          ResolveOwnedMapTexture(context, draw.emissive_texture),
+          ResolveOwnedMapTexture(
+              context, draw.normal_texture,
+              OwnedTextureRole::Normal));
+      nrhi::TextureView* object_material_maps[5] = {
+          g_r.white.srv,
+          ResolveOwnedMapTexture(
+              context, draw.orm_texture, OwnedTextureRole::Data),
+          g_r.owned_nsm_active ? g_r.owned_static_sun_srv[0]
+                               : g_r.white.srv,
+          g_r.owned_nsm_active ? g_r.owned_static_sun_srv[1]
+                               : g_r.white.srv,
+          g_r.owned_nsm_active ? g_r.owned_static_sun_srv[2]
+                               : g_r.white.srv};
+      cmd->SetTextures(8, object_material_maps, 5);
+      constants[32] = draw.color[0];
+      constants[33] = draw.color[1];
+      constants[34] = draw.color[2];
+      constants[35] = imported ? -draw.alpha_cutoff : 0.0f;
+      std::uint32_t owned_flags = 1u;
+      owned_flags |=
+          static_cast<std::uint32_t>(draw.alpha_mode) << 1u;
+      owned_flags |= draw.normal_texture != 0 ? 8u : 0u;
+      owned_flags |= draw.orm_texture != 0 ? 16u : 0u;
+      owned_flags |= draw.emissive_texture != 0 ? 32u : 0u;
+      owned_flags |= draw.indirect_lightmap != 0 ? 64u : 0u;
+      constants[48] =
+          imported ? -static_cast<float>(owned_flags)
+                   : draw.material[0];
+      constants[49] =
+          imported ? draw.baked_indirect_strength
+                   : draw.material[1];
+      constants[50] = draw.material[2];
+      constants[51] =
+          imported
+              ? (draw.material[2] < 0.0f ? -draw.material[2] : 0.0f)
+              : draw.material[3];
+      cmd->SetRootConstants(0, 52, constants, 0);
+      cmd->DrawIndexed(draw.index_count, draw.first_index, 0);
+      ++draw_calls;
+      ++editor_object_draws;
+    }
+
+    if (map_editor::Active() &&
+        map_editor::IsSelected(object_index)) {
+      // Inverted-hull outline: draw only the expanded mesh's back faces.
+      // Its interior stays hidden by the selected object's depth, leaving a
+      // restrained cyan contour instead of tinting or glowing every pixel.
+      if (use_depth && g_r.pso_cullback != nullptr) {
+        set_world_basis(
+            x_axis * 1.006f, y_axis * 1.006f,
+            z_axis * 1.006f,
+            {world_position[0], world_position[1], world_position[2]});
+        cmd->SetPipeline(g_r.pso_cullback);
+        cmd->SetTexture(1, g_r.white.srv);
+        cmd->SetTexture(2, g_r.white.srv);
+        cmd->SetTexturePair(5, g_r.white.srv, g_r.white.srv);
+        cmd->SetTextures(8, t8_default, 5);
+        constants[32] = 0.0f;
+        constants[33] = 0.055f;
+        constants[34] = 0.085f;
+        constants[35] = 0.0f;
+        constants[39] = -41.25f;
+        constants[48] = 0.0f;
+        constants[49] = 0.18f;
+        constants[50] = 0.0f;
+        constants[51] = 0.0f;
+        cmd->SetRootConstants(0, 52, constants, 0);
+        for (const mechanics_sandbox::map::VisualDraw& draw :
+             visual.draws) {
+          cmd->DrawIndexed(draw.index_count, draw.first_index, 0);
+          ++draw_calls;
+          ++editor_object_draws;
+        }
+      }
+    }
+  }
+
+  if (map_editor::Active()) {
+    const std::size_t selected = map_editor::SelectedObject();
+    if (selected < definition.editable_objects.size() &&
+        EnsureSandboxEditorGizmoMesh(context.device)) {
+      float translation[3] = {};
+      float basis[9] = {};
+      const bool pose_ready =
+          map_editor::ActiveGizmoHandle() != 0
+              ? map_editor::ObjectTransform(
+                    selected, translation, basis, nullptr)
+              : native_collision::EditableObjectPose(
+                    selected, translation, basis, nullptr) ||
+                    map_editor::ObjectTransform(
+                        selected, translation, basis, nullptr);
+      const auto mesh = g_r.meshes.find(kSandboxEditorGizmoMesh);
+      if (pose_ready && mesh != g_r.meshes.end()) {
+        const skate::world::Vec3 pivot{
+            origin[0] + translation[0],
+            origin[1] + translation[1],
+            origin[2] + translation[2],
+        };
+        const skate::world::Vec3 camera{
+            scene.cam_pos[0], scene.cam_pos[1], scene.cam_pos[2]};
+        const float scale = std::clamp(
+            skate::world::Length(pivot - camera) * 0.12f,
+            0.3f, 8.0f);
+        set_world_translation(
+            pivot.x, pivot.y, pivot.z, scale);
+        constants[39] = -41.25f;
+        mesh->second.last_used_frame = frame_number;
+        cmd->SetVertexBuffer(
+            mesh->second.vb_view.buffer, mesh->second.vb_view.offset,
+            mesh->second.vb_view.size_bytes,
+            mesh->second.vb_view.stride);
+        cmd->SetIndexBuffer(
+            mesh->second.ib_view.buffer, mesh->second.ib_view.offset,
+            mesh->second.ib_view.size_bytes);
+        cmd->SetPipeline(g_r.pso_nodepth);
+        cmd->SetTexture(1, g_r.white.srv);
+        cmd->SetTexture(2, g_r.white.srv);
+        cmd->SetTexturePair(5, g_r.white.srv, g_r.white.srv);
+        cmd->SetTextures(8, t8_default, 5);
+        for (const mechanics_sandbox::map::VisualDraw& draw :
+             mechanics_sandbox::map::ActiveEditorGizmoVisualMesh().draws) {
+          constants[32] = draw.color[0];
+          constants[33] = draw.color[1];
+          constants[34] = draw.color[2];
+          constants[35] = 0.0f;
+          constants[48] = draw.material[0];
+          constants[49] = draw.material[1];
+          constants[50] = draw.material[2];
+          constants[51] = draw.material[3];
+          cmd->SetRootConstants(0, 52, constants, 0);
+          cmd->DrawIndexed(
+              draw.index_count, draw.first_index, 0);
+          ++draw_calls;
+        }
+      }
+    }
+  }
+  set_world_translation(origin[0], origin[1], origin[2]);
+  constants[39] = -41.0f;
 
   // Advance and upload the project-owned heightfield. The solver itself is
   // fixed-step and renderer-independent; wall-clock time is only accumulated
@@ -13510,8 +13919,6 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
   // Kinematic objects use the pose most recently committed to both native
   // collision buffers. They are separate GPU meshes so their vertices never
   // need to be rebuilt or uploaded as they move.
-  const skate::world::MapDefinition& definition =
-      mechanics_sandbox::map::ActiveDefinition();
   for (std::size_t object_index = 0;
        object_index < definition.kinematic_boxes.size();
        ++object_index) {
@@ -13658,7 +14065,8 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
       const bool imported =
           draw.albedo_texture != 0 || draw.indirect_lightmap != 0 ||
           draw.normal_texture != 0 || draw.orm_texture != 0 ||
-          draw.emissive_texture != 0;
+          draw.emissive_texture != 0 ||
+          draw.retail_chromaticity_texture != 0;
       const bool alpha_blend =
           draw.alpha_mode ==
           skate::world::SurfaceMaterial::AlphaMode::Blend;
@@ -13678,7 +14086,7 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
           ResolveOwnedMapTexture(
               context, draw.normal_texture,
               OwnedTextureRole::Normal));
-      nrhi::TextureView* door_material_maps[5] = {
+      nrhi::TextureView* door_material_maps[6] = {
           g_r.white.srv,
           ResolveOwnedMapTexture(
               context, draw.orm_texture, OwnedTextureRole::Data),
@@ -13687,8 +14095,11 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
           g_r.owned_nsm_active ? g_r.owned_static_sun_srv[1]
                                : g_r.white.srv,
           g_r.owned_nsm_active ? g_r.owned_static_sun_srv[2]
-                               : g_r.white.srv};
-      cmd->SetTextures(8, door_material_maps, 5);
+                               : g_r.white.srv,
+          ResolveOwnedMapTexture(
+              context, draw.retail_chromaticity_texture,
+              OwnedTextureRole::Data)};
+      cmd->SetTextures(8, door_material_maps, 6);
       constants[32] = draw.color[0];
       constants[33] = draw.color[1];
       constants[34] = draw.color[2];
@@ -13700,6 +14111,21 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
       owned_flags |= draw.orm_texture != 0 ? 16u : 0u;
       owned_flags |= draw.emissive_texture != 0 ? 32u : 0u;
       owned_flags |= draw.indirect_lightmap != 0 ? 64u : 0u;
+      const bool has_skate2_lightmap =
+          draw.retail_chromaticity_texture != 0 &&
+          draw.skate2_lightmap_component >= 0.0f &&
+          draw.skate2_lightmap_component < 3.0f;
+      if (has_skate2_lightmap) {
+        owned_flags |=
+            (static_cast<std::uint32_t>(
+                 draw.skate2_lightmap_component) +
+             1u)
+            << 8u;
+      }
+      owned_flags |=
+          (draw.presentation_depth_layer & 3u) << 12u;
+      owned_flags |=
+          (draw.presentation_depth_order & 255u) << 14u;
       constants[48] =
           imported ? -static_cast<float>(owned_flags)
                    : draw.material[0];
@@ -13722,7 +14148,7 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
   cmd->SetTexture(1, g_r.white.srv);
   cmd->SetTexture(2, g_r.white.srv);
   cmd->SetTexturePair(5, g_r.white.srv, g_r.white.srv);
-  cmd->SetTextures(8, t8_default, 5);
+  cmd->SetTextures(8, t8_default, 6);
   set_world_translation(origin[0], origin[1], origin[2]);
 
   const auto multiplayer_perf_t0 = PerfClock::now();
@@ -15536,7 +15962,11 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
   }
   mechanics_sandbox::RecordMapChunks(
       static_cast<uint32_t>(world.chunks.size()), candidate_chunks,
-      visible_chunks, resident_chunks, draw_calls);
+      visible_chunks, occluded_chunks, resident_chunks, draw_calls);
+  mechanics_sandbox::RecordMapEditorObjects(
+      static_cast<uint32_t>(definition.editable_objects.size()),
+      editor_pose_ready, editor_pose_fallbacks, editor_visible_objects,
+      editor_resident_objects, editor_object_draws);
   mechanics_sandbox::RecordMapDraw(draw_calls != 0);
 }
 
@@ -15606,10 +16036,10 @@ void DrawSandboxSky(const NativeGuestOutputRenderContext& context,
   cmd->SetTexture(4, g_r.white.srv);
   cmd->SetTexture(5, g_r.white.srv);
   cmd->SetTexturePair(7, g_r.white_cube.srv, g_r.white.srv);
-  nrhi::TextureView* defaults[5] = {
+  nrhi::TextureView* defaults[6] = {
       g_r.white.srv, g_r.white.srv, g_r.white.srv, g_r.white.srv,
-      g_r.white.srv};
-  cmd->SetTextures(8, defaults, 5);
+      g_r.white.srv, g_r.white.srv};
+  cmd->SetTextures(8, defaults, 6);
   cmd->SetVertexBuffer(
       mesh->second.vb_view.buffer, mesh->second.vb_view.offset,
       mesh->second.vb_view.size_bytes, mesh->second.vb_view.stride);
@@ -16517,14 +16947,15 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
                         shadow_ready ? g_r.shadow_srv_final : g_r.white.srv);
     // v2 material table default (t8/t9 white) + independent static-shadow
     // maps at t10..t12. Every lit branch can sample them.
-    nrhi::TextureView* t8_default[5] = {
+    nrhi::TextureView* t8_default[6] = {
         g_r.white.srv, g_r.white.srv,
         g_r.owned_nsm_active ? g_r.owned_static_sun_srv[0]
                              : (g_r.static_sun_valid ? g_r.static_sun_srv
                                                      : g_r.white.srv),
         g_r.owned_nsm_active ? g_r.owned_static_sun_srv[1] : g_r.white.srv,
-        g_r.owned_nsm_active ? g_r.owned_static_sun_srv[2] : g_r.white.srv};
-    cmd->SetTextures(8, t8_default, 5);
+        g_r.owned_nsm_active ? g_r.owned_static_sun_srv[2] : g_r.white.srv,
+        g_r.white.srv};
+    cmd->SetTextures(8, t8_default, 6);
   }
   nrhi::TextureView* const nsm_view =
       g_r.owned_nsm_active
@@ -17940,11 +18371,11 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
     // ocean rides the same pair (t8 = second PCA component, t9 = overlay).
     if (v2_flags != 0 || ocean_n2 || ocean_ov) {
       // Rebinding only t8/t9 would reset the three static-shadow maps.
-      nrhi::TextureView* t8_views[5] = {
+      nrhi::TextureView* t8_views[6] = {
           (v2_detail != nullptr ? v2_detail : &g_r.white)->srv,
           (v2_spec2 != nullptr ? v2_spec2 : &g_r.white)->srv, nsm_view,
-          nsm_mid_view, nsm_far_view};
-      cmd->SetTextures(8, t8_views, 5);
+          nsm_mid_view, nsm_far_view, g_r.white.srv};
+      cmd->SetTextures(8, t8_views, 6);
     }
     // ROPA shape blend (see RendererState::ropa_shapes): combine the shape
     // generations with the kernel weights InterpolateDynamicItems computed

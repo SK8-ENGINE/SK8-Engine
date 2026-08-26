@@ -1,5 +1,6 @@
 #include "skate3_mechanics_sandbox.h"
 
+#include "skate3_map_editor.h"
 #include "generated/skate3_init.h"
 #include "native/skate3_native_entity.h"
 #include "skate3_mechanics_sandbox_map.h"
@@ -102,8 +103,15 @@ std::atomic<uint32_t> g_map_draws{0};
 std::atomic<uint32_t> g_map_chunk_count{0};
 std::atomic<uint32_t> g_map_candidate_chunks{0};
 std::atomic<uint32_t> g_map_visible_chunks{0};
+std::atomic<uint32_t> g_map_occluded_chunks{0};
 std::atomic<uint32_t> g_map_resident_chunks{0};
 std::atomic<uint32_t> g_map_chunk_draws{0};
+std::atomic<uint32_t> g_map_editor_objects{0};
+std::atomic<uint32_t> g_map_editor_pose_ready{0};
+std::atomic<uint32_t> g_map_editor_pose_fallbacks{0};
+std::atomic<uint32_t> g_map_editor_visible_objects{0};
+std::atomic<uint32_t> g_map_editor_resident_objects{0};
+std::atomic<uint32_t> g_map_editor_object_draws{0};
 std::atomic<uint32_t> g_sky_draws{0};
 std::atomic<uint32_t> g_map_contact_count{0};
 std::atomic<uint32_t> g_map_last_contact_id{0};
@@ -602,6 +610,8 @@ void ApplyOwnedWorldCollisionAfterPhysOut(PPCContext& ctx, uint8_t* base,
   }
 
   native_collision::EnsureInstalled(ctx, base, skateboard, origin);
+  map_editor::ObservePlayerState();
+  native_collision::UpdateEditableObjects(ctx, base);
   native_collision::UpdateKinematicObjects(ctx, base);
   native_collision::UpdateHingedDoors(ctx, base);
   native_grind::EnsureInstalled(ctx, base);
@@ -1051,13 +1061,28 @@ void RecordMapDraw(bool submitted) {
 }
 
 void RecordMapChunks(uint32_t total, uint32_t candidates,
-                     uint32_t visible, uint32_t resident,
+                     uint32_t visible, uint32_t occluded,
+                     uint32_t resident,
                      uint32_t draw_calls) {
   g_map_chunk_count.store(total, std::memory_order_relaxed);
   g_map_candidate_chunks.store(candidates, std::memory_order_relaxed);
   g_map_visible_chunks.store(visible, std::memory_order_relaxed);
+  g_map_occluded_chunks.store(occluded, std::memory_order_relaxed);
   g_map_resident_chunks.store(resident, std::memory_order_relaxed);
   g_map_chunk_draws.store(draw_calls, std::memory_order_relaxed);
+}
+
+void RecordMapEditorObjects(uint32_t total, uint32_t pose_ready,
+                            uint32_t editor_pose_fallbacks,
+                            uint32_t visible, uint32_t resident,
+                            uint32_t draw_calls) {
+  g_map_editor_objects.store(total, std::memory_order_relaxed);
+  g_map_editor_pose_ready.store(pose_ready, std::memory_order_relaxed);
+  g_map_editor_pose_fallbacks.store(editor_pose_fallbacks,
+                                    std::memory_order_relaxed);
+  g_map_editor_visible_objects.store(visible, std::memory_order_relaxed);
+  g_map_editor_resident_objects.store(resident, std::memory_order_relaxed);
+  g_map_editor_object_draws.store(draw_calls, std::memory_order_relaxed);
 }
 
 void RecordSkyDraw(uint32_t draw_calls) {
@@ -1147,10 +1172,24 @@ void AppendTelemetry(std::ostream& out) {
       << g_map_candidate_chunks.load(std::memory_order_relaxed)
       << " sandbox_map_visible_chunks="
       << g_map_visible_chunks.load(std::memory_order_relaxed)
+      << " sandbox_map_occluded_chunks="
+      << g_map_occluded_chunks.load(std::memory_order_relaxed)
       << " sandbox_map_resident_chunks="
       << g_map_resident_chunks.load(std::memory_order_relaxed)
       << " sandbox_map_chunk_draws="
       << g_map_chunk_draws.load(std::memory_order_relaxed)
+      << " sandbox_map_editor_objects="
+      << g_map_editor_objects.load(std::memory_order_relaxed)
+      << " sandbox_map_editor_pose_ready="
+      << g_map_editor_pose_ready.load(std::memory_order_relaxed)
+      << " sandbox_map_editor_pose_fallbacks="
+      << g_map_editor_pose_fallbacks.load(std::memory_order_relaxed)
+      << " sandbox_map_editor_visible_objects="
+      << g_map_editor_visible_objects.load(std::memory_order_relaxed)
+      << " sandbox_map_editor_resident_objects="
+      << g_map_editor_resident_objects.load(std::memory_order_relaxed)
+      << " sandbox_map_editor_object_draws="
+      << g_map_editor_object_draws.load(std::memory_order_relaxed)
       << " sandbox_sky_draws="
       << g_sky_draws.load(std::memory_order_relaxed)
       << " sandbox_presented_frames="
@@ -1282,6 +1321,7 @@ void AppendTelemetry(std::ostream& out) {
       << " sandbox_reset_failures="
       << g_reset_failures.load(std::memory_order_relaxed);
   native_collision::AppendTelemetry(out);
+  map_editor::AppendTelemetry(out);
   native_grind::AppendTelemetry(out);
   owned_world_boundary::AppendTelemetry(out);
   multiplayer::AppendTelemetry(out);

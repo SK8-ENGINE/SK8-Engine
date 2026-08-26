@@ -91,8 +91,10 @@ def main() -> int:
 
     manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
     package = analyze_package(args.package, include_payloads=True)
-    if package["version"] != 12:
-        raise RuntimeError(f"expected SKATE v12, found v{package['version']}")
+    if package["version"] not in (12, 13):
+        raise RuntimeError(
+            f"expected SKATE v12 or v13, found v{package['version']}"
+        )
 
     textures = {
         int(entry["id"]): str(entry["name"])

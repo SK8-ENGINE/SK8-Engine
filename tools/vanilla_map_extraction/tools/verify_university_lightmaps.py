@@ -111,8 +111,8 @@ def _verify_package(
 ) -> dict[str, int]:
     reader = Reader(package_path.read_bytes())
     magic = reader.take(8, "magic")
-    if magic != b"SKATE12\0":
-        raise RuntimeError(f"expected SKATE12 package, found {magic!r}")
+    if magic not in (b"SKATE12\0", b"SKATE13\0"):
+        raise RuntimeError(f"expected SKATE12/13 package, found {magic!r}")
     if reader.u32("endian marker") != 0x12345678:
         raise RuntimeError("invalid SKATE endian marker")
     reader.string("map name")

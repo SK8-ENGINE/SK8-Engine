@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -14,6 +15,7 @@ namespace skate::world {
 using MaterialId = std::uint32_t;
 using TextureId = std::uint32_t;
 using SurfaceId = std::uint32_t;
+using MapObjectId = std::uint32_t;
 using GrindRailId = std::uint32_t;
 using NpcRouteId = std::uint32_t;
 using KinematicObjectId = std::uint32_t;
@@ -178,6 +180,11 @@ struct SurfaceMaterial {
   std::uint8_t skate_audio_surface = 3;    // Concrete_Polished
   std::uint8_t skate_physics_surface = 1;  // Smooth
   std::uint8_t skate_surface_pattern = 0;  // None
+  // Semantic raster ordering for authored coplanar detail. Layer zero is
+  // ordinary world geometry; higher layers win the depth test by a tiny
+  // projection-space bias without changing world transforms, collision, or
+  // the package's authored vertex positions. Values above three are invalid.
+  std::uint32_t presentation_depth_layer = 0;
   RetailMaterialDefinition retail;
 };
 
@@ -192,7 +199,12 @@ struct ImageTexture {
   std::uint32_t width = 0;
   std::uint32_t height = 0;
   TextureColorSpace color_space = TextureColorSpace::Linear;
-  std::vector<std::uint8_t> rgba8;
+  // Package-loaded textures may retain their losslessly compressed payload
+  // until first use. Keeping 8+ GiB of Liberty City RGBA resident before the
+  // first frame caused severe paging on 32 GiB systems.
+  mutable std::vector<std::uint8_t> rgba8;
+  std::uint32_t stored_rgba8_method = 0;
+  mutable std::vector<std::uint8_t> stored_rgba8;
 };
 
 struct SpawnPoint {
@@ -298,6 +310,9 @@ struct RenderVertex {
   // is enough to reconstruct T = cross(B, N) * handedness.
   Vec3 tangent_binormal;
   float tangent_handedness = 0.0f;
+  // Runtime-only stable rank for one connected presentation surface. It is
+  // derived while compiling package geometry and is not serialized.
+  std::uint8_t presentation_rank = 0;
 };
 
 struct RenderMesh {
@@ -318,6 +333,42 @@ struct CollisionTriangle {
   // let the native collision builder derive codes from topology.
   std::array<std::uint8_t, 3> native_edge_codes{};
   bool has_native_edge_codes = false;
+};
+
+// One association between a collision triangle in the portable SKATE stream
+// and the untouched retail ClusteredMesh resource that originally supplied
+// it. A triangle can occur in more than one streamed resource at cell seams,
+// so this is deliberately a separate many-to-many table rather than one
+// resource field on CollisionTriangle.
+struct RetailCollisionAssociation {
+  std::uint32_t triangle_index = 0;
+  std::uint16_t resource_index = 0;
+  std::uint16_t cluster_index = 0;
+  std::uint32_t group_id = std::numeric_limits<std::uint32_t>::max();
+  std::uint8_t unit_flags = 0;
+};
+
+// One independently editable Blender object. Ordinary SKATE render and
+// collision records remain flattened for backward compatibility; the MOBJ
+// extension materializes the object's referenced ranges into this local-space
+// representation at load time. The authored origin plus one session pose is
+// the authoritative transform shared by rendering, native collision, picking,
+// and any associated grind rails.
+struct MapObject {
+  MapObjectId id = 0;
+  std::string name;
+  Vec3 origin;
+  Vec3 local_bounds_min;
+  Vec3 local_bounds_max;
+  std::uint32_t source_first_index = 0;
+  std::uint32_t source_index_count = 0;
+  std::uint32_t source_first_collision_triangle = 0;
+  std::uint32_t source_collision_triangle_count = 0;
+  // Indices into MapDefinition::grind_rails whose authored points are
+  // transformed with this object during an editor session.
+  std::vector<std::uint32_t> grind_rail_indices;
+  RenderMesh render_mesh;
+  std::vector<CollisionTriangle> collision_triangles;
 };
 
 // The first 120 bytes of one retail Pegasus tSplineData segment. Values are
@@ -508,6 +559,12 @@ struct MapDefinition {
   std::vector<ImageTexture> textures;
   RenderMesh render_mesh;
   std::vector<CollisionTriangle> collision_triangles;
+  // RCID v1 preserves provenance for exact-retail collision streaming. The
+  // resource names use the same order as University.spawn-collision.rwcmset.
+  // Generic and older maps leave both vectors empty.
+  std::vector<std::string> retail_collision_resource_names;
+  std::vector<RetailCollisionAssociation> retail_collision_associations;
+  std::vector<MapObject> editable_objects;
   std::vector<GrindRail> grind_rails;
   std::vector<NpcRoute> npc_routes;
   std::vector<KinematicBox> kinematic_boxes;
@@ -517,6 +574,14 @@ struct MapDefinition {
   std::vector<RaytracedPuddle> raytraced_puddles;
   std::vector<MovingLightOrb> moving_light_orbs;
 };
+
+bool HasRetailCollisionIdentity(const MapDefinition &map);
+std::vector<std::uint16_t>
+RetailCollisionResourcesForObject(const MapDefinition &map,
+                                  const MapObject &object);
+MapDefinition BuildRetailCollisionResourceFallback(
+    const MapDefinition &map, std::uint16_t resource_index,
+    std::span<const std::uint8_t> detached_objects);
 
 // Evaluates a cosine-eased ping-pong path. It is a pure function so replay,
 // the recomp adapter, and the standalone game can produce the same pose.
@@ -624,6 +689,7 @@ class WorldMap {
   explicit WorldMap(MapDefinition definition);
 
   const MapDefinition& Definition() const;
+  MapDefinition& MutableDefinition();
   const SurfaceMaterial* FindMaterial(MaterialId id) const;
 
   RayHit RayCast(Vec3 origin,

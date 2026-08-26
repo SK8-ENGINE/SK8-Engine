@@ -95,6 +95,9 @@ option(SKATE3_ENABLE_X86_64_V3
 option(SKATE3_CODEGEN_PATCHED_TITLE_UPDATE
     "Generate host code from the TU3-patched executable instead of the stable base-address image"
     OFF)
+option(SKATE3_RUNTIME_TITLE_UPDATE
+    "Compile TU3 runtime hooks when title-update files are staged outside the codegen root"
+    OFF)
 
 if(NOT APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "AMD64|x86_64")
     if(SKATE3_ENABLE_X86_64_V3)
@@ -222,7 +225,7 @@ if(NOT SKATE3_EFFECTIVE_TITLE_UPDATE_PACKAGE STREQUAL "")
         set(SKATE3_PATCHED_EAWEBKIT_XEX_LINE
             "patched_file_path = \"${SKATE3_TITLE_UPDATE_EAWEBKIT_XEX_CONFIG}\"")
         set(SKATE3_FUNCTION_CONFIG_INCLUDES
-            "  \"${SKATE3_SOURCE_DIR_CONFIG}/config/skate3_tu_functions.toml\",")
+            "  \"${SKATE3_SOURCE_DIR_CONFIG}/config/skate3_functions.toml\",\n  \"${SKATE3_SOURCE_DIR_CONFIG}/config/skate3_tu_functions.toml\",")
         message(STATUS
             "Skate 3 TU3-patched codegen enabled: ${SKATE3_EFFECTIVE_TITLE_UPDATE_PACKAGE}")
     else()
@@ -286,6 +289,7 @@ set(SKATE3_COMMON_SOURCES
     src/skate3_input_lab.cpp
     src/skate3_mechanics_sandbox.cpp
     src/skate3_mechanics_sandbox_map.cpp
+    src/skate3_map_editor.cpp
     src/skate3_multiplayer.cpp
     src/skate3_multiplayer_assets.cpp
     src/skate3_multiplayer_session.cpp
@@ -307,6 +311,7 @@ set(SKATE3_COMMON_SOURCES
     src/skate3_vanilla_ui/skate3_ui_audio.cpp
     src/skate3_vanilla_ui/skate3_ui_scene.cpp
     src/skate3_vanilla_ui/skate3_vanilla_ui_dialog.cpp
+    src/skate3_map_editor_spawn_dialog.cpp
     src/skate3_scoring.cpp
     src/skate3_native_render.cpp
     src/skate3_native_scene.cpp
@@ -338,6 +343,11 @@ set(SKATE3_SOURCES
 
 if(WIN32)
     add_executable(skate3 WIN32 ${SKATE3_SOURCES})
+    # Keep a linker map beside Release builds so crash RVAs from Windows Error
+    # Reporting can be resolved even when the optimized executable has no PDB.
+    target_link_options(skate3 PRIVATE
+        "LINKER:/MAP:${CMAKE_CURRENT_BINARY_DIR}/skate3.map"
+    )
     configure_file(
         ${CMAKE_CURRENT_SOURCE_DIR}/src/skate3_app.manifest
         ${CMAKE_CURRENT_BINARY_DIR}/skate3_app.manifest
@@ -421,7 +431,8 @@ if(WIN32)
 endif()
 target_compile_definitions(skate3 PRIVATE SKATE3_BUILD_CONFIG="$<CONFIG>")
 if(NOT SKATE3_EFFECTIVE_TITLE_UPDATE_PACKAGE STREQUAL ""
-   OR SKATE3_HAS_LOOSE_TITLE_UPDATE)
+   OR SKATE3_HAS_LOOSE_TITLE_UPDATE
+   OR SKATE3_RUNTIME_TITLE_UPDATE)
     target_compile_definitions(skate3 PRIVATE SKATE3_HAS_TITLE_UPDATE=1)
 else()
     target_compile_definitions(skate3 PRIVATE SKATE3_HAS_TITLE_UPDATE=0)

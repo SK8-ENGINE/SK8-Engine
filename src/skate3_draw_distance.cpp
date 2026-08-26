@@ -256,7 +256,7 @@ struct ProbeCache {
 };
 ProbeCache g_probe_cache[2];
 
-// F6 or gamepad LB+B (while skate3_draw_distance_debug is on): drop a
+// Alt+F6 or gamepad LB+B (while skate3_draw_distance_debug is on): drop a
 // numbered marker line into the log so a visual event ("the trees just
 // popped in") can be lined up with the surrounding stream/cull entries.
 // Edge-detected on the combined state; polled from the per-frame LOD hook
@@ -269,7 +269,8 @@ void MaybePollDebugMarkerKey() {
   static int marker = 0;
   bool down = false;
 #if defined(_WIN32)
-  down = (GetAsyncKeyState(VK_F6) & 0x8000) != 0;
+  down = (GetAsyncKeyState(VK_MENU) & 0x8000) != 0 &&
+         (GetAsyncKeyState(VK_F6) & 0x8000) != 0;
 #endif
   if (!down) {
     if (rex::input::InputSystem* input = skate3::demo_path::GetUiInputSystem()) {
@@ -282,7 +283,8 @@ void MaybePollDebugMarkerKey() {
   if (down && !was_down) {
     ++marker;
     REXLOG_WARN(
-        "draw_distance: ======== USER MARKER {} (F6 / LB+B): pop-in observed "
+        "draw_distance: ======== USER MARKER {} (Alt+F6 / LB+B): pop-in "
+        "observed "
         "========",
         marker);
   }

@@ -1,4 +1,4 @@
-"""Human-friendly Blender authoring and export tools for SKATE v12.
+"""Human-friendly Blender authoring and export tools for SKATE v13.
 
 This addon and exporter are original project code. They do not import,
 invoke, redistribute, or depend on ArenaBuilder.
@@ -866,6 +866,15 @@ class OwnedWorldSceneSettings(PropertyGroup):
         ),
         default="AUTO",
     )
+    export_editable_objects: BoolProperty(
+        name="Editable Map Objects",
+        description=(
+            "Include existing map meshes as selectable editor objects; "
+            "disable this to keep the exported map fully static while "
+            "preserving its rendering, collision, materials, and grind paths"
+        ),
+        default=True,
+    )
     last_status: StringProperty(
         name="Last Result",
         default="Run Validate Map before your first export.",
@@ -1538,11 +1547,26 @@ def _auto_configure_material(
     metallic = max(
         0.0, min(1.0, _socket_float(shader, "Metallic", 0.0))
     )
-    emissive = max(
-        0.0, _socket_float(shader, "Emission Strength", 0.0)
-    )
     emissive_color = _socket_color(
         shader, "Emission Color", (1.0, 1.0, 1.0)
+    )
+    emission_socket = (
+        shader.inputs.get("Emission Color")
+        if shader is not None
+        else None
+    )
+    emission_authored = bool(
+        emissive_image is not None
+        or (emission_socket is not None and emission_socket.links)
+        or max(emissive_color) > 1.0e-6
+    )
+    # Blender 4/5 Principled materials default to black Emission Color but an
+    # Emission Strength of 1. Black times one is still non-emissive. Copying
+    # the scalar alone made every automatically adopted material self-lit.
+    emissive = (
+        max(0.0, _socket_float(shader, "Emission Strength", 0.0))
+        if emission_authored
+        else 0.0
     )
     if generate_maps:
         normal_image, orm_image, emissive_image = _generate_material_maps(
@@ -1925,6 +1949,9 @@ def _validate_scene(
         issues.append("Groups 1 and 3 contain no presentation meshes.")
 
     material_groups: dict[str, set[str]] = {}
+    material_group_objects: dict[
+        str, list[tuple[bpy.types.Object, str]]
+    ] = {}
     for obj in scene.objects:
         if (
             obj.name == exporter.SPAWN_OBJECT
@@ -1955,8 +1982,35 @@ def _validate_scene(
                 material_groups.setdefault(slot.material.name, set()).add(
                     memberships[0]
                 )
+                material_group_objects.setdefault(
+                    slot.material.name, []
+                ).append((obj, memberships[0]))
     for material_name, groups in material_groups.items():
         if len(groups) > 1:
+            proxy_group_pair = groups == {
+                exporter.NO_COLLISION_COLLECTION,
+                exporter.NO_PRESENTATION_COLLECTION,
+            }
+            proxy_owners_are_valid = proxy_group_pair and all(
+                (
+                    group != exporter.NO_PRESENTATION_COLLECTION
+                    or (
+                        str(obj.get("ow_map_object_owner", "")).strip()
+                        in {
+                            visual.name
+                            for visual in visual_objects
+                            if any(
+                                slot.material is not None
+                                and slot.material.name == material_name
+                                for slot in visual.material_slots
+                            )
+                        }
+                    )
+                )
+                for obj, group in material_group_objects[material_name]
+            )
+            if proxy_owners_are_valid:
+                continue
             issues.append(
                 f"{material_name}: material is used across multiple map "
                 f"groups ({', '.join(sorted(groups))}); duplicate it or "
@@ -1998,10 +2052,23 @@ def _validate_scene(
                 f"{obj.name}: collision material {material_name!r} is not "
                 "used by a presentation group."
             )
+        owner_name = str(obj.get("ow_map_object_owner", "")).strip()
+        if (
+            settings.export_editable_objects
+            and owner_name
+            and owner_name not in {
+                visual.name for visual in visual_objects
+            }
+        ):
+            issues.append(
+                f"{obj.name}: editable collision owner {owner_name!r} "
+                "is not an exported presentation mesh."
+            )
     collision_audit = None
     if collision_objects and inspect_geometry:
         _triangles, collision_audit = exporter.audit_collision_geometry(
-            collision_objects
+            collision_objects,
+            include_editor_ownership=settings.export_editable_objects,
         )
         issues.extend(collision_audit.issues)
         warnings.extend(collision_audit.warnings)
@@ -2137,6 +2204,7 @@ def _run_export(context, output: Path) -> set[str]:
             output,
             force_rebuild=settings.export_mode == "FORCE",
             metadata_only=settings.export_mode == "METADATA",
+            export_editable_objects=settings.export_editable_objects,
             progress=update_progress,
         )
     finally:
@@ -3203,6 +3271,17 @@ def _draw_map_panel(layout, context) -> None:
     output.label(text="Validate and Export", icon="EXPORT")
     output.prop(settings, "output_path")
     output.prop(settings, "export_mode")
+    editable_row = output.row()
+    editable_row.enabled = settings.export_mode != "METADATA"
+    editable_row.prop(settings, "export_editable_objects")
+    if (
+        settings.export_mode != "METADATA"
+        and not settings.export_editable_objects
+    ):
+        output.label(
+            text="Existing map geometry will be static in the editor.",
+            icon="LOCKED",
+        )
     row = output.row(align=True)
     row.operator("skate_map.validate", icon="CHECKMARK")
     row.operator("skate_map.quick_export", icon="FILE_TICK")
