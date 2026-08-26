@@ -237,7 +237,10 @@ nonzero **Break Group**. Set initial Gravity to `0` and disable **Start
 Awake**, then tune **Impact Speed**, **Shatter Force**, **Shard Spin**, and
 **Released Gravity**. The pieces stay locked until the player reaches the
 impact threshold; the entire group then releases once. This is deterministic
-pre-fracturing, not runtime mesh cutting.
+pre-fracturing, not runtime mesh cutting. Spawned prefab copies receive
+different runtime group IDs, so breaking one copy cannot break or repair
+another. A qualifying player impact is held for a brief resistance window
+before release, allowing the native player collision to feel the intact pane.
 
 ## Advanced Blender scene contract
 

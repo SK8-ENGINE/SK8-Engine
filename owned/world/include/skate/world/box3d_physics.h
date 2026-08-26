@@ -61,6 +61,9 @@ class OwnedPhysicsWorld {
   OwnedPhysicsWorld& operator=(OwnedPhysicsWorld&&) noexcept;
 
   void Load(const MapDefinition& map);
+  // Adds newly appended map objects without rebuilding existing bodies. The
+  // first index must equal the current body-record count.
+  void AppendBodies(const MapDefinition& map, std::size_t first_object_index);
   void Reset() noexcept;
 
   // Advances a fixed 60 Hz simulation through a bounded accumulator. Invalid

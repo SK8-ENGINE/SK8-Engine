@@ -281,6 +281,63 @@ int main() {
                 initial_glass_height - 0.05f,
         "player impact did not release the complete glass break group");
 
+    const PhysicsObjectPose broken_pose_before_append =
+        physics.ObjectPose(1);
+    MapObject second_pane_shard = glass_map.editable_objects.front();
+    second_pane_shard.id = 3;
+    second_pane_shard.name = "second_pane_shard";
+    second_pane_shard.origin = {8.0f, 0.55f, 0.0f};
+    second_pane_shard.physics.break_group = 8;
+    glass_map.editable_objects.push_back(second_pane_shard);
+    physics.AppendBodies(glass_map, 2);
+    const PhysicsTelemetry appended_telemetry = physics.Telemetry();
+    Require(
+        physics.HasBody(2) &&
+            appended_telemetry.dynamic_body_count == 3 &&
+            appended_telemetry.breakable_body_count == 3 &&
+            appended_telemetry.glass_break_events == 1 &&
+            appended_telemetry.broken_group_count == 1 &&
+            NearlyEqual(
+                physics.ObjectPose(1).position.x,
+                broken_pose_before_append.position.x, 0.01f) &&
+            NearlyEqual(
+                physics.ObjectPose(1).position.y,
+                broken_pose_before_append.position.y, 0.01f),
+        "appending a second pane rebuilt or repaired existing glass bodies");
+    const float second_pane_initial_height =
+        physics.ObjectPose(2).position.y;
+    for (int frame = 0; frame < 120; ++frame) {
+      const float time = static_cast<float>(frame) / 60.0f;
+      physics.SetPlayerProxy(
+          {6.4f + 4.5f * time, 0.65f, 0.0f},
+          {4.5f, 0.0f, 0.0f}, true);
+      physics.Step(kBox3DFixedTimeStepSeconds);
+    }
+    const PhysicsTelemetry second_pane_telemetry = physics.Telemetry();
+    const PhysicsObjectPose second_pane_pose = physics.ObjectPose(2);
+    if (second_pane_telemetry.glass_break_events != 2 ||
+        second_pane_telemetry.broken_group_count != 2 ||
+        second_pane_telemetry.last_broken_group != 8 ||
+        second_pane_pose.position.y >=
+            second_pane_initial_height - 0.02f) {
+      std::cerr
+          << "APPENDED_GLASS_DIAGNOSTIC events="
+          << second_pane_telemetry.glass_break_events
+          << " groups=" << second_pane_telemetry.broken_group_count
+          << " last_group=" << second_pane_telemetry.last_broken_group
+          << " player_contacts="
+          << second_pane_telemetry.player_contact_count
+          << " initial_y=" << second_pane_initial_height
+          << " final_y=" << second_pane_pose.position.y << '\n';
+    }
+    Require(
+        second_pane_telemetry.glass_break_events == 2 &&
+            second_pane_telemetry.broken_group_count == 2 &&
+            second_pane_telemetry.last_broken_group == 8 &&
+            second_pane_pose.position.y <
+                second_pane_initial_height - 0.02f,
+        "independently appended glass group did not break separately");
+
     const std::uint64_t generation =
         physics.Telemetry().world_generation;
     physics.Load(MakePhysicsTestMap(1));
@@ -402,6 +459,27 @@ int main() {
                 ObjectCollisionShape::Box,
         "SKATEOBJ v2 did not preserve independent physics roots in "
         "prefab-pivot space");
+
+    asset.objects[0].physics.break_group = 1;
+    asset.objects[1].physics.break_group = 1;
+    MapDefinition destination;
+    MapObject existing;
+    existing.physics.break_group = 41;
+    destination.editable_objects.push_back(existing);
+    RemapSkateObjectBreakGroups(asset, destination);
+    Require(
+        asset.objects[0].physics.break_group == 42 &&
+            asset.objects[1].physics.break_group == 42,
+        "SKATEOBJ instance did not receive one unique shared break group");
+    destination.editable_objects.insert(
+        destination.editable_objects.end(),
+        asset.objects.begin(), asset.objects.end());
+    SkateObjectAsset second_instance = asset;
+    RemapSkateObjectBreakGroups(second_instance, destination);
+    Require(
+        second_instance.objects[0].physics.break_group == 43 &&
+            second_instance.objects[1].physics.break_group == 43,
+        "separate SKATEOBJ copies reused a runtime break group");
   }
 
   {

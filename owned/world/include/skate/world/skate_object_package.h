@@ -25,6 +25,12 @@ struct SkateObjectAsset {
 // separate from file I/O so exporter/profile tests can exercise the contract.
 SkateObjectAsset ExtractSkateObjectAsset(MapDefinition package);
 
+// Reassigns prefab-local break groups above every group already present in
+// the destination map. This keeps separately spawned copies independent
+// while preserving grouping between roots inside one prefab instance.
+void RemapSkateObjectBreakGroups(
+    SkateObjectAsset& asset, const MapDefinition& destination);
+
 // Loads a .skateobj file using the shared SKATE package decoder, then enforces
 // the object-profile restrictions.
 SkateObjectAsset LoadSkateObjectPackage(

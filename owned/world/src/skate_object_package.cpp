@@ -3,8 +3,10 @@
 #include "skate/world/owned_map_package.h"
 
 #include <algorithm>
+#include <limits>
 #include <numeric>
 #include <stdexcept>
+#include <unordered_map>
 #include <utility>
 
 namespace skate::world {
@@ -121,6 +123,34 @@ SkateObjectAsset ExtractSkateObjectAsset(MapDefinition package) {
     }
   }
   return asset;
+}
+
+void RemapSkateObjectBreakGroups(
+    SkateObjectAsset& asset, const MapDefinition& destination) {
+  std::uint32_t next_group = 0;
+  for (const MapObject& object : destination.editable_objects) {
+    next_group = std::max(next_group, object.physics.break_group);
+  }
+
+  std::unordered_map<std::uint32_t, std::uint32_t> remapped;
+  for (MapObject& object : asset.objects) {
+    const std::uint32_t source_group = object.physics.break_group;
+    if (source_group == 0) {
+      continue;
+    }
+    const auto found = remapped.find(source_group);
+    if (found != remapped.end()) {
+      object.physics.break_group = found->second;
+      continue;
+    }
+    if (next_group == std::numeric_limits<std::uint32_t>::max()) {
+      throw std::runtime_error(
+          "SKATEOBJ break-group namespace is exhausted");
+    }
+    const std::uint32_t instance_group = ++next_group;
+    remapped.emplace(source_group, instance_group);
+    object.physics.break_group = instance_group;
+  }
 }
 
 SkateObjectAsset LoadSkateObjectPackage(

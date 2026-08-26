@@ -59,6 +59,7 @@ skate::world::WorldMap& ActiveWorld();
 skate::world::OwnedPhysicsWorld g_owned_physics;
 bool g_owned_physics_initialized = false;
 std::uint64_t g_owned_physics_last_log_step = 0;
+std::uint64_t g_owned_physics_last_sound_break_event = 0;
 std::mutex g_owned_physics_mutex;
 
 constexpr float kRadiansToDegrees = 57.29577951308232f;
@@ -306,8 +307,72 @@ void PlayProceduralThunder() {
       reinterpret_cast<LPCSTR>(wave.data()), nullptr,
       SND_ASYNC | SND_MEMORY | SND_NODEFAULT);
 }
+
+const std::vector<std::uint8_t>& GlassBreakWave() {
+  static const std::vector<std::uint8_t> wave = [] {
+    constexpr std::uint32_t sample_rate = 22050;
+    constexpr std::uint32_t sample_count = sample_rate * 3 / 5;
+    constexpr std::uint32_t data_bytes = sample_count * 2;
+    std::vector<std::uint8_t> bytes(44 + data_bytes, 0);
+    const auto write16 = [&bytes](std::size_t offset, std::uint16_t value) {
+      bytes[offset + 0] = static_cast<std::uint8_t>(value);
+      bytes[offset + 1] = static_cast<std::uint8_t>(value >> 8);
+    };
+    const auto write32 = [&bytes](std::size_t offset, std::uint32_t value) {
+      bytes[offset + 0] = static_cast<std::uint8_t>(value);
+      bytes[offset + 1] = static_cast<std::uint8_t>(value >> 8);
+      bytes[offset + 2] = static_cast<std::uint8_t>(value >> 16);
+      bytes[offset + 3] = static_cast<std::uint8_t>(value >> 24);
+    };
+    std::memcpy(bytes.data() + 0, "RIFF", 4);
+    write32(4, 36 + data_bytes);
+    std::memcpy(bytes.data() + 8, "WAVEfmt ", 8);
+    write32(16, 16);
+    write16(20, 1);
+    write16(22, 1);
+    write32(24, sample_rate);
+    write32(28, sample_rate * 2);
+    write16(32, 2);
+    write16(34, 16);
+    std::memcpy(bytes.data() + 36, "data", 4);
+    write32(40, data_bytes);
+
+    std::uint32_t noise_state = 0xa17e51d3u;
+    float low_noise = 0.0f;
+    for (std::uint32_t index = 0; index < sample_count; ++index) {
+      noise_state ^= noise_state << 13;
+      noise_state ^= noise_state >> 17;
+      noise_state ^= noise_state << 5;
+      const float white =
+          (static_cast<float>(noise_state & 0xffffu) / 32767.5f) - 1.0f;
+      low_noise += (white - low_noise) * 0.11f;
+      const float high_noise = white - low_noise;
+      const float time = static_cast<float>(index) / sample_rate;
+      const float burst = high_noise * std::exp(-time * 9.5f) * 0.72f;
+      const float chime =
+          (std::sin(time * 2.0f * 3.14159265f * 2410.0f) * 0.20f +
+           std::sin(time * 2.0f * 3.14159265f * 3270.0f) * 0.13f +
+           std::sin(time * 2.0f * 3.14159265f * 4180.0f) * 0.08f) *
+          std::exp(-time * 7.0f);
+      const float sample = std::clamp(burst + chime, -1.0f, 1.0f);
+      const std::int16_t pcm =
+          static_cast<std::int16_t>(sample * 26000.0f);
+      write16(44 + index * 2, static_cast<std::uint16_t>(pcm));
+    }
+    return bytes;
+  }();
+  return wave;
+}
+
+void PlayProceduralGlassBreak() {
+  const std::vector<std::uint8_t>& wave = GlassBreakWave();
+  PlaySoundA(
+      reinterpret_cast<LPCSTR>(wave.data()), nullptr,
+      SND_ASYNC | SND_MEMORY | SND_NODEFAULT);
+}
 #else
 void PlayProceduralThunder() {}
+void PlayProceduralGlassBreak() {}
 #endif
 
 struct WeatherRuntime {
@@ -453,6 +518,8 @@ void ReloadOwnedPhysicsLocked() {
   }
   g_owned_physics_initialized = true;
   g_owned_physics_last_log_step = 0;
+  g_owned_physics_last_sound_break_event =
+      g_owned_physics.Telemetry().glass_break_events;
 }
 
 void ReloadOwnedPhysics() {
@@ -1565,6 +1632,7 @@ std::size_t AppendSpawnedObject(
     skate::world::Vec3 map_position) {
   skate::world::MapDefinition& definition =
       ActiveWorld().MutableDefinition();
+  skate::world::RemapSkateObjectBreakGroups(asset, definition);
 
   skate::world::TextureId next_texture = 1;
   for (const auto& texture : definition.textures) {
@@ -1681,7 +1749,13 @@ std::size_t AppendSpawnedObject(
     object.source_collision_triangle_count = 0;
     definition.editable_objects.push_back(std::move(object));
   }
-  ReloadOwnedPhysics();
+  {
+    std::scoped_lock lock(g_owned_physics_mutex);
+    EnsureOwnedPhysicsInitializedLocked();
+    if (HasOwnedPhysics(definition)) {
+      g_owned_physics.AppendBodies(definition, index);
+    }
+  }
   const std::size_t root_count =
       definition.editable_objects.size() - index;
   REXLOG_INFO(
@@ -1702,6 +1776,16 @@ void AdvanceOwnedPhysics(double frame_seconds) {
   g_owned_physics.Step(frame_seconds);
   const skate::world::PhysicsTelemetry telemetry =
       g_owned_physics.Telemetry();
+  if (telemetry.glass_break_events >
+      g_owned_physics_last_sound_break_event) {
+    g_owned_physics_last_sound_break_event =
+        telemetry.glass_break_events;
+    PlayProceduralGlassBreak();
+    REXLOG_INFO(
+        "box3d: glass break sound event={} group={} impact_speed={:.3f}",
+        telemetry.glass_break_events, telemetry.last_broken_group,
+        telemetry.last_break_speed);
+  }
   if (telemetry.world_steps >= g_owned_physics_last_log_step + 300) {
     g_owned_physics_last_log_step = telemetry.world_steps;
     const auto& pose = telemetry.representative_dynamic_pose;

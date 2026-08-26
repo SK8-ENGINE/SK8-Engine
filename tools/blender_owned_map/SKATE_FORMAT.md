@@ -270,9 +270,10 @@ object[object_count]:
 Every referenced object must exist and use Box3D Dynamic physics. Authors
 normally set initial gravity to zero and Start Awake off so pre-fractured
 pieces remain locked in place. A player-proxy contact at or above the impact
-threshold releases the complete group once, applies released gravity, and
-adds deterministic linear and angular impulses. Group zero is the
-backward-compatible non-breakable default.
+threshold arms a 50 ms resistance window before the complete group releases
+once, applies released gravity, and receives deterministic linear and angular
+impulses. Spawned prefab instances remap their local groups to unused runtime
+IDs. Group zero is the backward-compatible non-breakable default.
 
 `day_night_duration_seconds == 0` freezes celestial lighting at
 `day_night_start_hour`. With a positive duration and

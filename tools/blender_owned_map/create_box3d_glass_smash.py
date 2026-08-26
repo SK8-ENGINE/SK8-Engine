@@ -64,26 +64,6 @@ def assign_owned_object(
     obj["ow_upward_surface"] = False
 
 
-def add_box(
-    name: str,
-    location: tuple[float, float, float],
-    dimensions: tuple[float, float, float],
-    material: bpy.types.Material,
-) -> bpy.types.Object:
-    bpy.ops.mesh.primitive_cube_add(size=1.0, location=location)
-    obj = bpy.context.object
-    obj.name = name
-    obj.dimensions = dimensions
-    bpy.ops.object.transform_apply(
-        location=False, rotation=False, scale=True
-    )
-    obj.data.materials.append(material)
-    assign_owned_object(
-        obj, physics_type="BOX3D_STATIC", friction=0.72
-    )
-    return obj
-
-
 def add_shard(
     number: int,
     triangle: tuple[
@@ -201,40 +181,20 @@ def build() -> None:
             raise RuntimeError("unable to prepare glass SKATEOBJ scene")
 
         glass = bpy.data.materials.new("Breakable_Glass")
-        glass.diffuse_color = (0.48, 0.82, 0.94, 0.24)
+        # Deliberately texture-free and nearly colourless: the assembled
+        # shards should read as one simple flat pane before impact.
+        glass.diffuse_color = (0.78, 0.91, 0.96, 0.17)
         glass.owned_world.alpha_mode = "2"
-        glass.owned_world.roughness = 0.10
-        glass.owned_world.metallic = 0.02
+        glass.owned_world.roughness = 0.04
+        glass.owned_world.metallic = 0.0
         glass.owned_world.friction = 0.25
         glass.owned_world.restitution = 0.02
-
-        frame = bpy.data.materials.new("Glass_Frame")
-        frame.diffuse_color = (0.055, 0.075, 0.095, 1.0)
-        frame.owned_world.roughness = 0.28
-        frame.owned_world.metallic = 0.78
 
         shard_count = 0
         for shard_count, triangle in enumerate(
             fracture_triangles(), start=1
         ):
             add_shard(shard_count, triangle, glass)
-
-        add_box(
-            "Glass_Frame_Left", (-2.83, 0.0, 2.05),
-            (0.20, 0.24, 3.55), frame,
-        )
-        add_box(
-            "Glass_Frame_Right", (2.83, 0.0, 2.05),
-            (0.20, 0.24, 3.55), frame,
-        )
-        add_box(
-            "Glass_Frame_Top", (0.0, 0.0, 3.78),
-            (5.85, 0.24, 0.20), frame,
-        )
-        add_box(
-            "Glass_Frame_Bottom", (0.0, 0.0, 0.32),
-            (5.85, 0.32, 0.20), frame,
-        )
 
         scene = bpy.context.scene
         scene["ow_map_name"] = "Box3D Glass Smash"
@@ -247,7 +207,7 @@ def build() -> None:
         export_scene(PACKAGE_PATH, force_rebuild=True)
         print(
             "SKATEOBJ_BOX3D_GLASS_OK "
-            f"shards={shard_count} frame_parts=4 "
+            f"shards={shard_count} frame_parts=0 textures=0 "
             f"{BLEND_PATH} {PACKAGE_PATH}"
         )
     finally:

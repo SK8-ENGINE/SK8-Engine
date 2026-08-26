@@ -252,11 +252,12 @@ def main() -> int:
     ]
     require(
         glass_analysis["version"] == 14
-        and len(glass_roots) == 52
+        and len(glass_roots) == 48
         and len(breakable) == 48
+        and glass_analysis["counts"]["textures"] == 0
         and all(root["physics"]["break_group"] == 1 for root in breakable)
         and all(root["physics"]["gravity_scale"] == 0.0 for root in breakable),
-        "glass sample does not contain 48 locked shards in one break group",
+        "glass sample is not one texture-free panel of 48 locked shards",
     )
     runtime_glass = subprocess.run(
         [str(validator), str(glass_sample), "--object-profile"],
@@ -266,7 +267,7 @@ def main() -> int:
     )
     require(
         runtime_glass.returncode == 0
-        and "SKATEOBJ_PHYSICS_OK static=4 dynamic=48"
+        and "SKATEOBJ_PHYSICS_OK static=0 dynamic=48"
         in runtime_glass.stdout,
         "Box3D-linked runtime did not create the glass sample bodies",
     )

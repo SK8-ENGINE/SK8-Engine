@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <map>
 #include <set>
 #include <stdexcept>
 #include <string>
@@ -23,6 +24,7 @@ constexpr int kMaximumHullVertices = 64;
 constexpr float kPlayerProxyRadius = 0.52f;
 constexpr float kPlayerProxyLowerCenter = -0.20f;
 constexpr float kPlayerProxyUpperCenter = 1.25f;
+constexpr float kBreakResistanceSeconds = 0.05f;
 
 b3Vec3 ToBox3D(const Vec3& value) {
   return {
@@ -145,6 +147,11 @@ struct OwnedPhysicsWorld::Impl {
   double accumulator_seconds = 0.0;
   Vec3 player_proxy_velocity;
   std::set<std::uint32_t> broken_groups;
+  struct PendingBreak {
+    float elapsed_seconds = 0.0f;
+    float peak_impact_speed = 0.0f;
+  };
+  std::map<std::uint32_t, PendingBreak> pending_breaks;
 
   void Reset() noexcept {
     if (B3_IS_NON_NULL(world)) {
@@ -176,6 +183,7 @@ struct OwnedPhysicsWorld::Impl {
     accumulator_seconds = 0.0;
     player_proxy_velocity = {};
     broken_groups.clear();
+    pending_breaks.clear();
     telemetry.world_steps = 0;
     telemetry.dropped_step_batches = 0;
     telemetry.transform_updates = 0;
@@ -361,9 +369,16 @@ struct OwnedPhysicsWorld::Impl {
     }
   }
 
-  void CreateObjectBodies(const MapDefinition& map) {
+  void CreateObjectBodies(
+      const MapDefinition& map, std::size_t first_object_index = 0) {
+    if (first_object_index > map.editable_objects.size() ||
+        first_object_index != bodies.size()) {
+      throw std::runtime_error(
+          "Box3D appended-object range does not match existing bodies");
+    }
     bodies.resize(map.editable_objects.size());
-    for (std::size_t index = 0; index < map.editable_objects.size(); ++index) {
+    for (std::size_t index = first_object_index;
+         index < map.editable_objects.size(); ++index) {
       const MapObject& object = map.editable_objects[index];
       BodyRecord& record = bodies[index];
       record.type = object.physics.type;
@@ -424,6 +439,7 @@ struct OwnedPhysicsWorld::Impl {
       return;
     }
     broken_groups.insert(group);
+    pending_breaks.erase(group);
     const b3Vec3 player_impulse = ToBox3D(player_proxy_velocity);
     for (std::size_t index = 0; index < bodies.size(); ++index) {
       BodyRecord& record = bodies[index];
@@ -470,7 +486,7 @@ struct OwnedPhysicsWorld::Impl {
         static_cast<std::size_t>(capacity));
     const int count = b3Body_GetContactData(
         player_proxy_body, contacts.data(), capacity);
-    std::set<std::uint32_t> triggered_groups;
+    std::set<std::uint32_t> contacted_groups;
     for (int index = 0; index < count; ++index) {
       const b3ContactData& contact = contacts[index];
       const b3BodyId body_a = b3Shape_GetBody(contact.shapeIdA);
@@ -493,11 +509,24 @@ struct OwnedPhysicsWorld::Impl {
       if (record.break_group != 0 &&
           impact_speed >= record.break_speed_threshold &&
           !broken_groups.contains(record.break_group)) {
-        triggered_groups.insert(record.break_group);
+        contacted_groups.insert(record.break_group);
       }
     }
-    for (const std::uint32_t group : triggered_groups) {
-      BreakGroup(group, impact_speed);
+    for (const std::uint32_t group : contacted_groups) {
+      PendingBreak& pending = pending_breaks[group];
+      pending.peak_impact_speed =
+          std::max(pending.peak_impact_speed, impact_speed);
+    }
+    std::vector<std::pair<std::uint32_t, float>> triggered_groups;
+    for (auto& [group, pending] : pending_breaks) {
+      pending.elapsed_seconds += kBox3DFixedTimeStepSeconds;
+      if (pending.elapsed_seconds + 1.0e-6f >=
+          kBreakResistanceSeconds) {
+        triggered_groups.emplace_back(group, pending.peak_impact_speed);
+      }
+    }
+    for (const auto& [group, peak_impact_speed] : triggered_groups) {
+      BreakGroup(group, peak_impact_speed);
     }
   }
 
@@ -629,6 +658,37 @@ void OwnedPhysicsWorld::Load(const MapDefinition& map) {
   } catch (...) {
     impl_->Reset();
     impl_->telemetry.world_generation = next_generation;
+    throw;
+  }
+}
+
+void OwnedPhysicsWorld::AppendBodies(
+    const MapDefinition& map, std::size_t first_object_index) {
+  if (B3_IS_NULL(impl_->world)) {
+    Load(map);
+    return;
+  }
+  if (first_object_index != impl_->bodies.size() ||
+      first_object_index > map.editable_objects.size()) {
+    throw std::runtime_error(
+        "Box3D append must begin after the existing object records");
+  }
+
+  const PhysicsTelemetry previous_telemetry = impl_->telemetry;
+  try {
+    impl_->CreateObjectBodies(map, first_object_index);
+    impl_->RefreshBodyPoseRevisions();
+    impl_->RefreshTelemetry();
+  } catch (...) {
+    for (std::size_t index = impl_->bodies.size();
+         index > first_object_index; --index) {
+      const b3BodyId body = impl_->bodies[index - 1].id;
+      if (B3_IS_NON_NULL(body) && b3Body_IsValid(body)) {
+        b3DestroyBody(body);
+      }
+    }
+    impl_->bodies.resize(first_object_index);
+    impl_->telemetry = previous_telemetry;
     throw;
   }
 }
