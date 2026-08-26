@@ -1613,13 +1613,18 @@ std::string SanitizedFilename(std::string_view value) {
   return result;
 }
 
-RetailShaderFamily ShaderFamily(std::string_view type) {
-  if (type == "environmentParkDecal") {
-    return RetailShaderFamily::EnvironmentDecal;
+RetailShaderFamily ClassifyShaderFamily(std::string_view type) {
+  if (type == "dynamicObject" ||
+      type == "environmentPark" ||
+      type == "environmentParkDiffuse") {
+    return RetailShaderFamily::DynamicObject;
   }
-  if (type == "environmentParkAlphaTest" ||
-      type == "dynamicObjectAlphaTest") {
-    return RetailShaderFamily::EnvironmentAlphaTest;
+  if (type == "dynamicObjectAlphaTest" ||
+      type == "environmentParkAlphaTest") {
+    return RetailShaderFamily::DynamicObjectAlphaTest;
+  }
+  if (type == "environmentParkDecal") {
+    return RetailShaderFamily::DynamicObjectDecal;
   }
   if (type == "environmentParkWater") {
     return RetailShaderFamily::FlowingWater;
@@ -1652,11 +1657,32 @@ TextureColorSpace ColorSpaceForChannel(std::string_view channel) {
              : TextureColorSpace::Linear;
 }
 
-std::string RetailSemantic(std::string channel) {
+std::string ClassifyRetailSemantic(std::string channel) {
   if (channel == "transparency") {
     return "transparent";
   }
+  if (channel == "detailnormal") {
+    return "detail";
+  }
   return channel;
+}
+
+bool CurrentGeneratedAsset(const SkateObjectAsset& asset) {
+  return !asset.objects.empty() &&
+         std::all_of(
+             asset.objects.begin(), asset.objects.end(),
+             [](const MapObject& object) {
+               return object.physics.type ==
+                      ObjectPhysicsType::Disabled;
+             }) &&
+         std::all_of(
+             asset.materials.begin(), asset.materials.end(),
+             [](const SurfaceMaterial& material) {
+               return !material.retail.enabled ||
+                      material.retail.shader_family ==
+                          ClassifyShaderFamily(
+                              material.retail.shader_name);
+             });
 }
 
 struct AssetIndex {
@@ -1754,13 +1780,16 @@ bool BuildAsset(
         item.name + " material " +
         std::to_string(material_index + 1);
     material.flags = SurfaceFlags::Skateable;
-    material.display_color = {0.68f, 0.68f, 0.68f};
+    // Retail textures already contain the authored colour. A neutral tint
+    // also keeps the generic fallback from imposing the old grey/brown cast
+    // while exact lighting rows are still being captured.
+    material.display_color = {1.0f, 1.0f, 1.0f};
     material.roughness = 0.68f;
     material.retail.enabled = true;
     material.retail.material_guid = source_id;
     material.retail.shader_name = source->second.type;
     material.retail.shader_family =
-        ShaderFamily(source->second.type);
+        ClassifyShaderFamily(source->second.type);
     material.retail.render_flags =
         RenderFlags(source->second.type);
     if (skate::world::HasFlag(
@@ -1812,7 +1841,7 @@ bool BuildAsset(
         asset.textures.push_back(std::move(texture));
       }
       material.retail.texture_bindings.push_back(
-          {RetailSemantic(binding.channel),
+          {ClassifyRetailSemantic(binding.channel),
            package_texture,
            binding.channel == "decal" ? 2u : 0u,
            binding.channel == "decal" ? 1u : 0u,
@@ -1832,14 +1861,12 @@ bool BuildAsset(
   MapObject object;
   object.id = 1;
   object.name = item.name;
-  object.physics.type =
-      item.dynamic ? ObjectPhysicsType::Dynamic
-                   : ObjectPhysicsType::Static;
-  if (item.dynamic) {
-    object.physics.shape = ObjectCollisionShape::ConvexHull;
-  }
-  object.physics.friction = 0.55f;
-  object.physics.restitution = 0.05f;
+  // These packages are editor placement assets, not host-simulated rigid
+  // bodies. Their retained RX2 triangles are registered through Skate's
+  // native collision path. Box3D participation made DMO props move/fly,
+  // could reset the skater, and caused the grind transformer to exclude
+  // their otherwise valid native spline records.
+  object.physics.type = ObjectPhysicsType::Disabled;
   for (std::size_t mesh_index = 0;
        mesh_index < meshes.size(); ++mesh_index) {
     const std::uint32_t vertex_base =
@@ -2051,6 +2078,15 @@ bool ParseRecipe(
   return true;
 }
 
+RetailShaderFamily ShaderFamilyForMaterialType(
+    std::string_view type) {
+  return ClassifyShaderFamily(type);
+}
+
+std::string RetailTextureSemantic(std::string_view channel) {
+  return ClassifyRetailSemantic(std::string(channel));
+}
+
 Result ImportDefaults(
     const std::filesystem::path& game_data_root,
     const std::filesystem::path& object_library_root,
@@ -2175,8 +2211,8 @@ Result ImportDefaults(
                   output, filesystem_error) &&
               !filesystem_error) {
             try {
-              (void)skate::world::LoadSkateObjectPackage(output);
-              reused = true;
+              reused = CurrentGeneratedAsset(
+                  skate::world::LoadSkateObjectPackage(output));
             } catch (...) {
               reused = false;
             }
@@ -2239,7 +2275,7 @@ Result ImportDefaults(
     std::ofstream state(
         object_library_root / ".default-items-import-state",
         std::ios::trunc);
-    state << "schema=1\narchive=" << archive.CacheKey()
+    state << "schema=2\narchive=" << archive.CacheKey()
           << "\nwritten=" << progress.written
           << "\nreused=" << progress.reused
           << "\nunsupported=" << progress.unsupported << '\n';

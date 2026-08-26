@@ -2,9 +2,11 @@
 #include "skate3_drop_item_library.h"
 
 #include <skate/world/skate_object_package.h>
+#include <skate/world/rw_collision_mesh.h>
 
 #include <algorithm>
 #include <bit>
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -100,6 +102,29 @@ bool TestRecipeParser() {
     return false;
   }
   return true;
+}
+
+bool TestRetailMaterialClassification() {
+  using skate::world::RetailShaderFamily;
+  return skate3::drop_item_import::ShaderFamilyForMaterialType(
+             "environmentParkDiffuse") ==
+             RetailShaderFamily::DynamicObject &&
+         skate3::drop_item_import::ShaderFamilyForMaterialType(
+             "dynamicObject") ==
+             RetailShaderFamily::DynamicObject &&
+         skate3::drop_item_import::ShaderFamilyForMaterialType(
+             "environmentParkAlphaTest") ==
+             RetailShaderFamily::DynamicObjectAlphaTest &&
+         skate3::drop_item_import::ShaderFamilyForMaterialType(
+             "dynamicObjectAlphaTest") ==
+             RetailShaderFamily::DynamicObjectAlphaTest &&
+         skate3::drop_item_import::ShaderFamilyForMaterialType(
+             "environmentParkDecal") ==
+             RetailShaderFamily::DynamicObjectDecal &&
+         skate3::drop_item_import::RetailTextureSemantic(
+             "detailnormal") == "detail" &&
+         skate3::drop_item_import::RetailTextureSemantic(
+             "transparency") == "transparent";
 }
 
 bool TestMissingGameData(const std::filesystem::path& root) {
@@ -204,6 +229,7 @@ int main(int argc, char** argv) {
   std::filesystem::remove_all(root, error);
   if (!TestDiscovery(root / "discovery") ||
       !TestRecipeParser() ||
+      !TestRetailMaterialClassification() ||
       !TestMissingGameData(root) ||
       !TestDiscoveryFailure(root / "not-a-directory") ||
       !TestPackageRoundTrip(root)) {
@@ -249,6 +275,72 @@ int main(int argc, char** argv) {
       std::cerr << "installed park-item import is not idempotent: written="
                 << repeated.written << " reused=" << repeated.reused
                 << " unsupported=" << repeated.unsupported << '\n';
+      return 1;
+    }
+    std::vector<skate3::drop_item_library::Category> categories;
+    std::string discovery_error;
+    if (!skate3::drop_item_library::Discover(
+            output_root, categories, discovery_error)) {
+      std::cerr << discovery_error << '\n';
+      return 1;
+    }
+    std::size_t checked_assets = 0;
+    for (const auto& category : categories) {
+      if (category.name == "Custom") {
+        continue;
+      }
+      for (const auto& entry : category.files) {
+        const std::filesystem::path& file = entry.path;
+        const auto asset =
+            skate::world::LoadSkateObjectPackage(file);
+        for (const auto& object : asset.objects) {
+          if (object.physics.type !=
+              skate::world::ObjectPhysicsType::Disabled) {
+            std::cerr << file
+                      << " retained Box3D physics metadata\n";
+            return 1;
+          }
+          if (!object.grind_rail_indices.empty() &&
+              asset.grind_rails.empty()) {
+            std::cerr << file
+                      << " lost referenced grind splines\n";
+            return 1;
+          }
+        }
+        for (const auto& material : asset.materials) {
+          if (material.retail.enabled &&
+              material.retail.shader_family !=
+                  skate3::drop_item_import::
+                      ShaderFamilyForMaterialType(
+                          material.retail.shader_name)) {
+            std::cerr << file
+                      << " has stale retail shader routing\n";
+            return 1;
+          }
+          if (!material.retail.enabled) {
+            const std::uint16_t encoded =
+                skate::world::EncodeRwSurfaceId(
+                    material.skate_audio_surface,
+                    material.skate_physics_surface,
+                    material.skate_surface_pattern);
+            char expected[7] = {};
+            std::snprintf(
+                expected, sizeof(expected), "0x%04x", encoded);
+            if (material.name.find(expected) ==
+                std::string::npos) {
+              std::cerr << file
+                        << " did not retain its native collision "
+                           "audio/physics/pattern ID\n";
+              return 1;
+            }
+          }
+        }
+        ++checked_assets;
+      }
+    }
+    if (checked_assets != 652) {
+      std::cerr << "expected to validate 652 generated assets, got "
+                << checked_assets << '\n';
       return 1;
     }
   }

@@ -13326,8 +13326,14 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
       constants[46] = celestial.light_color.z;
       constants[47] =
           dynamic_lighting ? celestial.light_intensity : 0.0f;
+      const bool dynamic_object_family =
+          draw.retail_shader_family == 21 ||
+          draw.retail_shader_family == 22 ||
+          draw.retail_shader_family == 23;
       const bool retail_exact =
-          draw.retail_shader_family != 0 && scene.shadow_valid;
+          draw.retail_shader_family != 0 &&
+          (dynamic_object_family ? scene.dynobj_valid
+                                 : scene.shadow_valid);
       const bool imported =
           draw.albedo_texture != 0 || draw.indirect_lightmap != 0 ||
           draw.normal_texture != 0 || draw.orm_texture != 0 ||
@@ -13367,8 +13373,10 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
                     context, draw.retail_detail_texture,
                     OwnedTextureRole::Normal)
               : g_r.white.srv,
-          retail_exact && draw.retail_shader_family >= 3 &&
-                  draw.retail_shader_family <= 4
+          retail_exact &&
+                  ((draw.retail_shader_family >= 3 &&
+                    draw.retail_shader_family <= 4) ||
+                   dynamic_object_family)
               ? ResolveOwnedMapTexture(
                     context, draw.retail_specular_texture,
                     OwnedTextureRole::Data)
@@ -13395,7 +13403,8 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
                 : OwnedTextureRole::Color);
         const bool decal_family =
             draw.retail_shader_family == 3 ||
-            draw.retail_shader_family == 4;
+            draw.retail_shader_family == 4 ||
+            draw.retail_shader_family == 23;
         const skate::world::TextureId mask_id =
             decal_family ? draw.retail_decal_texture
                          : draw.retail_specular_texture;
@@ -13450,7 +13459,8 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
               : draw.material[3];
       if (retail_exact) {
         const std::uint32_t family = draw.retail_shader_family;
-        const bool decal_family = family == 3 || family == 4;
+        const bool decal_family =
+            family == 3 || family == 4 || family == 23;
         const bool has_macro = draw.retail_macro_texture != 0;
         const bool has_masks = draw.retail_specular_texture != 0;
         const bool has_normal = draw.normal_texture != 0;
@@ -13458,11 +13468,19 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
             draw.retail_detail_texture != 0 &&
             draw.retail_detail_scale > 0.0f;
         std::uint32_t v2_flags = 0;
-        if (family >= 1 && family <= 4) {
+        if ((family >= 1 && family <= 4) ||
+            dynamic_object_family) {
           v2_flags |= has_normal ? 1u : 0u;
-          v2_flags |= has_detail && family != 2 ? 2u : 0u;
           v2_flags |=
-              decal_family && has_masks ? 4u : 0u;
+              has_detail && family != 2 &&
+                      draw.retail_detail_scale > 0.0f
+                  ? 2u
+                  : 0u;
+          v2_flags |=
+              (decal_family || dynamic_object_family) &&
+                      has_masks
+                  ? 4u
+                  : 0u;
         }
         constants[39] = -static_cast<float>(family);
         constants[40] =
@@ -13678,6 +13696,7 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
         mesh->second.ib_view.size_bytes);
     for (const mechanics_sandbox::map::VisualDraw& draw :
          visual.draws) {
+      constants[39] = -41.25f;
       constants[40] = celestial.light_direction_to_light.x;
       constants[41] = celestial.light_direction_to_light.y;
       constants[42] = celestial.light_direction_to_light.z;
@@ -13687,10 +13706,19 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
       constants[46] = celestial.light_color.z;
       constants[47] =
           dynamic_lighting ? celestial.light_intensity : 0.0f;
+      const bool dynamic_object_family =
+          draw.retail_shader_family == 21 ||
+          draw.retail_shader_family == 22 ||
+          draw.retail_shader_family == 23;
+      const bool retail_exact =
+          draw.retail_shader_family != 0 &&
+          (dynamic_object_family ? scene.dynobj_valid
+                                 : scene.shadow_valid);
       const bool imported =
           draw.albedo_texture != 0 || draw.indirect_lightmap != 0 ||
           draw.normal_texture != 0 || draw.orm_texture != 0 ||
-          draw.emissive_texture != 0;
+          draw.emissive_texture != 0 ||
+          draw.retail_chromaticity_texture != 0;
       const bool alpha_blend =
           draw.alpha_mode ==
               skate::world::SurfaceMaterial::AlphaMode::Blend ||
@@ -13712,17 +13740,58 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
           ResolveOwnedMapTexture(
               context, draw.normal_texture,
               OwnedTextureRole::Normal));
-      nrhi::TextureView* object_material_maps[5] = {
-          g_r.white.srv,
-          ResolveOwnedMapTexture(
-              context, draw.orm_texture, OwnedTextureRole::Data),
+      nrhi::TextureView* object_material_maps[6] = {
+          retail_exact
+              ? ResolveOwnedMapTexture(
+                    context, draw.retail_detail_texture,
+                    OwnedTextureRole::Normal)
+              : g_r.white.srv,
+          retail_exact &&
+                  ((draw.retail_shader_family >= 3 &&
+                    draw.retail_shader_family <= 4) ||
+                   dynamic_object_family)
+              ? ResolveOwnedMapTexture(
+                    context, draw.retail_specular_texture,
+                    OwnedTextureRole::Data)
+              : ResolveOwnedMapTexture(
+                    context, draw.orm_texture,
+                    OwnedTextureRole::Data),
           g_r.owned_nsm_active ? g_r.owned_static_sun_srv[0]
                                : g_r.white.srv,
           g_r.owned_nsm_active ? g_r.owned_static_sun_srv[1]
                                : g_r.white.srv,
           g_r.owned_nsm_active ? g_r.owned_static_sun_srv[2]
-                               : g_r.white.srv};
-      cmd->SetTextures(8, object_material_maps, 5);
+                               : g_r.white.srv,
+          ResolveOwnedMapTexture(
+              context, draw.retail_chromaticity_texture,
+              OwnedTextureRole::Data)};
+      cmd->SetTextures(8, object_material_maps, 6);
+      if (retail_exact) {
+        const bool decal_family =
+            draw.retail_shader_family == 3 ||
+            draw.retail_shader_family == 4 ||
+            draw.retail_shader_family == 23;
+        const skate::world::TextureId mask_id =
+            decal_family ? draw.retail_decal_texture
+                         : draw.retail_specular_texture;
+        cmd->SetTexture(
+            4,
+            ResolveOwnedMapTexture(
+                context, draw.retail_macro_texture,
+                OwnedTextureRole::Color));
+        cmd->SetTexturePair(
+            5,
+            ResolveOwnedMapTexture(
+                context, mask_id,
+                decal_family ? OwnedTextureRole::Decal
+                             : OwnedTextureRole::Data),
+            ResolveOwnedMapTexture(
+                context, draw.normal_texture,
+                OwnedTextureRole::Normal));
+        cmd->SetTexturePair(
+            7, g_r.white_cube.srv,
+            shadow_ready ? g_r.shadow_srv_final : g_r.white.srv);
+      }
       constants[32] = draw.color[0];
       constants[33] = draw.color[1];
       constants[34] = draw.color[2];
@@ -13734,6 +13803,21 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
       owned_flags |= draw.orm_texture != 0 ? 16u : 0u;
       owned_flags |= draw.emissive_texture != 0 ? 32u : 0u;
       owned_flags |= draw.indirect_lightmap != 0 ? 64u : 0u;
+      const bool has_skate2_lightmap =
+          draw.retail_chromaticity_texture != 0 &&
+          draw.skate2_lightmap_component >= 0.0f &&
+          draw.skate2_lightmap_component < 3.0f;
+      if (has_skate2_lightmap) {
+        owned_flags |=
+            (static_cast<std::uint32_t>(
+                 draw.skate2_lightmap_component) +
+             1u)
+            << 8u;
+      }
+      owned_flags |=
+          (draw.presentation_depth_layer & 3u) << 12u;
+      owned_flags |=
+          (draw.presentation_depth_order & 255u) << 14u;
       constants[48] =
           imported ? -static_cast<float>(owned_flags)
                    : draw.material[0];
@@ -13745,6 +13829,49 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
           imported
               ? (draw.material[2] < 0.0f ? -draw.material[2] : 0.0f)
               : draw.material[3];
+      if (retail_exact) {
+        const std::uint32_t family = draw.retail_shader_family;
+        const bool decal_family =
+            family == 3 || family == 4 || family == 23;
+        const bool has_macro = draw.retail_macro_texture != 0;
+        const bool has_masks = draw.retail_specular_texture != 0;
+        const bool has_normal = draw.normal_texture != 0;
+        const bool has_detail =
+            draw.retail_detail_texture != 0 &&
+            draw.retail_detail_scale > 0.0f;
+        std::uint32_t v2_flags = 0;
+        if ((family >= 1 && family <= 4) ||
+            dynamic_object_family) {
+          v2_flags |= has_normal ? 1u : 0u;
+          v2_flags |=
+              has_detail && family != 2 ? 2u : 0u;
+          v2_flags |=
+              (decal_family || dynamic_object_family) &&
+                      has_masks
+                  ? 4u
+                  : 0u;
+        }
+        constants[39] = -static_cast<float>(family);
+        constants[40] =
+            draw.indirect_lightmap != 0 ? 1.0f : 0.0f;
+        constants[41] =
+            has_skate2_lightmap
+                ? draw.skate2_lightmap_component
+                : -1.0f;
+        constants[42] = dynamic_lighting ? 1.0f : 0.0f;
+        constants[43] = 0.0f;
+        constants[44] = draw.retail_macro_scale;
+        constants[45] = draw.retail_macro_opacity;
+        constants[46] = has_macro ? 1.0f : 0.0f;
+        constants[47] =
+            decal_family && draw.retail_decal_texture != 0
+                ? (family == 4 ? 2.0f : 1.0f)
+                : (has_masks ? 3.0f : 0.0f);
+        constants[48] = 0.0f;
+        constants[49] = 0.0f;
+        constants[50] = static_cast<float>(v2_flags);
+        constants[51] = draw.retail_detail_scale;
+      }
       cmd->SetRootConstants(0, 52, constants, 0);
       cmd->DrawIndexed(draw.index_count, draw.first_index, 0);
       ++draw_calls;

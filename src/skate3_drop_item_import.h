@@ -9,6 +9,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include <skate/world/world_map.h>
+
 namespace skate3::drop_item_import {
 
 struct TextureBinding {
@@ -40,6 +42,12 @@ struct Recipe {
 bool ParseRecipe(
     std::string_view xml, bool dynamic,
     Recipe& recipe, std::string& error);
+
+// Public pure classifiers keep converter fidelity policy covered by
+// non-game tests without exposing archive or RX2 internals.
+skate::world::RetailShaderFamily ShaderFamilyForMaterialType(
+    std::string_view type);
+std::string RetailTextureSemantic(std::string_view channel);
 
 struct Progress {
   std::size_t completed = 0;

@@ -78,6 +78,13 @@ enum class RetailShaderFamily : std::uint32_t {
   Incandescent = 12,
   EnvironmentReflectiveTransparent = 13,
   IncandescentUvScroll = 14,
+  // Rigid park-editor and droppable props use the retail dynamicobject
+  // lighting model. These selectors are already consumed by the exact
+  // native-scene shader and deliberately remain separate from world
+  // environment families, which expect baked lightmaps.
+  DynamicObject = 21,
+  DynamicObjectAlphaTest = 22,
+  DynamicObjectDecal = 23,
   FlowingWater = 30,
   Ocean = 31,
   OceanReflection = 32,
