@@ -10,9 +10,19 @@ from mathutils import Vector
 
 GRIND_COLLECTION = "OW_GROUP_4_GRINDS"
 GENERATED_PROPERTY = "sk8_auto_generated_grinds"
+EXCLUDE_PROPERTY = "sk8_auto_grind_exclude"
 GRIND_SOURCE_COLLECTIONS = {
     "OW_GROUP_1_PRESENTATION_COLLISION",
     "OW_GROUP_2_NO_PRESENTATION",
+    "OW_COLLISION",
+}
+GRIND_OWNER_COLLECTIONS = {
+    "OW_GROUP_1_PRESENTATION_COLLISION",
+    "OW_VISUAL",
+}
+GRIND_COLLECTIONS = {
+    GRIND_COLLECTION,
+    "OW_GRIND",
 }
 
 
@@ -61,8 +71,39 @@ def _is_grind_source(obj: bpy.types.Object) -> bool:
     )
 
 
+def _manual_grind_owner_names() -> set[str]:
+    result: set[str] = set()
+    for collection_name in GRIND_COLLECTIONS:
+        collection = bpy.data.collections.get(collection_name)
+        if collection is None:
+            continue
+        for obj in collection.all_objects:
+            if (
+                obj.type == "CURVE"
+                and not bool(obj.get(GENERATED_PROPERTY, False))
+                and obj.parent is not None
+                and obj.parent.type == "MESH"
+            ):
+                result.add(obj.parent.name)
+    return result
+
+
+def _grind_owner(source: bpy.types.Object) -> bpy.types.Object | None:
+    owner_name = str(source.get("ow_map_object_owner", "")).strip()
+    owner = bpy.data.objects.get(owner_name) if owner_name else None
+    if owner is not None and owner.type == "MESH":
+        return owner
+    if any(
+        collection.name in GRIND_OWNER_COLLECTIONS
+        for collection in source.users_collection
+    ):
+        return source
+    return None
+
+
 def _candidate_segments(settings: GrindSettings) -> list[Segment]:
     dependency_graph = bpy.context.evaluated_depsgraph_get()
+    manual_owner_names = _manual_grind_owner_names()
     result: list[Segment] = []
     for source in sorted(
         (
@@ -72,7 +113,12 @@ def _candidate_segments(settings: GrindSettings) -> list[Segment]:
             and obj.name != "OW_SPAWN"
             and not obj.hide_get()
             and not bool(obj.get(GENERATED_PROPERTY, False))
+            and not bool(obj.get(EXCLUDE_PROPERTY, False))
             and _is_grind_source(obj)
+            and (
+                (_grind_owner(obj) or obj).name
+                not in manual_owner_names
+            )
         ),
         key=lambda item: item.name.casefold(),
     ):
@@ -322,6 +368,12 @@ def generate_grinds(settings: GrindSettings | None = None) -> dict:
         obj[GENERATED_PROPERTY] = True
         obj["sk8_source_object"] = source
         collection.objects.link(obj)
+        source_object = bpy.data.objects.get(source)
+        owner = _grind_owner(source_object) if source_object else None
+        if owner is not None:
+            world_matrix = obj.matrix_world.copy()
+            obj.parent = owner
+            obj.matrix_world = world_matrix
         for chain in source_chains:
             spline = curve.splines.new("POLY")
             spline.points.add(len(chain) - 1)

@@ -607,7 +607,8 @@ float4 ShadePixel(VSOut i) {
     float3 ambient_light =
         dynamic_lighting
             ? sky_fill *
-                  (celestial_ambient * lerp(0.72, 1.12, sky_amount))
+                  (celestial_ambient * lerp(0.72, 1.12, sky_amount)) *
+                  (imported_material ? 0.45 : 1.0)
             : float3(0.0, 0.0, 0.0);
     if (imported_material && has_indirect_lightmap) {
       // UV1 holds static indirect illumination baked in Blender. It remains
@@ -638,7 +639,8 @@ float4 ShadePixel(VSOut i) {
     float3 diffuse_light =
         dynamic_lighting
             ? overlay.rgb * overlay.w *
-                  lerp(wrap * 0.24, ndotl, 0.84)
+                  lerp(wrap * 0.24, ndotl, 0.84) *
+                  (imported_material ? 0.55 : 1.0)
             : float3(0.0, 0.0, 0.0);
     float dynamic_visibility =
         SampleCsmShadowSoft(world_pos, 0.0, normal, i.pos.xy);
@@ -665,8 +667,9 @@ float4 ShadePixel(VSOut i) {
         overlay.rgb * f0 * specular +
         sky_fill * f0 * edge_fill * celestial_ambient *
             (dynamic_lighting ? 1.0 : 0.0);
+    float3 scene_linear_additive = float3(0.0, 0.0, 0.0);
     if (dynamic_lighting) {
-      lit += OwnedMovingLightContribution(
+      scene_linear_additive += OwnedMovingLightContribution(
           world_pos, normal, view_dir, albedo, roughness);
     }
     float3 emissive_color =
@@ -674,13 +677,18 @@ float4 ShadePixel(VSOut i) {
             ? SampleOwnedBlenderTexture(
                   decal_art, i.uv, albedo_address_mode).rgb
             : albedo;
-    lit += emissive_color * emissive_intensity;
-    // Blender Principled inputs, exported emissive strength, and authored
-    // local-light radiance all share this branch's scene-linear HDR space.
-    // PassGamma is only for legacy values authored as final display colour;
-    // applying its inverse tone curve here amplified Blender emission before
-    // bloom (for example, a blue channel of 5 became roughly 98 HDR units).
-    return ToneOut(max(lit, 0.0), output_alpha, false);
+    scene_linear_additive += emissive_color * emissive_intensity;
+    // The map body's sun, ambient and baked-light terms were calibrated as a
+    // final presentation colour. Feeding them directly into the HDR tone
+    // chain lifts their already-bright midtones a second time and flattens the
+    // whole scene toward white. Keep that established presentation through
+    // PassGamma's exact inverse, then add genuinely scene-linear Blender
+    // emission and authored local-light radiance before bloom and tone mapping.
+    // This retains HDR energy (a blue emission of 5 stays 5 rather than being
+    // expanded to roughly 98) without reinterpreting the ordinary map body.
+    return float4(
+        PassGamma(max(lit, 0.0)) + max(scene_linear_additive, 0.0),
+        output_alpha);
   }
   if (cam_pos.w < -42.5 && cam_pos.w > -43.5) {
     // Project-owned simulated water. Large waves and normals come from the

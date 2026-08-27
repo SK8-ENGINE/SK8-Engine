@@ -268,7 +268,6 @@ GrindSplineBuildResult BuildGrindSplineData(
         bytes, rail_offset + 28,
         native ? rail.retail_trailing_word : 0);
 
-    float cumulative_length = 0.0f;
     for (std::size_t local_segment = 0;
          local_segment < rail_segment_count; ++local_segment) {
       const std::size_t segment_index =
@@ -283,7 +282,14 @@ GrindSplineBuildResult BuildGrindSplineData(
         const Vec3 start = points[local_segment];
         const Vec3 end = points[local_segment + 1];
         const Vec3 delta = end - start;
-        const float length = Length(delta);
+        const Vec3 cubic_a{
+            -2.0f * delta.x,
+            -2.0f * delta.y,
+            -2.0f * delta.z};
+        const Vec3 cubic_b{
+            3.0f * delta.x,
+            3.0f * delta.y,
+            3.0f * delta.z};
         const Vec3 minimum{
             std::min(start.x, end.x),
             std::min(start.y, end.y),
@@ -293,15 +299,14 @@ GrindSplineBuildResult BuildGrindSplineData(
             std::max(start.y, end.y),
             std::max(start.z, end.z)};
 
-        WriteVec4(bytes, segment_offset, delta, 0.0f);
+        // Retail straight grind segments use the cubic smoothstep
+        // D + 3*delta*t^2 - 2*delta*t^3. The remaining coefficient
+        // and auxiliary fields stay zero in the native payload.
+        WriteVec4(bytes, segment_offset, cubic_a, 0.0f);
+        WriteVec4(bytes, segment_offset + 16, cubic_b, 0.0f);
         WriteVec4(bytes, segment_offset + 48, start, 1.0f);
-        WriteVec4(bytes, segment_offset + 64,
-                  {1.0f / length, 0.0f, 0.0f}, 0.0f);
         WriteVec4(bytes, segment_offset + 80, minimum, 0.0f);
         WriteVec4(bytes, segment_offset + 96, maximum, 0.0f);
-        WriteF32(bytes, segment_offset + 112, length);
-        WriteF32(bytes, segment_offset + 116, cumulative_length);
-        cumulative_length += length;
       }
       WriteU32(bytes, segment_offset + 120,
                static_cast<std::uint32_t>(rail_offset));

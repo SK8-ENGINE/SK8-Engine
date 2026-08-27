@@ -7,6 +7,12 @@
 
 namespace skate::world {
 
+inline constexpr int kLatestSupportedOwnedMapPackageVersion = 14;
+
+constexpr bool IsSupportedOwnedMapPackageVersion(int version) {
+  return version >= 1 && version <= kLatestSupportedOwnedMapPackageVersion;
+}
+
 // Reads the original SKATE package emitted by tools/blender_owned_map.
 // Packages are renderer-neutral: one file contains visual triangles with
 // UV0/UV1, embedded RGBA8 textures, independent collision triangles, grind

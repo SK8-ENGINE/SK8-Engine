@@ -1299,7 +1299,8 @@ MapDefinition LoadOwnedMapPackage(const std::filesystem::path& path) {
       magic[7] == '\0';
   const int package_version =
       skate_magic ? (magic[5] - '0') * 10 + (magic[6] - '0') : 0;
-  if (skate_magic && package_version > 14) {
+  if (skate_magic &&
+      package_version > kLatestSupportedOwnedMapPackageVersion) {
     throw std::runtime_error(
         "SKATE v" + std::to_string(package_version) +
         " requires a newer Custom Engine Layer release");
@@ -1310,7 +1311,9 @@ MapDefinition LoadOwnedMapPackage(const std::filesystem::path& path) {
        !version_14) ||
       reader.Scalar<std::uint32_t>() != kEndianMarker) {
     throw std::runtime_error(
-        "file is not a supported little-endian SKATE v1-v14 package");
+        "file is not a supported little-endian SKATE v1-v" +
+        std::to_string(kLatestSupportedOwnedMapPackageVersion) +
+        " package");
   }
 
   MapDefinition map;

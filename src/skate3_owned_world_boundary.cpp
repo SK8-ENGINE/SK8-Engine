@@ -25,9 +25,9 @@
 REXCVAR_DEFINE_BOOL(
     skate3_mechanics_sandbox_strip_retail_world_actors, true, "Skate 3",
     "While the owned custom-world sandbox is requested, prevent retail scene "
-    "DMOs and Living World pedestrians and vehicles from spawning behind it. "
-    "Generic dynamic presentation remains active because it also owns "
-    "player/board/on-foot transitions.")
+    "DMOs and Living World pedestrians, vehicles, and droppable dynamic "
+    "objects from spawning behind it. Player, board, and skater presentation "
+    "remain active.")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 
 REXCVAR_DEFINE_BOOL(
@@ -45,7 +45,6 @@ std::atomic<uint64_t> g_static_dmo_spawns_suppressed{0};
 std::atomic<uint64_t> g_pedestrian_spawns_suppressed{0};
 std::atomic<uint64_t> g_vehicle_spawns_suppressed{0};
 std::atomic<uint64_t> g_dynamic_object_spawns_suppressed{0};
-std::atomic<uint64_t> g_dynamic_presentation_calls_allowed{0};
 std::atomic<uint64_t> g_ai_spawn_requests{0};
 std::atomic<uint64_t> g_ai_spawns_owned{0};
 std::atomic<uint64_t> g_ai_spawns_suppressed{0};
@@ -69,8 +68,8 @@ void AnnounceOnce() {
                                           std::memory_order_acq_rel)) {
     REXLOG_INFO(
         "owned-world-boundary: retail scene DMOs, pedestrians, vehicles, "
-        "and AI spawns are disabled; generic player/board/on-foot dynamic "
-        "presentation remains active");
+        "droppable dynamic objects, and AI spawns are disabled; "
+        "player/board/skater presentation remains active");
   }
 }
 
@@ -280,9 +279,6 @@ void AppendTelemetry(std::ostream& out) {
       << g_vehicle_spawns_suppressed.load(std::memory_order_relaxed)
       << " owned_world_dynamic_object_spawns_suppressed="
       << g_dynamic_object_spawns_suppressed.load(std::memory_order_relaxed)
-      << " owned_world_dynamic_presentation_calls_allowed="
-      << g_dynamic_presentation_calls_allowed.load(
-             std::memory_order_relaxed)
       << " owned_world_npc_paths="
       << (CustomNpcPathsEnabled() ? 1 : 0)
       << " owned_world_npc_routes="
@@ -349,13 +345,16 @@ extern "C" REX_FUNC(sub_82C36300) {
 
 extern "C" REX_FUNC(sub_82C4D440) {
   if (skate3::owned_world_boundary::SuppressingRetailWorldActors()) {
-    // This boundary is not retail-prop-specific. Runtime evidence showed it
-    // is exercised tens of thousands of times even with scene DMO scheduling
-    // disabled, and suppressing it makes the on-foot state roll back after
-    // exactly 16 frames. Keep the precise scene/static/pedestrian/vehicle
-    // boundaries above, but preserve this shared dynamic presentation path.
-    skate3::owned_world_boundary::g_dynamic_presentation_calls_allowed
-        .fetch_add(1, std::memory_order_relaxed);
+    // Skate 3 TU3 symbol:
+    // LWDynamicObjectCensusMan::Spawn(LWEntitySpawnInfo const*).
+    // This is the Living World droppable-prop boundary, not the shared
+    // player/board/skater presentation path. The original function already
+    // returns nullptr on normal spawn failure, so its callers accept this
+    // suppression result.
+    skate3::owned_world_boundary::RecordSuppression(
+        skate3::owned_world_boundary::g_dynamic_object_spawns_suppressed);
+    ctx.r3.u64 = 0;
+    return;
   }
   __imp__sub_82C4D440(ctx, base);
 }

@@ -20,8 +20,14 @@ TOOL_ROOT = Path(__file__).resolve().parent
 ROOT = Path(__file__).resolve().parents[2]
 if str(TOOL_ROOT) not in sys.path:
     sys.path.insert(0, str(TOOL_ROOT))
+AUTO_MAP_SCRIPT_ROOT = (
+    TOOL_ROOT / "agent_workflow" / "sk8-auto-map" / "scripts"
+)
+if str(AUTO_MAP_SCRIPT_ROOT) not in sys.path:
+    sys.path.insert(0, str(AUTO_MAP_SCRIPT_ROOT))
 
 import create_bake_showcase as base  # noqa: E402
+from generate_grinds import generate_grinds  # noqa: E402
 from owned_world_material_addon.exporter import export_scene  # noqa: E402
 
 
@@ -30,6 +36,9 @@ PACKAGE_PATH = ROOT / "maps" / "blender_bake_showcase.skate"
 base.TEXTURE_DIR = (
     ROOT / "maps" / "blender_bake_showcase_textures"
 )
+MANUAL_GRIND_SPECS: list[
+    tuple[str, list[tuple[float, float, float]]]
+] = []
 
 
 def copy_uv_layer(
@@ -163,6 +172,7 @@ def add_rail_polyline(
         collider["ow_material"] = material.name
         collider["ow_map_object_owner"] = name
         collider["ow_upward_surface"] = False
+        collider["sk8_auto_grind_exclude"] = True
         collision.objects.link(collider)
     # Skate's native grind spline describes the contact line above the rail,
     # not the cylinder centreline. Keeping it slightly above the collision
@@ -172,7 +182,7 @@ def add_rail_polyline(
         (point[0], point[1], point[2] + grind_clearance)
         for point in points
     ]
-    base.add_grind_curve(f"{name}_Grind", grind_points, grinds)
+    MANUAL_GRIND_SPECS.append((name, grind_points))
 
 
 def prepare_editable_objects(
@@ -201,13 +211,6 @@ def prepare_editable_objects(
             bpy.ops.object.join()
         rail = segments[0]
         rail.name = rail_name
-        grind = grinds.objects.get(f"{rail_name}_Grind")
-        if grind is None:
-            raise RuntimeError(f"{rail_name} has no grind spline")
-        world_matrix = grind.matrix_world.copy()
-        grind.parent = rail
-        grind.matrix_world = world_matrix
-
     visual_names = {
         obj.name for obj in visual.objects if obj.type == "MESH"
     }
@@ -225,6 +228,30 @@ def prepare_editable_objects(
         collider["ow_map_object_owner"] = owner_name
 
     return base.prepare_shared_lightmap_uvs(visual)
+
+
+def add_manual_grind_curves(grinds: bpy.types.Collection) -> None:
+    """Create fresh validation curves without the automatic edge generator."""
+    if len(MANUAL_GRIND_SPECS) != 3:
+        raise RuntimeError(
+            "Feature Park must define exactly three manual grind rails"
+        )
+    for owner_name, points in MANUAL_GRIND_SPECS:
+        owner = bpy.data.objects.get(owner_name)
+        if owner is None or owner.type != "MESH":
+            raise RuntimeError(
+                f"manual grind owner {owner_name!r} is unavailable"
+            )
+        grind_name = f"{owner_name}_ManualGrind"
+        base.add_grind_curve(grind_name, points, grinds)
+        grind = grinds.objects.get(grind_name)
+        if grind is None:
+            raise RuntimeError(
+                f"manual grind {grind_name!r} was not created"
+            )
+        world_matrix = grind.matrix_world.copy()
+        grind.parent = owner
+        grind.matrix_world = world_matrix
 
 
 def add_npc_route(
@@ -757,15 +784,23 @@ def build_static_park(
 
 def build_scene() -> None:
     base.reset_scene()
+    MANUAL_GRIND_SPECS.clear()
     visual = base.make_collection("OW_VISUAL")
     collision = base.make_collection("OW_COLLISION")
-    grinds = base.make_collection("OW_GRIND")
+    grinds = base.make_collection("OW_GROUP_4_GRINDS")
     base.make_collection("OW_NPC_PATHS")
     npc_paths = base.make_collection("OW_NPC_PATHS_EXPERIMENTAL")
     materials, material_list = make_materials()
     build_static_park(materials, visual, collision, grinds, npc_paths)
 
     static_visuals = prepare_editable_objects(visual, collision, grinds)
+    grind_stats = generate_grinds()
+    print("Feature Park automatic grinds:", grind_stats)
+    add_manual_grind_curves(grinds)
+    print(
+        "Feature Park manual grinds:",
+        [name for name, _points in MANUAL_GRIND_SPECS],
+    )
     lightmap = bpy.data.images.new(
         "LM_BakedIndirect_Showcase", width=1024, height=1024, alpha=True
     )

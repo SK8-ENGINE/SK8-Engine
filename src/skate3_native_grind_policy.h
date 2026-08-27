@@ -10,6 +10,19 @@ enum class RegistrationDecision : std::uint8_t {
   AllowOwned,
 };
 
+// The streamer unloads GrindData runtime objects by the 64-bit identity
+// stored at offset zero. Reusing the intercepted retail asset identity makes
+// the owned runtime disappear when that retail streaming cell unloads.
+constexpr std::uint64_t OwnedRuntimeIdentity(
+    std::uint64_t retail_identity) noexcept {
+  constexpr std::uint64_t kOwnedIdentitySalt =
+      0x534B384752494E44ull;  // "SK8GRIND"
+  const std::uint64_t owned_identity =
+      retail_identity ^ kOwnedIdentitySalt;
+  return owned_identity != 0 ? owned_identity
+                             : ~kOwnedIdentitySalt;
+}
+
 constexpr RegistrationDecision DecideRegistration(
     bool installing_owned,
     bool original_world_replacement_requested) noexcept {

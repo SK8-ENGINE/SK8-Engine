@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise SKATE14/MOBJ3 validation and legacy package compatibility."""
+"""Exercise SKATE14/MOBJ3 validation and legacy object compatibility."""
 
 from __future__ import annotations
 
@@ -146,7 +146,7 @@ def main() -> int:
     sample = Path(sys.argv[1]).resolve()
     validator = Path(sys.argv[2]).resolve()
     legacy_object = Path(sys.argv[3]).resolve()
-    legacy_map = Path(sys.argv[4]).resolve()
+    editable_map = Path(sys.argv[4]).resolve()
     glass_sample = Path(sys.argv[5]).resolve()
 
     analysis = analyze_package(sample)
@@ -182,24 +182,33 @@ def main() -> int:
         and legacy_analysis["map_objects"][0]["physics"]["type"] == 0,
         "legacy SKATEOBJ did not default physics to disabled",
     )
-    legacy_map_analysis = analyze_package(legacy_map)
+    editable_map_analysis = analyze_package(editable_map)
+    editable_map_grind_indices = {
+        index
+        for root in editable_map_analysis["map_objects"]
+        for index in root["grind_indices"]
+    }
     require(
-        legacy_map_analysis["version"] == 12
-        and len(legacy_map_analysis["map_objects"]) > 1
+        editable_map_analysis["version"] == 14
+        and len(editable_map_analysis["map_objects"]) > 1
+        and editable_map_analysis["counts"]["grind_rails"] > 3
+        and editable_map_grind_indices
+        == set(range(editable_map_analysis["counts"]["grind_rails"]))
         and all(
             root["physics"]["type"] == 0
-            for root in legacy_map_analysis["map_objects"]
+            for root in editable_map_analysis["map_objects"]
         ),
-        "legacy SKATE map did not default physics to disabled",
+        "editable SKATE14 map lost broad owned grind coverage "
+        "or has unexpected object physics",
     )
-    for legacy_path, profile in (
+    for package_path, profile in (
         (legacy_object, True),
-        (legacy_map, False),
+        (editable_map, False),
     ):
         completed = subprocess.run(
             [
                 str(validator),
-                str(legacy_path),
+                str(package_path),
                 *(["--object-profile"] if profile else []),
             ],
             check=False,
@@ -208,7 +217,7 @@ def main() -> int:
         )
         require(
             completed.returncode == 0,
-            f"runtime validator rejected legacy package {legacy_path}: "
+            f"runtime validator rejected package {package_path}: "
             f"{completed.stderr}",
         )
 

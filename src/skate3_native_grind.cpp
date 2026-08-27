@@ -47,6 +47,7 @@ std::atomic<State> g_state{State::Disabled};
 // pointer. Preserving only its low word produced runtime objects under an
 // invalid identity even though the spline payload itself was intact.
 std::atomic<std::uint64_t> g_grind_data{0};
+std::atomic<std::uint64_t> g_owned_runtime_identity{0};
 std::atomic<std::uint32_t> g_memory_group{0};
 std::atomic<std::uint32_t> g_spline_data_address{0};
 std::atomic<std::uint32_t> g_spline_data_bytes{0};
@@ -391,7 +392,7 @@ void EnsureInstalled(PPCContext& ctx, std::uint8_t* base) noexcept {
           base + replacement_spline_data, updated.blob.bytes.data(),
           updated.blob.bytes.size());
       const std::uint64_t grind_data =
-          g_grind_data.load(std::memory_order_acquire);
+          g_owned_runtime_identity.load(std::memory_order_acquire);
       const std::uint32_t previous_runtime =
           g_runtime_object.load(std::memory_order_acquire);
       if (grind_data == 0 ||
@@ -541,9 +542,11 @@ void EnsureInstalled(PPCContext& ctx, std::uint8_t* base) noexcept {
   std::memcpy(base + spline_data, build.blob.bytes.data(),
               build.blob.bytes.size());
 
+  const std::uint64_t owned_runtime_identity =
+      OwnedRuntimeIdentity(grind_data);
   std::uint32_t runtime_object = 0;
   if (!RegisterOwnedSpline(
-          ctx, base, grind_data, spline_data,
+          ctx, base, owned_runtime_identity, spline_data,
           build.blob.rail_count, runtime_object)) {
     // The native runtime may have retained pointers before the observer
     // detected a failure, so keep the persistent blob alive.
@@ -556,12 +559,15 @@ void EnsureInstalled(PPCContext& ctx, std::uint8_t* base) noexcept {
                   std::memory_order_release);
     REXLOG_ERROR(
         "map-editor: grind install registration failed "
-        "identity=0x{:016X} rails={} segments={} bytes={}",
-        grind_data, build.blob.rail_count, build.blob.segment_count,
-        build.blob.bytes.size());
+        "retail_identity=0x{:016X} owned_identity=0x{:016X} "
+        "rails={} segments={} bytes={}",
+        grind_data, owned_runtime_identity, build.blob.rail_count,
+        build.blob.segment_count, build.blob.bytes.size());
     return;
   }
 
+  g_owned_runtime_identity.store(
+      owned_runtime_identity, std::memory_order_release);
   g_spline_data_address.store(spline_data,
                               std::memory_order_release);
   g_spline_data_bytes.store(
@@ -576,10 +582,12 @@ void EnsureInstalled(PPCContext& ctx, std::uint8_t* base) noexcept {
   g_applied_commit_serial.store(
       map_editor::TransformCommitSerial(), std::memory_order_release);
   REXLOG_INFO(
-      "map-editor: grind runtime installed identity=0x{:016X} "
+      "map-editor: grind runtime installed "
+      "retail_identity=0x{:016X} owned_identity=0x{:016X} "
       "rails={} segments={} bytes={} runtime=0x{:08X}",
-      grind_data, build.blob.rail_count, build.blob.segment_count,
-      build.blob.bytes.size(), runtime_object);
+      grind_data, owned_runtime_identity, build.blob.rail_count,
+      build.blob.segment_count, build.blob.bytes.size(),
+      runtime_object);
 }
 
 void AppendTelemetry(std::ostream& out) {
@@ -601,6 +609,8 @@ void AppendTelemetry(std::ostream& out) {
       << StateName(g_state.load(std::memory_order_acquire))
       << " sandbox_native_grind_data="
       << g_grind_data.load(std::memory_order_acquire)
+      << " sandbox_native_grind_owned_identity="
+      << g_owned_runtime_identity.load(std::memory_order_acquire)
       << " sandbox_native_grind_memory_group="
       << g_memory_group.load(std::memory_order_acquire)
       << " sandbox_native_grind_spline_data="

@@ -124,13 +124,23 @@ skate::world::MapDefinition MakePhysicsTestMap(
 int main() {
   using namespace skate::world;
 
+  static_assert(IsSupportedOwnedMapPackageVersion(1));
+  static_assert(IsSupportedOwnedMapPackageVersion(14));
+  static_assert(!IsSupportedOwnedMapPackageVersion(0));
+  static_assert(!IsSupportedOwnedMapPackageVersion(15));
+
   {
     const auto future_package =
         std::filesystem::temp_directory_path() /
         "skate_owned_world_future_format_test.skate";
+    constexpr int kFuturePackageVersion =
+        kLatestSupportedOwnedMapPackageVersion + 1;
+    static_assert(kFuturePackageVersion < 100);
     const std::array<std::uint8_t, 12> header = {
-        'S', 'K', 'A', 'T', 'E', '1', '5', '\0',
-        0x78, 0x56, 0x34, 0x12};
+        'S', 'K', 'A', 'T', 'E',
+        static_cast<std::uint8_t>('0' + kFuturePackageVersion / 10),
+        static_cast<std::uint8_t>('0' + kFuturePackageVersion % 10),
+        '\0', 0x78, 0x56, 0x34, 0x12};
     {
       std::ofstream output(
           future_package, std::ios::binary | std::ios::trunc);
@@ -1449,18 +1459,56 @@ int main() {
   Require(first_segment == 16 + 7 * 32 &&
               ReadBeU32(grind.blob.bytes, 16 + 24) == first_segment,
           "grind spline rail links are wrong");
-  Require(NearlyEqual(ReadBeF32(grind.blob.bytes, first_segment),
-                      21.0f) &&
-              NearlyEqual(ReadBeF32(grind.blob.bytes,
-                                    first_segment + 48),
-                          72.0f) &&
-              NearlyEqual(ReadBeF32(grind.blob.bytes,
-                                    first_segment + 52),
-                          20.395f) &&
-              NearlyEqual(ReadBeF32(grind.blob.bytes,
-                                    first_segment + 56),
-                          -54.0f),
-          "grind spline segment vectors are wrong");
+  const GrindRail& first_rail = definition.grind_rails.front();
+  const Vec3 first_delta =
+      first_rail.points[1] - first_rail.points[0];
+  const Vec3 first_start{
+      first_rail.points[0].x + 100.0f,
+      first_rail.points[0].y + 20.0f,
+      first_rail.points[0].z - 40.0f};
+  const Vec3 first_end{
+      first_rail.points[1].x + 100.0f,
+      first_rail.points[1].y + 20.0f,
+      first_rail.points[1].z - 40.0f};
+  for (std::size_t axis = 0; axis < 3; ++axis) {
+    const float delta = axis == 0 ? first_delta.x
+                        : axis == 1 ? first_delta.y
+                                    : first_delta.z;
+    const float start = axis == 0 ? first_start.x
+                        : axis == 1 ? first_start.y
+                                    : first_start.z;
+    const float end = axis == 0 ? first_end.x
+                      : axis == 1 ? first_end.y
+                                  : first_end.z;
+    const float cubic_a =
+        ReadBeF32(grind.blob.bytes, first_segment + axis * 4);
+    const float cubic_b =
+        ReadBeF32(grind.blob.bytes, first_segment + 16 + axis * 4);
+    const float cubic_c =
+        ReadBeF32(grind.blob.bytes, first_segment + 32 + axis * 4);
+    const float cubic_d =
+        ReadBeF32(grind.blob.bytes, first_segment + 48 + axis * 4);
+    Require(
+        NearlyEqual(cubic_a, -2.0f * delta) &&
+            NearlyEqual(cubic_b, 3.0f * delta) &&
+            NearlyEqual(cubic_c, 0.0f) &&
+            NearlyEqual(cubic_d, start) &&
+            NearlyEqual(cubic_d + cubic_c + cubic_b + cubic_a, end),
+        "generated grind spline cubic does not match retail layout");
+  }
+  Require(
+      ReadBeU32(grind.blob.bytes, first_segment + 12) == 0 &&
+          ReadBeU32(grind.blob.bytes, first_segment + 28) == 0 &&
+          ReadBeU32(grind.blob.bytes, first_segment + 44) == 0 &&
+          NearlyEqual(
+              ReadBeF32(grind.blob.bytes, first_segment + 60), 1.0f) &&
+          ReadBeU32(grind.blob.bytes, first_segment + 64) == 0 &&
+          ReadBeU32(grind.blob.bytes, first_segment + 68) == 0 &&
+          ReadBeU32(grind.blob.bytes, first_segment + 72) == 0 &&
+          ReadBeU32(grind.blob.bytes, first_segment + 76) == 0 &&
+          ReadBeU32(grind.blob.bytes, first_segment + 112) == 0 &&
+          ReadBeU32(grind.blob.bytes, first_segment + 116) == 0,
+      "generated grind spline auxiliary fields do not match retail layout");
   Require(ReadBeU32(grind.blob.bytes, first_segment + 120) == 16 &&
               ReadBeU32(grind.blob.bytes, first_segment + 124) == 0 &&
               ReadBeU32(grind.blob.bytes, first_segment + 128) == 0,

@@ -23,6 +23,8 @@
 #include "skate3_version.h"
 #include "skate3_win_icon.h"
 
+#include "skate/world/owned_map_package.h"
+
 #include <algorithm>
 #include <array>
 #include <cctype>
@@ -280,10 +282,11 @@ SkatePackageHeader InspectSkatePackage(const std::filesystem::path &path) {
     return result;
   }
   result.valid = true;
-  result.supported = result.version >= 1 && result.version <= 13;
+  result.supported =
+      skate::world::IsSupportedOwnedMapPackageVersion(result.version);
   if (!result.supported) {
     result.issue =
-        result.version > 13
+        result.version > skate::world::kLatestSupportedOwnedMapPackageVersion
             ? "This map uses SKATE v" + std::to_string(result.version) +
                   ". Update the Custom Engine Layer before loading it."
             : "This map uses an unsupported legacy SKATE format.";
