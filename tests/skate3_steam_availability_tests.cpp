@@ -9,6 +9,7 @@
 
 namespace {
 
+using skate3::multiplayer::steam::availability::CheckGate;
 using skate3::multiplayer::steam::availability::Tracker;
 using skate3::multiplayer::steam::availability::Transition;
 
@@ -74,11 +75,23 @@ void TestStableObservationsDoNotRepeatTransitions() {
          "stable available state must not repeat a transition");
 }
 
+void TestChecksAreOneShotUntilRequested() {
+  CheckGate checks;
+  Expect(checks.Consume(), "monitor startup must perform one initial check");
+  Expect(!checks.Consume(),
+         "an unavailable monitor must not retry continuously");
+  Expect(checks.Request(), "the first button press must queue a check");
+  Expect(!checks.Request(), "repeated button presses must coalesce");
+  Expect(checks.Consume(), "a requested check must run once");
+  Expect(!checks.Consume(), "a completed check must remain idle");
+}
+
 } // namespace
 
 int main() {
   TestUnavailableAvailableUnavailableTransitions();
   TestStableObservationsDoNotRepeatTransitions();
+  TestChecksAreOneShotUntilRequested();
 
   if (g_failures != 0) {
     std::cerr << g_failures << " Steam availability test(s) failed\n";

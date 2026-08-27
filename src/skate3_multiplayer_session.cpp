@@ -530,6 +530,9 @@ SessionSnapshot GetSessionSnapshot(const std::string& active_map) {
 
 SessionSnapshot RefreshServerBrowser(const std::string& active_map) {
   steam::Tick();
+  if (!steam::IsInitialized()) {
+    steam::RequestAvailabilityCheck();
+  }
   std::scoped_lock lock(g_mutex);
   return SnapshotLocked(active_map, true);
 }

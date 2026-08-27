@@ -56,7 +56,6 @@ constexpr std::string_view kSteamRuntimeArchiveSha256 =
     "9412348cc404563be5a43a28347cfeda3c679ee044a14d87a507ed2d796a537d";
 constexpr std::string_view kSteamRuntimeDllSha256 =
     "eb17909a76668cf9ae0b92a618a34a50f6c73d3a6787cb4dd8ce36a8b10bfb75";
-constexpr auto kInitializeRetryInterval = std::chrono::seconds(5);
 constexpr auto kServiceCheckInterval = std::chrono::seconds(1);
 constexpr auto kAvailabilityMonitorInterval = std::chrono::seconds(1);
 constexpr std::string_view kUnavailableStatus =
@@ -269,7 +268,7 @@ struct Runtime {
   bool pending_allow_late_join = true;
   std::uint64_t pending_password_hash = 0;
   availability::Tracker availability;
-  std::chrono::steady_clock::time_point initialize_retry_after{};
+  availability::CheckGate availability_checks;
   std::chrono::steady_clock::time_point service_check_after{};
 };
 
@@ -1086,8 +1085,6 @@ void ResetApiSessionLocked(Runtime& runtime, std::string status) {
   runtime.state = {};
   runtime.state.library_found = library_found;
   runtime.state.status = std::move(status);
-  runtime.initialize_retry_after =
-      std::chrono::steady_clock::now() + kInitializeRetryInterval;
   runtime.service_check_after = {};
   RecordAvailabilityLocked(runtime, false, runtime.state.status, active_lobby);
 }
@@ -1097,14 +1094,10 @@ bool InitializeLocked(Runtime& runtime) {
     return true;
   }
   const auto now = std::chrono::steady_clock::now();
-  if (now < runtime.initialize_retry_after) {
-    return false;
-  }
   // SteamAPI_InitFlat can take tens of milliseconds when AppID 480 is
   // unavailable (for example while another local test client owns it).
-  // Retry from the availability monitor at a modest interval rather than
-  // stalling a rendered frame or spamming initialization.
-  runtime.initialize_retry_after = now + kInitializeRetryInterval;
+  // The monitor runs this only for its startup check or a user-requested
+  // check, keeping the rendered frame responsive without retrying forever.
   if (runtime.api.module == nullptr && !LoadApi(runtime)) {
     return false;
   }
@@ -1171,7 +1164,6 @@ bool InitializeLocked(Runtime& runtime) {
   runtime.state.persona_name =
       persona == nullptr ? std::string{} : std::string(persona);
   runtime.state.initialized = true;
-  runtime.initialize_retry_after = {};
   runtime.service_check_after = now + kServiceCheckInterval;
   runtime.state.status =
       runtime.state.persona_name.empty()
@@ -1277,7 +1269,7 @@ void StartAvailabilityMonitor() {
     while (!stop_token.stop_requested()) {
       {
         std::scoped_lock lock(g_mutex);
-        TickLocked(g_runtime, true);
+        TickLocked(g_runtime, g_runtime.availability_checks.Consume());
       }
       for (int slice = 0;
            slice < 10 && !stop_token.stop_requested(); ++slice) {
@@ -1299,6 +1291,17 @@ void StopAvailabilityMonitor() {
     monitor = std::move(g_availability_monitor);
   }
   monitor.join();
+}
+
+void RequestAvailabilityCheck() {
+  std::scoped_lock lock(g_mutex);
+  if (g_runtime.state.initialized) {
+    return;
+  }
+  g_runtime.state.status = "Checking for Steam...";
+  if (g_runtime.availability_checks.Request()) {
+    REXLOG_INFO("steam-multiplayer: user requested an availability check");
+  }
 }
 
 void Tick() {

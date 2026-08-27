@@ -26,10 +26,13 @@ connection acts as a relay for the rest of the lobby.
 If the Steam runtime is absent, Steam is not running, or the signed-in Steam
 session becomes unavailable, the Multiplayer tab remains visible but disables
 its controls and reports `Start Steam to use multiplayer`. Offline and
-single-player play remain available. The game periodically retries the actual
-Steamworks connection and enables the tab automatically when it succeeds,
-without launching Steam or restarting the game. Same-PC discovery remains an
-explicit development/test mode rather than an automatic user-facing fallback.
+single-player play remain available. The game performs one actual Steamworks
+connection check during startup. If that check fails, the disabled
+page provides a `Check for Steam` button that performs one new check without
+launching Steam or restarting the game. Once connected, the game continues to
+monitor the live service state so a later disconnect degrades safely. Same-PC
+discovery remains an explicit development/test mode rather than an automatic
+user-facing fallback.
 
 ## Steam / Spacewar boundary
 

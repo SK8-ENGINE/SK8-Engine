@@ -33,4 +33,24 @@ private:
   Status status_ = Status::kUnknown;
 };
 
+class CheckGate {
+public:
+  [[nodiscard]] bool Request() {
+    const bool newly_requested = !requested_;
+    requested_ = true;
+    return newly_requested;
+  }
+
+  [[nodiscard]] bool Consume() {
+    const bool requested = requested_;
+    requested_ = false;
+    return requested;
+  }
+
+private:
+  // Check once when monitoring starts. Later checks are explicitly requested
+  // by the user rather than retried forever in the background.
+  bool requested_ = true;
+};
+
 } // namespace skate3::multiplayer::steam::availability
