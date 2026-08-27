@@ -23,10 +23,16 @@ discovery and membership, but gameplay pose, animation, and appearance
 packets travel directly between authenticated Steam peers. No player's
 connection acts as a relay for the rest of the lobby.
 
-If the Steam runtime is absent or Steam is not running, the menu reports that
-status and falls back to same-PC discovery. Local discovery records live under
-the user's local application-data directory and are removed when a session
-closes; they are not maps, saves, or project files.
+If the Steam runtime is absent, Steam is not running, or the signed-in Steam
+session becomes unavailable, the Multiplayer tab remains visible but disables
+its controls and reports `Start Steam to use multiplayer`. Offline and
+single-player play remain available. The game performs one actual Steamworks
+connection check during startup. If that check fails, the disabled
+page provides a `Check for Steam` button that performs one new check without
+launching Steam or restarting the game. Once connected, the game continues to
+monitor the live service state so a later disconnect degrades safely. Same-PC
+discovery remains an explicit development/test mode rather than an automatic
+user-facing fallback.
 
 ## Steam / Spacewar boundary
 
@@ -50,12 +56,11 @@ installation, the game performs this development setup automatically:
 - verify the extracted `steam_api64.dll` SHA-256 before loading it;
 - cache the verified runtime under `.cel-steam`;
 - generate the local `steam_appid.txt` marker containing `480`;
-- start Steam when necessary and connect to the signed-in Steam account.
+- connect to the signed-in Steam account when the user has Steam running.
 
 The runtime DLL and App 480 marker are not committed or embedded in the public
 archive. If automatic setup fails, read `.cel-steam/bootstrap.log`; multiplayer
-falls back to the same-PC development transport instead of preventing the game
-from starting.
+remains disabled while offline and single-player play continue normally.
 
 Spacewar does not open as a second game window. When setup succeeds, Steam
 tracks the running `skate3.exe` process as App 480 and friends may see the user

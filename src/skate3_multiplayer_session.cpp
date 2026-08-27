@@ -27,6 +27,8 @@ namespace {
 constexpr std::uint32_t kRegistryVersion = 1;
 constexpr std::int32_t kDefaultBasePort = 27051;
 constexpr std::int32_t kPortsPerSession = 100;
+constexpr std::string_view kSteamUnavailableMessage =
+    "Start Steam to use multiplayer.";
 
 struct RegistrySession {
   std::string id;
@@ -51,6 +53,10 @@ struct RuntimeState {
 
 std::mutex g_mutex;
 RuntimeState g_state;
+
+bool LocalTestModeEnabled() {
+  return rex::cvar::Query<bool>("skate3_multiplayer_local_visuals");
+}
 
 std::uint32_t CurrentPid() {
 #if defined(_WIN32)
@@ -448,10 +454,12 @@ std::optional<std::uint64_t> ParseSteamLobbyId(
 SessionSnapshot SnapshotLocked(const std::string& active_map,
                                bool refresh) {
   const steam::State steam_state = steam::GetState();
+  const bool local_test_mode = LocalTestModeEnabled();
   g_state.snapshot.steam_available = steam_state.initialized;
   g_state.snapshot.backend_name =
       steam_state.initialized ? "Steam P2P (Spacewar / App 480)"
-                              : "Local PC Test";
+      : local_test_mode       ? "Local PC Test"
+                              : "Steam unavailable";
   g_state.snapshot.steam_status = steam_state.status;
   if (steam_state.initialized) {
     if (refresh) {
@@ -487,6 +495,22 @@ SessionSnapshot SnapshotLocked(const std::string& active_map,
     }
     return g_state.snapshot;
   }
+  if (!local_test_mode) {
+    g_state.snapshot.phase = SessionPhase::kOffline;
+    g_state.snapshot.is_host = false;
+    g_state.snapshot.status =
+        steam_state.status.empty()
+            ? std::string(kSteamUnavailableMessage)
+            : steam_state.status;
+    g_state.snapshot.session_id.clear();
+    g_state.snapshot.session_name.clear();
+    g_state.snapshot.host_name.clear();
+    g_state.snapshot.map_name.clear();
+    g_state.snapshot.players = 0;
+    g_state.snapshot.max_players = 0;
+    g_state.snapshot.servers.clear();
+    return g_state.snapshot;
+  }
   if (refresh) {
     PopulateBrowser(active_map);
   }
@@ -506,6 +530,9 @@ SessionSnapshot GetSessionSnapshot(const std::string& active_map) {
 
 SessionSnapshot RefreshServerBrowser(const std::string& active_map) {
   steam::Tick();
+  if (!steam::IsInitialized()) {
+    steam::RequestAvailabilityCheck();
+  }
   std::scoped_lock lock(g_mutex);
   return SnapshotLocked(active_map, true);
 }
@@ -531,6 +558,11 @@ bool HostSession(const HostSettings& settings) {
         started ? "Creating Steam lobby..."
                 : steam::GetState().status;
     return started;
+  }
+  if (!LocalTestModeEnabled()) {
+    g_state.snapshot.phase = SessionPhase::kOffline;
+    g_state.snapshot.status = std::string(kSteamUnavailableMessage);
+    return false;
   }
   ResetActiveState();
   const auto base_port = FindHostBasePort();
@@ -607,6 +639,11 @@ bool JoinSession(const std::string& server_id, const std::string& password,
         started ? "Joining Steam lobby..."
                 : steam::GetState().status;
     return started;
+  }
+  if (!LocalTestModeEnabled()) {
+    g_state.snapshot.phase = SessionPhase::kOffline;
+    g_state.snapshot.status = std::string(kSteamUnavailableMessage);
+    return false;
   }
   ResetActiveState();
   std::optional<RegistrySession> target;

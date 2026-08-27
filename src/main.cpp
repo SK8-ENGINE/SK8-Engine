@@ -3,7 +3,6 @@
 // This file is yours to edit. 'rexglue migrate' will NOT overwrite it.
 
 #include "skate3_app_common.h"
-#include "skate3_steam_backend.h"
 #include <skate3_version.h>
 
 #include <string>
@@ -43,11 +42,6 @@ class Skate3PureApp : public Skate3BaseApp {
 
   static std::unique_ptr<rex::ui::WindowedApp> Create(
       rex::ui::WindowedAppContext& ctx) {
-    // Steam Input may replace or reorder legacy XInput/SDL devices when
-    // SteamAPI initializes. Do this before ReX constructs its input system so
-    // Skate assigns player 1 to the final controller once, rather than losing
-    // the controller when multiplayer first starts ticking in gameplay.
-    skate3::multiplayer::steam::Initialize();
     return std::unique_ptr<Skate3PureApp>(
         new Skate3PureApp(ctx, "skate3", skate3_PPCImageConfig));
   }

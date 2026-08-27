@@ -74,6 +74,9 @@ enum class PacketReliability {
 
 bool Initialize();
 bool IsInitialized();
+void StartAvailabilityMonitor();
+void StopAvailabilityMonitor();
+void RequestAvailabilityCheck();
 void Tick();
 State GetState();
 void RefreshLobbies();
