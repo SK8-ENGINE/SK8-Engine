@@ -1,6 +1,6 @@
 # Reviewed public release consumed by the in-game updater.
 # Package-Windows-Release.ps1 generates the replacement for each release.
-version = "0.1.0-preview.15"
-asset_url = "https://github.com/SK8-ENGINE/SK8-Engine/releases/download/v0.1.0-preview.15/Skate3CustomEngineLayer-0.1.0-preview.15-Windows.zip"
-sha256 = "ec5a683b6193c5660b9bd09536dd6170e43d107824891b879e07651ff6b8fc24"
-size = 46656623
+version = "0.1.0-preview.16"
+asset_url = "https://github.com/SK8-ENGINE/SK8-Engine/releases/download/v0.1.0-preview.16/Skate3CustomEngineLayer-0.1.0-preview.16-Windows.zip"
+sha256 = "19d5d02a22ee8136cd87b5b9e6e239604d5d017945023e4f3a9bb9f7c398b995"
+size = 47455681
