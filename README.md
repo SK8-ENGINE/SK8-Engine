@@ -1,5 +1,10 @@
 # Skate 3 Custom Engine Layer
 
+> **New here?** Download the
+> **[current Windows release (preview.15)](https://github.com/SK8-ENGINE/SK8-Engine/releases/download/v0.1.0-preview.15/Skate3CustomEngineLayer-0.1.0-preview.15-Windows.zip)**
+> and follow the [five-step setup guide](#download-and-first-start).
+> Do not download GitHub's automatic **Source code** zip.
+
 **Skate 3 Custom Engine Layer** builds a project-owned world, rendering,
 physics, and Blender map-authoring layer on top of
 [Skate3Recomp](https://github.com/mchughalex/skate3recomp). It keeps Skate 3's
@@ -12,20 +17,84 @@ grind paths, PBR materials, baked and dynamic lighting, day/night settings,
 weather, mirrors, water, and contact-driven hinged doors. The project is
 unofficial and is not affiliated with Electronic Arts.
 
-The first public preview is Windows/D3D12 only. The upstream recompilation
-supports additional platforms, but the Custom Engine Layer changes have not
-yet been validated on its Vulkan or macOS paths.
+## Download and first start
+
+The current public preview is for **Windows and D3D12**. Other platforms and
+render paths exist upstream, but the Custom Engine Layer has not been properly
+validated on Vulkan, Linux, or macOS yet.
+
+1. Download
+   [`Skate3CustomEngineLayer-0.1.0-preview.15-Windows.zip`](https://github.com/SK8-ENGINE/SK8-Engine/releases/download/v0.1.0-preview.15/Skate3CustomEngineLayer-0.1.0-preview.15-Windows.zip)
+   from the [preview.15 Releases page](https://github.com/SK8-ENGINE/SK8-Engine/releases/tag/v0.1.0-preview.15).
+   Do not download GitHub's automatic **Source code** zip.
+2. Extract the entire zip to a normal folder you control.
+3. Run `skate3.exe`.
+4. Select your own legally obtained Skate 3 Xbox 360 ISO when prompted.
+5. Let the installer prepare the local game files, then start the game
+   normally.
+
+The included Blender Feature Park should be selected automatically on a fresh
+install. Press **Escape** on keyboard or **RB + Start** on controller to open
+the settings menu.
+
+No retail maps or game files are included in the download.
+
+## Installing custom maps
+
+1. Open **Settings → Maps → Open Maps Folder**.
+2. Place your `.skate` map files in the folder that opens.
+3. Return to the game and press **Refresh Map List**.
+4. Select a map and press **Load Selected Map**.
+
+The game restarts when you change maps so it can reload the collision, grinds,
+physics, lighting, and renderer cleanly. Your selected map is remembered for
+the next launch.
+
+Only install `.skate` packages from people you trust. A `.blend` file is
+Blender source and cannot be loaded directly by the game. See
+[Custom Maps](CUSTOM_MAPS.md) for package compatibility, folder locations,
+troubleshooting, and map-authoring links.
+
+### What happens when the custom world starts
 
 Run the normal executable with no special launch flags. Once Skate 3 reaches
 gameplay, the Custom Engine Layer activates automatically, loads the selected
 map from the Maps folder, installs its native collision and grind data, and
 removes the retail world's static collision.
 
+### Updating the Custom Engine Layer
+
 Windows release builds can update themselves from **Settings → System →
 Update Custom Engine Layer**. The verified release is installed after the
 game closes, while retail game data, saves, settings, and user maps are left
 in place. The downloaded release also refreshes the standalone Blender addon
 zip; users remain in control of installing it into Blender.
+
+## Features at a glance
+
+- **Self-contained custom maps:** `.skate` packages can include visual
+  geometry, textures, materials, collision, grind paths, lights, authored
+  world settings, sounds, physics, doors, water, mirrors, and editable object
+  data. The current exporter writes SKATE v15.
+- **Blender map authoring:** the Windows release includes the installable
+  Owned World Authoring addon, the full source-only map toolkit, the
+  `sk8-auto-map` agent workflow, and an editable Feature Park example.
+- **Custom renderer and world controls:** custom maps support PBR materials,
+  baked and dynamic lighting, local lights, shadows, day/night palettes, and
+  world settings for time, sun, sky, ambient light, and lighting balance.
+- **Live map editor and custom objects:** press **G** during gameplay to enter
+  the editor and **E** to browse placeable objects. Shareable `.skateobj`
+  packages can carry their own rendering, collision, materials, grind rails,
+  and physics. Editor changes currently last for the running session only.
+- **Experimental multiplayer:** Steam lobbies replicate remote players,
+  boards, outfits, animation, tricks, and bails directly between peers.
+  Multiplayer remains experimental and does not yet provide shared collision,
+  scoring, trick authority, or host migration.
+
+The original skating, board physics, tricks, and animation still come from
+Skate 3. The Custom Engine Layer controls the world and systems around that
+gameplay. See [Known Issues](KNOWN_ISSUES.md) for the current limitations and
+[Changelog](CHANGELOG.md) for what each preview adds.
 
 ### Experimental native vanilla-style menu
 
