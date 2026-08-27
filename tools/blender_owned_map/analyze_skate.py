@@ -147,6 +147,7 @@ def analyze_package(
         record = {
                 "id": index + 1,
                 "name": name,
+                "display_color": struct.unpack_from("<3f", fields, 12),
                 "roughness": struct.unpack_from("<f", fields, 24)[0],
                 "emissive_intensity": struct.unpack_from(
                     "<f", fields, 28
@@ -437,6 +438,8 @@ def analyze_package(
     extension_tags: list[str] = []
     map_objects: list[dict[str, object]] = []
     break_groups: dict[int, dict[str, object]] = {}
+    blender_material_compatibility: list[dict[str, object]] = []
+    extension_bytes = b""
     if version >= 12:
         start = reader.offset
         extension_count = reader.u32("extension count")
@@ -607,6 +610,48 @@ def analyze_package(
                     }
                 if break_reader.offset != len(payload):
                     raise PackageError("BGRP has trailing bytes")
+            elif tag == "BMAT" and schema == 1:
+                material_reader = Reader(payload)
+                count = material_reader.u32(
+                    "Blender material compatibility count"
+                )
+                if count != material_count:
+                    raise PackageError(
+                        "Blender material compatibility count "
+                        f"{count} does not match {material_count} materials"
+                    )
+                for material_index in range(count):
+                    values = struct.unpack(
+                        "<IIIfIIIII",
+                        material_reader.take(
+                            36,
+                            f"Blender material compatibility "
+                            f"{material_index}",
+                        ),
+                    )
+                    material_id = values[0]
+                    if not 1 <= material_id <= material_count:
+                        raise PackageError(
+                            "Blender material compatibility uses invalid "
+                            f"material ID {material_id}"
+                        )
+                    compatibility = {
+                        "material_id": material_id,
+                        "secondary_albedo_texture": values[1],
+                        "blend_mask_texture": values[2],
+                        "blend_factor": values[3],
+                        "blend_mask_channel": values[4],
+                        "albedo_address_mode": values[5],
+                        "secondary_address_mode": values[6],
+                        "blend_mask_address_mode": values[7],
+                        "cull_mode": values[8],
+                    }
+                    blender_material_compatibility.append(compatibility)
+                    material_records[material_id - 1].update(compatibility)
+                if material_reader.offset != len(payload):
+                    raise PackageError(
+                        "Blender material compatibility has trailing bytes"
+                    )
         objects_by_id = {record["id"]: record for record in map_objects}
         for object_id, breakable in break_groups.items():
             record = objects_by_id.get(object_id)
@@ -616,6 +661,7 @@ def analyze_package(
                 )
             record["physics"].update(breakable)
         _section(sections, reader, "extensions", start)
+        extension_bytes = reader.data[start : reader.offset]
 
     if reader.offset != len(reader.data):
         raise PackageError(
@@ -697,6 +743,9 @@ def analyze_package(
         "retail_shader_families": retail_family_counts,
         "extension_tags": extension_tags,
         "map_objects": map_objects,
+        "blender_material_compatibility": (
+            blender_material_compatibility
+        ),
         "texture_decoded_bytes": texture_decoded_bytes,
         "texture_dimensions": texture_dimensions,
         "maximum_visual_index": maximum_index,
@@ -717,6 +766,9 @@ def analyze_package(
             ).hexdigest(),
             "grind_rails_sha256": hashlib.sha256(
                 grind_section_bytes
+            ).hexdigest(),
+            "extensions_sha256": hashlib.sha256(
+                extension_bytes
             ).hexdigest(),
             "authored_features_sha256": hashlib.sha256(
                 reader.data[authored_features_start : reader.offset]

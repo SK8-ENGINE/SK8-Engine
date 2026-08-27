@@ -61,7 +61,7 @@ _HELPER_OBJECT_MARKERS = (
     "scale_reference",
     "scale reference",
 )
-CACHE_SCHEMA = 20
+CACHE_SCHEMA = 21
 METADATA_FLOAT_COUNT = 49
 METADATA_BYTE_COUNT = METADATA_FLOAT_COUNT * 4
 RETAIL_NORMAL_ATTRIBUTE = "skate3_retail_normal"
@@ -81,11 +81,15 @@ EDITOR_COLLISION_OWNER_ATTRIBUTE = "ow_editor_collision_owner"
 class ExportMaterial:
     blender_material: bpy.types.Material
     material_id: int
+    export_name: str
+    display_color: tuple[float, float, float]
     albedo_texture: int
     lightmap_texture: int
     normal_texture: int
     orm_texture: int
     emissive_texture: int
+    secondary_albedo_texture: int
+    blend_mask_texture: int
     retail_shader_name: str
     retail_shader_family: int
     retail_render_flags: int
@@ -546,6 +550,12 @@ def _hash_mesh(
         _hash_matrix(digest, source_object.matrix_world)
         digest.update(
             struct.pack(
+                "<4f",
+                *(float(value) for value in source_object.color),
+            )
+        )
+        digest.update(
+            struct.pack(
                 "<IIII",
                 len(mesh.vertices),
                 len(mesh.loops),
@@ -600,11 +610,11 @@ def _hash_mesh(
                 )
             uv0, uv1 = _visual_uv_layers(mesh, source_object.name)
             _hash_foreach(digest, mesh.loops, "normal", 3, "f")
-            _hash_foreach(digest, uv0.data, "uv", 2, "f")
-            _hash_foreach(digest, uv1.data, "uv", 2, "f")
-            decal_uv = mesh.uv_layers.get("Decal")
-            if decal_uv is not None:
-                _hash_foreach(digest, decal_uv.data, "uv", 2, "f")
+            for uv_layer in sorted(
+                mesh.uv_layers, key=lambda layer: layer.name.casefold()
+            ):
+                _hash_text(digest, uv_layer.name)
+                _hash_foreach(digest, uv_layer.data, "uv", 2, "f")
             retail_frame = _retail_world_frame_attributes(mesh)
             if retail_frame is not None:
                 normal, tangent, handedness = retail_frame
@@ -658,6 +668,8 @@ def _scene_content_fingerprint(
         "ow_roughness",
         "ow_emissive",
         "ow_albedo_image",
+        "ow_secondary_albedo_image",
+        "ow_blend_mask_image",
         "ow_lightmap_image",
         "ow_lightmap_encoding",
         "ow_baked_strength",
@@ -666,6 +678,18 @@ def _scene_content_fingerprint(
         "ow_emissive_image",
         "ow_alpha_mode",
         "ow_alpha_cutoff",
+        "ow_blend_factor",
+        "ow_blend_mask_channel",
+        "ow_albedo_address_mode",
+        "ow_secondary_address_mode",
+        "ow_blend_mask_address_mode",
+        "ow_cull_mode",
+        "ow_uv_map",
+        "ow_secondary_uv_map",
+        "ow_blend_mask_uv_map",
+        "ow_uv_transform",
+        "ow_secondary_uv_transform",
+        "ow_blend_mask_uv_transform",
         "ow_audio_surface",
         "ow_physics_surface",
         "ow_surface_pattern",
@@ -860,6 +884,11 @@ def _scene_content_fingerprint(
         object_complete(f"Hashing NPC paths: {obj.name}")
 
     local_lights = 0
+    scene_eevee = getattr(bpy.context.scene, "eevee", None)
+    _hash_text(
+        digest,
+        repr(float(getattr(scene_eevee, "light_threshold", 0.01))),
+    )
     for obj in _visible_local_light_objects():
         light = obj.data
         local_lights += 1
@@ -869,8 +898,12 @@ def _scene_content_fingerprint(
             light.type,
             tuple(light.color),
             light.energy,
+            bool(getattr(light, "use_custom_distance", False)),
             light.cutoff_distance,
             light.shadow_soft_size,
+            getattr(light, "diffuse_factor", 1.0),
+            getattr(light, "specular_factor", 1.0),
+            getattr(light, "volume_factor", 1.0),
             getattr(light, "size", 0.0),
             getattr(light, "size_y", 0.0),
             getattr(light, "shape", ""),
@@ -1258,6 +1291,11 @@ def _pack_tangent_frame(
 def _export_local_lights() -> list[ExportLocalLight]:
     result: list[ExportLocalLight] = []
     type_ids = {"POINT": 0, "SPOT": 1, "AREA": 2}
+    scene_eevee = getattr(bpy.context.scene, "eevee", None)
+    light_threshold = max(
+        1.0e-16,
+        float(getattr(scene_eevee, "light_threshold", 0.01)),
+    )
     for obj in _visible_local_light_objects():
         light = obj.data
         forward = obj.matrix_world.to_quaternion() @ Vector((0.0, 0.0, -1.0))
@@ -1274,8 +1312,27 @@ def _export_local_lights() -> list[ExportLocalLight]:
             )
         else:
             source_radius = max(float(light.shadow_soft_size), 0.01)
+        if bool(getattr(light, "use_custom_distance", False)):
+            influence_radius = float(light.cutoff_distance)
+        else:
+            # Match Eevee's automatic influence radius. Blender's
+            # cutoff_distance remains at an inactive 40 m default when
+            # Custom Distance is disabled; exporting that value made every
+            # indoor light overlap neighbouring rooms.
+            maximum_power = (
+                max(float(value) for value in light.color)
+                * abs(float(light.energy) / 100.0)
+                * max(
+                    float(getattr(light, "diffuse_factor", 1.0)),
+                    float(getattr(light, "specular_factor", 1.0)),
+                    float(getattr(light, "volume_factor", 1.0)),
+                )
+            )
+            influence_radius = math.sqrt(
+                maximum_power / light_threshold
+            )
         influence_radius = max(
-            float(light.cutoff_distance), source_radius + 0.01
+            influence_radius, source_radius + 0.01
         )
 
         inner_cosine = 1.0
@@ -1297,9 +1354,9 @@ def _export_local_lights() -> list[ExportLocalLight]:
                 position=_to_runtime(obj.matrix_world.translation),
                 direction=tuple(float(value) for value in runtime_forward),
                 color=tuple(float(value) for value in light.color),
-                # Blender's local lights use Watts. This maps the familiar
-                # default 1000 W light to the renderer's established 10-unit
-                # local-light scale.
+                # Eevee derives local-light influence from power / 100 and
+                # evaluates inverse-square falloff. Keep the same power scale
+                # in the package; the shader applies Blender's attenuation.
                 intensity=max(0.001, float(light.energy) * 0.01),
                 influence_radius=influence_radius,
                 source_radius=source_radius,
@@ -1420,6 +1477,65 @@ def _used_export_materials(
             if identity not in seen:
                 result.append(material)
                 seen.add(identity)
+    if not result:
+        raise ValueError("export groups do not reference any materials")
+    return result
+
+
+def _object_material_tint(
+    obj: bpy.types.Object,
+    material: bpy.types.Material,
+) -> tuple[float, float, float]:
+    if not bool(material.get("ow_uses_object_color", False)):
+        return 1.0, 1.0, 1.0
+    return tuple(
+        round(max(0.0, min(1.0, float(obj.color[index]))), 6)
+        for index in range(3)
+    )
+
+
+def _used_export_material_variants(
+    visual_objects: list[bpy.types.Object],
+    collision_objects: list[bpy.types.Object],
+) -> list[
+    tuple[bpy.types.Material, tuple[float, float, float]]
+]:
+    result: list[
+        tuple[bpy.types.Material, tuple[float, float, float]]
+    ] = []
+    seen: set[tuple[int, tuple[float, float, float]]] = set()
+    for obj in visual_objects:
+        if obj.type != "MESH":
+            continue
+        for slot in obj.material_slots:
+            material = slot.material
+            if material is None:
+                continue
+            tint = _object_material_tint(obj, material)
+            key = material.as_pointer(), tint
+            if key not in seen:
+                seen.add(key)
+                result.append((material, tint))
+    for obj in collision_objects:
+        if obj.type != "MESH":
+            continue
+        for slot in obj.material_slots:
+            material = slot.material
+            if material is None:
+                continue
+            existing = next(
+                (
+                    variant
+                    for variant in result
+                    if variant[0] == material
+                ),
+                None,
+            )
+            if existing is not None:
+                continue
+            tint = (1.0, 1.0, 1.0)
+            seen.add((material.as_pointer(), tint))
+            result.append((material, tint))
     if not result:
         raise ValueError("export groups do not reference any materials")
     return result
@@ -1643,6 +1759,8 @@ def _referenced_images(
     for material in materials:
         for property_name in (
             "ow_albedo_image",
+            "ow_secondary_albedo_image",
+            "ow_blend_mask_image",
             "ow_lightmap_image",
             "ow_normal_image",
             "ow_orm_image",
@@ -1916,9 +2034,105 @@ def _duplicate_visual_surface_keep_mask(
     return keep
 
 
+def _blender_material_extension(
+    materials: list[ExportMaterial],
+) -> bytes:
+    payload = bytearray(struct.pack("<I", len(materials)))
+    record = struct.Struct("<IIIfIIIII")
+    for exported in materials:
+        material = exported.blender_material
+        blend_factor = float(material.get("ow_blend_factor", 0.0))
+        if not math.isfinite(blend_factor) or not 0.0 <= blend_factor <= 1.0:
+            raise ValueError(
+                f"material {material.name!r} has invalid blend factor"
+            )
+        payload.extend(
+            record.pack(
+                exported.material_id,
+                exported.secondary_albedo_texture,
+                exported.blend_mask_texture,
+                blend_factor,
+                _bounded_int(
+                    material, "ow_blend_mask_channel", 0, 4
+                ),
+                _bounded_int(
+                    material, "ow_albedo_address_mode", 0, 3
+                ),
+                _bounded_int(
+                    material, "ow_secondary_address_mode", 0, 3
+                ),
+                _bounded_int(
+                    material, "ow_blend_mask_address_mode", 0, 3
+                ),
+                _bounded_int(material, "ow_cull_mode", 1, 2),
+            )
+        )
+    return bytes(payload)
+
+
+def _material_uv_layer(
+    mesh: bpy.types.Mesh,
+    material: bpy.types.Material,
+    *,
+    secondary: bool = False,
+) -> bpy.types.MeshUVLoopLayer:
+    if secondary and str(material.get("skate3_shader_name", "")):
+        return mesh.uv_layers.get("Decal") or mesh.uv_layers["UVMap"]
+    if secondary:
+        uv_name = str(
+            material.get("ow_blend_mask_uv_map", "")
+            or material.get("ow_secondary_uv_map", "")
+            or material.get("ow_uv_map", "")
+        )
+    else:
+        uv_name = str(material.get("ow_uv_map", ""))
+    return (
+        mesh.uv_layers.get(uv_name)
+        if uv_name
+        else None
+    ) or mesh.uv_layers["UVMap"]
+
+
+def _material_uv_transform(
+    material: bpy.types.Material,
+    *,
+    secondary: bool = False,
+) -> tuple[float, float, float, float, float]:
+    if secondary:
+        value = (
+            material.get("ow_blend_mask_uv_transform")
+            if str(material.get("ow_blend_mask_image", ""))
+            else None
+        ) or material.get("ow_secondary_uv_transform")
+    else:
+        value = material.get("ow_uv_transform")
+    if value is None or len(value) != 5:
+        return 1.0, 1.0, 0.0, 0.0, 0.0
+    result = tuple(float(component) for component in value)
+    if not all(math.isfinite(component) for component in result):
+        raise ValueError(
+            f"material {material.name!r} has a non-finite UV transform"
+        )
+    return result
+
+
+def _transform_uv(uv, transform):
+    scale_u, scale_v, rotation, translate_u, translate_v = transform
+    source_u = float(uv[0]) * scale_u
+    source_v = float(uv[1]) * scale_v
+    cosine = math.cos(rotation)
+    sine = math.sin(rotation)
+    return (
+        source_u * cosine - source_v * sine + translate_u,
+        source_u * sine + source_v * cosine + translate_v,
+    )
+
+
 def _export_visual_geometry(
     visual_objects: list[bpy.types.Object],
-    material_name_ids: dict[str, int],
+    material_variant_ids: dict[
+        tuple[str, tuple[float, float, float]], int
+    ],
     progress: ProgressCallback | None = None,
 ) -> PackedVisualGeometry:
     depsgraph = bpy.context.evaluated_depsgraph_get()
@@ -2051,11 +2265,14 @@ def _export_visual_geometry(
                 mesh.polygons.foreach_get(
                     "material_index", polygon_materials
                 )
+                used_material_indices = numpy.unique(
+                    polygon_materials[triangle_polygons]
+                )
                 if (
-                    polygon_materials.size
+                    used_material_indices.size
                     and (
-                        int(polygon_materials.min()) < 0
-                        or int(polygon_materials.max())
+                        int(used_material_indices.min()) < 0
+                        or int(used_material_indices.max())
                         >= len(mesh.materials)
                     )
                 ):
@@ -2063,20 +2280,28 @@ def _export_visual_geometry(
                         f"mesh {source_object.name!r} has an invalid "
                         "material slot"
                     )
-                mesh_material_ids = numpy.empty(
+                mesh_material_ids = numpy.zeros(
                     len(mesh.materials), dtype=numpy.uint32
                 )
-                for material_index, material in enumerate(mesh.materials):
-                    if (
-                        material is None
-                        or material.name not in material_name_ids
-                    ):
+                for material_index in used_material_indices:
+                    material_index = int(material_index)
+                    material = mesh.materials[material_index]
+                    if material is None:
                         raise ValueError(
                             f"mesh {source_object.name!r} has an "
                             "unexported material"
                         )
+                    variant_key = (
+                        material.name,
+                        _object_material_tint(source_object, material),
+                    )
+                    if variant_key not in material_variant_ids:
+                        raise ValueError(
+                            f"mesh {source_object.name!r} has an "
+                            "unexported material colour variant"
+                        )
                     mesh_material_ids[material_index] = (
-                        material_name_ids[material.name]
+                        material_variant_ids[variant_key]
                     )
 
                 triangle_loops = triangle_loops.reshape((-1, 3))
@@ -2265,21 +2490,95 @@ def _export_visual_geometry(
                     runtime_binormals = numpy.cross(
                         runtime_normals, runtime_tangents
                     ) * runtime_handedness[:, None]
-                corner_materials = numpy.repeat(
-                    mesh_material_ids[
-                        polygon_materials[triangle_polygons]
-                    ],
-                    3,
+                triangle_material_indices = polygon_materials[
+                    triangle_polygons
+                ]
+                corner_material_indices = numpy.repeat(
+                    triangle_material_indices, 3
                 )
+                corner_materials = mesh_material_ids[
+                    corner_material_indices
+                ]
+                corner_base_uvs = base_uvs[triangle_loops].copy()
+                corner_secondary_uvs = decal_uvs[
+                    triangle_loops
+                ].copy()
+                uv_array_cache: dict[str, numpy.ndarray] = {
+                    uv0.name: base_uvs,
+                    decal_uv.name: decal_uvs,
+                }
+
+                def uv_values(layer):
+                    values = uv_array_cache.get(layer.name)
+                    if values is None:
+                        values = numpy.empty(
+                            loop_count * 2, dtype=numpy.float32
+                        )
+                        layer.data.foreach_get("uv", values)
+                        values = values.reshape((-1, 2))
+                        uv_array_cache[layer.name] = values
+                    return values
+
+                for material_index in used_material_indices:
+                    material_index = int(material_index)
+                    material = mesh.materials[material_index]
+                    corner_mask = (
+                        corner_material_indices == material_index
+                    )
+                    primary_layer = _material_uv_layer(
+                        mesh, material
+                    )
+                    secondary_layer = _material_uv_layer(
+                        mesh, material, secondary=True
+                    )
+                    selected_base = uv_values(primary_layer)[
+                        triangle_loops[corner_mask]
+                    ].copy()
+                    selected_secondary = uv_values(secondary_layer)[
+                        triangle_loops[corner_mask]
+                    ].copy()
+                    for selected, transform in (
+                        (
+                            selected_base,
+                            _material_uv_transform(material),
+                        ),
+                        (
+                            selected_secondary,
+                            _material_uv_transform(
+                                material, secondary=True
+                            ),
+                        ),
+                    ):
+                        scale_u, scale_v, rotation, move_u, move_v = (
+                            transform
+                        )
+                        source_u = selected[:, 0] * scale_u
+                        source_v = selected[:, 1] * scale_v
+                        cosine = math.cos(rotation)
+                        sine = math.sin(rotation)
+                        selected[:, 0] = (
+                            source_u * cosine
+                            - source_v * sine
+                            + move_u
+                        )
+                        selected[:, 1] = (
+                            source_u * sine
+                            + source_v * cosine
+                            + move_v
+                        )
+                    corner_base_uvs[corner_mask] = selected_base
+                    corner_secondary_uvs[corner_mask] = (
+                        selected_secondary
+                    )
 
                 if not all(
                     numpy.isfinite(values).all()
                     for values in (
                         runtime_positions,
                         runtime_normals,
-                        base_uvs[triangle_loops],
+                        corner_base_uvs,
                         light_uvs[triangle_loops],
-                        decal_uvs[triangle_loops],
+                        corner_secondary_uvs,
                         runtime_binormals,
                         runtime_handedness,
                     )
@@ -2304,10 +2603,10 @@ def _export_visual_geometry(
                 records = numpy.empty(corner_count, dtype=record_dtype)
                 records["position"] = runtime_positions
                 records["normal"] = runtime_normals
-                records["uv0"] = base_uvs[triangle_loops]
+                records["uv0"] = corner_base_uvs
                 records["uv1"] = light_uvs[triangle_loops]
                 records["material"] = corner_materials
-                records["uv2"] = decal_uvs[triangle_loops]
+                records["uv2"] = corner_secondary_uvs
                 records["tangent_frame"][:, :3] = numpy.rint(
                     numpy.clip(runtime_binormals, -1.0, 1.0) * 127.0
                 ).astype(numpy.int8)
@@ -2349,15 +2648,27 @@ def _export_visual_geometry(
                             "material slot"
                         )
                     material = mesh.materials[polygon.material_index]
-                    if (
-                        material is None
-                        or material.name not in material_name_ids
-                    ):
+                    if material is None:
                         raise ValueError(
                             f"mesh {source_object.name!r} has an "
                             "unexported material"
                         )
-                    material_id = material_name_ids[material.name]
+                    variant_key = (
+                        material.name,
+                        _object_material_tint(source_object, material),
+                    )
+                    if variant_key not in material_variant_ids:
+                        raise ValueError(
+                            f"mesh {source_object.name!r} has an "
+                            "unexported material colour variant"
+                        )
+                    material_id = material_variant_ids[variant_key]
+                    material_uv = _material_uv_layer(
+                        mesh, material
+                    )
+                    material_secondary_uv = _material_uv_layer(
+                        mesh, material, secondary=True
+                    )
                     for loop_index in triangle.loops:
                         loop = mesh.loops[loop_index]
                         point = (
@@ -2377,9 +2688,17 @@ def _export_visual_geometry(
                                     .vector
                                 )
                             )
-                        base_uv = uv0.data[loop_index].uv
+                        base_uv = _transform_uv(
+                            material_uv.data[loop_index].uv,
+                            _material_uv_transform(material),
+                        )
                         light_uv = uv1.data[loop_index].uv
-                        decal = decal_uv.data[loop_index].uv
+                        decal = _transform_uv(
+                            material_secondary_uv.data[loop_index].uv,
+                            _material_uv_transform(
+                                material, secondary=True
+                            ),
+                        )
                         handedness = 0.0
                         binormal = Vector((0.0, 0.0, 0.0))
                         orientation = (
@@ -2437,14 +2756,14 @@ def _export_visual_geometry(
                         values = (
                             *_to_runtime(point),
                             *_to_runtime(normal),
-                            float(base_uv.x),
-                            float(base_uv.y),
+                            float(base_uv[0]),
+                            float(base_uv[1]),
                             float(light_uv.x),
                             float(light_uv.y),
                         )
                         retail_values = (
-                            float(decal.x),
-                            float(decal.y),
+                            float(decal[0]),
+                            float(decal[1]),
                         )
                         if not all(
                             math.isfinite(value)
@@ -3244,6 +3563,9 @@ def _door_box_collision(
 def _export_hinged_doors(
     visual_objects: list[bpy.types.Object],
     material_name_ids: dict[str, int],
+    material_variant_ids: dict[
+        tuple[str, tuple[float, float, float]], int
+    ],
 ) -> list[ExportHingedDoor]:
     depsgraph = bpy.context.evaluated_depsgraph_get()
     result: list[ExportHingedDoor] = []
@@ -3329,7 +3651,13 @@ def _export_hinged_doors(
                         f"hinged door {source_object.name!r} has an "
                         "unexported material"
                     )
-                material_id = material_name_ids[material.name]
+                variant_key = (
+                    material.name,
+                    _object_material_tint(source_object, material),
+                )
+                material_id = material_variant_ids.get(
+                    variant_key, material_name_ids[material.name]
+                )
                 for loop_index in triangle.loops:
                     loop = mesh.loops[loop_index]
                     world_point = (
@@ -3513,19 +3841,42 @@ def export_scene(
     npc_path_objects = _objects_from_collections(
         NPC_PATH_COLLECTION, LEGACY_NPC_PATH_COLLECTION
     )
-    materials = _used_export_materials(visual_objects, collision_objects)
+    material_variants = _used_export_material_variants(
+        visual_objects, collision_objects
+    )
+    materials: list[bpy.types.Material] = []
+    seen_materials: set[int] = set()
+    for material, _tint in material_variants:
+        identity = material.as_pointer()
+        if identity not in seen_materials:
+            seen_materials.add(identity)
+            materials.append(material)
     images, image_ids = _referenced_images(materials)
-    material_ids = {
-        material.as_pointer(): index + 1
-        for index, material in enumerate(materials)
+    material_variant_ids = {
+        (material.name, tint): index + 1
+        for index, (material, tint) in enumerate(material_variants)
     }
-    material_name_ids = {
-        material.name: material_ids[material.as_pointer()]
-        for material in materials
-    }
+    material_name_ids: dict[str, int] = {}
+    for material, tint in material_variants:
+        material_name_ids.setdefault(
+            material.name,
+            material_variant_ids[(material.name, tint)],
+        )
 
     export_materials: list[ExportMaterial] = []
-    for material in materials:
+    for material, tint in material_variants:
+        material_id = material_variant_ids[
+            (material.name, tint)
+        ]
+        base_color = _material_color(material)
+        display_color = tuple(
+            base_color[index] * tint[index] for index in range(3)
+        )
+        export_name = material.name
+        if tint != (1.0, 1.0, 1.0):
+            export_name += " [Object Color " + ",".join(
+                f"{value:.3f}" for value in tint
+            ) + "]"
         (
             retail_shader_name,
             retail_shader_family,
@@ -3540,7 +3891,9 @@ def export_scene(
         export_materials.append(
             ExportMaterial(
                 blender_material=material,
-                material_id=material_ids[material.as_pointer()],
+                material_id=material_id,
+                export_name=export_name,
+                display_color=display_color,
                 albedo_texture=_texture_id(
                     material, "ow_albedo_image", image_ids
                 ),
@@ -3555,6 +3908,12 @@ def export_scene(
                 ),
                 emissive_texture=_texture_id(
                     material, "ow_emissive_image", image_ids
+                ),
+                secondary_albedo_texture=_texture_id(
+                    material, "ow_secondary_albedo_image", image_ids
+                ),
+                blend_mask_texture=_texture_id(
+                    material, "ow_blend_mask_image", image_ids
                 ),
                 retail_shader_name=retail_shader_name,
                 retail_shader_family=retail_shader_family,
@@ -3686,7 +4045,7 @@ def export_scene(
 
     geometry = _export_visual_geometry(
         static_visual_objects,
-        material_name_ids,
+        material_variant_ids,
         progress=lambda fraction, stage: _report_progress(
             progress,
             0.30 + fraction * 0.40,
@@ -3696,7 +4055,11 @@ def export_scene(
     _report_progress(progress, 0.71, "Packing map metadata")
     rails = _export_grinds(grind_objects)
     npc_routes = _export_npc_routes(npc_path_objects)
-    doors = _export_hinged_doors(visual_objects, material_name_ids)
+    doors = _export_hinged_doors(
+        visual_objects,
+        material_name_ids,
+        material_variant_ids,
+    )
     lights = _export_local_lights()
 
     spawn = bpy.data.objects.get(SPAWN_OBJECT)
@@ -3789,11 +4152,11 @@ def export_scene(
                 # so compensate the common decode without altering a byte
                 # of the source page or the artist-facing strength control.
                 baked_strength *= 0.25
-            _write_string(stream, material.name)
+            _write_string(stream, exported.export_name)
             _write_u32(stream, int(material.get("ow_flags", 1)))
             _write_f32(stream, float(material.get("ow_friction", 0.82)))
             _write_f32(stream, float(material.get("ow_restitution", 0.0)))
-            _write_vec(stream, _material_color(material))
+            _write_vec(stream, exported.display_color)
             _write_f32(stream, float(material.get("ow_roughness", 0.78)))
             _write_f32(stream, float(material.get("ow_emissive", 0.0)))
             _write_u32(stream, exported.albedo_texture)
@@ -4067,7 +4430,7 @@ def export_scene(
         )
         _write_u32(
             stream,
-            1 + (1 if has_break_groups else 0) +
+            2 + (1 if has_break_groups else 0) +
             (1 if retail_manifest is not None else 0),
         )
         stream.write(b"MOBJ")
@@ -4079,6 +4442,13 @@ def export_scene(
             _write_u32(stream, 1)
             _write_u32(stream, len(break_groups))
             _write_stored_bytes(stream, break_groups)
+        blender_material_metadata = _blender_material_extension(
+            export_materials
+        )
+        stream.write(b"BMAT")
+        _write_u32(stream, 1)
+        _write_u32(stream, len(blender_material_metadata))
+        _write_stored_bytes(stream, blender_material_metadata)
         if retail_manifest is not None:
             metadata = retail_manifest.as_string().encode("utf-8")
             stream.write(b"WMET")

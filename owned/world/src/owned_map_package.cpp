@@ -892,7 +892,20 @@ void Validate(MapDefinition& map) {
         (material.orm_texture != 0 &&
          !texture_ids.contains(material.orm_texture)) ||
         (material.emissive_texture != 0 &&
-         !texture_ids.contains(material.emissive_texture))) {
+         !texture_ids.contains(material.emissive_texture)) ||
+        (material.secondary_albedo_texture != 0 &&
+         !texture_ids.contains(material.secondary_albedo_texture)) ||
+        (material.blend_mask_texture != 0 &&
+         !texture_ids.contains(material.blend_mask_texture)) ||
+        !std::isfinite(material.blend_factor) ||
+        material.blend_factor < 0.0f || material.blend_factor > 1.0f ||
+        material.blend_mask_channel > 4 ||
+        material.albedo_address_mode > 3 ||
+        material.secondary_address_mode > 3 ||
+        material.blend_mask_address_mode > 3 ||
+        static_cast<std::uint32_t>(material.cull_mode) >
+            static_cast<std::uint32_t>(
+                SurfaceMaterial::CullMode::BackFaces)) {
       throw std::runtime_error("SKATE material table is invalid");
     }
     if (material.retail.enabled) {
@@ -1829,6 +1842,52 @@ MapDefinition LoadOwnedMapPackage(const std::filesystem::path& path) {
         break_group_seen = true;
         break_group_schema = schema;
         break_group_payload = std::move(payload);
+      } else if (
+          tag == std::array<char, 4>{'B', 'M', 'A', 'T'} &&
+          schema == 1) {
+        Reader material_reader(std::move(payload));
+        const std::uint32_t count =
+            material_reader.Scalar<std::uint32_t>();
+        RequireCount(count, "Blender material compatibility");
+        if (count != map.materials.size()) {
+          throw std::runtime_error(
+              "SKATE Blender material extension count is invalid");
+        }
+        for (std::uint32_t material_index = 0;
+             material_index < count; ++material_index) {
+          const MaterialId material_id =
+              material_reader.Scalar<MaterialId>();
+          const auto found = std::find_if(
+              map.materials.begin(), map.materials.end(),
+              [material_id](const SurfaceMaterial& material) {
+                return material.id == material_id;
+              });
+          if (found == map.materials.end()) {
+            throw std::runtime_error(
+                "SKATE Blender material extension ID is invalid");
+          }
+          found->secondary_albedo_texture =
+              material_reader.Scalar<TextureId>();
+          found->blend_mask_texture =
+              material_reader.Scalar<TextureId>();
+          found->blend_factor = material_reader.Scalar<float>();
+          found->blend_mask_channel =
+              static_cast<std::uint8_t>(
+                  material_reader.Scalar<std::uint32_t>());
+          found->albedo_address_mode =
+              static_cast<std::uint8_t>(
+                  material_reader.Scalar<std::uint32_t>());
+          found->secondary_address_mode =
+              static_cast<std::uint8_t>(
+                  material_reader.Scalar<std::uint32_t>());
+          found->blend_mask_address_mode =
+              static_cast<std::uint8_t>(
+                  material_reader.Scalar<std::uint32_t>());
+          found->cull_mode =
+              static_cast<SurfaceMaterial::CullMode>(
+                  material_reader.Scalar<std::uint32_t>());
+        }
+        material_reader.RequireEnd();
       }
     }
     if (break_group_seen) {

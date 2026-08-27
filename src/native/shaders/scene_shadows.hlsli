@@ -98,6 +98,78 @@ static const float2 kPcssTaps[12] = {
     float2(0.519456, 0.767022),   float2(0.185461, -0.893124),
     float2(0.507431, 0.064425),   float2(0.896420, 0.412458),
     float2(-0.321940, -0.932615), float2(-0.791559, -0.597705)};
+// These Vogel disks are immutable. Keeping their coordinates in constants
+// preserves the exact tap counts, radii and angular sequence without paying
+// for sqrt + sincos in every receiver pixel and every filter iteration.
+static const float2 kVogel13[13] = {
+    float2(0.1961161351, 0.0000000000),
+    float2(-0.2504717012, 0.2294527016),
+    float2(0.03833851576, -0.4368499176),
+    float2(0.3157037067, 0.4117789926),
+    float2(-0.5793547030, -0.1024791404),
+    float2(0.5488148605, -0.3491119763),
+    float2(-0.1835670232, 0.6828639308),
+    float2(-0.3500851003, -0.6740649074),
+    float2(0.7595427925, 0.2773822275),
+    float2(-0.7901765072, 0.3261752876),
+    float2(0.3809157457, -0.8139996943),
+    float2(0.2814906967, 0.8974287561),
+    float2(-0.8484107481, -0.4916682460)};
+static const float2 kVogel24[24] = {
+    float2(0.1443375673, 0.0000000000),
+    float2(-0.1843421807, 0.1688726159),
+    float2(0.02821638360, -0.3215128339),
+    float2(0.2323516369, 0.3030611327),
+    float2(-0.4263935162, -0.07542260514),
+    float2(0.4039168007, -0.2569394575),
+    float2(-0.1351016710, 0.5025742451),
+    float2(-0.2576556574, -0.4960983392),
+    float2(0.5590083593, 0.2041477919),
+    float2(-0.5815541628, 0.2400585117),
+    float2(0.2803463980, -0.5990875538),
+    float2(0.2071715433, 0.6604896807),
+    float2(-0.6244134036, -0.3618580312),
+    float2(0.7325063493, -0.1610417594),
+    float2(-0.4470354708, 0.6358663024),
+    float2(-0.1032787639, -0.7969735443),
+    float2(0.6340154176, 0.5343448795),
+    float2(-0.8531832308, 0.03528514291),
+    float2(0.6223292123, -0.6193058088),
+    float2(-0.04163247649, 0.9004258642),
+    float2(-0.5921539405, -0.7095916977),
+    float2(0.9380326687, 0.1262063616),
+    float2(-0.7947898723, 0.5530000532),
+    float2(0.2171779707, -0.9654016758)};
+static const float2 kVogel26[26] = {
+    float2(0.1386750491, 0.0000000000),
+    float2(-0.1771102384, 0.1622475613),
+    float2(0.02710942448, -0.3088995391),
+    float2(0.2232362319, 0.2911717180),
+    float2(-0.4096656392, -0.07246369509),
+    float2(0.3880707095, -0.2468594458),
+    float2(-0.1298014869, 0.4828577161),
+    float2(-0.2475475484, -0.4766358670),
+    float2(0.5370778592, 0.1961388541),
+    float2(-0.5587391666, 0.2306407577),
+    float2(0.2693481068, -0.5755847038),
+    float2(0.1990439804, 0.6345779591),
+    float2(-0.5999169932, -0.3476619508),
+    float2(0.7037693362, -0.1547239177),
+    float2(-0.4294977877, 0.6109205824),
+    float2(-0.09922702678, -0.7657074136),
+    float2(0.6091423099, 0.5133819543),
+    float2(-0.8197119337, 0.03390086875),
+    float2(0.5979145670, -0.5950097748),
+    float2(-0.03999918959, 0.8651011876),
+    float2(-0.5689231035, -0.6817536511),
+    float2(0.9012326367, 0.1212551501),
+    float2(-0.7636094095, 0.5313052655),
+    float2(0.2086578450, -0.9275279282),
+    float2(0.4826307193, 0.8422441933),
+    float2(-0.9434895289, -0.3009929230)};
+float2 VariableVogelTap(int tap_count, int index) {
+  return tap_count > 13 ? kVogel26[index] : kVogel13[index];
+}
 float CsmSoftTap(float2 suv, float refd, float tile_x0, float tile_x1) {
   // Taps clamp half a texel inside the tile so filtering never bleeds the
   // neighboring cascade (same convention as the exact character taps).
@@ -222,9 +294,7 @@ float SampleCsmShadowSoft(float3 wp, float extra_bias, float3 nrm,
     // at the tighter owned near cascade. The old 13 randomly rotated taps
     // exposed individual texels as low-resolution moving blotches.
     [loop] for (int j = 0; j < 24; ++j) {
-      float r = sqrt((float(j) + 0.5) / 24.0);
-      float a = float(j) * 2.399963;
-      float2 o = float2(cos(a), sin(a)) * r;
+      float2 o = kVogel24[j];
       acc += CsmSoftTap(suv0 + o * rfilt, refd, tile_x0, tile_x1);
     }
     return acc / 25.0;
@@ -366,9 +436,7 @@ float SampleStaticSunMap(float3 wp, float3 nrm, float2 px, float4 map_x,
   int n = r_uc > 0.3 * ucpm ? 26 : 13;
   float acc = 0.0;
   [loop] for (int j = 0; j < n; ++j) {
-    float r = sqrt((float(j) + 0.5) / float(n));
-    float a = float(j) * 2.399963;
-    float2 o = float2(cos(a), sin(a)) * r;
+    float2 o = VariableVogelTap(n, j);
     float d = NsmTap(suv + o * rfilt, refd, tile_u0, history);
     acc += saturate((d - refd) / w + 0.5);
   }
@@ -443,9 +511,7 @@ float SampleOwnedStaticCascade(float3 wp, float3 nrm, float2 px,
   int tap_count = r_uc > 0.3 * ucpm ? 26 : 13;
   float acc = 0.0;
   [loop] for (int j = 0; j < tap_count; ++j) {
-    float r = sqrt((float(j) + 0.5) / float(tap_count));
-    float a = float(j) * 2.399963;
-    float2 o = float2(cos(a), sin(a)) * r;
+    float2 o = VariableVogelTap(tap_count, j);
     float d = OwnedNsmTap(suv + o * rfilt, cascade_index);
     acc += saturate((d - refd) / soft_width + 0.5);
   }

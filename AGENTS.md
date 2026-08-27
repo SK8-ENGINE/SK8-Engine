@@ -4,6 +4,29 @@ This is the public SK8 Engine source repository. The Skate-specific runtime is
 the `third_party/rexglue-sdk` Git submodule. Preserve unrelated user changes and
 never reset, clean, or broadly revert the working tree.
 
+## Imported-map development
+
+Imported maps are local test inputs, never repository content. Keep source
+maps, converted Blender scenes, textures, generated `.skate` packages,
+inventories, plans, screenshots, launchers, logs, and extracted assets under
+ignored `out/local-tools/` paths or outside the repository. Do not stage or
+commit them, even when they expose an exporter or renderer defect.
+
+Use imported-map testing to improve universal Blender authoring, export,
+runtime rendering, collision, validation, and agent-workflow behavior:
+
+- treat Blender as the visual authority for authored maps;
+- fix reusable pipeline behavior instead of adding map-name, object-name,
+  material-name, coordinate, or asset-specific exceptions;
+- reproduce regressions with minimal synthetic geometry or metadata in
+  portable tests, without copying the imported map or its assets;
+- keep the checked-in `tools/blender_owned_map/agent_workflow/sk8-auto-map`
+  skill and its public documentation synchronized with workflow changes.
+
+Eligible changes are portable source, schemas, tests, documentation, and
+reusable tooling. Existing first-party demonstration assets are unrelated to
+this imported-map test policy and do not authorize adding another map.
+
 ## Releases
 
 Read `RELEASE.md` before publishing. When the user asks to commit, push, and

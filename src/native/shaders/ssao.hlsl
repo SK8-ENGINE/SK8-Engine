@@ -50,6 +50,11 @@ static const float kPi = 3.14159265f;
 // pass.)
 #define AO_SLICES 3
 #define AO_STEPS 3
+static const float2 kAoSliceDirection[AO_SLICES] = {
+    float2(1.0f, 0.0f),
+    float2(0.5f, 0.8660254038f),
+    float2(-0.5f, 0.8660254038f),
+};
 
 struct VSOut {
   float4 pos : SV_Position;
@@ -161,11 +166,18 @@ float ps_gtao(VSOut i) : SV_Target {
   float noise_dir = Ign(i.pos.xy);
   float noise_off = Ign(i.pos.xy + 41.13f);
   float inv_r = 1.0f / max(p0.x, 1e-4f);
+  // Every slice has the same per-pixel rotation. Compute that rotation once
+  // and apply it to the fixed three-slice basis instead of evaluating the
+  // same angle progression with a fresh sincos in each unrolled slice.
+  float noise_phi = noise_dir * (kPi / float(AO_SLICES));
+  float2 noise_rotation = float2(cos(noise_phi), sin(noise_phi));
 
   float vis = 0.0f;
   [unroll] for (int s = 0; s < AO_SLICES; ++s) {
-    float phi = (float(s) + noise_dir) * (kPi / float(AO_SLICES));
-    float2 sdir = float2(cos(phi), sin(phi));
+    float2 basis = kAoSliceDirection[s];
+    float2 sdir =
+        float2(basis.x * noise_rotation.x - basis.y * noise_rotation.y,
+               basis.x * noise_rotation.y + basis.y * noise_rotation.x);
     // The view-space direction a +sdir pixel step moves the surface point
     // (screen y runs down, view y up; aspect via the per-axis pixel sizes).
     float3 D = normalize(float3(sdir.x * size.z / proj.x,

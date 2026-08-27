@@ -7,6 +7,7 @@
 #include "skate3_demo_path.h"
 #include "skate3_map_editor.h"
 #include "skate3_native_scene.h"
+#include "skate3_owned_shadow_scheduler.h"
 
 #include "generated/skate3_init.h"
 
@@ -7042,63 +7043,161 @@ static bool RenderOwnedStaticCascades(
       std::max(42.0f, far_radius / 2.0f),
       far_radius,
   };
-  // The recomp may submit this scene hundreds of times per second. Real-time
-  // clocks keep "live" near shadows at display-rate instead of tying their
-  // cost to an uncapped internal frame counter. Middle/far run at lower rates
-  // where their projected movement is much smaller.
-  constexpr float update_hz[3] = {60.0f, 30.0f, 15.0f};
   const float depth_range = far_radius * 4.0f;
-  const float depth_half = depth_range * 0.5f;
   const mechanics_sandbox::map::VisualWorld& world =
       mechanics_sandbox::map::ActiveVisualWorld();
   nrhi::Cmd* cmd = context.cmd;
 
+  // Retain a cascade until its desired light-space projection has moved far
+  // enough to matter in its own texels. The per-cascade rate is only a ceiling:
+  // a paused sun and stationary camera perform no static-world shadow draws.
+  // Ordinary refreshes are spread across submissions; first use, a hot radius
+  // change, or a discontinuous time-of-day edit refreshes the coherent set.
+  struct CascadeCandidate {
+    float radius = 1.0f;
+    float texel_m = 1.0f;
+    float center[3] = {};
+    float rows[12] = {};
+    float vp[16] = {};
+    float sun_dot = 1.0f;
+    float sun_error_texels = 0.0f;
+    float camera_error_texels = 0.0f;
+    float pressure = 0.0f;
+    bool invalid = false;
+    bool configuration_changed = false;
+    bool projection_changed = false;
+    bool sudden_sun_jump = false;
+    bool rate_ready = false;
+    bool eligible = false;
+  };
+  const auto now = std::chrono::steady_clock::now();
+  std::array<CascadeCandidate, 3> candidates = {};
+  bool refresh_all = false;
   for (uint32_t cascade = 0; cascade < 3; ++cascade) {
-    const auto now = std::chrono::steady_clock::now();
-    const bool due =
-        !g_r.owned_static_sun_valid[cascade] ||
+    CascadeCandidate& candidate = candidates[cascade];
+    candidate.radius = radii[cascade];
+    candidate.texel_m =
+        2.0f * candidate.radius /
+        float(std::max(1u, g_r.owned_static_sun_size[cascade]));
+    candidate.center[0] = scene.cam_pos[0];
+    candidate.center[1] = scene.cam_pos[1];
+    candidate.center[2] = scene.cam_pos[2];
+    const float cx = xl[0] * candidate.center[0] +
+                     xl[1] * candidate.center[1] +
+                     xl[2] * candidate.center[2];
+    const float cy = yl[0] * candidate.center[0] +
+                     yl[1] * candidate.center[1] +
+                     yl[2] * candidate.center[2];
+    const float dx =
+        cx - std::round(cx / candidate.texel_m) * candidate.texel_m;
+    const float dy =
+        cy - std::round(cy / candidate.texel_m) * candidate.texel_m;
+    for (int axis = 0; axis < 3; ++axis) {
+      candidate.center[axis] -= xl[axis] * dx + yl[axis] * dy;
+      candidate.rows[axis] = xl[axis] / candidate.radius;
+      candidate.rows[4 + axis] = yl[axis] / candidate.radius;
+      candidate.rows[8 + axis] = zl[axis] / depth_range;
+    }
+    candidate.rows[3] =
+        -(candidate.rows[0] * candidate.center[0] +
+          candidate.rows[1] * candidate.center[1] +
+          candidate.rows[2] * candidate.center[2]);
+    candidate.rows[7] =
+        -(candidate.rows[4] * candidate.center[0] +
+          candidate.rows[5] * candidate.center[1] +
+          candidate.rows[6] * candidate.center[2]);
+    candidate.rows[11] =
+        0.5f - (candidate.rows[8] * candidate.center[0] +
+                candidate.rows[9] * candidate.center[1] +
+                candidate.rows[10] * candidate.center[2]);
+    for (int row = 0; row < 3; ++row) {
+      candidate.vp[row * 4 + 0] = candidate.rows[row];
+      candidate.vp[row * 4 + 1] = candidate.rows[4 + row];
+      candidate.vp[row * 4 + 2] = candidate.rows[8 + row];
+    }
+    candidate.vp[12] = candidate.rows[3];
+    candidate.vp[13] = candidate.rows[7];
+    candidate.vp[14] = candidate.rows[11];
+    candidate.vp[15] = 1.0f;
+
+    candidate.invalid = !g_r.owned_static_sun_valid[cascade];
+    if (!candidate.invalid) {
+      candidate.sun_dot =
+          owned_shadow::NormalizedDot(g_r.owned_nsm_sun[cascade], sun);
+      candidate.sun_error_texels =
+          owned_shadow::SunProjectionErrorTexels(
+              candidate.sun_dot, g_r.owned_static_sun_size[cascade]);
+      candidate.camera_error_texels =
+          owned_shadow::CameraProjectionErrorTexels(
+              g_r.owned_nsm_center[cascade], candidate.center, xl, yl,
+              candidate.texel_m);
+    }
+    candidate.configuration_changed =
+        !candidate.invalid &&
+        (std::fabs(g_r.owned_nsm_radius[cascade] - candidate.radius) >
+             1.0e-4f ||
+         std::fabs(g_r.owned_nsm_depth_range[cascade] - depth_range) >
+             1.0e-4f);
+    const owned_shadow::CascadePolicy& policy =
+        owned_shadow::kCascadePolicies[cascade];
+    candidate.projection_changed =
+        owned_shadow::ProjectionChanged(candidate.sun_error_texels,
+                                        candidate.camera_error_texels, policy);
+    candidate.sudden_sun_jump =
+        !candidate.invalid && owned_shadow::SuddenSunJump(candidate.sun_dot);
+    candidate.rate_ready =
         g_r.owned_nsm_next_update[cascade].time_since_epoch().count() == 0 ||
         now >= g_r.owned_nsm_next_update[cascade];
-    if (!due) {
+    candidate.pressure = owned_shadow::UpdatePressure(
+        candidate.sun_error_texels, candidate.camera_error_texels, policy);
+    candidate.eligible =
+        candidate.invalid || candidate.configuration_changed ||
+        candidate.sudden_sun_jump ||
+        (candidate.projection_changed && candidate.rate_ready);
+    refresh_all |= candidate.invalid || candidate.configuration_changed ||
+                   candidate.sudden_sun_jump;
+  }
+
+  int selected_cascade = -1;
+  if (!refresh_all) {
+    float best_pressure = -1.0f;
+    for (uint32_t cascade = 0; cascade < 3; ++cascade) {
+      if (candidates[cascade].eligible &&
+          candidates[cascade].pressure > best_pressure) {
+        best_pressure = candidates[cascade].pressure;
+        selected_cascade = int(cascade);
+      }
+    }
+  }
+
+  static auto s_last_adaptive_log = std::chrono::steady_clock::time_point{};
+  const bool log_adaptive_state =
+      s_last_adaptive_log.time_since_epoch().count() == 0 ||
+      now - s_last_adaptive_log >= std::chrono::seconds(5);
+  if (log_adaptive_state) {
+    s_last_adaptive_log = now;
+    REXLOG_INFO(
+        "native-scene: owned static cascade adaptive cache "
+        "(updates=[{},{},{}] sun_texels=[{:.2f},{:.2f},{:.2f}] "
+        "camera_texels=[{:.1f},{:.1f},{:.1f}] selected={} refresh_all={})",
+        g_r.owned_nsm_update_count[0], g_r.owned_nsm_update_count[1],
+        g_r.owned_nsm_update_count[2], candidates[0].sun_error_texels,
+        candidates[1].sun_error_texels, candidates[2].sun_error_texels,
+        candidates[0].camera_error_texels,
+        candidates[1].camera_error_texels,
+        candidates[2].camera_error_texels, selected_cascade, refresh_all);
+  }
+
+  for (uint32_t cascade = 0; cascade < 3; ++cascade) {
+    CascadeCandidate& candidate = candidates[cascade];
+    if (!(refresh_all || int(cascade) == selected_cascade)) {
       continue;
     }
     const auto submit_started = std::chrono::steady_clock::now();
-    const float radius = radii[cascade];
-    const float texel_m =
-        2.0f * radius /
-        float(std::max(1u, g_r.owned_static_sun_size[cascade]));
-    float center[3] = {scene.cam_pos[0], scene.cam_pos[1], scene.cam_pos[2]};
-    const float cx = xl[0] * center[0] + xl[1] * center[1] +
-                     xl[2] * center[2];
-    const float cy = yl[0] * center[0] + yl[1] * center[1] +
-                     yl[2] * center[2];
-    const float dx = cx - std::round(cx / texel_m) * texel_m;
-    const float dy = cy - std::round(cy / texel_m) * texel_m;
-    for (int axis = 0; axis < 3; ++axis) {
-      center[axis] -= xl[axis] * dx + yl[axis] * dy;
-    }
-    float rows[12] = {};
-    for (int axis = 0; axis < 3; ++axis) {
-      rows[axis] = xl[axis] / radius;
-      rows[4 + axis] = yl[axis] / radius;
-      rows[8 + axis] = zl[axis] / depth_range;
-    }
-    rows[3] = -(rows[0] * center[0] + rows[1] * center[1] +
-                rows[2] * center[2]);
-    rows[7] = -(rows[4] * center[0] + rows[5] * center[1] +
-                rows[6] * center[2]);
-    rows[11] = 0.5f - (rows[8] * center[0] + rows[9] * center[1] +
-                       rows[10] * center[2]);
-    float vp[16] = {};
-    for (int row = 0; row < 3; ++row) {
-      vp[row * 4 + 0] = rows[row];
-      vp[row * 4 + 1] = rows[4 + row];
-      vp[row * 4 + 2] = rows[8 + row];
-    }
-    vp[12] = rows[3];
-    vp[13] = rows[7];
-    vp[14] = rows[11];
-    vp[15] = 1.0f;
+    const float radius = candidate.radius;
+    const float* center = candidate.center;
+    const float* rows = candidate.rows;
+    const float* vp = candidate.vp;
     const auto chunk_overlaps_cascade =
         [&](const mechanics_sandbox::map::VisualChunk& chunk) {
           float umin = std::numeric_limits<float>::max();
@@ -7253,34 +7352,50 @@ static bool RenderOwnedStaticCascades(
     cmd->FlushBarriers();
     g_r.owned_static_sun_in_srv[cascade] = true;
     g_r.owned_static_sun_valid[cascade] = true;
-    std::memcpy(g_r.owned_nsm_rows[cascade], rows, sizeof(rows));
-    std::memcpy(g_r.owned_nsm_center[cascade], center, sizeof(center));
+    std::memcpy(g_r.owned_nsm_rows[cascade], rows,
+                sizeof(g_r.owned_nsm_rows[cascade]));
+    std::memcpy(g_r.owned_nsm_center[cascade], center,
+                sizeof(g_r.owned_nsm_center[cascade]));
     std::memcpy(g_r.owned_nsm_sun[cascade], sun, sizeof(sun));
     g_r.owned_nsm_radius[cascade] = radius;
     g_r.owned_nsm_depth_range[cascade] = depth_range;
     g_r.owned_nsm_last_update[cascade] = frame_number;
-    const float phase_seconds =
-        g_r.owned_nsm_update_count[cascade] == 0
-            ? (cascade == 0 ? 0.0f : (cascade == 1 ? 0.008f : 0.025f))
-            : 0.0f;
+    const owned_shadow::CascadePolicy& policy =
+        owned_shadow::kCascadePolicies[cascade];
     g_r.owned_nsm_next_update[cascade] =
         now + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
                   std::chrono::duration<float>(
-                      1.0f / update_hz[cascade] + phase_seconds));
+                      1.0f / policy.maximum_updates_per_second));
     g_r.owned_nsm_last_draws[cascade] = caster_draws;
     g_r.owned_nsm_last_chunks[cascade] = visible_chunks;
     const uint64_t update = ++g_r.owned_nsm_update_count[cascade];
-    if (update <= 8 || (update & 255u) == 0) {
+    if (update <= 8 || (update & 63u) == 0) {
       const float submit_ms =
           std::chrono::duration<float, std::milli>(
               std::chrono::steady_clock::now() - submit_started)
               .count();
+      const char* reason =
+          candidate.invalid
+              ? "initial"
+              : candidate.configuration_changed
+                    ? "configuration"
+                    : candidate.sudden_sun_jump
+                          ? "sun-jump"
+                          : candidate.sun_error_texels /
+                                        policy.sun_error_threshold_texels >=
+                                    candidate.camera_error_texels /
+                                        policy.camera_error_threshold_texels
+                                ? "sun"
+                                : "camera";
       REXLOG_INFO(
           "native-scene: owned static cascade {} update "
           "(radius={:.1f}m chunks={}/{} draws={} cpu_submit={:.2f}ms "
-          "update_hz={:.0f} update={})",
+          "reason={} sun_texels={:.2f} camera_texels={:.1f} "
+          "max_hz={:.0f} update={})",
           cascade, radius, visible_chunks, world.chunks.size(), caster_draws,
-          submit_ms, update_hz[cascade], update);
+          submit_ms, reason, candidate.sun_error_texels,
+          candidate.camera_error_texels, policy.maximum_updates_per_second,
+          update);
     }
   }
   return g_r.owned_static_sun_valid[0] &&
@@ -13338,6 +13453,8 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
           draw.albedo_texture != 0 || draw.indirect_lightmap != 0 ||
           draw.normal_texture != 0 || draw.orm_texture != 0 ||
           draw.emissive_texture != 0 ||
+          draw.secondary_albedo_texture != 0 ||
+          draw.blend_mask_texture != 0 ||
           draw.retail_chromaticity_texture != 0;
       const bool alpha_blend =
           draw.alpha_mode ==
@@ -13362,6 +13479,9 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
       cmd->SetTexture(
           2, ResolveOwnedMapTexture(
                  context, draw.indirect_lightmap, OwnedTextureRole::Data));
+      cmd->SetTexture(
+          4, ResolveOwnedMapTexture(
+                 context, draw.secondary_albedo_texture));
       cmd->SetTexturePair(
           5,
           ResolveOwnedMapTexture(context, draw.emissive_texture),
@@ -13389,7 +13509,9 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
           g_r.owned_nsm_active ? g_r.owned_static_sun_srv[2]
                                : g_r.white.srv,
           ResolveOwnedMapTexture(
-              context, draw.retail_chromaticity_texture,
+              context,
+              retail_exact ? draw.retail_chromaticity_texture
+                           : draw.blend_mask_texture,
               OwnedTextureRole::Data)};
       cmd->SetTextures(8, owned_material_maps, 6);
       if (retail_exact) {
@@ -13425,7 +13547,23 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
       constants[32] = draw.color[0];
       constants[33] = draw.color[1];
       constants[34] = draw.color[2];
-      constants[35] = imported ? -draw.alpha_cutoff : 0.0f;
+      std::uint32_t blender_compatibility =
+          static_cast<std::uint32_t>(std::lround(
+              std::clamp(draw.alpha_cutoff, 0.0f, 1.0f) * 255.0f));
+      blender_compatibility |=
+          static_cast<std::uint32_t>(std::lround(
+              std::clamp(draw.blend_factor, 0.0f, 1.0f) * 255.0f))
+          << 8u;
+      blender_compatibility |=
+          (draw.blend_mask_channel & 7u) << 16u;
+      blender_compatibility |=
+          (draw.albedo_address_mode & 3u) << 19u;
+      blender_compatibility |=
+          (draw.secondary_address_mode & 3u) << 21u;
+      blender_compatibility |=
+          (draw.blend_mask_address_mode & 3u) << 23u;
+      constants[35] =
+          imported ? std::bit_cast<float>(blender_compatibility) : 0.0f;
       std::uint32_t owned_flags = 1u;
       owned_flags |=
           static_cast<std::uint32_t>(draw.alpha_mode) << 1u;
@@ -13433,6 +13571,10 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
       owned_flags |= draw.orm_texture != 0 ? 16u : 0u;
       owned_flags |= draw.emissive_texture != 0 ? 32u : 0u;
       owned_flags |= draw.indirect_lightmap != 0 ? 64u : 0u;
+      owned_flags |=
+          draw.secondary_albedo_texture != 0 ? (1u << 22u) : 0u;
+      owned_flags |=
+          draw.blend_mask_texture != 0 ? (1u << 23u) : 0u;
       const bool has_skate2_lightmap =
           draw.retail_chromaticity_texture != 0 &&
           draw.skate2_lightmap_component >= 0.0f &&
@@ -14220,20 +14362,34 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
           draw.albedo_texture != 0 || draw.indirect_lightmap != 0 ||
           draw.normal_texture != 0 || draw.orm_texture != 0 ||
           draw.emissive_texture != 0 ||
+          draw.secondary_albedo_texture != 0 ||
+          draw.blend_mask_texture != 0 ||
           draw.retail_chromaticity_texture != 0;
       const bool alpha_blend =
           draw.alpha_mode ==
           skate::world::SurfaceMaterial::AlphaMode::Blend;
-      cmd->SetPipeline(
-          alpha_blend && g_r.pso_transparent != nullptr
-              ? g_r.pso_transparent
-              : (use_depth ? g_r.pso : g_r.pso_nodepth));
+      nrhi::Pipeline* door_pipeline =
+          use_depth && draw.cull_backfaces &&
+                  g_r.pso_cullback != nullptr
+              ? g_r.pso_cullback
+              : (use_depth ? g_r.pso : g_r.pso_nodepth);
+      if (alpha_blend && g_r.pso_transparent != nullptr) {
+        door_pipeline =
+            use_depth && draw.cull_backfaces &&
+                    g_r.pso_transparent_cullback != nullptr
+                ? g_r.pso_transparent_cullback
+                : g_r.pso_transparent;
+      }
+      cmd->SetPipeline(door_pipeline);
       cmd->SetTexture(
           1, ResolveOwnedMapTexture(context, draw.albedo_texture));
       cmd->SetTexture(
           2, ResolveOwnedMapTexture(
                  context, draw.indirect_lightmap,
                  OwnedTextureRole::Data));
+      cmd->SetTexture(
+          4, ResolveOwnedMapTexture(
+                 context, draw.secondary_albedo_texture));
       cmd->SetTexturePair(
           5,
           ResolveOwnedMapTexture(context, draw.emissive_texture),
@@ -14251,13 +14407,29 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
           g_r.owned_nsm_active ? g_r.owned_static_sun_srv[2]
                                : g_r.white.srv,
           ResolveOwnedMapTexture(
-              context, draw.retail_chromaticity_texture,
+              context, draw.blend_mask_texture,
               OwnedTextureRole::Data)};
       cmd->SetTextures(8, door_material_maps, 6);
       constants[32] = draw.color[0];
       constants[33] = draw.color[1];
       constants[34] = draw.color[2];
-      constants[35] = imported ? -draw.alpha_cutoff : 0.0f;
+      std::uint32_t blender_compatibility =
+          static_cast<std::uint32_t>(std::lround(
+              std::clamp(draw.alpha_cutoff, 0.0f, 1.0f) * 255.0f));
+      blender_compatibility |=
+          static_cast<std::uint32_t>(std::lround(
+              std::clamp(draw.blend_factor, 0.0f, 1.0f) * 255.0f))
+          << 8u;
+      blender_compatibility |=
+          (draw.blend_mask_channel & 7u) << 16u;
+      blender_compatibility |=
+          (draw.albedo_address_mode & 3u) << 19u;
+      blender_compatibility |=
+          (draw.secondary_address_mode & 3u) << 21u;
+      blender_compatibility |=
+          (draw.blend_mask_address_mode & 3u) << 23u;
+      constants[35] =
+          imported ? std::bit_cast<float>(blender_compatibility) : 0.0f;
       std::uint32_t owned_flags = 1u;
       owned_flags |=
           static_cast<std::uint32_t>(draw.alpha_mode) << 1u;
@@ -14265,6 +14437,10 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
       owned_flags |= draw.orm_texture != 0 ? 16u : 0u;
       owned_flags |= draw.emissive_texture != 0 ? 32u : 0u;
       owned_flags |= draw.indirect_lightmap != 0 ? 64u : 0u;
+      owned_flags |=
+          draw.secondary_albedo_texture != 0 ? (1u << 22u) : 0u;
+      owned_flags |=
+          draw.blend_mask_texture != 0 ? (1u << 23u) : 0u;
       const bool has_skate2_lightmap =
           draw.retail_chromaticity_texture != 0 &&
           draw.skate2_lightmap_component >= 0.0f &&

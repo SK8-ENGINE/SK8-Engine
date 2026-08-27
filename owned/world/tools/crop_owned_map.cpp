@@ -280,6 +280,37 @@ std::vector<std::uint8_t> PackCollision(
   return bytes;
 }
 
+std::vector<std::uint8_t> PackBlenderMaterialCompatibility(
+    const std::vector<SurfaceMaterial>& materials) {
+  std::vector<std::uint8_t> bytes;
+  bytes.reserve(
+      sizeof(std::uint32_t) +
+      materials.size() * (8u * sizeof(std::uint32_t) + sizeof(float)));
+  AppendScalar(
+      bytes, static_cast<std::uint32_t>(materials.size()));
+  for (const SurfaceMaterial& material : materials) {
+    AppendScalar(bytes, material.id);
+    AppendScalar(bytes, material.secondary_albedo_texture);
+    AppendScalar(bytes, material.blend_mask_texture);
+    AppendScalar(bytes, material.blend_factor);
+    AppendScalar(
+        bytes,
+        static_cast<std::uint32_t>(material.blend_mask_channel));
+    AppendScalar(
+        bytes,
+        static_cast<std::uint32_t>(material.albedo_address_mode));
+    AppendScalar(
+        bytes,
+        static_cast<std::uint32_t>(material.secondary_address_mode));
+    AppendScalar(
+        bytes,
+        static_cast<std::uint32_t>(material.blend_mask_address_mode));
+    AppendScalar(
+        bytes, static_cast<std::uint32_t>(material.cull_mode));
+  }
+  return bytes;
+}
+
 void SaveDiagnosticPackage(
     const std::filesystem::path& output,
     const MapDefinition& map,
@@ -364,7 +395,16 @@ void SaveDiagnosticPackage(
       stream, PackIndices(map.render_mesh.indices));
   WriteStoredBytes(
       stream, PackCollision(map.collision_triangles));
-  WriteScalar(stream, 0u);  // No extensions in the diagnostic crop.
+  const std::vector<std::uint8_t> blender_materials =
+      PackBlenderMaterialCompatibility(map.materials);
+  WriteScalar(stream, 1u);
+  constexpr std::array<char, 4> tag{'B', 'M', 'A', 'T'};
+  WriteBytes(stream, tag.data(), tag.size());
+  WriteScalar(stream, 1u);
+  WriteScalar(
+      stream,
+      static_cast<std::uint32_t>(blender_materials.size()));
+  WriteStoredBytes(stream, blender_materials);
 }
 
 float DistanceSquaredXZ(Vec3 point, Vec3 center) {
@@ -406,12 +446,14 @@ bool KeepTriangle(
 void AddMaterialTextures(
     const SurfaceMaterial& material,
     std::unordered_set<TextureId>& textures) {
-  const std::array<TextureId, 5> generic{
+  const std::array<TextureId, 7> generic{
       material.albedo_texture,
       material.indirect_lightmap,
       material.normal_texture,
       material.orm_texture,
-      material.emissive_texture};
+      material.emissive_texture,
+      material.secondary_albedo_texture,
+      material.blend_mask_texture};
   for (const TextureId texture : generic) {
     if (texture != 0) {
       textures.insert(texture);

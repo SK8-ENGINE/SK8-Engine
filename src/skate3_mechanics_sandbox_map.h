@@ -35,6 +35,8 @@ struct VisualDraw {
   skate::world::TextureId normal_texture = 0;
   skate::world::TextureId orm_texture = 0;
   skate::world::TextureId emissive_texture = 0;
+  skate::world::TextureId secondary_albedo_texture = 0;
+  skate::world::TextureId blend_mask_texture = 0;
   skate::world::TextureId retail_macro_texture = 0;
   skate::world::TextureId retail_decal_texture = 0;
   skate::world::TextureId retail_specular_texture = 0;
@@ -49,6 +51,11 @@ struct VisualDraw {
   float retail_scroll_u = 0.0f;
   float retail_scroll_v = 0.0f;
   float baked_indirect_strength = 0.0f;
+  float blend_factor = 0.0f;
+  uint32_t blend_mask_channel = 0;
+  uint32_t albedo_address_mode = 0;
+  uint32_t secondary_address_mode = 0;
+  uint32_t blend_mask_address_mode = 0;
   float skate2_lightmap_component = -1.0f;
   skate::world::SurfaceMaterial::AlphaMode alpha_mode =
       skate::world::SurfaceMaterial::AlphaMode::Opaque;
