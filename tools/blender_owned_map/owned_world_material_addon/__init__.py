@@ -1,4 +1,4 @@
-"""Human-friendly Blender authoring and export tools for SKATE v14.
+"""Human-friendly Blender authoring and export tools for SKATE v15.
 
 This addon and exporter are original project code. They do not import,
 invoke, redistribute, or depend on ArenaBuilder.
@@ -46,7 +46,7 @@ exporter = importlib.reload(_exporter)
 bl_info = {
     "name": "Owned World Authoring",
     "author": "Skate 3 Custom Engine Layer contributors",
-    "version": (1, 14, 3),
+    "version": (1, 15, 0),
     "blender": (5, 0, 0),
     "location": "3D View > Sidebar > Skate 3 Map",
     "description": "Create, validate, and export Skate 3 Custom Engine maps",
@@ -716,6 +716,9 @@ def _sync_scene(settings: "OwnedWorldSceneSettings") -> None:
     scene["ow_start_hour"] = float(settings.start_hour)
     scene["ow_end_hour"] = float(settings.end_hour)
     scene["ow_cycle_ping_pong"] = bool(settings.cycle_ping_pong)
+    scene["ow_dynamic_lighting_enabled_by_default"] = bool(
+        settings.dynamic_lighting_enabled_by_default
+    )
     scene["ow_orbit_azimuth"] = float(settings.orbit_azimuth)
     scene["ow_sky_zenith"] = tuple(settings.sky_zenith)
     scene["ow_sky_horizon"] = tuple(settings.sky_horizon)
@@ -829,6 +832,15 @@ class OwnedWorldSceneSettings(PropertyGroup):
     cycle_ping_pong: BoolProperty(
         name="Move Between Start and End",
         description="Animate back and forth without passing through night",
+        default=True,
+        update=_scene_updated,
+    )
+    dynamic_lighting_enabled_by_default: BoolProperty(
+        name="Dynamic Lighting On by Default",
+        description=(
+            "Initial per-map state for sun, moon, ambient light, and world "
+            "shadows; players may still toggle it for the current session"
+        ),
         default=True,
         update=_scene_updated,
     )
@@ -4859,6 +4871,7 @@ def _draw_map_panel(layout, context) -> None:
     )
     world.prop(settings, "map_name")
     world.prop(settings, "cycle_seconds")
+    world.prop(settings, "dynamic_lighting_enabled_by_default")
     world.prop(settings, "cycle_ping_pong")
     row = world.row(align=True)
     row.prop(settings, "start_hour")
@@ -5131,6 +5144,9 @@ def _hydrate_scene(scene: Scene) -> None:
     settings.end_hour = float(scene.get("ow_end_hour", 17.0))
     settings.cycle_ping_pong = bool(
         scene.get("ow_cycle_ping_pong", True)
+    )
+    settings.dynamic_lighting_enabled_by_default = bool(
+        scene.get("ow_dynamic_lighting_enabled_by_default", True)
     )
     settings.orbit_azimuth = float(scene.get("ow_orbit_azimuth", 0.62))
     settings.sky_zenith = tuple(

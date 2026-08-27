@@ -10,6 +10,10 @@ import struct
 import zlib
 from dataclasses import dataclass
 from pathlib import Path
+try:
+    from compression import zstd
+except ImportError:
+    zstd = None
 
 
 VERTEX_BYTES = 44
@@ -17,6 +21,154 @@ VERTEX_BYTES_V12 = 56
 COLLISION_TRIANGLE_BYTES_V10 = 44
 COLLISION_TRIANGLE_BYTES_V11 = 48
 RETAIL_COLLISION_ARCHIVE_MAGIC = b"RWCMSET1"
+
+
+def _inflate(stored: bytes, expected: int, label: str) -> bytes:
+    try:
+        decoded = zlib.decompress(stored)
+    except zlib.error as error:
+        raise PackageError(f"{label} DEFLATE payload is invalid") from error
+    if len(decoded) != expected:
+        raise PackageError(
+            f"{label} decoded to {len(decoded)} bytes; expected {expected}"
+        )
+    return decoded
+
+
+def _unzstd(stored: bytes, expected: int, label: str) -> bytes:
+    if zstd is None:
+        raise PackageError(
+            f"{label} uses Zstandard; run this analyzer with Python 3.14+"
+        )
+    try:
+        decoded = zstd.decompress(stored)
+    except Exception as error:
+        raise PackageError(f"{label} Zstandard payload is invalid") from error
+    if len(decoded) != expected:
+        raise PackageError(
+            f"{label} decoded to {len(decoded)} bytes; expected {expected}"
+        )
+    return decoded
+
+
+def _undo_rgba_filter(data: bytes, expected: int, label: str) -> bytes:
+    source = Reader(data)
+    width = source.u32(f"{label} filtered width")
+    height = source.u32(f"{label} filtered height")
+    row_size = width * 4
+    if row_size * height != expected:
+        raise PackageError(f"{label} filtered dimensions are invalid")
+    result = bytearray(expected)
+    for y in range(height):
+        filter_type = source.take(1, f"{label} row filter")[0]
+        if filter_type > 4:
+            raise PackageError(f"{label} row filter is invalid")
+        filtered = source.take(row_size, f"{label} filtered row")
+        row_offset = y * row_size
+        for x, value in enumerate(filtered):
+            left = result[row_offset + x - 4] if x >= 4 else 0
+            above = result[row_offset - row_size + x] if y else 0
+            upper_left = (
+                result[row_offset - row_size + x - 4]
+                if y and x >= 4
+                else 0
+            )
+            if filter_type == 1:
+                predictor = left
+            elif filter_type == 2:
+                predictor = above
+            elif filter_type == 3:
+                predictor = (left + above) // 2
+            elif filter_type == 4:
+                prediction = left + above - upper_left
+                distances = (
+                    abs(prediction - left),
+                    abs(prediction - above),
+                    abs(prediction - upper_left),
+                )
+                predictor = (left, above, upper_left)[distances.index(
+                    min(distances)
+                )]
+            else:
+                predictor = 0
+            result[row_offset + x] = (value + predictor) & 0xFF
+    if source.offset != len(data):
+        raise PackageError(f"{label} filtered payload has trailing bytes")
+    return bytes(result)
+
+
+def _undo_vertex_soa(data: bytes, expected: int, label: str) -> bytes:
+    if expected % VERTEX_BYTES_V12 or len(data) != expected:
+        raise PackageError(f"{label} vertex streams are invalid")
+    result = bytearray(expected)
+    fields = ((0, 12), (12, 12), (24, 8), (32, 8), (40, 4),
+              (44, 8), (52, 4))
+    source = 0
+    count = expected // VERTEX_BYTES_V12
+    for field_offset, field_size in fields:
+        for vertex in range(count):
+            destination = vertex * VERTEX_BYTES_V12 + field_offset
+            result[destination : destination + field_size] = data[
+                source : source + field_size
+            ]
+            source += field_size
+    return bytes(result)
+
+
+def _read_varuint(data: bytes, offset: int, label: str) -> tuple[int, int]:
+    value = 0
+    for shift in range(0, 64, 7):
+        if offset >= len(data):
+            raise PackageError(f"{label} varint is truncated")
+        byte = data[offset]
+        offset += 1
+        value |= (byte & 0x7F) << shift
+        if not byte & 0x80:
+            return value, offset
+    raise PackageError(f"{label} varint is invalid")
+
+
+def _undo_index_delta(data: bytes, expected: int, label: str) -> bytes:
+    if expected % 4:
+        raise PackageError(f"{label} index size is invalid")
+    result = bytearray(expected)
+    previous = 0
+    offset = 0
+    for index in range(expected // 4):
+        zigzag, offset = _read_varuint(data, offset, label)
+        delta = (zigzag >> 1) ^ -(zigzag & 1)
+        current = previous + delta
+        if not 0 <= current <= 0xFFFFFFFF:
+            raise PackageError(f"{label} index delta is invalid")
+        struct.pack_into("<I", result, index * 4, current)
+        previous = current
+    if offset != len(data):
+        raise PackageError(f"{label} has trailing index data")
+    return bytes(result)
+
+
+def _undo_indexed_collision(data: bytes, expected: int, label: str) -> bytes:
+    if expected % COLLISION_TRIANGLE_BYTES_V11:
+        raise PackageError(f"{label} collision size is invalid")
+    source = Reader(data)
+    vertex_count = source.u32(f"{label} collision vertex count")
+    vertices = source.take(vertex_count * 12, f"{label} collision vertices")
+    result = bytearray(expected)
+    for triangle in range(expected // COLLISION_TRIANGLE_BYTES_V11):
+        destination = triangle * COLLISION_TRIANGLE_BYTES_V11
+        for corner in range(3):
+            vertex = source.u32(f"{label} collision vertex index")
+            if vertex >= vertex_count:
+                raise PackageError(f"{label} collision vertex is invalid")
+            result[
+                destination + corner * 12 : destination + corner * 12 + 12
+            ] = vertices[vertex * 12 : vertex * 12 + 12]
+        result[destination + 36 : destination + 48] = source.take(
+            12, f"{label} collision fields"
+        )
+    if source.offset != len(data):
+        raise PackageError(f"{label} indexed collision has trailing bytes")
+    return bytes(result)
 
 
 class PackageError(ValueError):
@@ -51,7 +203,12 @@ class Reader:
     def skip(self, size: int, label: str) -> None:
         self.take(size, label)
 
-    def stored(self, expected_size: int, label: str) -> bytes:
+    def stored(
+        self,
+        expected_size: int,
+        label: str,
+        references: list[bytes] | None = None,
+    ) -> bytes:
         method = self.u32(f"{label} storage method")
         stored_size = self.u32(f"{label} stored size")
         stored = self.take(stored_size, f"{label} payload")
@@ -62,18 +219,37 @@ class Reader:
                     f"expected {expected_size}"
                 )
             return stored
-        if method != 1:
-            raise PackageError(f"{label} uses unsupported method {method}")
-        try:
-            decoded = zlib.decompress(stored)
-        except zlib.error as error:
-            raise PackageError(f"{label} DEFLATE payload is invalid") from error
-        if len(decoded) != expected_size:
-            raise PackageError(
-                f"{label} decoded to {len(decoded)} bytes; "
-                f"expected {expected_size}"
+        if method == 11:
+            if references is None or len(stored) != 4:
+                raise PackageError(f"{label} texture reference is invalid")
+            source = struct.unpack("<I", stored)[0]
+            if source >= len(references):
+                raise PackageError(f"{label} texture reference is out of range")
+            decoded = references[source]
+            if len(decoded) != expected_size:
+                raise PackageError(f"{label} texture reference size differs")
+            return decoded
+        if method in (1, 2):
+            return (
+                _inflate(stored, expected_size, label)
+                if method == 1
+                else _unzstd(stored, expected_size, label)
             )
-        return decoded
+        if method not in range(3, 11) or len(stored) < 4:
+            raise PackageError(f"{label} uses unsupported method {method}")
+        transformed_size = struct.unpack("<I", stored[:4])[0]
+        transformed = (
+            _unzstd(stored[4:], transformed_size, label)
+            if method <= 6
+            else _inflate(stored[4:], transformed_size, label)
+        )
+        if method in (3, 7):
+            return _undo_rgba_filter(transformed, expected_size, label)
+        if method in (4, 8):
+            return _undo_vertex_soa(transformed, expected_size, label)
+        if method in (5, 9):
+            return _undo_index_delta(transformed, expected_size, label)
+        return _undo_indexed_collision(transformed, expected_size, label)
 
 
 def _section(
@@ -140,9 +316,10 @@ def analyze_package(
         b"SKATE12\0",
         b"SKATE13\0",
         b"SKATE14\0",
+        b"SKATE15\0",
     ):
         raise PackageError(
-            f"unsupported magic {magic!r}; expected SKATE v8-v14"
+            f"unsupported magic {magic!r}; expected SKATE v8-v15"
         )
     version = int(magic[5:7])
     if reader.u32("endian marker") != 0x12345678:
@@ -167,6 +344,13 @@ def analyze_package(
     _section(sections, reader, "header_and_map_metadata", start)
 
     start = reader.offset
+    package_reader = reader
+    if version >= 15:
+        decoded_material_size = reader.u32("material block decoded size")
+        reader = Reader(
+            reader.stored(decoded_material_size, "material block")
+        )
+    material_start = reader.offset
     material_alpha_modes = {0: 0, 1: 0, 2: 0}
     material_depth_layers = {0: 0, 1: 0, 2: 0, 3: 0}
     retail_family_counts: dict[int, int] = {}
@@ -204,11 +388,25 @@ def analyze_package(
                 "physics_surface": struct.unpack_from("<I", fields, 68)[0],
                 "surface_pattern": struct.unpack_from("<I", fields, 72)[0],
         }
-        depth_layer = (
-            reader.u32(f"material {index} presentation depth layer")
-            if version >= 13
-            else 0
-        )
+        if version >= 13:
+            depth_layer = reader.u32(
+                f"material {index} presentation depth layer"
+            )
+        elif alpha_mode == 2:
+            depth_layer = 3
+        elif any(
+            token in name.lower()
+            for token in (
+                "sign", "poster", "billboard", "adbord", "advert",
+                "banner", "logo", "decal", "graffiti", "sticker",
+                "plaque", "letter", "neon",
+            )
+        ):
+            depth_layer = 2
+        elif alpha_mode == 1:
+            depth_layer = 1
+        else:
+            depth_layer = 0
         if depth_layer not in material_depth_layers:
             raise PackageError(
                 f"material {index} uses invalid depth layer {depth_layer}"
@@ -303,11 +501,16 @@ def analyze_package(
                     f"material {index} retail source metadata"
                 )
         material_records.append(record)
-    material_bytes = reader.data[start : reader.offset]
+    material_bytes = reader.data[material_start : reader.offset]
+    if version >= 15:
+        if reader.offset != len(reader.data):
+            raise PackageError("material block has trailing bytes")
+        reader = package_reader
     _section(sections, reader, "materials", start)
 
     start = reader.offset
     texture_decoded_bytes = 0
+    texture_payloads: list[bytes] = []
     texture_dimensions: list[dict[str, object]] = []
     texture_digest = hashlib.sha256()
     for index in range(texture_count):
@@ -317,7 +520,9 @@ def analyze_package(
         color_space = reader.u32(f"texture {index} color space")
         expected = width * height * 4
         if version >= 9:
-            rgba8 = reader.stored(expected, f"texture {index}")
+            rgba8 = reader.stored(
+                expected, f"texture {index}", texture_payloads
+            )
         else:
             byte_count = reader.u32(f"texture {index} byte count")
             if byte_count != expected:
@@ -325,6 +530,7 @@ def analyze_package(
                     f"texture {index} has {byte_count} bytes; expected {expected}"
                 )
             rgba8 = reader.take(byte_count, f"texture {index} RGBA8")
+        texture_payloads.append(rgba8)
         encoded_name = name.encode("utf-8")
         texture_digest.update(struct.pack("<I", len(encoded_name)))
         texture_digest.update(encoded_name)
@@ -479,6 +685,7 @@ def analyze_package(
     blender_material_compatibility: list[dict[str, object]] = []
     embedded_retail_collision: dict[str, object] | None = None
     embedded_retail_collision_bytes = b""
+    dynamic_lighting_enabled_by_default = True
     extension_bytes = b""
     if version >= 12:
         start = reader.offset
@@ -495,7 +702,13 @@ def analyze_package(
                 decoded_size, f"extension {extension_index}"
             )
             extension_tags.append(tag)
-            if tag == "MOBJ":
+            if tag == "WCFG":
+                if schema != 1 or len(payload) != 4:
+                    raise PackageError("WCFG extension is invalid")
+                dynamic_lighting_enabled_by_default = (
+                    struct.unpack("<I", payload)[0] != 0
+                )
+            elif tag == "MOBJ":
                 if schema not in (1, 2, 3) or (
                     schema == 3 and version < 14
                 ):
@@ -796,6 +1009,8 @@ def analyze_package(
         "material_depth_layers": material_depth_layers,
         "retail_shader_families": retail_family_counts,
         "extension_tags": extension_tags,
+        "dynamic_lighting_enabled_by_default":
+            dynamic_lighting_enabled_by_default,
         "embedded_retail_collision": embedded_retail_collision,
         "map_objects": map_objects,
         "blender_material_compatibility": (

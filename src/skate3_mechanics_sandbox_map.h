@@ -1,12 +1,12 @@
 #pragma once
 
-#include "skate/world/box3d_physics.h"
-#include "skate/world/world_map.h"
-#include "skate/world/skate_object_package.h"
-
 #include <cstddef>
 #include <cstdint>
 #include <vector>
+
+#include "skate/world/box3d_physics.h"
+#include "skate/world/skate_object_package.h"
+#include "skate/world/world_map.h"
 
 namespace skate3::mechanics_sandbox::map {
 
@@ -154,7 +154,8 @@ struct WeatherSnapshot {
 const VisualWorld& ActiveVisualWorld();
 const VisualMesh& ActiveSkyMesh();
 const VisualMesh& ActiveEditorGizmoVisualMesh();
-const VisualMesh& ActiveEditableObjectVisualMesh(std::size_t index);
+const std::vector<VisualMesh>& ActiveEditableObjectVisualMeshes(
+    std::size_t index);
 const VisualMesh& ActiveKinematicVisualMesh(std::size_t index);
 const VisualMesh& ActiveHingedDoorVisualMesh(std::size_t index);
 const VisualMesh& ActiveWaterVisualMesh();
@@ -164,16 +165,13 @@ const VisualMesh& ActiveRemoteSkaterVisualMesh();
 const VisualMesh& ActiveRainVisualMesh();
 const VisualMesh& ActiveLightningVisualMesh();
 const skate::world::MapDefinition& ActiveDefinition();
-std::size_t AppendSpawnedObject(
-    skate::world::SkateObjectAsset asset,
+std::size_t AppendSpawnedObject(skate::world::SkateObjectAsset asset,
     skate::world::Vec3 map_position);
 void AdvanceOwnedPhysics(double frame_seconds);
-bool ActivePhysicsObjectPose(
-    std::size_t index,
+bool ActivePhysicsObjectPose(std::size_t index,
     skate::world::PhysicsObjectPose& out);
 skate::world::PhysicsTelemetry ActivePhysicsTelemetry();
-void UpdateOwnedPhysicsPlayerProxy(
-    skate::world::Vec3 position,
+void UpdateOwnedPhysicsPlayerProxy(skate::world::Vec3 position,
     skate::world::Vec3 linear_velocity,
     bool active);
 const skate::world::ImageTexture* ActiveImageTexture(
@@ -195,8 +193,7 @@ std::size_t ActiveMovingLightCount();
 // Advances the renderer-owned animation clock once and publishes one coherent
 // pose snapshot consumed by raster, collision-independent visuals, and DXR.
 void AdvanceMovingLights(float frame_seconds);
-bool ActiveMovingLightSnapshot(std::size_t index,
-                               MovingLightSnapshot& out);
+bool ActiveMovingLightSnapshot(std::size_t index, MovingLightSnapshot& out);
 
 // One deterministic clock evaluates the project-owned celestial contract.
 // Raster, sky, DXR, character adaptation, and telemetry consume this same
@@ -269,8 +266,8 @@ WaterTelemetry ActiveWaterTelemetry();
 
 bool QueryContact(const float position[3], float radius, Contact& out);
 bool QueryRaySegment(const float start[3], const float delta[3], RayHit& out);
-bool QueryGround(const float position[3], float probe_above,
-                 float probe_below, GroundHit& out);
+bool QueryGround(const float position[3], float probe_above, float probe_below,
+                 GroundHit& out);
 bool QueryLowestGround(const float position[3], float probe_above,
                        float probe_below, GroundHit& out);
 

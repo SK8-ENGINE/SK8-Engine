@@ -642,6 +642,9 @@ struct MapDefinition {
   TexturedSkyDefinition textured_sky;
   DirectionalLightDefinition sun;
   DayNightCycleDefinition day_night_cycle;
+  // Authored startup preference. The in-game World menu may still toggle
+  // dynamic lighting for the current session without mutating the package.
+  bool dynamic_lighting_enabled_by_default = true;
   WeatherDefinition weather;
   std::vector<SurfaceMaterial> materials;
   std::vector<ImageTexture> textures;

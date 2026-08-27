@@ -3,34 +3,33 @@
 // it through the RHI (D3D12 / Vulkan) into the guest output texture. Shared
 // cross-thread state lives in skate3_native_scene_state.h.
 
-#include "skate3_native_debug_dialog.h"
-#include "skate3_demo_path.h"
-#include "skate3_map_editor.h"
-#include "skate3_native_scene.h"
-#include "skate3_owned_shadow_scheduler.h"
-
-#include "generated/skate3_init.h"
-
+#include <algorithm>
 #include <array>
 #include <atomic>
-#include <algorithm>
 #include <bit>
 #include <chrono>
 #include <cmath>
-#include <limits>
 #include <condition_variable>
 #include <cstdio>
 #include <cstring>
-#include <deque>
 #include <ctime>
+#include <deque>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <thread>
 #include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
+
+#include "generated/skate3_init.h"
+#include "skate3_demo_path.h"
+#include "skate3_map_editor.h"
+#include "skate3_native_debug_dialog.h"
+#include "skate3_native_scene.h"
+#include "skate3_owned_shadow_scheduler.h"
 
 #if defined(_WIN32)
 #include <windows.h>
@@ -52,7 +51,8 @@
 // backend runtime-compiles the embedded HLSL as before.
 #include "native/shaders/spirv/skate3_native_shaders_spirv.h"
 
-#if (defined(REX_HAS_D3D12) && REX_HAS_D3D12) || (defined(REX_HAS_VULKAN) && REX_HAS_VULKAN)
+#if (defined(REX_HAS_D3D12) && REX_HAS_D3D12) || \
+    (defined(REX_HAS_VULKAN) && REX_HAS_VULKAN)
 #include <rex/graphics/native_rhi.h>
 #include <rex/graphics/pipeline/texture/info.h>
 #include <rex/graphics/pipeline/texture/util.h>
@@ -61,19 +61,19 @@
 #include <windows.h>
 #endif
 #endif
-#include "skate3_native_scene_state.h"
-#include "skate3_native_scene_gpu_internal.h"
 #include "skate3_mechanics_sandbox.h"
 #include "skate3_mechanics_sandbox_map.h"
 #include "skate3_multiplayer.h"
-#include "skate3_multiplayer_motion_trace.h"
-#include "skate3_multiplayer_pose_cadence.h"
 #include "skate3_multiplayer_assets.h"
 #include "skate3_multiplayer_capture.h"
 #include "skate3_multiplayer_lifecycle.h"
+#include "skate3_multiplayer_motion_trace.h"
+#include "skate3_multiplayer_pose_cadence.h"
 #include "skate3_multiplayer_render_cache.h"
 #include "skate3_native_collision.h"
 #include "skate3_native_raytraced_mirror.h"
+#include "skate3_native_scene_gpu_internal.h"
+#include "skate3_native_scene_state.h"
 #include "skate3_trick_pipeline.h"
 
 // Cvars defined in skate3_native_scene.cpp (and SDK cvars re-declared there).
@@ -188,7 +188,8 @@ REXCVAR_DECLARE(std::string, skate3_native_render_scene_trace_mesh);
 REXCVAR_DECLARE(std::string, skate3_native_render_scene_trace_2d);
 REXCVAR_DECLARE(std::string, skate3_native_render_snapshot_dir);
 
-#if (defined(REX_HAS_D3D12) && REX_HAS_D3D12) || (defined(REX_HAS_VULKAN) && REX_HAS_VULKAN)
+#if (defined(REX_HAS_D3D12) && REX_HAS_D3D12) || \
+    (defined(REX_HAS_VULKAN) && REX_HAS_VULKAN)
 
 namespace skate3::native_scene {
 namespace {
@@ -207,8 +208,7 @@ bool StaticSceneShadowsEnabled() {
   if (mechanics_sandbox::VisualMapEnabled()) {
     return mechanics_sandbox::map::DynamicWorldLightingEnabled();
   }
-  return REXCVAR_GET(
-      skate3_native_render_scene_shadow_static_casters);
+  return REXCVAR_GET(skate3_native_render_scene_shadow_static_casters);
 }
 
 // Retire a guest texture's GPU resources AND its view. Destruction is
@@ -381,19 +381,22 @@ void EvictTexStore(uint64_t frame_number, uint64_t submission) {
     g_tex_store_bytes = total;
   }
   const uint64_t byte_cap =
-      uint64_t(std::max(256, REXCVAR_GET(skate3_native_render_scene_tex_store_mb)))
+      uint64_t(
+          std::max(256, REXCVAR_GET(skate3_native_render_scene_tex_store_mb)))
       << 20;
   const uint64_t byte_low = byte_cap - byte_cap / 8;
   const size_t low_water = kTexStoreCap - kTexStoreCap / 8;
   const bool was_evicting = s_evicting;
   if (g_r.tex_store.size() > kTexStoreCap || g_tex_store_bytes > byte_cap) {
     s_evicting = true;
-  } else if (g_r.tex_store.size() <= low_water && g_tex_store_bytes <= byte_low) {
+  } else if (g_r.tex_store.size() <= low_water &&
+             g_tex_store_bytes <= byte_low) {
     s_evicting = false;
   }
   const bool byte_pressure = g_tex_store_bytes > byte_low;
   const uint64_t min_idle_frames = std::max<uint64_t>(
-      4, uint64_t(g_evict_fps_estimate * (byte_pressure ? kEvictPressureIdleSeconds
+      4, uint64_t(g_evict_fps_estimate * (byte_pressure
+                                              ? kEvictPressureIdleSeconds
                                                         : kTexEvictMinIdleSeconds)));
   if (was_evicting != s_evicting) {
     if (s_evicting) {
@@ -418,15 +421,13 @@ void EvictTexStore(uint64_t frame_number, uint64_t submission) {
       ages.emplace_back(t.last_used_frame, k);
     }
   }
-  size_t excess = g_r.tex_store.size() > low_water
-                      ? g_r.tex_store.size() - low_water
-                      : 0;
+  size_t excess =
+      g_r.tex_store.size() > low_water ? g_r.tex_store.size() - low_water : 0;
   if (byte_pressure) {
     // Keep draining while over the byte budget even with the count under
     // its cap: convert the byte excess into entries via the average size.
-    const uint64_t avg =
-        std::max<uint64_t>(1, g_tex_store_bytes /
-                                  std::max<size_t>(1, g_r.tex_store.size()));
+    const uint64_t avg = std::max<uint64_t>(
+        1, g_tex_store_bytes / std::max<size_t>(1, g_r.tex_store.size()));
     excess = std::max(excess, size_t((g_tex_store_bytes - byte_low) / avg) + 1);
   }
   const size_t n = std::min({ages.size(), excess, kTexEvictPerFrame});
@@ -440,8 +441,8 @@ void EvictTexStore(uint64_t frame_number, uint64_t submission) {
   for (size_t i = 0; i < n; ++i) {
     const auto it = g_r.tex_store.find(ages[i].second);
     if (it != g_r.tex_store.end()) {
-      g_tex_store_bytes -= std::min<uint64_t>(g_tex_store_bytes,
-                                              it->second.gpu_bytes);
+      g_tex_store_bytes -=
+          std::min<uint64_t>(g_tex_store_bytes, it->second.gpu_bytes);
       RetireGuestTexture(it->second, submission);
       g_r.tex_store.erase(it);
     }
@@ -479,7 +480,8 @@ void EvictMeshStore(uint64_t frame_number) {
     g_mesh_store_bytes = total;
   }
   const uint64_t byte_cap =
-      uint64_t(std::max(256, REXCVAR_GET(skate3_native_render_scene_mesh_store_mb)))
+      uint64_t(
+          std::max(256, REXCVAR_GET(skate3_native_render_scene_mesh_store_mb)))
       << 20;
   const uint64_t byte_low = byte_cap - byte_cap / 8;
   const size_t low_water = kMeshStoreCap - kMeshStoreCap / 8;
@@ -494,8 +496,8 @@ void EvictMeshStore(uint64_t frame_number) {
       byte_pressure
           ? std::max<uint64_t>(
                 240, uint64_t(g_evict_fps_estimate * kEvictPressureIdleSeconds))
-          : std::max<uint64_t>(
-                1800, uint64_t(g_evict_fps_estimate * kMeshEvictMinIdleSeconds));
+          : std::max<uint64_t>(1800, uint64_t(g_evict_fps_estimate *
+                                              kMeshEvictMinIdleSeconds));
   if (was_evicting != s_evicting) {
     if (s_evicting) {
       s_evicted_run = 0;
@@ -505,7 +507,8 @@ void EvictMeshStore(uint64_t frame_number) {
           g_r.meshes.size(), kMeshStoreCap, g_mesh_store_bytes >> 20,
           byte_cap >> 20, min_idle_frames, g_evict_fps_estimate);
     } else {
-      REXLOG_INFO("native-scene: mesh store LRU done (size={} mb={} evicted={})",
+      REXLOG_INFO(
+          "native-scene: mesh store LRU done (size={} mb={} evicted={})",
                   g_r.meshes.size(), g_mesh_store_bytes >> 20, s_evicted_run);
     }
   }
@@ -524,7 +527,8 @@ void EvictMeshStore(uint64_t frame_number) {
   if (byte_pressure) {
     const uint64_t avg = std::max<uint64_t>(
         1, g_mesh_store_bytes / std::max<size_t>(1, g_r.meshes.size()));
-    excess = std::max(excess, size_t((g_mesh_store_bytes - byte_low) / avg) + 1);
+    excess =
+        std::max(excess, size_t((g_mesh_store_bytes - byte_low) / avg) + 1);
   }
   const size_t n = std::min({ages.size(), excess, kMeshEvictPerFrame});
   if (n == 0) {
@@ -538,8 +542,8 @@ void EvictMeshStore(uint64_t frame_number) {
     const auto it = g_r.meshes.find(ages[i].second);
     if (it != g_r.meshes.end()) {
       g_mesh_store_bytes -= std::min<uint64_t>(
-          g_mesh_store_bytes,
-          uint64_t(it->second.vb_view.size_bytes) + it->second.ib_view.size_bytes);
+          g_mesh_store_bytes, uint64_t(it->second.vb_view.size_bytes) +
+                                  it->second.ib_view.size_bytes);
       g_r.device->DestroyDeferred(it->second.vb);
       g_r.device->DestroyDeferred(it->second.ib);
       g_r.ropa_shapes.erase(it->first);
@@ -562,7 +566,8 @@ void EvictCubeStore(uint64_t frame_number, uint64_t submission) {
   const uint64_t min_idle_frames = std::max<uint64_t>(
       4, uint64_t(g_evict_fps_estimate * kTexEvictMinIdleSeconds));
   auto oldest = g_r.cube_textures.end();
-  for (auto it = g_r.cube_textures.begin(); it != g_r.cube_textures.end(); ++it) {
+  for (auto it = g_r.cube_textures.begin(); it != g_r.cube_textures.end();
+       ++it) {
     if (it->second.last_used_frame + min_idle_frames < frame_number &&
         (oldest == g_r.cube_textures.end() ||
          it->second.last_used_frame < oldest->second.last_used_frame)) {
@@ -788,8 +793,7 @@ uint32_t SandboxMapMeshKey(std::size_t chunk_index) {
   return kSandboxMapMeshBase + static_cast<uint32_t>(chunk_index);
 }
 
-bool EnsureSandboxVisualMesh(
-    nrhi::Device* device, uint32_t key,
+bool EnsureSandboxVisualMesh(nrhi::Device* device, uint32_t key,
     const mechanics_sandbox::map::VisualMesh& mesh,
     const char* label) {
   if (g_r.meshes.find(key) != g_r.meshes.end()) {
@@ -799,16 +803,17 @@ bool EnsureSandboxVisualMesh(
       mesh.vertices.size() > 0xFFFFu) {
     static std::atomic<uint32_t> s_invalid_map_log{0};
     if (s_invalid_map_log.fetch_add(1, std::memory_order_relaxed) == 0) {
-      REXLOG_ERROR(
-          "native-scene: sandbox {} geometry is empty or too large", label);
+      REXLOG_ERROR("native-scene: sandbox {} geometry is empty or too large",
+                   label);
     }
     return false;
   }
   static_assert(sizeof(mechanics_sandbox::map::VisualVertex) == 56);
   nrhi::Buffer* vb = AcquireMeshUploadBuffer(
-      device, mesh.vertices.size() * sizeof(mechanics_sandbox::map::VisualVertex));
-  nrhi::Buffer* ib = AcquireMeshUploadBuffer(device,
-                                              mesh.indices.size() * sizeof(uint16_t));
+      device,
+      mesh.vertices.size() * sizeof(mechanics_sandbox::map::VisualVertex));
+  nrhi::Buffer* ib =
+      AcquireMeshUploadBuffer(device, mesh.indices.size() * sizeof(uint16_t));
   if (vb == nullptr || ib == nullptr) {
     static std::atomic<uint32_t> s_buffer_map_log{0};
     if (s_buffer_map_log.fetch_add(1, std::memory_order_relaxed) == 0) {
@@ -826,8 +831,8 @@ bool EnsureSandboxVisualMesh(
     static std::atomic<uint32_t> s_map_map_log{0};
     if (s_map_map_log.fetch_add(1, std::memory_order_relaxed) == 0) {
       REXLOG_ERROR(
-          "native-scene: sandbox {} buffer mapping failed (vb={} ib={})",
-          label, vb_ptr != nullptr ? 1 : 0, ib_ptr != nullptr ? 1 : 0);
+          "native-scene: sandbox {} buffer mapping failed (vb={} ib={})", label,
+          vb_ptr != nullptr ? 1 : 0, ib_ptr != nullptr ? 1 : 0);
     }
     if (vb_ptr != nullptr) device->Unmap(vb);
     if (ib_ptr != nullptr) device->Unmap(ib);
@@ -835,16 +840,19 @@ bool EnsureSandboxVisualMesh(
     PoolMeshBuffer(device, ib);
     return false;
   }
-  std::memcpy(vb_ptr, mesh.vertices.data(),
+  std::memcpy(
+      vb_ptr, mesh.vertices.data(),
               mesh.vertices.size() * sizeof(mechanics_sandbox::map::VisualVertex));
-  std::memcpy(ib_ptr, mesh.indices.data(), mesh.indices.size() * sizeof(uint16_t));
+  std::memcpy(ib_ptr, mesh.indices.data(),
+              mesh.indices.size() * sizeof(uint16_t));
   device->Unmap(vb);
   device->Unmap(ib);
   MeshBuffers buffers;
   buffers.vb = vb;
   buffers.ib = ib;
   buffers.vb_view = {vb, 0,
-                     uint32_t(mesh.vertices.size() * sizeof(mechanics_sandbox::map::VisualVertex)),
+                     uint32_t(mesh.vertices.size() *
+                              sizeof(mechanics_sandbox::map::VisualVertex)),
                      uint32_t(sizeof(mechanics_sandbox::map::VisualVertex))};
   buffers.ib_view = {ib, 0, uint32_t(mesh.indices.size() * sizeof(uint16_t))};
   buffers.fingerprint = 1;
@@ -853,63 +861,51 @@ bool EnsureSandboxVisualMesh(
   return true;
 }
 
-bool EnsureSandboxMapChunk(nrhi::Device* device,
-                           std::size_t chunk_index) {
+bool EnsureSandboxMapChunk(nrhi::Device* device, std::size_t chunk_index) {
   const mechanics_sandbox::map::VisualWorld& world =
       mechanics_sandbox::map::ActiveVisualWorld();
   if (chunk_index >= world.chunks.size() ||
       chunk_index >= kSandboxMapMeshCapacity) {
     return false;
   }
-  return EnsureSandboxVisualMesh(
-      device, SandboxMapMeshKey(chunk_index), world.chunks[chunk_index],
-      "map chunk");
+  return EnsureSandboxVisualMesh(device, SandboxMapMeshKey(chunk_index),
+                                 world.chunks[chunk_index], "map chunk");
 }
 
 bool EnsureSandboxKinematicMesh(nrhi::Device* device,
                                 std::size_t object_index) {
-  if (object_index >=
-          mechanics_sandbox::map::ActiveKinematicObjectCount() ||
+  if (object_index >= mechanics_sandbox::map::ActiveKinematicObjectCount() ||
       object_index >= kSandboxKinematicMeshCapacity) {
     return false;
   }
   return EnsureSandboxVisualMesh(
-      device,
-      kSandboxKinematicMeshBase +
-          static_cast<uint32_t>(object_index),
+      device, kSandboxKinematicMeshBase + static_cast<uint32_t>(object_index),
       mechanics_sandbox::map::ActiveKinematicVisualMesh(object_index),
       "kinematic object");
 }
 
-bool EnsureSandboxHingedDoorMesh(nrhi::Device* device,
-                                 std::size_t door_index) {
-  if (door_index >=
-          mechanics_sandbox::map::ActiveHingedDoorCount() ||
+bool EnsureSandboxHingedDoorMesh(nrhi::Device* device, std::size_t door_index) {
+  if (door_index >= mechanics_sandbox::map::ActiveHingedDoorCount() ||
       door_index >= kSandboxHingedDoorMeshCapacity) {
     return false;
   }
   return EnsureSandboxVisualMesh(
       device,
-      kSandboxHingedDoorMeshBase +
-          static_cast<std::uint32_t>(door_index),
+      kSandboxHingedDoorMeshBase + static_cast<std::uint32_t>(door_index),
       mechanics_sandbox::map::ActiveHingedDoorVisualMesh(door_index),
       "hinged door");
 }
 
-bool EnsureSandboxEditorObjectMesh(nrhi::Device* device,
-                                   std::size_t object_index) {
-  if (object_index >=
-          mechanics_sandbox::map::ActiveEditableObjectCount() ||
-      object_index >= kSandboxEditorObjectMeshCapacity) {
+bool EnsureSandboxEditorObjectMesh(
+    nrhi::Device* device, std::size_t mesh_index,
+    const mechanics_sandbox::map::VisualMesh& visual) {
+  if (mesh_index >= kSandboxEditorObjectMeshCapacity) {
     return false;
   }
   return EnsureSandboxVisualMesh(
       device,
-      kSandboxEditorObjectMeshBase +
-          static_cast<std::uint32_t>(object_index),
-      mechanics_sandbox::map::ActiveEditableObjectVisualMesh(
-          object_index),
-      "editable map object");
+      kSandboxEditorObjectMeshBase + static_cast<std::uint32_t>(mesh_index),
+      visual, "editable map object");
 }
 
 bool EnsureSandboxEditorGizmoMesh(nrhi::Device* device) {
@@ -921,8 +917,7 @@ bool EnsureSandboxEditorGizmoMesh(nrhi::Device* device) {
 
 bool EnsureSandboxSkyMesh(nrhi::Device* device) {
   return EnsureSandboxVisualMesh(
-      device, kSandboxSkyMesh,
-      mechanics_sandbox::map::ActiveSkyMesh(), "sky");
+      device, kSandboxSkyMesh, mechanics_sandbox::map::ActiveSkyMesh(), "sky");
 }
 
 bool EnsureSandboxMovingLightMesh(nrhi::Device* device) {
@@ -935,40 +930,36 @@ bool EnsureSandboxMovingLightMesh(nrhi::Device* device) {
 bool EnsureSandboxRemoteSkaterMesh(nrhi::Device* device) {
   return EnsureSandboxVisualMesh(
       device, kSandboxRemoteSkaterMesh,
-      mechanics_sandbox::map::ActiveRemoteSkaterVisualMesh(),
-      "remote skater");
+      mechanics_sandbox::map::ActiveRemoteSkaterVisualMesh(), "remote skater");
 }
 
 bool EnsureSandboxRainMesh(nrhi::Device* device) {
-  return EnsureSandboxVisualMesh(
-      device, kSandboxRainMesh,
-      mechanics_sandbox::map::ActiveRainVisualMesh(), "storm rain");
+  return EnsureSandboxVisualMesh(device, kSandboxRainMesh,
+                                 mechanics_sandbox::map::ActiveRainVisualMesh(),
+                                 "storm rain");
 }
 
 bool EnsureSandboxLightningMesh(nrhi::Device* device) {
   return EnsureSandboxVisualMesh(
       device, kSandboxLightningMesh,
-      mechanics_sandbox::map::ActiveLightningVisualMesh(),
-      "storm lightning");
+      mechanics_sandbox::map::ActiveLightningVisualMesh(), "storm lightning");
 }
 
 bool UpdateSandboxDynamicVisualMesh(
     nrhi::Device* device, uint32_t key,
-    const mechanics_sandbox::map::VisualMesh& mesh,
-    const char* label) {
+    const mechanics_sandbox::map::VisualMesh& mesh, const char* label) {
   if (!EnsureSandboxVisualMesh(device, key, mesh, label)) {
     return false;
   }
   auto found = g_r.meshes.find(key);
   if (found == g_r.meshes.end() ||
       found->second.vb_view.size_bytes !=
-          mesh.vertices.size() *
-              sizeof(mechanics_sandbox::map::VisualVertex)) {
+          mesh.vertices.size() * sizeof(mechanics_sandbox::map::VisualVertex)) {
     return false;
   }
 
-  nrhi::Buffer* replacement = AcquireMeshUploadBuffer(
-      device, found->second.vb_view.size_bytes);
+  nrhi::Buffer* replacement =
+      AcquireMeshUploadBuffer(device, found->second.vb_view.size_bytes);
   if (replacement == nullptr) {
     return false;
   }
@@ -979,19 +970,17 @@ bool UpdateSandboxDynamicVisualMesh(
   }
   std::memcpy(
       mapped, mesh.vertices.data(),
-      mesh.vertices.size() *
-          sizeof(mechanics_sandbox::map::VisualVertex));
+      mesh.vertices.size() * sizeof(mechanics_sandbox::map::VisualVertex));
   device->Unmap(replacement);
 
   nrhi::Buffer* previous = found->second.vb;
   found->second.vb = replacement;
   found->second.vb_view = {
-      replacement, 0,
-      static_cast<uint32_t>(
-          mesh.vertices.size() *
+      replacement,
+      0,
+      static_cast<uint32_t>(mesh.vertices.size() *
           sizeof(mechanics_sandbox::map::VisualVertex)),
-      static_cast<uint32_t>(
-          sizeof(mechanics_sandbox::map::VisualVertex)),
+      static_cast<uint32_t>(sizeof(mechanics_sandbox::map::VisualVertex)),
   };
   PoolMeshBuffer(device, previous);
   return true;
@@ -1040,7 +1029,8 @@ bool DecodeMesh(nrhi::Device* device, uint8_t* base, const DrawItem& item,
   }
   if (!item.cloth_quads && ib_payload == nullptr) {
     ib_scratch.resize(size_t(item.ib_count) * 2);
-    if (!GuestTryCopy(ib_scratch.data(), base + item.ib_addr, size_t(item.ib_count) * 2)) {
+    if (!GuestTryCopy(ib_scratch.data(), base + item.ib_addr,
+                      size_t(item.ib_count) * 2)) {
       return false;
     }
     ib_payload = ib_scratch.data();
@@ -1056,8 +1046,8 @@ bool DecodeMesh(nrhi::Device* device, uint8_t* base, const DrawItem& item,
   // two_sided_sheet detection eligibility (see MeshBuffers): small static
   // triangle-list meshes only. Strips alternate winding per triangle and
   // skinned/cloth meshes deform, so both stay on the uncull(ed) PSO.
-  bool detect_sheet =
-      !item.skinned && !item.cloth_quads && item.ib_count >= 6 && item.ib_count <= 8192;
+  bool detect_sheet = !item.skinned && !item.cloth_quads &&
+                      item.ib_count >= 6 && item.ib_count <= 8192;
   for (const DrawEntry& de : item.draws) {
     if (de.prim != 4) {
       detect_sheet = false;
@@ -1079,9 +1069,12 @@ bool DecodeMesh(nrhi::Device* device, uint8_t* base, const DrawItem& item,
     float x = 0.0f, y = 0.0f, z = 0.0f;
     switch (item.pos_fmt) {
       case 57: {  // k_32_32_32_FLOAT
-        x = std::bit_cast<float>(SwapU32(*reinterpret_cast<const uint32_t*>(p)));
-        y = std::bit_cast<float>(SwapU32(*reinterpret_cast<const uint32_t*>(p + 4)));
-        z = std::bit_cast<float>(SwapU32(*reinterpret_cast<const uint32_t*>(p + 8)));
+        x = std::bit_cast<float>(
+            SwapU32(*reinterpret_cast<const uint32_t*>(p)));
+        y = std::bit_cast<float>(
+            SwapU32(*reinterpret_cast<const uint32_t*>(p + 4)));
+        z = std::bit_cast<float>(
+            SwapU32(*reinterpret_cast<const uint32_t*>(p + 8)));
         break;
       }
       case 32: {  // k_16_16_16_16_FLOAT
@@ -1106,13 +1099,14 @@ bool DecodeMesh(nrhi::Device* device, uint8_t* base, const DrawItem& item,
         device->DestroyDeferred(ib);
         return false;
     }
-    if (!(x == x && y == y && z == z) ||
-        x < item.bbox_min[0] - 2.f || x > item.bbox_max[0] + 2.f ||
-        y < item.bbox_min[1] - 2.f || y > item.bbox_max[1] + 2.f ||
-        z < item.bbox_min[2] - 2.f || z > item.bbox_max[2] + 2.f) {
+    if (!(x == x && y == y && z == z) || x < item.bbox_min[0] - 2.f ||
+        x > item.bbox_max[0] + 2.f || y < item.bbox_min[1] - 2.f ||
+        y > item.bbox_max[1] + 2.f || z < item.bbox_min[2] - 2.f ||
+        z > item.bbox_max[2] + 2.f) {
       ++garbage;
     }
-    const auto decode_uv = [&](uint32_t fmt, uint32_t offset, float& u, float& w) {
+    const auto decode_uv = [&](uint32_t fmt, uint32_t offset, float& u,
+                               float& w) {
       u = 0.0f;
       w = 0.0f;
       if (fmt == 0) return;
@@ -1125,19 +1119,25 @@ bool DecodeMesh(nrhi::Device* device, uint8_t* base, const DrawItem& item,
           break;
         case 37:  // k_32_32_FLOAT (hair strand-alpha UV; xenos enum 37)
         case 38:  // k_32_32_32_32_FLOAT (use xy)
-          u = std::bit_cast<float>(SwapU32(*reinterpret_cast<const uint32_t*>(q)));
-          w = std::bit_cast<float>(SwapU32(*reinterpret_cast<const uint32_t*>(q + 4)));
+          u = std::bit_cast<float>(
+              SwapU32(*reinterpret_cast<const uint32_t*>(q)));
+          w = std::bit_cast<float>(
+              SwapU32(*reinterpret_cast<const uint32_t*>(q + 4)));
           break;
         case 25: {  // k_16_16 (snorm; UVs span the full s16 range for [0,1])
-          const int16_t su = int16_t(SwapU16(*reinterpret_cast<const uint16_t*>(q)));
-          const int16_t sv = int16_t(SwapU16(*reinterpret_cast<const uint16_t*>(q + 2)));
+          const int16_t su =
+              int16_t(SwapU16(*reinterpret_cast<const uint16_t*>(q)));
+          const int16_t sv =
+              int16_t(SwapU16(*reinterpret_cast<const uint16_t*>(q + 2)));
           u = su / 32767.0f;
           w = sv / 32767.0f;
           break;
         }
         case 26: {  // k_16_16_16_16 (snorm; use xy: unwrap UV sets)
-          const int16_t su = int16_t(SwapU16(*reinterpret_cast<const uint16_t*>(q)));
-          const int16_t sv = int16_t(SwapU16(*reinterpret_cast<const uint16_t*>(q + 2)));
+          const int16_t su =
+              int16_t(SwapU16(*reinterpret_cast<const uint16_t*>(q)));
+          const int16_t sv =
+              int16_t(SwapU16(*reinterpret_cast<const uint16_t*>(q + 2)));
           u = su / 32767.0f;
           w = sv / 32767.0f;
           break;
@@ -1174,10 +1174,10 @@ bool DecodeMesh(nrhi::Device* device, uint8_t* base, const DrawItem& item,
     uint32_t bw = 0;
     uint32_t bi = 0;
     if (item.skinned) {
-      bw = SwapU32(*reinterpret_cast<const uint32_t*>(src_vb + size_t(v) * item.stride +
-                                                      item.bw_offset));
-      bi = SwapU32(*reinterpret_cast<const uint32_t*>(src_vb + size_t(v) * item.stride +
-                                                      item.bi_offset));
+      bw = SwapU32(*reinterpret_cast<const uint32_t*>(
+          src_vb + size_t(v) * item.stride + item.bw_offset));
+      bi = SwapU32(*reinterpret_cast<const uint32_t*>(
+          src_vb + size_t(v) * item.stride + item.bi_offset));
       for (int k = 0; k < 4; ++k) {
         const uint8_t weight = uint8_t(bw >> (k * 8));
         const uint8_t index = uint8_t(bi >> (k * 8));
@@ -1226,21 +1226,23 @@ bool DecodeMesh(nrhi::Device* device, uint8_t* base, const DrawItem& item,
       // B = sign.x * cross(N, T), exactly the game's VS
       // (vBinormal = signs.x * cross(vNormal, vTangent)).
       const uint8_t* q = src_vb + size_t(v) * item.stride + item.uv2_offset;
-      const int16_t sx = int16_t(SwapU16(*reinterpret_cast<const uint16_t*>(q)));
-      const int16_t sy = int16_t(SwapU16(*reinterpret_cast<const uint16_t*>(q + 2)));
-      const int16_t nx = int16_t(SwapU16(*reinterpret_cast<const uint16_t*>(q + 4)));
-      const int16_t ny = int16_t(SwapU16(*reinterpret_cast<const uint16_t*>(q + 6)));
+      const int16_t sx =
+          int16_t(SwapU16(*reinterpret_cast<const uint16_t*>(q)));
+      const int16_t sy =
+          int16_t(SwapU16(*reinterpret_cast<const uint16_t*>(q + 2)));
+      const int16_t nx =
+          int16_t(SwapU16(*reinterpret_cast<const uint16_t*>(q + 4)));
+      const int16_t ny =
+          int16_t(SwapU16(*reinterpret_cast<const uint16_t*>(q + 6)));
       n3[0] = nx / 32767.0f;
       n3[1] = ny / 32767.0f;
       // The game clamps xy_len at 0.999 (water normals ride |xy| ~ 1, so
       // z floors at 0.0316 rather than 0, verified against the VS ucode).
-      const float xylen =
-          std::min(n3[0] * n3[0] + n3[1] * n3[1], 0.999f);
+      const float xylen = std::min(n3[0] * n3[0] + n3[1] * n3[1], 0.999f);
       n3[2] = (sy > 0 ? 1.0f : -1.0f) * std::sqrt(1.0f - xylen);
       float t3[3];
       unpack_10_11_11(item.tangent_offset, t3);
-      const uint32_t packed = pk(t3[0]) | (pk(t3[1]) << 8) |
-                              (pk(t3[2]) << 16) |
+      const uint32_t packed = pk(t3[0]) | (pk(t3[1]) << 8) | (pk(t3[2]) << 16) |
                               ((sx > 0 ? 200u : 100u) << 24);
       std::memcpy(&dst[v * 14 + 7], &packed, 4);
     } else if (item.env_family != 0 &&
@@ -1254,10 +1256,14 @@ bool DecodeMesh(nrhi::Device* device, uint8_t* base, const DrawItem& item,
       // these meshes is the BINORMAL, not the normal; using it as the
       // normal breaks the sun/spec terms of the exact shading.
       const uint8_t* q = src_vb + size_t(v) * item.stride + item.uv2_offset;
-      const int16_t sx = int16_t(SwapU16(*reinterpret_cast<const uint16_t*>(q)));
-      const int16_t sy = int16_t(SwapU16(*reinterpret_cast<const uint16_t*>(q + 2)));
-      const int16_t nx = int16_t(SwapU16(*reinterpret_cast<const uint16_t*>(q + 4)));
-      const int16_t ny = int16_t(SwapU16(*reinterpret_cast<const uint16_t*>(q + 6)));
+      const int16_t sx =
+          int16_t(SwapU16(*reinterpret_cast<const uint16_t*>(q)));
+      const int16_t sy =
+          int16_t(SwapU16(*reinterpret_cast<const uint16_t*>(q + 2)));
+      const int16_t nx =
+          int16_t(SwapU16(*reinterpret_cast<const uint16_t*>(q + 4)));
+      const int16_t ny =
+          int16_t(SwapU16(*reinterpret_cast<const uint16_t*>(q + 6)));
       n3[0] = nx / 32767.0f;
       n3[1] = ny / 32767.0f;
       const float d = 1.0f - n3[0] * n3[0] - n3[1] * n3[1];
@@ -1321,8 +1327,8 @@ bool DecodeMesh(nrhi::Device* device, uint8_t* base, const DrawItem& item,
       // normal makes cross(B, N) == T x |B|^2 up to orthogonality error, so
       // the handedness is positive by construction.
       if (!item.skinned && item.dynobj != 0) {
-        const uint32_t packed = pk(b3[0]) | (pk(b3[1]) << 8) |
-                                (pk(b3[2]) << 16) | (200u << 24);
+        const uint32_t packed =
+            pk(b3[0]) | (pk(b3[1]) << 8) | (pk(b3[2]) << 16) | (200u << 24);
         std::memcpy(&dst[v * 14 + 7], &packed, 4);
       }
     }
@@ -1376,8 +1382,7 @@ bool DecodeMesh(nrhi::Device* device, uint8_t* base, const DrawItem& item,
     out.ropa_verts.assign(dst, dst + size_t(num_verts) * 14);
   }
   const bool retain_raytracing =
-      item.dyn_entity || item.skinned || item.ropa ||
-      item.char_family != 0;
+      item.dyn_entity || item.skinned || item.ropa || item.char_family != 0;
   if (retain_raytracing) {
     out.raytracing_verts.assign(dst, dst + size_t(num_verts) * 14);
   }
@@ -1398,10 +1403,11 @@ bool DecodeMesh(nrhi::Device* device, uint8_t* base, const DrawItem& item,
   if (garbage != 0) {
     REXLOG_WARN(
         "native-scene: mesh {:08X} decoded {} of {} verts outside bbox "
-        "({:.1f},{:.1f},{:.1f})..({:.1f},{:.1f},{:.1f}) fmt {} stride {} vb {:08X}",
-        item.mesh, garbage, num_verts, item.bbox_min[0], item.bbox_min[1], item.bbox_min[2],
-        item.bbox_max[0], item.bbox_max[1], item.bbox_max[2], item.pos_fmt, item.stride,
-        item.vb_addr);
+        "({:.1f},{:.1f},{:.1f})..({:.1f},{:.1f},{:.1f}) fmt {} stride "
+        "{} vb {:08X}",
+        item.mesh, garbage, num_verts, item.bbox_min[0], item.bbox_min[1],
+        item.bbox_min[2], item.bbox_max[0], item.bbox_max[1], item.bbox_max[2],
+        item.pos_fmt, item.stride, item.vb_addr);
   }
 
   uint16_t* dst_ib = nullptr;
@@ -1448,9 +1454,12 @@ bool DecodeMesh(nrhi::Device* device, uint8_t* base, const DrawItem& item,
         continue;
       }
       for (uint32_t i = 0; i + 2 < de.index_count; i += 3) {
-        const uint32_t a = uint32_t(dst_ib[de.start_index + i]) + de.base_vertex;
-        const uint32_t b = uint32_t(dst_ib[de.start_index + i + 1]) + de.base_vertex;
-        const uint32_t c = uint32_t(dst_ib[de.start_index + i + 2]) + de.base_vertex;
+        const uint32_t a =
+            uint32_t(dst_ib[de.start_index + i]) + de.base_vertex;
+        const uint32_t b =
+            uint32_t(dst_ib[de.start_index + i + 1]) + de.base_vertex;
+        const uint32_t c =
+            uint32_t(dst_ib[de.start_index + i + 2]) + de.base_vertex;
         if (a >= num_verts || b >= num_verts || c >= num_verts) {
           continue;
         }
@@ -1459,7 +1468,8 @@ bool DecodeMesh(nrhi::Device* device, uint8_t* base, const DrawItem& item,
         const float* pc = &sheet_pos[size_t(c) * 3];
         const float e1[3] = {pb[0] - pa[0], pb[1] - pa[1], pb[2] - pa[2]};
         const float e2[3] = {pc[0] - pa[0], pc[1] - pa[1], pc[2] - pa[2]};
-        const float n[3] = {e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2],
+        const float n[3] = {e1[1] * e2[2] - e1[2] * e2[1],
+                            e1[2] * e2[0] - e1[0] * e2[2],
                             e1[0] * e2[1] - e1[1] * e2[0]};
         const float len = std::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
         if (len < 1e-8f) {
@@ -1502,7 +1512,8 @@ bool DecodeMesh(nrhi::Device* device, uint8_t* base, const DrawItem& item,
           if (along > 0.05f || d2 - along * along > lat_limit * lat_limit) {
             continue;
           }
-          const float dot = tris[i].n[0] * tris[j].n[0] + tris[i].n[1] * tris[j].n[1] +
+          const float dot = tris[i].n[0] * tris[j].n[0] +
+                            tris[i].n[1] * tris[j].n[1] +
                             tris[i].n[2] * tris[j].n[2];
           if (dot < -0.9f) {
             used[i] = 1;
@@ -1534,7 +1545,9 @@ bool DecodeMesh(nrhi::Device* device, uint8_t* base, const DrawItem& item,
       if (two_sided) {
         static std::atomic<uint32_t> logged{0};
         if (logged.fetch_add(1, std::memory_order_relaxed) < 16) {
-          REXLOG_INFO("native-scene: two-sided sheet mesh {:08X} ({} indices, {}/{} twins) -> cull-back",
+          REXLOG_INFO(
+              "native-scene: two-sided sheet mesh {:08X} ({} indices, "
+              "{}/{} twins) -> cull-back",
                       item.mesh, item.ib_count, twins, tris.size());
         }
       }
@@ -1593,8 +1606,8 @@ void DecodeBc1Block(const uint8_t* b, uint8_t px[16][4]) {
     col[2][3] = 255;
     col[3][3] = 0;
   }
-  uint32_t bits =
-      uint32_t(b[4]) | (uint32_t(b[5]) << 8) | (uint32_t(b[6]) << 16) | (uint32_t(b[7]) << 24);
+  uint32_t bits = uint32_t(b[4]) | (uint32_t(b[5]) << 8) |
+                  (uint32_t(b[6]) << 16) | (uint32_t(b[7]) << 24);
   for (int i = 0; i < 16; ++i) {
     std::memcpy(px[i], col[bits & 3u], 4);
     bits >>= 2;
@@ -1610,12 +1623,13 @@ void DecodeBc1Block(const uint8_t* b, uint8_t px[16][4]) {
 // DXT1/8888 textures are decoded to RGBA8 and uploaded with a CPU
 // box-filtered mip chain instead. Returns false to fall back to the plain
 // single-mip path.
-bool UploadGeneratedMips(const NativeGuestOutputRenderContext& context, uint8_t* base,
-                         const rex::graphics::TextureInfo& info, uint32_t fetch_swizzle,
-                         GuestTexture& out) {
+bool UploadGeneratedMips(const NativeGuestOutputRenderContext& context,
+                         uint8_t* base, const rex::graphics::TextureInfo& info,
+                         uint32_t fetch_swizzle, GuestTexture& out) {
   const rex::graphics::FormatInfo* format_info = info.format_info();
   const uint32_t bytes_per_block = format_info->bytes_per_block();
-  const uint32_t bytes_per_block_log2 = uint32_t(std::countr_zero(bytes_per_block));
+  const uint32_t bytes_per_block_log2 =
+      uint32_t(std::countr_zero(bytes_per_block));
   const uint32_t width = info.width + 1u;
   const uint32_t height = info.height + 1u;
   const uint32_t block_w = format_info->block_width;
@@ -1643,7 +1657,8 @@ bool UploadGeneratedMips(const NativeGuestOutputRenderContext& context, uint8_t*
   gen_scratch.resize(size);
   if (!GuestTryCopy(gen_scratch.data(), base + (0xA0000000u | addr), size)) {
     if (min_size >= size ||
-        !GuestTryCopy(gen_scratch.data(), base + (0xA0000000u | addr), min_size)) {
+        !GuestTryCopy(gen_scratch.data(), base + (0xA0000000u | addr),
+                      min_size)) {
       return false;
     }
     size = min_size;
@@ -1657,7 +1672,8 @@ bool UploadGeneratedMips(const NativeGuestOutputRenderContext& context, uint8_t*
   for (uint32_t by = 0; by < rows; ++by) {
     uint8_t* out_row = linear.data() + size_t(by) * cols * bytes_per_block;
     if (!info.is_tiled) {
-      const uint32_t row_off = ((by + oy) * pitch_blocks + ox) * bytes_per_block;
+      const uint32_t row_off =
+          ((by + oy) * pitch_blocks + ox) * bytes_per_block;
       const uint32_t row_bytes = cols * bytes_per_block;
       if (row_off + row_bytes <= size) {
         std::memcpy(out_row, gen_scratch.data() + row_off, row_bytes);
@@ -1665,29 +1681,34 @@ bool UploadGeneratedMips(const NativeGuestOutputRenderContext& context, uint8_t*
         for (uint32_t bx = 0; bx < cols; ++bx) {
           const uint32_t off = row_off + bx * bytes_per_block;
           if (off + bytes_per_block > size) {
-            std::memset(out_row + size_t(bx) * bytes_per_block, 0, bytes_per_block);
+            std::memset(out_row + size_t(bx) * bytes_per_block, 0,
+                        bytes_per_block);
             continue;
           }
-          std::memcpy(out_row + size_t(bx) * bytes_per_block, gen_scratch.data() + off,
-                      bytes_per_block);
+          std::memcpy(out_row + size_t(bx) * bytes_per_block,
+                      gen_scratch.data() + off, bytes_per_block);
         }
       }
     } else {
       uint32_t bx = 0;
       while (bx < cols) {
         const uint32_t x = bx + ox;
-        const uint32_t run = std::min(cols - bx, run_blocks - (x & (run_blocks - 1)));
-        const uint32_t off = uint32_t(rex::graphics::texture_util::GetTiledOffset2D(
-            int32_t(x), int32_t(by + oy), pitch_blocks, bytes_per_block_log2));
+        const uint32_t run =
+            std::min(cols - bx, run_blocks - (x & (run_blocks - 1)));
+        const uint32_t off =
+            uint32_t(rex::graphics::texture_util::GetTiledOffset2D(
+                int32_t(x), int32_t(by + oy), pitch_blocks,
+                bytes_per_block_log2));
         const uint32_t bytes = run * bytes_per_block;
         if (off + bytes <= size) {
-          std::memcpy(out_row + size_t(bx) * bytes_per_block, gen_scratch.data() + off,
-                      bytes);
+          std::memcpy(out_row + size_t(bx) * bytes_per_block,
+                      gen_scratch.data() + off, bytes);
         } else {
           for (uint32_t i = 0; i < run; ++i) {
             const uint32_t boff = off + i * bytes_per_block;
             if (boff + bytes_per_block > size) {
-              std::memset(out_row + size_t(bx + i) * bytes_per_block, 0, bytes_per_block);
+              std::memset(out_row + size_t(bx + i) * bytes_per_block, 0,
+                          bytes_per_block);
             } else {
               std::memcpy(out_row + size_t(bx + i) * bytes_per_block,
                           gen_scratch.data() + boff, bytes_per_block);
@@ -1706,7 +1727,8 @@ bool UploadGeneratedMips(const NativeGuestOutputRenderContext& context, uint8_t*
     for (uint32_t by = 0; by < rows; ++by) {
       for (uint32_t bx = 0; bx < cols; ++bx) {
         uint8_t px[16][4];
-        DecodeBc1Block(linear.data() + (size_t(by) * cols + bx) * bytes_per_block, px);
+        DecodeBc1Block(
+            linear.data() + (size_t(by) * cols + bx) * bytes_per_block, px);
         for (uint32_t t = 0; t < 16; ++t) {
           const uint32_t x = bx * 4 + (t & 3u);
           const uint32_t y = by * 4 + (t >> 2);
@@ -1718,8 +1740,8 @@ bool UploadGeneratedMips(const NativeGuestOutputRenderContext& context, uint8_t*
     }
   } else {  // k_8_8_8_8: rows are already RGBA8 after the endian swap
     for (uint32_t y = 0; y < height; ++y) {
-      std::memcpy(&rgba[size_t(y) * width * 4], linear.data() + size_t(y) * cols * 4,
-                  size_t(width) * 4);
+      std::memcpy(&rgba[size_t(y) * width * 4],
+                  linear.data() + size_t(y) * cols * 4, size_t(width) * 4);
     }
   }
 
@@ -1729,10 +1751,9 @@ bool UploadGeneratedMips(const NativeGuestOutputRenderContext& context, uint8_t*
   // exactly this generated-mips path).
   if (REXCVAR_GET(skate3_native_render_scene_lm_dump)) {
     char path[260];
-    std::snprintf(path, sizeof(path),
-                  "native_texture_dumps/gen_%08X_%ux%u_t%u.rgba",
-                  info.memory.base_address, width, height,
-                  info.is_tiled ? 1u : 0u);
+    std::snprintf(
+        path, sizeof(path), "native_texture_dumps/gen_%08X_%ux%u_t%u.rgba",
+        info.memory.base_address, width, height, info.is_tiled ? 1u : 0u);
     if (FILE* f = std::fopen(path, "wb")) {
       std::fwrite(rgba.data(), 1, rgba.size(), f);
       std::fclose(f);
@@ -1797,7 +1818,8 @@ bool UploadGeneratedMips(const NativeGuestOutputRenderContext& context, uint8_t*
   if (out.texture == nullptr) {
     return false;
   }
-  out.upload = CreateUploadBuffer(device, upload_size, nrhi::BufferBindClass::kCopySrc);
+  out.upload =
+      CreateUploadBuffer(device, upload_size, nrhi::BufferBindClass::kCopySrc);
   if (!out.upload) {
     device->DestroyDeferred(out.texture);
     out.texture = nullptr;
@@ -1807,8 +1829,8 @@ bool UploadGeneratedMips(const NativeGuestOutputRenderContext& context, uint8_t*
   for (uint32_t m = 0; m < mip_count; ++m) {
     const Plan& p = plans[m];
     for (uint32_t y = 0; y < p.h; ++y) {
-      std::memcpy(mapping + p.offset + size_t(y) * p.pitch, &mips[m][size_t(y) * p.w * 4],
-                  size_t(p.w) * 4);
+      std::memcpy(mapping + p.offset + size_t(y) * p.pitch,
+                  &mips[m][size_t(y) * p.w * 4], size_t(p.w) * 4);
     }
   }
   device->Unmap(out.upload);
@@ -1819,7 +1841,8 @@ bool UploadGeneratedMips(const NativeGuestOutputRenderContext& context, uint8_t*
     StagedTexCommit& sc = *g_tex_stage_out;
     sc.copy_format = nrhi::Format::kR8G8B8A8_UNORM;
     sc.srv_format = nrhi::Format::kR8G8B8A8_UNORM;
-    ComposeSrvSwizzle(fetch_swizzle, xenos::XE_GPU_TEXTURE_SWIZZLE_RGBA, sc.swizzle);
+    ComposeSrvSwizzle(fetch_swizzle, xenos::XE_GPU_TEXTURE_SWIZZLE_RGBA,
+                      sc.swizzle);
     sc.mip_count = std::min<uint32_t>(mip_count, 16);
     for (uint32_t m = 0; m < sc.mip_count; ++m) {
       sc.mips[m] = {plans[m].offset, plans[m].pitch, plans[m].w, plans[m].h};
@@ -1840,7 +1863,8 @@ bool UploadGeneratedMips(const NativeGuestOutputRenderContext& context, uint8_t*
     nrhi::TextureViewDesc srv;
     srv.dimension = nrhi::ViewDimension::k2D;
     srv.format = nrhi::Format::kR8G8B8A8_UNORM;
-    ComposeSrvSwizzle(fetch_swizzle, xenos::XE_GPU_TEXTURE_SWIZZLE_RGBA, srv.swizzle);
+    ComposeSrvSwizzle(fetch_swizzle, xenos::XE_GPU_TEXTURE_SWIZZLE_RGBA,
+                      srv.swizzle);
     srv.mip_levels = mip_count;
     out.srv_format = srv.format;
     out.srv_mips = mip_count;
@@ -1882,7 +1906,8 @@ bool EnsureGuestTextureFromWords(const NativeGuestOutputRenderContext& context,
   fetch.dword_3 = words[3];
   fetch.dword_4 = words[4];
   fetch.dword_5 = words[5];
-  if (fetch.type != xenos::FetchConstantType::kTexture || fetch.base_address == 0) {
+  if (fetch.type != xenos::FetchConstantType::kTexture ||
+      fetch.base_address == 0) {
     return false;
   }
   // Pre-validate the raw format BEFORE Prepare: TextureInfo::Prepare calls
@@ -1894,8 +1919,8 @@ bool EnsureGuestTextureFromWords(const NativeGuestOutputRenderContext& context,
   // into Daly Estates).
   const rex::graphics::FormatInfo* pre_fi =
       rex::graphics::FormatInfo::Get(uint32_t(fetch.format));
-  if (pre_fi == nullptr || pre_fi->block_width == 0 || pre_fi->block_height == 0 ||
-      pre_fi->bytes_per_block() == 0) {
+  if (pre_fi == nullptr || pre_fi->block_width == 0 ||
+      pre_fi->block_height == 0 || pre_fi->bytes_per_block() == 0) {
     return false;
   }
   rex::graphics::TextureInfo info;
@@ -1907,8 +1932,9 @@ bool EnsureGuestTextureFromWords(const NativeGuestOutputRenderContext& context,
     return false;
   }
   if (info.dimension != xenos::DataDimension::k2DOrStacked || info.is_stacked ||
-      info.width >= 8192 || info.height >= 8192 || info.memory.base_address == 0 ||
-      info.memory.base_size == 0 || info.memory.base_size > 64u * 1024u * 1024u) {
+      info.width >= 8192 || info.height >= 8192 ||
+      info.memory.base_address == 0 || info.memory.base_size == 0 ||
+      info.memory.base_size > 64u * 1024u * 1024u) {
     return false;
   }
 
@@ -1917,7 +1943,8 @@ bool EnsureGuestTextureFromWords(const NativeGuestOutputRenderContext& context,
   if (bytes_per_block == 0 || (bytes_per_block & (bytes_per_block - 1)) != 0) {
     return false;
   }
-  const uint32_t bytes_per_block_log2 = uint32_t(std::countr_zero(bytes_per_block));
+  const uint32_t bytes_per_block_log2 =
+      uint32_t(std::countr_zero(bytes_per_block));
   const uint32_t width = info.width + 1u;
   const uint32_t height = info.height + 1u;
   const uint32_t block_w = format_info->block_width;
@@ -1934,7 +1961,8 @@ bool EnsureGuestTextureFromWords(const NativeGuestOutputRenderContext& context,
   if (pow2 && info.memory.mip_address != 0 &&
       REXCVAR_GET(skate3_native_render_scene_tex_mips)) {
     const uint32_t avail = std::min(info.mip_levels(), info.GetMaxMipLevels());
-    while (mip_count < avail && (width >> mip_count) >= 4 && (height >> mip_count) >= 4) {
+    while (mip_count < avail && (width >> mip_count) >= 4 &&
+           (height >> mip_count) >= 4) {
       uint32_t ox = 0, oy = 0;
       if (info.GetMipLocation(mip_count, &ox, &oy, true) == 0) {
         break;
@@ -1945,14 +1973,16 @@ bool EnsureGuestTextureFromWords(const NativeGuestOutputRenderContext& context,
   // No guest chain at all (runtime-composed lightmap pages): generate one,
   // see UploadGeneratedMips. Small DXT1/8888 textures only; falls back to
   // the plain single-mip path on any failure.
-  if (mip_count == 1 && pow2 && REXCVAR_GET(skate3_native_render_scene_tex_mips) &&
-      width >= 8 && height >= 8 && width <= 512 && height <= 512) {
+  if (mip_count == 1 && pow2 &&
+      REXCVAR_GET(skate3_native_render_scene_tex_mips) && width >= 8 &&
+      height >= 8 && width <= 512 && height <= 512) {
     const auto base_fmt = rex::graphics::GetBaseFormat(info.format);
     if (base_fmt == xenos::TextureFormat::k_DXT1 ||
         base_fmt == xenos::TextureFormat::k_8_8_8_8) {
       GuestTexture gen = out;  // keeps fetch_words already copied
       const auto gen_t0 = PerfClock::now();
-      const bool gen_ok = UploadGeneratedMips(context, base, info, fetch.swizzle, gen);
+      const bool gen_ok =
+          UploadGeneratedMips(context, base, info, fetch.swizzle, gen);
       g_tex_dec_gen_ns += PerfNsSince(gen_t0);
       if (gen_ok) {
         out = gen;
@@ -1985,7 +2015,8 @@ bool EnsureGuestTextureFromWords(const NativeGuestOutputRenderContext& context,
     MipSrc& s = srcs[m];
     s.addr = mip_addr;
     s.pitch_blocks = m == 0 ? info.extent.block_pitch_h : ext.block_pitch_h;
-    s.size = m == 0 ? info.memory.base_size : ext.all_blocks() * bytes_per_block;
+    s.size =
+        m == 0 ? info.memory.base_size : ext.all_blocks() * bytes_per_block;
     s.min_size = s.size;
     if (info.is_tiled) {
       // Tiled addressing swizzles across 32x32-BLOCK macro tiles AND, for
@@ -2086,7 +2117,8 @@ bool EnsureGuestTextureFromWords(const NativeGuestOutputRenderContext& context,
   if (out.texture == nullptr) {
     return false;
   }
-  out.upload = CreateUploadBuffer(device, upload_size, nrhi::BufferBindClass::kCopySrc);
+  out.upload =
+      CreateUploadBuffer(device, upload_size, nrhi::BufferBindClass::kCopySrc);
   g_tex_dec_create_ns += PerfNsSince(create_t0);
   if (!out.upload) {
     device->DestroyDeferred(out.texture);
@@ -2094,8 +2126,8 @@ bool EnsureGuestTextureFromWords(const NativeGuestOutputRenderContext& context,
     return false;
   }
   uint8_t* mapping = static_cast<uint8_t*>(device->Map(out.upload));
-  const bool swap_rb_565 =
-      rex::graphics::GetBaseFormat(info.format) == xenos::TextureFormat::k_5_6_5;
+  const bool swap_rb_565 = rex::graphics::GetBaseFormat(info.format) ==
+                           xenos::TextureFormat::k_5_6_5;
   for (uint32_t m = 0; m < mip_count; ++m) {
     const MipPlan& p = plans[m];
     const uint32_t ox = srcs[m].ox;
@@ -2122,8 +2154,7 @@ bool EnsureGuestTextureFromWords(const NativeGuestOutputRenderContext& context,
     // long-unattributed 35-135 ms decode class (512x512 = 1 MB = 34 ms,
     // 1024x1024+chain = 135 ms; linear fit across a slow-decode log).
     // The mapping gets exactly one streaming memcpy per row.
-    const uint32_t run_blocks =
-        std::clamp(16u >> bytes_per_block_log2, 1u, 8u);
+    const uint32_t run_blocks = std::clamp(16u >> bytes_per_block_log2, 1u, 8u);
     static thread_local std::vector<uint8_t> row_buf;
     row_buf.resize(row_bytes);
     for (uint32_t by = 0; by < p.rows; ++by) {
@@ -2137,7 +2168,8 @@ bool EnsureGuestTextureFromWords(const NativeGuestOutputRenderContext& context,
           for (uint32_t bx = 0; bx < p.cols; ++bx) {
             const uint32_t off = row_off + bx * bytes_per_block;
             if (off + bytes_per_block > src_size) {
-              std::memset(out_row + size_t(bx) * bytes_per_block, 0, bytes_per_block);
+              std::memset(out_row + size_t(bx) * bytes_per_block, 0,
+                          bytes_per_block);
               ++guard_zeroed;
               continue;
             }
@@ -2151,11 +2183,14 @@ bool EnsureGuestTextureFromWords(const NativeGuestOutputRenderContext& context,
           const uint32_t x = bx + ox;
           const uint32_t run =
               std::min(p.cols - bx, run_blocks - (x & (run_blocks - 1)));
-          const uint32_t off = uint32_t(rex::graphics::texture_util::GetTiledOffset2D(
-              int32_t(x), int32_t(by + oy), src_pitch_blocks, bytes_per_block_log2));
+          const uint32_t off =
+              uint32_t(rex::graphics::texture_util::GetTiledOffset2D(
+                  int32_t(x), int32_t(by + oy), src_pitch_blocks,
+                  bytes_per_block_log2));
           const uint32_t bytes = run * bytes_per_block;
           if (off + bytes <= src_size) {
-            std::memcpy(out_row + size_t(bx) * bytes_per_block, guest + off, bytes);
+            std::memcpy(out_row + size_t(bx) * bytes_per_block, guest + off,
+                        bytes);
           } else {
             // Padded macro rows past the copied size: per-block guard-zero
             // (offsets within the run are contiguous, same proof as above).
@@ -2166,8 +2201,8 @@ bool EnsureGuestTextureFromWords(const NativeGuestOutputRenderContext& context,
                             bytes_per_block);
                 ++guard_zeroed;
               } else {
-                std::memcpy(out_row + size_t(bx + i) * bytes_per_block, guest + boff,
-                            bytes_per_block);
+                std::memcpy(out_row + size_t(bx + i) * bytes_per_block,
+                            guest + boff, bytes_per_block);
               }
             }
           }
@@ -2184,7 +2219,8 @@ bool EnsureGuestTextureFromWords(const NativeGuestOutputRenderContext& context,
           std::memcpy(out_row + i, &value, sizeof(value));
         }
       }
-      std::memcpy(mapping + p.offset + size_t(by) * p.pitch, out_row, row_bytes);
+      std::memcpy(mapping + p.offset + size_t(by) * p.pitch, out_row,
+                  row_bytes);
     }
     // Half-black-mip diagnostic (PCU Library banners): discriminate "the
     // guest pool genuinely holds zeros for this mip" from "our addressing
@@ -2198,13 +2234,14 @@ bool EnsureGuestTextureFromWords(const NativeGuestOutputRenderContext& context,
         const uint32_t by = bi / p.cols;
         const uint32_t bx = bi % p.cols;
         uint64_t q = 0;
-        std::memcpy(&q, mapping + p.offset + size_t(by) * p.pitch +
+        std::memcpy(&q,
+                    mapping + p.offset + size_t(by) * p.pitch +
                             size_t(bx) * bytes_per_block,
                     std::min<uint32_t>(8, bytes_per_block));
         zero_samples += q == 0 ? 1 : 0;
       }
-      if (total_blocks >= 32 && (guard_zeroed * 4 >= total_blocks ||
-                                 zero_samples >= 12)) {
+      if (total_blocks >= 32 &&
+          (guard_zeroed * 4 >= total_blocks || zero_samples >= 12)) {
         static std::atomic<uint32_t> s_mip_diag{0};
         if (s_mip_diag.fetch_add(1, std::memory_order_relaxed) < 24) {
           REXLOG_INFO(
@@ -2250,7 +2287,8 @@ bool EnsureGuestTextureFromWords(const NativeGuestOutputRenderContext& context,
     ComposeSrvSwizzle(fetch.swizzle, host.host_swizzle, sc.swizzle);
     sc.mip_count = std::min<uint32_t>(mip_count, 16);
     for (uint32_t m = 0; m < sc.mip_count; ++m) {
-      sc.mips[m] = {plans[m].offset, plans[m].pitch, std::max(host_width >> m, 1u),
+      sc.mips[m] = {plans[m].offset, plans[m].pitch,
+                    std::max(host_width >> m, 1u),
                     std::max(host_height >> m, 1u)};
     }
   } else {
@@ -2321,13 +2359,14 @@ bool UpdateGuestTexture2DInPlace(const NativeGuestOutputRenderContext& context,
   fetch.dword_3 = t.fetch_words[3];
   fetch.dword_4 = t.fetch_words[4];
   fetch.dword_5 = t.fetch_words[5];
-  if (fetch.type != xenos::FetchConstantType::kTexture || fetch.base_address == 0) {
+  if (fetch.type != xenos::FetchConstantType::kTexture ||
+      fetch.base_address == 0) {
     return false;
   }
   const rex::graphics::FormatInfo* pre_fi =
       rex::graphics::FormatInfo::Get(uint32_t(fetch.format));
-  if (pre_fi == nullptr || pre_fi->block_width == 0 || pre_fi->block_height == 0 ||
-      pre_fi->bytes_per_block() == 0) {
+  if (pre_fi == nullptr || pre_fi->block_width == 0 ||
+      pre_fi->block_height == 0 || pre_fi->bytes_per_block() == 0) {
     return false;
   }
   rex::graphics::TextureInfo info;
@@ -2339,8 +2378,9 @@ bool UpdateGuestTexture2DInPlace(const NativeGuestOutputRenderContext& context,
     return false;
   }
   if (info.dimension != xenos::DataDimension::k2DOrStacked || info.is_stacked ||
-      info.width >= 8192 || info.height >= 8192 || info.memory.base_address == 0 ||
-      info.memory.base_size == 0 || info.memory.base_size > 64u * 1024u * 1024u) {
+      info.width >= 8192 || info.height >= 8192 ||
+      info.memory.base_address == 0 || info.memory.base_size == 0 ||
+      info.memory.base_size > 64u * 1024u * 1024u) {
     return false;
   }
   const rex::graphics::FormatInfo* format_info = info.format_info();
@@ -2348,7 +2388,8 @@ bool UpdateGuestTexture2DInPlace(const NativeGuestOutputRenderContext& context,
   if (bytes_per_block == 0 || (bytes_per_block & (bytes_per_block - 1)) != 0) {
     return false;
   }
-  const uint32_t bytes_per_block_log2 = uint32_t(std::countr_zero(bytes_per_block));
+  const uint32_t bytes_per_block_log2 =
+      uint32_t(std::countr_zero(bytes_per_block));
   const uint32_t width = info.width + 1u;
   const uint32_t height = info.height + 1u;
   if ((width & (width - 1)) == 0 && (height & (height - 1)) == 0) {
@@ -2372,7 +2413,8 @@ bool UpdateGuestTexture2DInPlace(const NativeGuestOutputRenderContext& context,
   const uint32_t min_size = info.memory.base_size;
   uint32_t size = min_size;
   if (info.is_tiled) {
-    size = std::max(size, rex::graphics::texture_util::GetTiledAddressUpperBound2D(
+    size = std::max(
+        size, rex::graphics::texture_util::GetTiledAddressUpperBound2D(
                               cols + ox, rows + oy, pitch_blocks, bytes_per_block_log2));
   }
   static thread_local std::vector<uint8_t> inplace_scratch;
@@ -2382,9 +2424,11 @@ bool UpdateGuestTexture2DInPlace(const NativeGuestOutputRenderContext& context,
   uint64_t fp = 0;
   for (int attempt = 0; attempt < 3; ++attempt) {
     const uint64_t fp_before = SampleProbeFingerprint(base, t);
-    if (!GuestTryCopy(inplace_scratch.data(), base + (0xA0000000u | addr), size)) {
+    if (!GuestTryCopy(inplace_scratch.data(), base + (0xA0000000u | addr),
+                      size)) {
       if (min_size >= size ||
-          !GuestTryCopy(inplace_scratch.data(), base + (0xA0000000u | addr), min_size)) {
+          !GuestTryCopy(inplace_scratch.data(), base + (0xA0000000u | addr),
+                        min_size)) {
         return false;  // payload unreadable: let the full path sort it out
       }
       size = min_size;
@@ -2408,7 +2452,8 @@ bool UpdateGuestTexture2DInPlace(const NativeGuestOutputRenderContext& context,
     up = nullptr;
   }
   if (up == nullptr) {
-    up = CreateUploadBuffer(device, upload_size, nrhi::BufferBindClass::kCopySrc);
+    up = CreateUploadBuffer(device, upload_size,
+                            nrhi::BufferBindClass::kCopySrc);
     if (up == nullptr) {
       return false;
     }
@@ -2417,8 +2462,8 @@ bool UpdateGuestTexture2DInPlace(const NativeGuestOutputRenderContext& context,
   if (mapping == nullptr) {
     return false;
   }
-  const bool swap_rb_565 =
-      rex::graphics::GetBaseFormat(info.format) == xenos::TextureFormat::k_5_6_5;
+  const bool swap_rb_565 = rex::graphics::GetBaseFormat(info.format) ==
+                           xenos::TextureFormat::k_5_6_5;
   const uint8_t* guest = inplace_scratch.data();
   const uint32_t row_bytes = cols * bytes_per_block;
   const uint32_t run_blocks = std::clamp(16u >> bytes_per_block_log2, 1u, 8u);
@@ -2430,14 +2475,16 @@ bool UpdateGuestTexture2DInPlace(const NativeGuestOutputRenderContext& context,
   for (uint32_t by = 0; by < rows; ++by) {
     uint8_t* out_row = row_buf.data();
     if (!info.is_tiled) {
-      const uint32_t row_off = ((by + oy) * pitch_blocks + ox) * bytes_per_block;
+      const uint32_t row_off =
+          ((by + oy) * pitch_blocks + ox) * bytes_per_block;
       if (row_off + row_bytes <= size) {
         std::memcpy(out_row, guest + row_off, row_bytes);
       } else {
         for (uint32_t bx = 0; bx < cols; ++bx) {
           const uint32_t off = row_off + bx * bytes_per_block;
           if (off + bytes_per_block > size) {
-            std::memset(out_row + size_t(bx) * bytes_per_block, 0, bytes_per_block);
+            std::memset(out_row + size_t(bx) * bytes_per_block, 0,
+                        bytes_per_block);
           } else {
             std::memcpy(out_row + size_t(bx) * bytes_per_block, guest + off,
                         bytes_per_block);
@@ -2448,20 +2495,25 @@ bool UpdateGuestTexture2DInPlace(const NativeGuestOutputRenderContext& context,
       uint32_t bx = 0;
       while (bx < cols) {
         const uint32_t x = bx + ox;
-        const uint32_t run = std::min(cols - bx, run_blocks - (x & (run_blocks - 1)));
-        const uint32_t off = uint32_t(rex::graphics::texture_util::GetTiledOffset2D(
-            int32_t(x), int32_t(by + oy), pitch_blocks, bytes_per_block_log2));
+        const uint32_t run =
+            std::min(cols - bx, run_blocks - (x & (run_blocks - 1)));
+        const uint32_t off =
+            uint32_t(rex::graphics::texture_util::GetTiledOffset2D(
+                int32_t(x), int32_t(by + oy), pitch_blocks,
+                bytes_per_block_log2));
         const uint32_t bytes = run * bytes_per_block;
         if (off + bytes <= size) {
-          std::memcpy(out_row + size_t(bx) * bytes_per_block, guest + off, bytes);
+          std::memcpy(out_row + size_t(bx) * bytes_per_block, guest + off,
+                      bytes);
         } else {
           for (uint32_t i = 0; i < run; ++i) {
             const uint32_t boff = off + i * bytes_per_block;
             if (boff + bytes_per_block > size) {
-              std::memset(out_row + size_t(bx + i) * bytes_per_block, 0, bytes_per_block);
-            } else {
-              std::memcpy(out_row + size_t(bx + i) * bytes_per_block, guest + boff,
+              std::memset(out_row + size_t(bx + i) * bytes_per_block, 0,
                           bytes_per_block);
+            } else {
+              std::memcpy(out_row + size_t(bx + i) * bytes_per_block,
+                          guest + boff, bytes_per_block);
             }
           }
         }
@@ -2488,8 +2540,8 @@ bool UpdateGuestTexture2DInPlace(const NativeGuestOutputRenderContext& context,
   context.cmd->Barrier(t.texture, nrhi::ResourceState::kPixelShaderResource,
                        nrhi::ResourceState::kCopyDest);
   context.cmd->FlushBarriers();
-  context.cmd->CopyBufferToTexture(t.texture, 0, 0, up, 0, pitch, cols * block_w,
-                                   rows * block_h, 1);
+  context.cmd->CopyBufferToTexture(t.texture, 0, 0, up, 0, pitch,
+                                   cols * block_w, rows * block_h, 1);
   context.cmd->Barrier(t.texture, nrhi::ResourceState::kCopyDest,
                        nrhi::ResourceState::kPixelShaderResource);
   context.cmd->FlushBarriers();
@@ -2506,8 +2558,9 @@ bool UpdateGuestTexture2DInPlace(const NativeGuestOutputRenderContext& context,
 // per face slice), WITH the guest mip chain; gradient-derived LOD on the
 // normal-mapped reflection vector is what blurs baked cube detail
 // (streetlight heads) into the soft reflections of the real console output.
-bool EnsureGuestCubeTexture(const NativeGuestOutputRenderContext& context, uint8_t* base,
-                            uint32_t tex_ptr, GuestTexture& out) {
+bool EnsureGuestCubeTexture(const NativeGuestOutputRenderContext& context,
+                            uint8_t* base, uint32_t tex_ptr,
+                            GuestTexture& out) {
   uint32_t words[6] = {};
   {
     uint32_t raw[6];
@@ -2526,23 +2579,25 @@ bool EnsureGuestCubeTexture(const NativeGuestOutputRenderContext& context, uint8
   fetch.dword_3 = words[3];
   fetch.dword_4 = words[4];
   fetch.dword_5 = words[5];
-  if (fetch.type != xenos::FetchConstantType::kTexture || fetch.base_address == 0) {
+  if (fetch.type != xenos::FetchConstantType::kTexture ||
+      fetch.base_address == 0) {
     return false;
   }
   // Same divide-by-zero pre-guard as EnsureGuestTextureFromWords (garbage
   // format -> zero block dims inside Prepare's extent math).
   const rex::graphics::FormatInfo* pre_fi =
       rex::graphics::FormatInfo::Get(uint32_t(fetch.format));
-  if (pre_fi == nullptr || pre_fi->block_width == 0 || pre_fi->block_height == 0 ||
-      pre_fi->bytes_per_block() == 0) {
+  if (pre_fi == nullptr || pre_fi->block_width == 0 ||
+      pre_fi->block_height == 0 || pre_fi->bytes_per_block() == 0) {
     return false;
   }
   rex::graphics::TextureInfo info;
   if (!rex::graphics::TextureInfo::Prepare(fetch, &info)) {
     return false;
   }
-  if (info.dimension != xenos::DataDimension::kCube || info.memory.base_address == 0 ||
-      info.width >= 1024 || info.height >= 1024) {
+  if (info.dimension != xenos::DataDimension::kCube ||
+      info.memory.base_address == 0 || info.width >= 1024 ||
+      info.height >= 1024) {
     return false;
   }
   HostTextureFormat host;
@@ -2554,7 +2609,8 @@ bool EnsureGuestCubeTexture(const NativeGuestOutputRenderContext& context, uint8
   if (bytes_per_block == 0 || (bytes_per_block & (bytes_per_block - 1)) != 0) {
     return false;
   }
-  const uint32_t bytes_per_block_log2 = uint32_t(std::countr_zero(bytes_per_block));
+  const uint32_t bytes_per_block_log2 =
+      uint32_t(std::countr_zero(bytes_per_block));
   const uint32_t width = info.width + 1u;
   const uint32_t height = info.height + 1u;
   const uint32_t block_w = format_info->block_width;
@@ -2574,19 +2630,21 @@ bool EnsureGuestCubeTexture(const NativeGuestOutputRenderContext& context, uint8
   // chain down to 1x1 below; other formats fall back to copying the guest
   // chain (down to 32px: smaller levels live packed inside a shared 32x32
   // tile, see GetPackedTileOffset).
-  const xenos::TextureFormat cube_base_fmt = rex::graphics::GetBaseFormat(info.format);
-  const bool rgba_chain =
-      (cube_base_fmt == xenos::TextureFormat::k_DXT1 ||
+  const xenos::TextureFormat cube_base_fmt =
+      rex::graphics::GetBaseFormat(info.format);
+  const bool rgba_chain = (cube_base_fmt == xenos::TextureFormat::k_DXT1 ||
        cube_base_fmt == xenos::TextureFormat::k_8_8_8_8) &&
-      width >= 8 && (width & (width - 1)) == 0 && width == height;
+                          width >= 8 && (width & (width - 1)) == 0 &&
+                          width == height;
   uint32_t mip_levels = 1;
-  if (!rgba_chain && info.memory.mip_address != 0 && (width & (width - 1)) == 0 &&
-      (height & (height - 1)) == 0) {
+  if (!rgba_chain && info.memory.mip_address != 0 &&
+      (width & (width - 1)) == 0 && (height & (height - 1)) == 0) {
     const uint32_t avail = std::min(info.mip_levels(), info.GetMaxMipLevels());
     while (mip_levels < avail && (width >> mip_levels) >= 32 &&
            (height >> mip_levels) >= 32) {
       uint32_t ox = 0, oy = 0;
-      if (info.GetMipLocation(mip_levels, &ox, &oy, true) == 0 || ox != 0 || oy != 0) {
+      if (info.GetMipLocation(mip_levels, &ox, &oy, true) == 0 || ox != 0 ||
+          oy != 0) {
         break;
       }
       ++mip_levels;
@@ -2604,7 +2662,8 @@ bool EnsureGuestCubeTexture(const NativeGuestOutputRenderContext& context, uint8
     CubeLevel& L = lv[m];
     const auto ext = m == 0 ? info.extent : info.GetMipExtent(m, true);
     uint32_t ox = 0, oy = 0;
-    L.addr = m == 0 ? info.memory.base_address : info.GetMipLocation(m, &ox, &oy, true);
+    L.addr = m == 0 ? info.memory.base_address
+                    : info.GetMipLocation(m, &ox, &oy, true);
     L.pitch_blocks = ext.block_pitch_h;
     L.slice_bytes = ext.block_pitch_h * ext.block_pitch_v * bytes_per_block;
     const uint32_t mw = std::max(width >> m, 1u);
@@ -2615,8 +2674,7 @@ bool EnsureGuestCubeTexture(const NativeGuestOutputRenderContext& context, uint8
     L.h = L.rows * block_h;
     L.up_pitch = (L.cols * bytes_per_block + (nrhi::kRowPitchAlignment - 1u)) &
                  ~(nrhi::kRowPitchAlignment - 1u);
-    L.up_face_bytes =
-        (L.up_pitch * L.rows + (kUploadPlacementAlignment - 1u)) &
+    L.up_face_bytes = (L.up_pitch * L.rows + (kUploadPlacementAlignment - 1u)) &
         ~(kUploadPlacementAlignment - 1u);
     L.scratch_off = scratch_total;
     scratch_total += L.slice_bytes * 6;
@@ -2628,7 +2686,8 @@ bool EnsureGuestCubeTexture(const NativeGuestOutputRenderContext& context, uint8
   cube_scratch.resize(scratch_total);
   for (uint32_t m = 0; m < mip_levels; ++m) {
     if (!GuestTryCopy(cube_scratch.data() + lv[m].scratch_off,
-                      base + (0xA0000000u | lv[m].addr), lv[m].slice_bytes * 6)) {
+                      base + (0xA0000000u | lv[m].addr),
+                      lv[m].slice_bytes * 6)) {
       if (m == 0) {
         return false;
       }
@@ -2673,7 +2732,8 @@ bool EnsureGuestCubeTexture(const NativeGuestOutputRenderContext& context, uint8
     if (out.texture == nullptr) {
       return false;
     }
-    out.upload = CreateUploadBuffer(device, face_upload * 6, nrhi::BufferBindClass::kCopySrc);
+    out.upload = CreateUploadBuffer(device, face_upload * 6,
+                                    nrhi::BufferBindClass::kCopySrc);
     if (!out.upload) {
       device->DestroyDeferred(out.texture);
       out.texture = nullptr;
@@ -2697,19 +2757,23 @@ bool EnsureGuestCubeTexture(const NativeGuestOutputRenderContext& context, uint8
         for (uint32_t bx = 0; bx < L0.cols; ++bx) {
           uint32_t source_offset;
           if (info.is_tiled) {
-            source_offset = uint32_t(rex::graphics::texture_util::GetTiledOffset2D(
-                int32_t(bx), int32_t(by), L0.pitch_blocks, bytes_per_block_log2));
+            source_offset =
+                uint32_t(rex::graphics::texture_util::GetTiledOffset2D(
+                    int32_t(bx), int32_t(by), L0.pitch_blocks,
+                    bytes_per_block_log2));
           } else {
             source_offset = (by * L0.pitch_blocks + bx) * bytes_per_block;
           }
           if (source_offset + bytes_per_block > L0.slice_bytes) {
-            std::memset(&bc_row[size_t(bx) * bytes_per_block], 0, bytes_per_block);
+            std::memset(&bc_row[size_t(bx) * bytes_per_block], 0,
+                        bytes_per_block);
             continue;
           }
-          std::memcpy(&bc_row[size_t(bx) * bytes_per_block], guest + source_offset,
-                      bytes_per_block);
+          std::memcpy(&bc_row[size_t(bx) * bytes_per_block],
+                      guest + source_offset, bytes_per_block);
         }
-        SwapGuestEndian(bc_row.data(), uint32_t(bc_row.size()), info.endianness);
+        SwapGuestEndian(bc_row.data(), uint32_t(bc_row.size()),
+                        info.endianness);
         if (cube_base_fmt == xenos::TextureFormat::k_DXT1) {
           for (uint32_t bx = 0; bx < L0.cols; ++bx) {
             uint8_t px[16][4];
@@ -2770,7 +2834,8 @@ bool EnsureGuestCubeTexture(const NativeGuestOutputRenderContext& context, uint8
       }
     }
     device->Unmap(out.upload);
-    REXLOG_DEBUG("native-scene: cube {:08X} {}x{} fmt={} -> RGBA full chain ({} levels)",
+    REXLOG_DEBUG(
+        "native-scene: cube {:08X} {}x{} fmt={} -> RGBA full chain ({} levels)",
                  tex_ptr, width, height, uint32_t(info.format), levels);
     nrhi::Swizzle swizzle_mapping[4];
     ComposeSrvSwizzle(fetch.swizzle, xenos::XE_GPU_TEXTURE_SWIZZLE_RGBA,
@@ -2793,7 +2858,8 @@ bool EnsureGuestCubeTexture(const NativeGuestOutputRenderContext& context, uint8
       }
       out.payload_addr = 0xA0000000u | info.memory.base_address;
       out.payload_size = lv[0].slice_bytes * 6;
-      out.payload_fp = SamplePayloadFingerprint(base, out.payload_addr, out.payload_size);
+      out.payload_fp =
+          SamplePayloadFingerprint(base, out.payload_addr, out.payload_size);
       out.recheck_frame = 0;
       out.valid = false;  // live only after commit
       return true;
@@ -2825,7 +2891,8 @@ bool EnsureGuestCubeTexture(const NativeGuestOutputRenderContext& context, uint8
     }
     out.payload_addr = 0xA0000000u | info.memory.base_address;
     out.payload_size = lv[0].slice_bytes * 6;
-    out.payload_fp = SamplePayloadFingerprint(base, out.payload_addr, out.payload_size);
+    out.payload_fp =
+        SamplePayloadFingerprint(base, out.payload_addr, out.payload_size);
     out.recheck_frame = 0;
     out.valid = true;
     return true;
@@ -2847,7 +2914,8 @@ bool EnsureGuestCubeTexture(const NativeGuestOutputRenderContext& context, uint8
   if (out.texture == nullptr) {
     return false;
   }
-  out.upload = CreateUploadBuffer(device, face_upload * 6, nrhi::BufferBindClass::kCopySrc);
+  out.upload = CreateUploadBuffer(device, face_upload * 6,
+                                  nrhi::BufferBindClass::kCopySrc);
   if (!out.upload) {
     device->DestroyDeferred(out.texture);
     out.texture = nullptr;
@@ -2877,17 +2945,20 @@ bool EnsureGuestCubeTexture(const NativeGuestOutputRenderContext& context, uint8
         for (uint32_t bx = 0; bx < L.cols; ++bx) {
           uint32_t source_offset;
           if (info.is_tiled) {
-            source_offset = uint32_t(rex::graphics::texture_util::GetTiledOffset2D(
-                int32_t(bx), int32_t(by), L.pitch_blocks, bytes_per_block_log2));
+            source_offset =
+                uint32_t(rex::graphics::texture_util::GetTiledOffset2D(
+                    int32_t(bx), int32_t(by), L.pitch_blocks,
+                    bytes_per_block_log2));
           } else {
             source_offset = (by * L.pitch_blocks + bx) * bytes_per_block;
           }
           if (source_offset + bytes_per_block > L.slice_bytes) {
-            std::memset(out_row + size_t(bx) * bytes_per_block, 0, bytes_per_block);
+            std::memset(out_row + size_t(bx) * bytes_per_block, 0,
+                        bytes_per_block);
             continue;
           }
-          std::memcpy(out_row + size_t(bx) * bytes_per_block, guest + source_offset,
-                      bytes_per_block);
+          std::memcpy(out_row + size_t(bx) * bytes_per_block,
+                      guest + source_offset, bytes_per_block);
         }
         SwapGuestEndian(out_row, row_bytes, info.endianness);
       }
@@ -2895,8 +2966,9 @@ bool EnsureGuestCubeTexture(const NativeGuestOutputRenderContext& context, uint8
   }
   device->Unmap(out.upload);
 
-  REXLOG_DEBUG("native-scene: cube {:08X} {}x{} fmt={} mips={} (of {} avail)", tex_ptr,
-               width, height, uint32_t(info.format), mip_levels, info.mip_levels());
+  REXLOG_DEBUG("native-scene: cube {:08X} {}x{} fmt={} mips={} (of {} avail)",
+               tex_ptr, width, height, uint32_t(info.format), mip_levels,
+               info.mip_levels());
   if (g_tex_stage_out != nullptr) {
     // Decode worker: export the commit recipe, face-major (face * levels +
     // mip) entries matching the old D3D12 subresource numbering.
@@ -2909,13 +2981,14 @@ bool EnsureGuestCubeTexture(const NativeGuestOutputRenderContext& context, uint8
     sc.mip_count = 6 * mip_levels;
     for (uint32_t face = 0; face < 6; ++face) {
       for (uint32_t m = 0; m < mip_levels; ++m) {
-        sc.mips[face * mip_levels + m] = {upload_offset(face, m), lv[m].up_pitch,
-                                          lv[m].w, lv[m].h};
+        sc.mips[face * mip_levels + m] = {upload_offset(face, m),
+                                          lv[m].up_pitch, lv[m].w, lv[m].h};
       }
     }
     out.payload_addr = 0xA0000000u | info.memory.base_address;
     out.payload_size = lv[0].slice_bytes * 6;
-    out.payload_fp = SamplePayloadFingerprint(base, out.payload_addr, out.payload_size);
+    out.payload_fp =
+        SamplePayloadFingerprint(base, out.payload_addr, out.payload_size);
     out.recheck_frame = 0;
     out.valid = false;  // live only after commit
     return true;
@@ -2945,7 +3018,8 @@ bool EnsureGuestCubeTexture(const NativeGuestOutputRenderContext& context, uint8
   }
   out.payload_addr = 0xA0000000u | info.memory.base_address;
   out.payload_size = lv[0].slice_bytes * 6;
-  out.payload_fp = SamplePayloadFingerprint(base, out.payload_addr, out.payload_size);
+  out.payload_fp =
+      SamplePayloadFingerprint(base, out.payload_addr, out.payload_size);
   out.recheck_frame = 0;
   out.valid = true;
   return true;
@@ -3069,9 +3143,8 @@ bool EnsureScenePsoFamily(const NativeGuestOutputRenderContext& context) {
   // Scene color format: the float HDR intermediate when the HDR post chain
   // is active (the tonemap pass then writes the gamma guest output),
   // otherwise the guest output itself.
-  const nrhi::Format scene_fmt = g_r.hdr_active
-                                     ? g_r.hdr_scene_format
-                                     : context.guest_output->format();
+  const nrhi::Format scene_fmt =
+      g_r.hdr_active ? g_r.hdr_scene_format : context.guest_output->format();
   // g_r.msaa is selected by EnsurePipeline (which triggers this rebuild on
   // change).
 
@@ -3080,9 +3153,8 @@ bool EnsureScenePsoFamily(const NativeGuestOutputRenderContext& context) {
   // destruction queue).
   for (nrhi::Pipeline** p :
        {&g_r.pso, &g_r.pso_cullback, &g_r.pso_transparent,
-        &g_r.pso_transparent_cullback, &g_r.pso_fade,
-        &g_r.pso_hair_a, &g_r.pso_hair_b, &g_r.pso_nodepth,
-        &g_r.pso_outline_mask}) {
+        &g_r.pso_transparent_cullback, &g_r.pso_fade, &g_r.pso_hair_a,
+        &g_r.pso_hair_b, &g_r.pso_nodepth, &g_r.pso_outline_mask}) {
     if (*p != nullptr) {
       device->DestroyDeferred(*p);
       *p = nullptr;
@@ -3111,10 +3183,9 @@ bool EnsureScenePsoFamily(const NativeGuestOutputRenderContext& context) {
   nrhi::Shader* vs = device->CreateShader(
       MakeShaderDesc(nrhi::ShaderStage::kVertex, "scene.hlsl", kShaderSource,
                      "vs_main", nullptr, ""));
-  nrhi::Shader* ps = device->CreateShader(
-      MakeShaderDesc(nrhi::ShaderStage::kPixel, "scene.hlsl", kShaderSource,
-                     "ps_main", ps_def_count != 0 ? ps_defs : nullptr,
-                     ps_variant));
+  nrhi::Shader* ps = device->CreateShader(MakeShaderDesc(
+      nrhi::ShaderStage::kPixel, "scene.hlsl", kShaderSource, "ps_main",
+      ps_def_count != 0 ? ps_defs : nullptr, ps_variant));
   if (vs == nullptr || ps == nullptr) {
     REXLOG_ERROR("native-scene: shader compile failed");
     g_r.failed = true;
@@ -3162,11 +3233,9 @@ bool EnsureScenePsoFamily(const NativeGuestOutputRenderContext& context) {
   pso.blend.op_alpha = nrhi::BlendOp::kAdd;
   g_r.pso_transparent = device->CreateGraphicsPipeline(pso);
   pso.cull = nrhi::CullMode::kFront;
-  g_r.pso_transparent_cullback =
-      device->CreateGraphicsPipeline(pso);
+  g_r.pso_transparent_cullback = device->CreateGraphicsPipeline(pso);
   if (g_r.pso_transparent_cullback == nullptr) {
-    REXLOG_WARN(
-        "native-scene: transparent cull-back PSO creation failed");
+    REXLOG_WARN("native-scene: transparent cull-back PSO creation failed");
   }
   pso.cull = nrhi::CullMode::kNone;
   // Entity-fade variant: z-write ON (see RendererState::pso_fade). Drawn
@@ -3248,8 +3317,8 @@ bool EnsureResolvePso(const NativeGuestOutputRenderContext& context) {
     rp.cull = nrhi::CullMode::kNone;
     // Under HDR the resolve averages the float MSAA scene into the 1x float
     // plane (hdr_resolved); classic resolves straight into the guest output.
-    rp.rtv_format = g_r.hdr_active ? g_r.hdr_scene_format
-                                   : context.guest_output->format();
+    rp.rtv_format =
+        g_r.hdr_active ? g_r.hdr_scene_format : context.guest_output->format();
     rp.sample_count = 1;
     g_r.resolve_pso = device->CreateGraphicsPipeline(rp);
     device->DestroyDeferred(rvs);
@@ -3447,7 +3516,8 @@ bool EnsureSplinePsos(const NativeGuestOutputRenderContext& context) {
     // states (spline.xml): darken = straight alpha, default = additive.
     // Under HDR the pixel shaders encode through the tone chain's inverse
     // (SplineOut) so the host tonemap restores the authored look.
-    for (nrhi::Pipeline** p : {&g_r.pso_spline_darken, &g_r.pso_spline_default}) {
+    for (nrhi::Pipeline** p :
+         {&g_r.pso_spline_darken, &g_r.pso_spline_default}) {
       if (*p != nullptr) {
         device->DestroyDeferred(*p);
         *p = nullptr;
@@ -3473,14 +3543,12 @@ bool EnsureSplinePsos(const NativeGuestOutputRenderContext& context) {
     nrhi::Shader* svs = device->CreateShader(
         MakeShaderDesc(nrhi::ShaderStage::kVertex, "spline.hlsl",
                        kShaderSplineSource, "vs_main", nullptr, ""));
-    nrhi::Shader* spd = device->CreateShader(
-        MakeShaderDesc(nrhi::ShaderStage::kPixel, "spline.hlsl",
-                       kShaderSplineSource, "ps_default",
-                       sp_def_count != 0 ? sp_defs : nullptr, sp_variant));
-    nrhi::Shader* spk = device->CreateShader(
-        MakeShaderDesc(nrhi::ShaderStage::kPixel, "spline.hlsl",
-                       kShaderSplineSource, "ps_darken",
-                       sp_def_count != 0 ? sp_defs : nullptr, sp_variant));
+    nrhi::Shader* spd = device->CreateShader(MakeShaderDesc(
+        nrhi::ShaderStage::kPixel, "spline.hlsl", kShaderSplineSource,
+        "ps_default", sp_def_count != 0 ? sp_defs : nullptr, sp_variant));
+    nrhi::Shader* spk = device->CreateShader(MakeShaderDesc(
+        nrhi::ShaderStage::kPixel, "spline.hlsl", kShaderSplineSource,
+        "ps_darken", sp_def_count != 0 ? sp_defs : nullptr, sp_variant));
     if (svs == nullptr || spd == nullptr || spk == nullptr) {
       REXLOG_ERROR("native-scene: spline shader compile failed");
       g_r.failed = true;
@@ -3501,8 +3569,8 @@ bool EnsureSplinePsos(const NativeGuestOutputRenderContext& context) {
     sp.input_elements = input_spline;
     sp.input_element_count = 3;
     sp.vertex_stride = 28;
-    sp.rtv_format = g_r.hdr_active ? g_r.hdr_scene_format
-                                   : context.guest_output->format();
+    sp.rtv_format =
+        g_r.hdr_active ? g_r.hdr_scene_format : context.guest_output->format();
     sp.dsv_format = nrhi::Format::kD32_FLOAT;
     sp.sample_count = g_r.msaa;
     sp.blend.enable = true;
@@ -3618,10 +3686,11 @@ bool EnsureHeapsAndRings(const NativeGuestOutputRenderContext& context) {
   nrhi::Device* device = context.device;
 
   if (!g_r.bone_ring) {
-    g_r.bone_ring = CreateUploadBuffer(
-        device, size_t(RendererState::kBoneRegionSize) * RendererState::kBoneRegions);
-    g_r.bone_ring_cpu =
-        g_r.bone_ring ? static_cast<uint8_t*>(device->Map(g_r.bone_ring))
+    g_r.bone_ring =
+        CreateUploadBuffer(device, size_t(RendererState::kBoneRegionSize) *
+                                       RendererState::kBoneRegions);
+    g_r.bone_ring_cpu = g_r.bone_ring
+                            ? static_cast<uint8_t*>(device->Map(g_r.bone_ring))
                       : nullptr;
     if (g_r.bone_ring_cpu == nullptr) {
       g_r.failed = true;
@@ -3630,10 +3699,11 @@ bool EnsureHeapsAndRings(const NativeGuestOutputRenderContext& context) {
   }
 
   if (!g_r.ropa_ring) {
-    g_r.ropa_ring = CreateUploadBuffer(
-        device, size_t(RendererState::kRopaRegionSize) * RendererState::kBoneRegions);
-    g_r.ropa_ring_cpu =
-        g_r.ropa_ring ? static_cast<uint8_t*>(device->Map(g_r.ropa_ring))
+    g_r.ropa_ring =
+        CreateUploadBuffer(device, size_t(RendererState::kRopaRegionSize) *
+                                       RendererState::kBoneRegions);
+    g_r.ropa_ring_cpu = g_r.ropa_ring
+                            ? static_cast<uint8_t*>(device->Map(g_r.ropa_ring))
                       : nullptr;
     if (g_r.ropa_ring_cpu == nullptr) {
       g_r.failed = true;
@@ -3642,11 +3712,11 @@ bool EnsureHeapsAndRings(const NativeGuestOutputRenderContext& context) {
   }
 
   if (!g_r.ui_ring) {
-    g_r.ui_ring = CreateUploadBuffer(
-        device, size_t(RendererState::kUiRegionSize) * RendererState::kUiRegions);
-    g_r.ui_ring_cpu = g_r.ui_ring
-                          ? static_cast<uint8_t*>(device->Map(g_r.ui_ring))
-                          : nullptr;
+    g_r.ui_ring =
+        CreateUploadBuffer(device, size_t(RendererState::kUiRegionSize) *
+                                       RendererState::kUiRegions);
+    g_r.ui_ring_cpu =
+        g_r.ui_ring ? static_cast<uint8_t*>(device->Map(g_r.ui_ring)) : nullptr;
     if (g_r.ui_ring_cpu == nullptr) {
       g_r.failed = true;
       return false;
@@ -3762,7 +3832,8 @@ bool EnsurePhotoFxPipeline(const NativeGuestOutputRenderContext& context) {
     const Fixed fixed[3] = {
         {&g_r.pfx_half[0], RendererState::kPfxHalfW, RendererState::kPfxHalfH},
         {&g_r.pfx_half[1], RendererState::kPfxHalfW, RendererState::kPfxHalfH},
-        {&g_r.pfx_quarter, RendererState::kPfxQuarterW, RendererState::kPfxQuarterH},
+        {&g_r.pfx_quarter, RendererState::kPfxQuarterW,
+         RendererState::kPfxQuarterH},
     };
     for (const Fixed& f : fixed) {
       if (*f.res != nullptr) {
@@ -3796,8 +3867,8 @@ bool EnsurePhotoFxPipeline(const NativeGuestOutputRenderContext& context) {
       // Upload: 32 rows of 32 texels x 32 slices, 256-byte row pitch.
       const uint32_t row_pitch = 256;
       const uint32_t slice_pitch = row_pitch * 32;
-      g_r.pfx_lut_upload =
-          CreateUploadBuffer(device, size_t(slice_pitch) * 32, nrhi::BufferBindClass::kCopySrc);
+      g_r.pfx_lut_upload = CreateUploadBuffer(device, size_t(slice_pitch) * 32,
+                                              nrhi::BufferBindClass::kCopySrc);
       if (g_r.pfx_lut_upload == nullptr) {
         return fail("LUT upload");
       }
@@ -3815,9 +3886,12 @@ bool EnsurePhotoFxPipeline(const NativeGuestOutputRenderContext& context) {
           for (uint32_t ix = 0; ix < 32; ++ix) {
             const float u = (float(ix) + 0.5f) / 32.0f;
             const float g = (u - 0.015625f) / 0.96875f;
-            row[ix * 4 + 0] = uint8_t(std::clamp(r, 0.0f, 1.0f) * 255.0f + 0.5f);
-            row[ix * 4 + 1] = uint8_t(std::clamp(g, 0.0f, 1.0f) * 255.0f + 0.5f);
-            row[ix * 4 + 2] = uint8_t(std::clamp(b, 0.0f, 1.0f) * 255.0f + 0.5f);
+            row[ix * 4 + 0] =
+                uint8_t(std::clamp(r, 0.0f, 1.0f) * 255.0f + 0.5f);
+            row[ix * 4 + 1] =
+                uint8_t(std::clamp(g, 0.0f, 1.0f) * 255.0f + 0.5f);
+            row[ix * 4 + 2] =
+                uint8_t(std::clamp(b, 0.0f, 1.0f) * 255.0f + 0.5f);
             row[ix * 4 + 3] = 255;
           }
         }
@@ -3829,9 +3903,8 @@ bool EnsurePhotoFxPipeline(const NativeGuestOutputRenderContext& context) {
       // 10 slots per frame region: depth pack + accum feed + 6 passes +
       // accum mode 2 + the debug view.
       g_r.pfx_cb = CreateUploadBuffer(device, 10u * 4096u * 4u);
-      g_r.pfx_cb_ptr = g_r.pfx_cb
-                           ? static_cast<uint8_t*>(device->Map(g_r.pfx_cb))
-                           : nullptr;
+      g_r.pfx_cb_ptr =
+          g_r.pfx_cb ? static_cast<uint8_t*>(device->Map(g_r.pfx_cb)) : nullptr;
       if (g_r.pfx_cb_ptr == nullptr) {
         return fail("constant ring");
       }
@@ -3873,12 +3946,9 @@ bool EnsureShadowResources(const NativeGuestOutputRenderContext& context) {
   // any device-limit clamping the texture cache applied, and gives the same
   // effective shadow raster the emulated GPU renders at that scale.
   const int32_t tile_cfg = REXCVAR_GET(skate3_native_render_scene_shadow_tile);
-  const uint32_t automatic_tile =
-      std::min(512u * std::max(
-                          1u, (context.guest_output_height + 719u) / 720u),
-               4096u);
-  const uint32_t want_tile =
-      tile_cfg > 0
+  const uint32_t automatic_tile = std::min(
+      512u * std::max(1u, (context.guest_output_height + 719u) / 720u), 4096u);
+  const uint32_t want_tile = tile_cfg > 0
           ? uint32_t(tile_cfg)
           : (mechanics_sandbox::VisualMapEnabled()
                  ? std::max(automatic_tile, 2048u)
@@ -3926,9 +3996,9 @@ bool EnsureShadowResources(const NativeGuestOutputRenderContext& context) {
       // The raw and final tiles are the shadow-dump readback sources, so
       // those two also need copy-source usage; the intermediate is never
       // copied and stays render-target only.
-      desc.usage = nrhi::kTextureUsageRenderTarget |
-                   (t != 1 ? nrhi::kTextureUsageCopySource
-                           : nrhi::kTextureUsageNone);
+      desc.usage =
+          nrhi::kTextureUsageRenderTarget |
+          (t != 1 ? nrhi::kTextureUsageCopySource : nrhi::kTextureUsageNone);
       *targets[t] = device->CreateTexture(desc);
       if (*targets[t] == nullptr) {
         REXLOG_ERROR("native-scene: shadow atlas creation failed");
@@ -3946,8 +4016,7 @@ bool EnsureShadowResources(const NativeGuestOutputRenderContext& context) {
     }
     g_r.shadow_in_srv_state = false;
     REXLOG_INFO("native-scene: shadow atlas created ({}x{} tiles{})",
-                g_r.shadow_tile, g_r.shadow_tile,
-                tile_cfg > 0 ? "" : ", auto");
+                g_r.shadow_tile, g_r.shadow_tile, tile_cfg > 0 ? "" : ", auto");
   }
   if (!g_r.world_shadow && g_r.shadow_raw != nullptr) {
     // dynamicobject static world-shadow map (see RendererState). Fixed at
@@ -3985,7 +4054,8 @@ bool EnsureShadowResources(const NativeGuestOutputRenderContext& context) {
       want_static_size /= 2;
     }
   }
-  if (g_r.static_sun != nullptr && g_r.static_sun_requested != want_static_size) {
+  if (g_r.static_sun != nullptr &&
+      g_r.static_sun_requested != want_static_size) {
     // Hot size change: retire the map; recreated below. The recreated map
     // is uninitialized, so force the cross-frame cache to re-render it
     // (RenderStaticSunMap rebuilds whenever nsm_built_radius <= 0).
@@ -4104,8 +4174,7 @@ bool EnsureShadowResources(const NativeGuestOutputRenderContext& context) {
         g_r.static_sun_size * 3, g_r.static_sun_size,
         g_r.static_sun_history != nullptr ? 1 : 0);
   }
-  if (g_r.shadow_raw != nullptr &&
-      StaticSceneShadowsEnabled()) {
+  if (g_r.shadow_raw != nullptr && StaticSceneShadowsEnabled()) {
     for (uint32_t cascade = 0; cascade < 3; ++cascade) {
       if (g_r.owned_static_sun[cascade] != nullptr) {
         continue;
@@ -4150,10 +4219,11 @@ bool EnsureShadowResources(const NativeGuestOutputRenderContext& context) {
   if (!g_r.shadow_cb) {
     // Always created (even with shadows off): the scene PS declares b1 and
     // a root CBV must be bound; a zeroed block disables the shadow branch.
-    g_r.shadow_cb = CreateUploadBuffer(
-        device, size_t(RendererState::kShadowCbSlice) * RendererState::kShadowCbRegions);
-    g_r.shadow_cb_cpu =
-        g_r.shadow_cb ? static_cast<uint8_t*>(device->Map(g_r.shadow_cb))
+    g_r.shadow_cb =
+        CreateUploadBuffer(device, size_t(RendererState::kShadowCbSlice) *
+                                       RendererState::kShadowCbRegions);
+    g_r.shadow_cb_cpu = g_r.shadow_cb
+                            ? static_cast<uint8_t*>(device->Map(g_r.shadow_cb))
                       : nullptr;
     if (g_r.shadow_cb_cpu == nullptr) {
       g_r.failed = true;
@@ -4180,9 +4250,9 @@ bool EnsureBlurOutlineTargets(const NativeGuestOutputRenderContext& context) {
     for (int t = 0; t < 2 && ok; ++t) {
       // blur_tex[0] is also the photo-grab readback source (copied into the
       // grab readback buffers), so it alone needs copy-source usage.
-      desc.usage = nrhi::kTextureUsageRenderTarget |
-                   (t == 0 ? nrhi::kTextureUsageCopySource
-                           : nrhi::kTextureUsageNone);
+      desc.usage =
+          nrhi::kTextureUsageRenderTarget |
+          (t == 0 ? nrhi::kTextureUsageCopySource : nrhi::kTextureUsageNone);
       g_r.blur_tex[t] = device->CreateTexture(desc);
       if (g_r.blur_tex[t] == nullptr) {
         ok = false;
@@ -4197,7 +4267,8 @@ bool EnsureBlurOutlineTargets(const NativeGuestOutputRenderContext& context) {
       }
     }
     if (!ok) {
-      REXLOG_ERROR("native-scene: blur intermediate creation failed; blur disabled");
+      REXLOG_ERROR(
+          "native-scene: blur intermediate creation failed; blur disabled");
       for (int t = 0; t < 2; ++t) {
         if (g_r.blur_srv[t]) device->DestroyDeferred(g_r.blur_srv[t]);
         g_r.blur_srv[t] = nullptr;
@@ -4237,7 +4308,8 @@ bool EnsureBlurOutlineTargets(const NativeGuestOutputRenderContext& context) {
       }
       nrhi::TextureViewDesc vd;
       vd.mip_levels = 1;
-      g_r.menu_blur_srv[t] = device->CreateTextureView(g_r.menu_blur_tex[t], vd);
+      g_r.menu_blur_srv[t] =
+          device->CreateTextureView(g_r.menu_blur_tex[t], vd);
       if (g_r.menu_blur_srv[t] == nullptr) {
         ok = false;
         break;
@@ -4280,7 +4352,8 @@ bool EnsureBlurOutlineTargets(const NativeGuestOutputRenderContext& context) {
     desc.initial_state = nrhi::ResourceState::kRenderTarget;
     g_r.outline_mask = device->CreateTexture(desc);
     if (g_r.outline_mask == nullptr) {
-      REXLOG_ERROR("native-scene: outline mask creation failed; outline disabled");
+      REXLOG_ERROR(
+          "native-scene: outline mask creation failed; outline disabled");
       g_r.pso_outline_edge = nullptr;
     } else {
       g_r.outline_mask_width = context.guest_output_width;
@@ -4314,7 +4387,8 @@ bool EnsureFallbackTextures(const NativeGuestOutputRenderContext& context) {
       g_r.failed = true;
       return false;
     }
-    g_r.white.upload = CreateUploadBuffer(device, 256, nrhi::BufferBindClass::kCopySrc);
+    g_r.white.upload =
+        CreateUploadBuffer(device, 256, nrhi::BufferBindClass::kCopySrc);
     if (!g_r.white.upload) {
       g_r.failed = true;
       return false;
@@ -4351,12 +4425,14 @@ bool EnsureFallbackTextures(const NativeGuestOutputRenderContext& context) {
       g_r.failed = true;
       return false;
     }
-    g_r.white_cube.upload = CreateUploadBuffer(device, 512 * 6, nrhi::BufferBindClass::kCopySrc);
+    g_r.white_cube.upload =
+        CreateUploadBuffer(device, 512 * 6, nrhi::BufferBindClass::kCopySrc);
     if (!g_r.white_cube.upload) {
       g_r.failed = true;
       return false;
     }
-    uint8_t* mapping = static_cast<uint8_t*>(device->Map(g_r.white_cube.upload));
+    uint8_t* mapping =
+        static_cast<uint8_t*>(device->Map(g_r.white_cube.upload));
     for (uint32_t f = 0; f < 6; ++f) {
       std::memset(mapping + f * 512, 0x80, 4);
     }
@@ -4398,8 +4474,7 @@ nrhi::TextureView* ResolveOwnedMapTexture(
     return g_r.white.srv;
   }
   const std::uint64_t cache_key =
-      (std::uint64_t(texture_id) << 8u) |
-      static_cast<std::uint8_t>(role);
+      (std::uint64_t(texture_id) << 8u) | static_cast<std::uint8_t>(role);
   const auto cached = g_r.owned_map_textures.find(cache_key);
   if (cached != g_r.owned_map_textures.end()) {
     return cached->second.valid ? cached->second.srv : g_r.white.srv;
@@ -4433,8 +4508,8 @@ nrhi::TextureView* ResolveOwnedMapTexture(
     const std::uint32_t next_width = std::max(mip_width >> 1, 1u);
     const std::uint32_t next_height = std::max(mip_height >> 1, 1u);
     const std::vector<std::uint8_t>& input = mips.back();
-    std::vector<std::uint8_t> output(
-        std::size_t(next_width) * next_height * 4u);
+    std::vector<std::uint8_t> output(std::size_t(next_width) * next_height *
+                                     4u);
     for (std::uint32_t y = 0; y < next_height; ++y) {
       const std::uint32_t y0 = std::min(y * 2u, mip_height - 1u);
       const std::uint32_t y1 = std::min(y0 + 1u, mip_height - 1u);
@@ -4447,8 +4522,7 @@ nrhi::TextureView* ResolveOwnedMapTexture(
             (std::size_t(y1) * mip_width + x0) * 4u,
             (std::size_t(y1) * mip_width + x1) * 4u,
         };
-        const std::size_t destination =
-            (std::size_t(y) * next_width + x) * 4u;
+        const std::size_t destination = (std::size_t(y) * next_width + x) * 4u;
         if (role == OwnedTextureRole::Normal) {
           float normal[3] = {};
           for (const std::size_t pixel : source_pixels) {
@@ -4456,8 +4530,8 @@ nrhi::TextureView* ResolveOwnedMapTexture(
             normal[1] += float(input[pixel + 1]) * (2.0f / 255.0f) - 1.0f;
             normal[2] += float(input[pixel + 2]) * (2.0f / 255.0f) - 1.0f;
           }
-          const float length = std::sqrt(
-              normal[0] * normal[0] + normal[1] * normal[1] +
+          const float length =
+              std::sqrt(normal[0] * normal[0] + normal[1] * normal[1] +
               normal[2] * normal[2]);
           if (length > 1.0e-6f) {
             for (float& component : normal) {
@@ -4469,8 +4543,8 @@ nrhi::TextureView* ResolveOwnedMapTexture(
           }
           for (int channel = 0; channel < 3; ++channel) {
             output[destination + channel] = std::uint8_t(std::clamp(
-                std::lround((normal[channel] * 0.5f + 0.5f) * 255.0f),
-                0l, 255l));
+                std::lround((normal[channel] * 0.5f + 0.5f) * 255.0f), 0l,
+                255l));
           }
         } else if (role == OwnedTextureRole::Decal) {
           // Retail decal assets ship authored mip chains. SKATE currently
@@ -4492,21 +4566,18 @@ nrhi::TextureView* ResolveOwnedMapTexture(
             std::uint32_t weighted_color = 0;
             for (const std::size_t pixel : source_pixels) {
               weighted_color +=
-                  std::uint32_t(input[pixel + channel]) *
-                  input[pixel + 3];
+                  std::uint32_t(input[pixel + channel]) * input[pixel + 3];
             }
             output[destination + channel] = std::uint8_t(
                 (weighted_color + alpha_weight / 2u) / alpha_weight);
           }
         } else {
           for (int channel = 0; channel < 3; ++channel) {
-            const std::uint32_t sum =
-                input[source_pixels[0] + channel] +
+            const std::uint32_t sum = input[source_pixels[0] + channel] +
                 input[source_pixels[1] + channel] +
                 input[source_pixels[2] + channel] +
                 input[source_pixels[3] + channel];
-            output[destination + channel] =
-                std::uint8_t((sum + 2u) / 4u);
+            output[destination + channel] = std::uint8_t((sum + 2u) / 4u);
           }
         }
         const std::uint32_t alpha =
@@ -4532,11 +4603,9 @@ nrhi::TextureView* ResolveOwnedMapTexture(
     upload.width = std::max(source->width >> mip, 1u);
     upload.height = std::max(source->height >> mip, 1u);
     const std::uint32_t row_bytes = upload.width * 4u;
-    upload.row_pitch =
-        (row_bytes + nrhi::kRowPitchAlignment - 1u) &
+    upload.row_pitch = (row_bytes + nrhi::kRowPitchAlignment - 1u) &
         ~(nrhi::kRowPitchAlignment - 1u);
-    upload.offset =
-        (upload_size + kUploadPlacementAlignment - 1u) &
+    upload.offset = (upload_size + kUploadPlacementAlignment - 1u) &
         ~(std::uint64_t(kUploadPlacementAlignment) - 1u);
     upload_size =
         upload.offset + std::uint64_t(upload.row_pitch) * upload.height;
@@ -4549,8 +4618,7 @@ nrhi::TextureView* ResolveOwnedMapTexture(
   desc.format = nrhi::Format::kR8G8B8A8_UNORM;
   desc.initial_state = nrhi::ResourceState::kCopyDest;
   texture.texture = context.device->CreateTexture(desc);
-  texture.upload = CreateUploadBuffer(
-      context.device, upload_size,
+  texture.upload = CreateUploadBuffer(context.device, upload_size,
       nrhi::BufferBindClass::kCopySrc);
   if (texture.texture == nullptr || texture.upload == nullptr) {
     context.device->DestroyDeferred(texture.texture);
@@ -4578,22 +4646,18 @@ nrhi::TextureView* ResolveOwnedMapTexture(
     const std::size_t row_bytes = std::size_t(upload.width) * 4u;
     for (std::uint32_t row = 0; row < upload.height; ++row) {
       std::memcpy(
-          destination + upload.offset +
-              std::uint64_t(row) * upload.row_pitch,
-          mips[mip].data() + std::size_t(row) * row_bytes,
-          row_bytes);
+          destination + upload.offset + std::uint64_t(row) * upload.row_pitch,
+          mips[mip].data() + std::size_t(row) * row_bytes, row_bytes);
     }
   }
   context.device->Unmap(texture.upload);
   for (std::size_t mip = 0; mip < mips.size(); ++mip) {
     const MipUpload& upload = uploads[mip];
     context.cmd->CopyBufferToTexture(
-        texture.texture, static_cast<std::uint32_t>(mip), 0,
-        texture.upload, upload.offset, upload.row_pitch,
-        upload.width, upload.height, 1);
+        texture.texture, static_cast<std::uint32_t>(mip), 0, texture.upload,
+        upload.offset, upload.row_pitch, upload.width, upload.height, 1);
   }
-  context.cmd->Barrier(
-      texture.texture, nrhi::ResourceState::kCopyDest,
+  context.cmd->Barrier(texture.texture, nrhi::ResourceState::kCopyDest,
       nrhi::ResourceState::kPixelShaderResource);
   context.device->DestroyDeferred(texture.upload);
   texture.upload = nullptr;
@@ -4605,8 +4669,7 @@ nrhi::TextureView* ResolveOwnedMapTexture(
     context.device->DestroyDeferred(texture.texture);
     texture.texture = nullptr;
   }
-  nrhi::TextureView* resolved =
-      texture.valid ? texture.srv : g_r.white.srv;
+  nrhi::TextureView* resolved = texture.valid ? texture.srv : g_r.white.srv;
   g_r.owned_map_textures.emplace(cache_key, std::move(texture));
   REXLOG_INFO(
       "native-scene: uploaded owned map texture {} '{}' ({}x{}, {} mips)",
@@ -4624,8 +4687,7 @@ bool EnsureOutputSizedTargets(const NativeGuestOutputRenderContext& context) {
       g_r.hdr_active ? g_r.hdr_scene_format : nrhi::Format::kUnknown;
   if (!g_r.depth || g_r.depth_width != width || g_r.depth_height != height ||
       g_r.targets_hdr != g_r.hdr_active ||
-      g_r.targets_scene_fmt != want_scene_fmt ||
-      g_r.targets_msaa != g_r.msaa) {
+      g_r.targets_scene_fmt != want_scene_fmt || g_r.targets_msaa != g_r.msaa) {
     if (g_r.depth) {
       // The AO/SSR/volumetric scene-depth SRVs alias this texture and
       // re-point on pointer identity; heap reuse can hand the NEW depth
@@ -4796,8 +4858,10 @@ bool EnsurePipeline(const NativeGuestOutputRenderContext& context) {
   const nrhi::Format scene_fmt_want =
       hdr_want ? hdr_fmt_want : context.guest_output->format();
   const int32_t msaa_req = REXCVAR_GET(skate3_native_render_scene_msaa);
-  uint32_t msaa_want =
-      msaa_req >= 8 ? 8u : msaa_req >= 4 ? 4u : msaa_req >= 2 ? 2u : 1u;
+  uint32_t msaa_want = msaa_req >= 8   ? 8u
+                       : msaa_req >= 4 ? 4u
+                       : msaa_req >= 2 ? 2u
+                                       : 1u;
   msaa_want = device->GetSupportedSampleCount(scene_fmt_want, msaa_want);
   if (!g_r.pso || g_r.rtv_format != context.guest_output->format() ||
       g_r.hdr_active != hdr_want ||
@@ -4890,11 +4954,14 @@ struct WarmCounters {
   uint32_t deferred = 0;
 };
 
-void WarmItemResources(const NativeGuestOutputRenderContext& context, uint8_t* base,
-                       uint64_t frame_number, const DrawItem& item,
+void WarmItemResources(const NativeGuestOutputRenderContext& context,
+                       uint8_t* base, uint64_t frame_number,
+                       const DrawItem& item,
                        std::chrono::steady_clock::time_point deadline,
                        WarmCounters& wc) {
-  const auto within = [&] { return std::chrono::steady_clock::now() < deadline; };
+  const auto within = [&] {
+    return std::chrono::steady_clock::now() < deadline;
+  };
 
   bool need_mesh = false;
   auto mit = g_r.meshes.find(item.mesh);
@@ -4912,7 +4979,9 @@ void WarmItemResources(const NativeGuestOutputRenderContext& context, uint8_t* b
     if (within()) {
       if (g_warm_mesh_log_budget.load(std::memory_order_relaxed) > 0 &&
           g_warm_mesh_log_budget.fetch_sub(1, std::memory_order_relaxed) > 0) {
-        REXLOG_DEBUG("native-scene: settle mesh REVALIDATE mesh={:08X} fp {:016X}->{:016X}",
+        REXLOG_DEBUG(
+            "native-scene: settle mesh REVALIDATE mesh={:08X} fp "
+            "{:016X}->{:016X}",
                      item.mesh, mit->second.fingerprint, item.fingerprint);
       }
       PoolMeshBuffer(g_r.device, mit->second.vb);
@@ -4964,7 +5033,9 @@ void WarmItemResources(const NativeGuestOutputRenderContext& context, uint8_t* b
       }
       if (g_warm_tex_log_budget.load(std::memory_order_relaxed) > 0 &&
           g_warm_tex_log_budget.fetch_sub(1, std::memory_order_relaxed) > 0) {
-        REXLOG_DEBUG("native-scene: settle tex RETIRE ptr={:08X} key={:016X} incomplete={} "
+        REXLOG_DEBUG(
+            "native-scene: settle tex RETIRE ptr={:08X} key={:016X} "
+            "incomplete={} "
                      "fp {:016X}->{:016X}",
                      tex_ptr, key, it->second.incomplete, it->second.payload_fp, fp);
       }
@@ -5082,7 +5153,6 @@ void EnqueueMeshMiss(uint32_t mesh) {
     g_prewarm_cv.notify_one();
   }
 }
-
 
 // Words-keyed texture miss (streamed-artwork posters / event ads): the art
 // exists only as draw-time fetch words. Decoded unbudgeted inline these were
@@ -5563,8 +5633,8 @@ void PrewarmCommit(const NativeGuestOutputRenderContext& context,
               "tex-trace: f{} COMMIT key={:016X} valid={} vfail={} "
               "fp={:016X} inc={} nb={} cached={}",
               frame_number, t.words_key, t.valid ? 1 : 0,
-              t.verify_failed ? 1 : 0, t.gt.payload_fp,
-              t.gt.incomplete ? 1 : 0, t.gt.near_black ? 1 : 0,
+              t.verify_failed ? 1 : 0, t.gt.payload_fp, t.gt.incomplete ? 1 : 0,
+              t.gt.near_black ? 1 : 0,
               wit != g_r.tex_store.end()
                   ? (wit->second.valid ? "valid" : "invalid")
                   : "none");
@@ -5573,7 +5643,8 @@ void PrewarmCommit(const NativeGuestOutputRenderContext& context,
           // Same-content dedup, except a complete re-decode always
           // displaces an incomplete cached entry (truncated tiled-mip copy:
           // the zeroed blocks live in mips the fingerprint never samples).
-          const bool same_content = t.valid && wit->second.valid &&
+          const bool same_content =
+              t.valid && wit->second.valid &&
                                     t.gt.payload_fp == wit->second.payload_fp &&
                                     !(wit->second.incomplete && !t.gt.incomplete);
           if (same_content || (!t.valid && wit->second.valid)) {
@@ -5681,8 +5752,8 @@ void PrewarmCommit(const NativeGuestOutputRenderContext& context,
   if (committed_tex) {
     context.cmd->FlushBarriers();
   }
-  g_pw_commit.Add(uint64_t(
-      std::chrono::duration_cast<std::chrono::nanoseconds>(PerfClock::now() - commit_t0)
+  g_pw_commit.Add(uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                               PerfClock::now() - commit_t0)
           .count()));
 }
 
@@ -5736,14 +5807,14 @@ bool YieldForMenus(const NativeGuestOutputRenderContext& context) {
   // boot_native lifts the first-gameplay prerequisite from both native menu
   // modes: a boot-frontend 3D backdrop renders like a pause backdrop, and
   // everything else (videos, menus, the first load) renders as 2D-over-black.
-  const bool boot_native =
-      direct_boot_loading ||
+  const bool boot_native = direct_boot_loading ||
       REXCVAR_GET(skate3_native_render_scene_boot_native);
   bool pause_native = false;
   if (in_menus && (s_seen_gameplay || boot_native) &&
       REXCVAR_GET(skate3_native_render_scene_pause_native)) {
     const int64_t last_ns = g_last_publish_ns.load(std::memory_order_relaxed);
-    const int64_t now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+    const int64_t now_ns =
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
                                std::chrono::steady_clock::now().time_since_epoch())
                                .count();
     pause_native = last_ns >= 0 && now_ns - last_ns < 300'000'000;
@@ -5888,8 +5959,7 @@ bool YieldForMenus(const NativeGuestOutputRenderContext& context) {
   if (in_loading != s_in_loading) {
     s_in_loading = in_loading;
     if (in_loading) {
-      REXLOG_INFO(
-          "native-scene: menus/loading - {} (presence context)",
+      REXLOG_INFO("native-scene: menus/loading - {} (presence context)",
           loading_native ? "rendering the loading screen NATIVELY"
                          : "yielding to emulated output");
       // Arena addresses are reused across map loads: let the next load's
@@ -5917,7 +5987,8 @@ bool YieldForMenus(const NativeGuestOutputRenderContext& context) {
         queued = g_prewarm_queue.size();
       }
       REXLOG_INFO(
-          "native-scene: gameplay (prewarm: {} meshes decoded, {} dropped, {} still "
+          "native-scene: gameplay (prewarm: {} meshes decoded, {} "
+          "dropped, {} still "
           "queued)",
           g_prewarm_done.load(std::memory_order_relaxed),
           g_prewarm_dropped.load(std::memory_order_relaxed), queued);
@@ -5998,7 +6069,8 @@ bool YieldForMovie() {
   if (!REXCVAR_GET(skate3_native_render_scene_fmv_yield)) {
     return false;
   }
-  const int64_t last_ns = g_movie_decode_last_ns.load(std::memory_order_relaxed);
+  const int64_t last_ns =
+      g_movie_decode_last_ns.load(std::memory_order_relaxed);
   if (last_ns < 0) {
     return false;
   }
@@ -6022,7 +6094,8 @@ bool YieldForMovie() {
   } else if (s_fresh_since < 0) {
     s_fresh_since = now_ns;
   }
-  const int64_t native_ns = g_movie_native_last_ns.load(std::memory_order_relaxed);
+  const int64_t native_ns =
+      g_movie_native_last_ns.load(std::memory_order_relaxed);
   // Yield only for a video that is ON SCREEN and NOT being served:
   // (a) quad_recent - the 2D replay recently carried a video quad (detection
   //     runs regardless of movie_sub). A skipped/force-completed video
@@ -6035,7 +6108,8 @@ bool YieldForMovie() {
   //     starting; a skip tail (<= ~600 ms) never can.
   const int64_t quad_ns = g_movie_quad_last_ns.load(std::memory_order_relaxed);
   const bool quad_recent = quad_ns >= 0 && now_ns - quad_ns < 500'000'000;
-  const bool yield = active && now_ns - s_fresh_since >= 400'000'000 && quad_recent &&
+  const bool yield = active && now_ns - s_fresh_since >= 400'000'000 &&
+                     quad_recent &&
                      (native_ns < 0 || last_ns - native_ns > 1'000'000'000);
   static bool s_active = false;
   if (yield != s_active) {
@@ -6067,14 +6141,16 @@ const char* PhotoEditorSignal(uint8_t* base) {
       for (uint32_t i = 0; i < n && signal == nullptr; ++i) {
         uint32_t f0 = 0, f1 = 0;
         if (GuestTryLoadU32(base, beg + i * 20, &f0) &&
-            GuestTryLoadU32(base, beg + i * 20 + 4, &f1) && f0 == 1 && f1 == 11) {
+            GuestTryLoadU32(base, beg + i * 20 + 4, &f1) && f0 == 1 &&
+            f1 == 11) {
           signal = "FE PhotoSelect push-state";
         }
       }
     }
   }
   if (signal == nullptr) {
-    const int64_t last_ns = g_photo_replay_last_ns.load(std::memory_order_relaxed);
+    const int64_t last_ns =
+        g_photo_replay_last_ns.load(std::memory_order_relaxed);
     const int64_t now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
                                PerfClock::now().time_since_epoch())
                                .count();
@@ -6172,7 +6248,8 @@ bool WriteGrabToGuest(uint8_t* base, const uint8_t* src) {
     const uint32_t* row = reinterpret_cast<const uint32_t*>(
         src + size_t(y) * RendererState::kGrabRowPitch);
     for (uint32_t x = 0; x < kW; x += 4) {
-      const uint32_t off = uint32_t(rex::graphics::texture_util::GetTiledOffset2D(
+      const uint32_t off =
+          uint32_t(rex::graphics::texture_util::GetTiledOffset2D(
           int32_t(x), int32_t(y), kW, 2));
       uint32_t* dst = reinterpret_cast<uint32_t*>(staging.data() + off);
       for (uint32_t i = 0; i < 4; ++i) {
@@ -6249,7 +6326,8 @@ void UpdatePhotoGrabWindow(uint8_t* base) {
   if (REXCVAR_GET(skate3_native_render_scene_photo_readback)) {
     want = PhotoEditorSignal(base) != nullptr;
     if (!want) {
-      const int64_t last_ns = g_take_photo_last_ns.load(std::memory_order_relaxed);
+      const int64_t last_ns =
+          g_take_photo_last_ns.load(std::memory_order_relaxed);
       if (last_ns >= 0) {
         want = now_ns - last_ns < 3'000'000'000;
       }
@@ -6259,7 +6337,8 @@ void UpdatePhotoGrabWindow(uint8_t* base) {
   // runs on the guest thread at the draw-done hook).
   g_photo_flow_frame.store(want, std::memory_order_relaxed);
   const auto arm_emulated = [&] {
-    s_readback_saved = REXCVAR_GET(native_render_force_resolve_readback_max_length);
+    s_readback_saved =
+        REXCVAR_GET(native_render_force_resolve_readback_max_length);
     if (s_readback_saved <= 0) {
       REXCVAR_SET(native_render_force_resolve_readback_max_length,
                   kForceReadbackMaxLength);
@@ -6367,7 +6446,8 @@ void UpdatePhotoGrabWindow(uint8_t* base) {
   if (s_armed && !s_emulated_armed &&
       !g_photo_display_yielding.load(std::memory_order_relaxed) &&
       g_photo_grab_native_armed.load(std::memory_order_relaxed)) {
-    const int64_t last_write = g_grab_last_write_ns.load(std::memory_order_relaxed);
+    const int64_t last_write =
+        g_grab_last_write_ns.load(std::memory_order_relaxed);
     const int64_t yield_end =
         g_photo_display_yield_end_ns.load(std::memory_order_relaxed);
     const int64_t basis = std::max(std::max(last_write, s_arm_ns), yield_end);
@@ -6410,7 +6490,8 @@ void UpdatePhotoGrabWindow(uint8_t* base) {
     // grab-done covers the aux-target grab some flows issue on the
     // following frame; the 1.5 s cap remains only as the fallback for a
     // request that never grabs.
-    const int64_t done_ns = g_photo_grab_done_ns.load(std::memory_order_relaxed);
+    const int64_t done_ns =
+        g_photo_grab_done_ns.load(std::memory_order_relaxed);
     const bool grab_done = done_ns > req && now_ns - done_ns > 150'000'000;
     const bool burst_want =
         req >= 0 && now_ns - req < 1'500'000'000 && !grab_done;
@@ -6421,7 +6502,8 @@ void UpdatePhotoGrabWindow(uint8_t* base) {
       if (s_burst_max_saved <= 0) {
         REXCVAR_SET(native_render_force_resolve_readback_max_length, 0x2D0000);
       }
-      s_burst_suppress_saved = REXCVAR_GET(native_render_suppress_emulated_draws);
+      s_burst_suppress_saved =
+          REXCVAR_GET(native_render_suppress_emulated_draws);
       if (s_burst_suppress_saved) {
         REXCVAR_SET(native_render_suppress_emulated_draws, false);
       }
@@ -6610,7 +6692,8 @@ bool YieldForCasEditor(uint8_t* base) {
     // stayed NATIVE on the FE detection alone).
     const int64_t last_ns = g_cas_ps_last_ns.load(std::memory_order_relaxed);
     if (last_ns >= 0) {
-      const int64_t now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+      const int64_t now_ns =
+          std::chrono::duration_cast<std::chrono::nanoseconds>(
                                  std::chrono::steady_clock::now().time_since_epoch())
                                  .count();
       if (now_ns - last_ns < 500'000'000) {
@@ -6639,7 +6722,8 @@ bool YieldForCasEditor(uint8_t* base) {
 // Services the debug-dialog texture/mesh cache flushes. (The old
 // retired-buffer drain / SRV-slot recycling is gone: deferred destruction
 // is backend-internal now: Device::DestroyDeferred.)
-void ReleaseRetiredAndFlushCaches(const NativeGuestOutputRenderContext& context) {
+void ReleaseRetiredAndFlushCaches(
+    const NativeGuestOutputRenderContext& context) {
   // Debug-dialog cache flushes: retire every cached decode (freed once the
   // GPU is done with the current submission) so hot-toggled decode settings
   // rebuild the world with the new rules this frame.
@@ -6777,12 +6861,10 @@ bool BuildOwnedShadowRows(const FrameScene& scene, float out[36]) {
     out[12 + axis] = yl[axis] / kNearRadius;
     out[16 + axis] = zl[axis] / (2.0f * depth_half);
   }
-  out[3] = -(out[0] * center[0] + out[1] * center[1] +
-             out[2] * center[2]);
-  out[15] = -(out[12] * center[0] + out[13] * center[1] +
-              out[14] * center[2]);
-  out[19] = 0.5f - (out[16] * center[0] + out[17] * center[1] +
-                    out[18] * center[2]);
+  out[3] = -(out[0] * center[0] + out[1] * center[1] + out[2] * center[2]);
+  out[15] = -(out[12] * center[0] + out[13] * center[1] + out[14] * center[2]);
+  out[19] =
+      0.5f - (out[16] * center[0] + out[17] * center[1] + out[18] * center[2]);
   out[4] = kNearRadius / kMiddleRadius;
   out[5] = kNearRadius / kMiddleRadius;
   out[8] = kNearRadius / far_radius;
@@ -6843,16 +6925,14 @@ static bool RenderOwnedStaticSunSlice(
     const float cull = tile == 0   ? 1.05f / kRatioInner
                        : tile == 1 ? 1.05f / kRatioMid
                                    : 1.05f;
-    cmd->SetViewport(
-        nrhi::Viewport{size * tile, 0.0f, size, size, 0.0f, 1.0f});
+    cmd->SetViewport(nrhi::Viewport{size * tile, 0.0f, size, size, 0.0f, 1.0f});
     cmd->SetScissor(nrhi::Rect{int32_t(g_r.static_sun_size) * tile, 0,
                                int32_t(g_r.static_sun_size) * (tile + 1),
                                int32_t(g_r.static_sun_size)});
     for (int phase = 0; phase < 2; ++phase) {
       cmd->SetPipeline(phase == 0 ? g_r.pso_shadow_caster
                                   : g_r.pso_shadow_caster_clip);
-      for (std::size_t chunk_index = first; chunk_index < last;
-           ++chunk_index) {
+      for (std::size_t chunk_index = first; chunk_index < last; ++chunk_index) {
         const mechanics_sandbox::map::VisualChunk& chunk =
             world.chunks[chunk_index];
         float umin = std::numeric_limits<float>::max();
@@ -6882,8 +6962,7 @@ static bool RenderOwnedStaticSunSlice(
           vmin = std::min(vmin, v);
           vmax = std::max(vmax, v);
         }
-        if (umax < -cull || umin > cull || vmax < -cull ||
-            vmin > cull ||
+        if (umax < -cull || umin > cull || vmax < -cull || vmin > cull ||
             !EnsureSandboxMapChunk(context.device, chunk_index)) {
           continue;
         }
@@ -6909,17 +6988,15 @@ static bool RenderOwnedStaticSunSlice(
         }
         cmd->SetRootConstants(0, 52, constants, 0);
         cmd->SetBufferSrv(3, g_r.bone_ring, bone_region);
-        cmd->SetVertexBuffer(mit->second.vb_view.buffer,
-                             mit->second.vb_view.offset,
-                             mit->second.vb_view.size_bytes,
-                             mit->second.vb_view.stride);
+        cmd->SetVertexBuffer(
+            mit->second.vb_view.buffer, mit->second.vb_view.offset,
+            mit->second.vb_view.size_bytes, mit->second.vb_view.stride);
         cmd->SetIndexBuffer(mit->second.ib_view.buffer,
                             mit->second.ib_view.offset,
                             mit->second.ib_view.size_bytes);
         for (const mechanics_sandbox::map::VisualDraw& draw : chunk.draws) {
           const bool mask =
-              draw.alpha_mode ==
-              skate::world::SurfaceMaterial::AlphaMode::Mask;
+              draw.alpha_mode == skate::world::SurfaceMaterial::AlphaMode::Mask;
           if (draw.alpha_mode ==
                   skate::world::SurfaceMaterial::AlphaMode::Blend ||
               mask != (phase == 1)) {
@@ -6949,17 +7026,14 @@ static bool RenderOwnedStaticSunSlice(
   // The completed inactive texture becomes current. The previous complete
   // current texture becomes history, so the existing receiver transition
   // remains valid and never samples a half-built atlas.
-  std::memcpy(g_r.nsm_history_rows, g_r.nsm_rows,
-              sizeof(g_r.nsm_history_rows));
+  std::memcpy(g_r.nsm_history_rows, g_r.nsm_rows, sizeof(g_r.nsm_history_rows));
   std::swap(g_r.static_sun, g_r.static_sun_history);
   std::swap(g_r.static_sun_srv, g_r.static_sun_history_srv);
   std::swap(g_r.static_sun_in_srv, g_r.static_sun_history_in_srv);
-  std::memcpy(g_r.nsm_rows, g_r.nsm_progressive_rows,
-              sizeof(g_r.nsm_rows));
+  std::memcpy(g_r.nsm_rows, g_r.nsm_progressive_rows, sizeof(g_r.nsm_rows));
   std::memcpy(g_r.nsm_center, g_r.nsm_progressive_center,
               sizeof(g_r.nsm_center));
-  std::memcpy(g_r.nsm_sun, g_r.nsm_progressive_sun,
-              sizeof(g_r.nsm_sun));
+  std::memcpy(g_r.nsm_sun, g_r.nsm_progressive_sun, sizeof(g_r.nsm_sun));
   g_r.nsm_built_radius = g_r.nsm_progressive_built_radius;
   g_r.nsm_depth_range = g_r.nsm_progressive_depth_range;
   g_r.nsm_radius = g_r.nsm_progressive_radius;
@@ -6970,8 +7044,7 @@ static bool RenderOwnedStaticSunSlice(
   if (g_r.nsm_blend_started.time_since_epoch().count() != 0) {
     const float completion_interval =
         std::chrono::duration<float>(now - g_r.nsm_blend_started).count();
-    g_r.nsm_blend_seconds =
-        std::clamp(completion_interval * 0.9f, 0.15f, 1.5f);
+    g_r.nsm_blend_seconds = std::clamp(completion_interval * 0.9f, 0.15f, 1.5f);
   }
   g_r.nsm_blend_started = now;
   g_r.nsm_last_build_frame = frame_number;
@@ -7009,16 +7082,14 @@ static bool RenderOwnedStaticCascades(
   const float slen =
       std::sqrt(sun[0] * sun[0] + sun[1] * sun[1] + sun[2] * sun[2]);
   if (slen < 0.5f) {
-    return g_r.owned_static_sun_valid[0] &&
-           g_r.owned_static_sun_valid[1] &&
+    return g_r.owned_static_sun_valid[0] && g_r.owned_static_sun_valid[1] &&
            g_r.owned_static_sun_valid[2];
   }
   for (float& v : sun) {
     v /= slen;
   }
   if (sun[1] < 0.08f) {
-    return g_r.owned_static_sun_valid[0] &&
-           g_r.owned_static_sun_valid[1] &&
+    return g_r.owned_static_sun_valid[0] && g_r.owned_static_sun_valid[1] &&
            g_r.owned_static_sun_valid[2];
   }
 
@@ -7076,17 +7147,14 @@ static bool RenderOwnedStaticCascades(
   for (uint32_t cascade = 0; cascade < 3; ++cascade) {
     CascadeCandidate& candidate = candidates[cascade];
     candidate.radius = radii[cascade];
-    candidate.texel_m =
-        2.0f * candidate.radius /
+    candidate.texel_m = 2.0f * candidate.radius /
         float(std::max(1u, g_r.owned_static_sun_size[cascade]));
     candidate.center[0] = scene.cam_pos[0];
     candidate.center[1] = scene.cam_pos[1];
     candidate.center[2] = scene.cam_pos[2];
-    const float cx = xl[0] * candidate.center[0] +
-                     xl[1] * candidate.center[1] +
+    const float cx = xl[0] * candidate.center[0] + xl[1] * candidate.center[1] +
                      xl[2] * candidate.center[2];
-    const float cy = yl[0] * candidate.center[0] +
-                     yl[1] * candidate.center[1] +
+    const float cy = yl[0] * candidate.center[0] + yl[1] * candidate.center[1] +
                      yl[2] * candidate.center[2];
     const float dx =
         cx - std::round(cx / candidate.texel_m) * candidate.texel_m;
@@ -7098,16 +7166,13 @@ static bool RenderOwnedStaticCascades(
       candidate.rows[4 + axis] = yl[axis] / candidate.radius;
       candidate.rows[8 + axis] = zl[axis] / depth_range;
     }
-    candidate.rows[3] =
-        -(candidate.rows[0] * candidate.center[0] +
+    candidate.rows[3] = -(candidate.rows[0] * candidate.center[0] +
           candidate.rows[1] * candidate.center[1] +
           candidate.rows[2] * candidate.center[2]);
-    candidate.rows[7] =
-        -(candidate.rows[4] * candidate.center[0] +
+    candidate.rows[7] = -(candidate.rows[4] * candidate.center[0] +
           candidate.rows[5] * candidate.center[1] +
           candidate.rows[6] * candidate.center[2]);
-    candidate.rows[11] =
-        0.5f - (candidate.rows[8] * candidate.center[0] +
+    candidate.rows[11] = 0.5f - (candidate.rows[8] * candidate.center[0] +
                 candidate.rows[9] * candidate.center[1] +
                 candidate.rows[10] * candidate.center[2]);
     for (int row = 0; row < 3; ++row) {
@@ -7124,11 +7189,9 @@ static bool RenderOwnedStaticCascades(
     if (!candidate.invalid) {
       candidate.sun_dot =
           owned_shadow::NormalizedDot(g_r.owned_nsm_sun[cascade], sun);
-      candidate.sun_error_texels =
-          owned_shadow::SunProjectionErrorTexels(
+      candidate.sun_error_texels = owned_shadow::SunProjectionErrorTexels(
               candidate.sun_dot, g_r.owned_static_sun_size[cascade]);
-      candidate.camera_error_texels =
-          owned_shadow::CameraProjectionErrorTexels(
+      candidate.camera_error_texels = owned_shadow::CameraProjectionErrorTexels(
               g_r.owned_nsm_center[cascade], candidate.center, xl, yl,
               candidate.texel_m);
     }
@@ -7136,13 +7199,11 @@ static bool RenderOwnedStaticCascades(
         !candidate.invalid &&
         (std::fabs(g_r.owned_nsm_radius[cascade] - candidate.radius) >
              1.0e-4f ||
-         std::fabs(g_r.owned_nsm_depth_range[cascade] - depth_range) >
-             1.0e-4f);
+         std::fabs(g_r.owned_nsm_depth_range[cascade] - depth_range) > 1.0e-4f);
     const owned_shadow::CascadePolicy& policy =
         owned_shadow::kCascadePolicies[cascade];
-    candidate.projection_changed =
-        owned_shadow::ProjectionChanged(candidate.sun_error_texels,
-                                        candidate.camera_error_texels, policy);
+    candidate.projection_changed = owned_shadow::ProjectionChanged(
+        candidate.sun_error_texels, candidate.camera_error_texels, policy);
     candidate.sudden_sun_jump =
         !candidate.invalid && owned_shadow::SuddenSunJump(candidate.sun_dot);
     candidate.rate_ready =
@@ -7150,8 +7211,7 @@ static bool RenderOwnedStaticCascades(
         now >= g_r.owned_nsm_next_update[cascade];
     candidate.pressure = owned_shadow::UpdatePressure(
         candidate.sun_error_texels, candidate.camera_error_texels, policy);
-    candidate.eligible =
-        candidate.invalid || candidate.configuration_changed ||
+    candidate.eligible = candidate.invalid || candidate.configuration_changed ||
         candidate.sudden_sun_jump ||
         (candidate.projection_changed && candidate.rate_ready);
     refresh_all |= candidate.invalid || candidate.configuration_changed ||
@@ -7183,8 +7243,7 @@ static bool RenderOwnedStaticCascades(
         g_r.owned_nsm_update_count[0], g_r.owned_nsm_update_count[1],
         g_r.owned_nsm_update_count[2], candidates[0].sun_error_texels,
         candidates[1].sun_error_texels, candidates[2].sun_error_texels,
-        candidates[0].camera_error_texels,
-        candidates[1].camera_error_texels,
+        candidates[0].camera_error_texels, candidates[1].camera_error_texels,
         candidates[2].camera_error_texels, selected_cascade, refresh_all);
   }
 
@@ -7252,8 +7311,8 @@ static bool RenderOwnedStaticCascades(
     cmd->SetPrimitiveTopology(nrhi::PrimitiveTopology::kTriangleList);
     const float size = float(g_r.owned_static_sun_size[cascade]);
     cmd->SetViewport(nrhi::Viewport{0.0f, 0.0f, size, size, 0.0f, 1.0f});
-    cmd->SetScissor(
-        nrhi::Rect{0, 0, int32_t(g_r.owned_static_sun_size[cascade]),
+    cmd->SetScissor(nrhi::Rect{0, 0,
+                               int32_t(g_r.owned_static_sun_size[cascade]),
                    int32_t(g_r.owned_static_sun_size[cascade])});
 
     uint32_t caster_draws = 0;
@@ -7294,10 +7353,9 @@ static bool RenderOwnedStaticCascades(
         }
         cmd->SetRootConstants(0, 52, constants, 0);
         cmd->SetBufferSrv(3, g_r.bone_ring, bone_region);
-        cmd->SetVertexBuffer(mit->second.vb_view.buffer,
-                             mit->second.vb_view.offset,
-                             mit->second.vb_view.size_bytes,
-                             mit->second.vb_view.stride);
+        cmd->SetVertexBuffer(
+            mit->second.vb_view.buffer, mit->second.vb_view.offset,
+            mit->second.vb_view.size_bytes, mit->second.vb_view.stride);
         cmd->SetIndexBuffer(mit->second.ib_view.buffer,
                             mit->second.ib_view.offset,
                             mit->second.ib_view.size_bytes);
@@ -7375,14 +7433,10 @@ static bool RenderOwnedStaticCascades(
               std::chrono::steady_clock::now() - submit_started)
               .count();
       const char* reason =
-          candidate.invalid
-              ? "initial"
-              : candidate.configuration_changed
-                    ? "configuration"
-                    : candidate.sudden_sun_jump
-                          ? "sun-jump"
-                          : candidate.sun_error_texels /
-                                        policy.sun_error_threshold_texels >=
+          candidate.invalid                 ? "initial"
+          : candidate.configuration_changed ? "configuration"
+          : candidate.sudden_sun_jump       ? "sun-jump"
+          : candidate.sun_error_texels / policy.sun_error_threshold_texels >=
                                     candidate.camera_error_texels /
                                         policy.camera_error_threshold_texels
                                 ? "sun"
@@ -7398,8 +7452,7 @@ static bool RenderOwnedStaticCascades(
           update);
     }
   }
-  return g_r.owned_static_sun_valid[0] &&
-         g_r.owned_static_sun_valid[1] &&
+  return g_r.owned_static_sun_valid[0] && g_r.owned_static_sun_valid[1] &&
          g_r.owned_static_sun_valid[2];
 }
 
@@ -7440,15 +7493,14 @@ static void RenderStaticSunMap(const NativeGuestOutputRenderContext& context,
   }
   if (g_r.static_sun == nullptr || g_r.pso_shadow_caster == nullptr ||
       g_r.pso_shadow_caster_clip == nullptr || debug_mode != 0 ||
-      (!scene.shadow_valid && !owned_shadow) ||
-      !SceneShadowsEnabled() ||
+      (!scene.shadow_valid && !owned_shadow) || !SceneShadowsEnabled() ||
       !StaticSceneShadowsEnabled()) {
     g_r.owned_nsm_active = false;
     return;
   }
   if (owned_shadow) {
-    g_r.owned_nsm_active = RenderOwnedStaticCascades(
-        context, scene, owned_rows, bone_region, frame_number);
+    g_r.owned_nsm_active = RenderOwnedStaticCascades(context, scene, owned_rows,
+                                                     bone_region, frame_number);
     g_r.static_sun_valid = g_r.owned_nsm_active;
     return;
   }
@@ -7509,8 +7561,7 @@ static void RenderStaticSunMap(const NativeGuestOutputRenderContext& context,
   // the celestial direction every frame; the large static atlas advances in
   // approximately two-degree steps, hidden by its soft filter, instead of
   // replaying 5k+ caster draws for every tiny clock movement.
-  const float sun_rebuild_dot =
-      owned_shadow ? 0.9993908f : 0.999995f;
+  const float sun_rebuild_dot = owned_shadow ? 0.9993908f : 0.999995f;
   if (g_r.nsm_built_radius > 0.0f) {
     const float held_dot = sun[0] * g_r.nsm_sun[0] + sun[1] * g_r.nsm_sun[1] +
                            sun[2] * g_r.nsm_sun[2];
@@ -7522,7 +7573,8 @@ static void RenderStaticSunMap(const NativeGuestOutputRenderContext& context,
       static uint64_t s_cand_frame = 0;
       const float cand_dot =
           sun[0] * s_cand[0] + sun[1] * s_cand[1] + sun[2] * s_cand[2];
-      const bool confirmed = s_cand_frame + 1 == frame_number && cand_dot > 0.9999f;
+      const bool confirmed =
+          s_cand_frame + 1 == frame_number && cand_dot > 0.9999f;
       std::memcpy(s_cand, sun, sizeof(s_cand));
       s_cand_frame = frame_number;
       if (!confirmed) {
@@ -7579,8 +7631,10 @@ static void RenderStaticSunMap(const NativeGuestOutputRenderContext& context,
     };
     uint64_t key = uint64_t(item.mesh) * 0x9E3779B97F4A7C15ull;
     key ^= q(item.world[12]) * 0xC2B2AE3D27D4EB4Full;
-    key ^= (q(item.world[13]) + 0x165667B19E3779F9ull) * 0x27D4EB2F165667C5ull;
-    key ^= (q(item.world[14]) + 0x9E3779B97F4A7C15ull) * 0x85EBCA77C2B2AE63ull;
+      key ^=
+          (q(item.world[13]) + 0x165667B19E3779F9ull) * 0x27D4EB2F165667C5ull;
+      key ^=
+          (q(item.world[14]) + 0x9E3779B97F4A7C15ull) * 0x85EBCA77C2B2AE63ull;
     RendererState::StaticCaster& rec = g_r.static_casters[key];
     if (rec.mesh == 0 || rec.fingerprint != item.fingerprint) {
       rec.mesh = item.mesh;
@@ -7630,11 +7684,11 @@ static void RenderStaticSunMap(const NativeGuestOutputRenderContext& context,
   // to a full map redraw every frame. A <=30-frame shadow latency for
   // newly streamed geometry is invisible; drift/sun rebuilds stay
   // immediate.
-  bool rebuild = g_r.nsm_built_radius <= 0.0f ||
+  bool rebuild =
+      g_r.nsm_built_radius <= 0.0f ||
                   std::fabs(radius - g_r.nsm_built_radius) > 0.5f ||
                   frame_number >= g_r.nsm_rebuild_frame ||
-                  (g_r.nsm_dirty &&
-                  frame_number >= g_r.nsm_last_build_frame + 30);
+      (g_r.nsm_dirty && frame_number >= g_r.nsm_last_build_frame + 30);
   if (!rebuild) {
     // Camera drift from the built center, measured in the map plane: the
     // INNER tile (radius/6) must keep covering the player's
@@ -7674,13 +7728,12 @@ static void RenderStaticSunMap(const NativeGuestOutputRenderContext& context,
   float displayed_radius = g_r.nsm_radius;
   if (progressive_build) {
     std::memcpy(displayed_rows, g_r.nsm_rows, sizeof(displayed_rows));
-    std::memcpy(displayed_center, g_r.nsm_center,
-                sizeof(displayed_center));
+    std::memcpy(displayed_center, g_r.nsm_center, sizeof(displayed_center));
     std::memcpy(displayed_sun, g_r.nsm_sun, sizeof(displayed_sun));
   }
-  const bool temporal_blend =
-      !progressive_build && owned_shadow && previous_map_valid &&
-      !shadow_mode_changed && g_r.static_sun_history != nullptr &&
+  const bool temporal_blend = !progressive_build && owned_shadow &&
+                              previous_map_valid && !shadow_mode_changed &&
+                              g_r.static_sun_history != nullptr &&
       g_r.static_sun_history_srv != nullptr;
   if (temporal_blend) {
     std::swap(g_r.static_sun, g_r.static_sun_history);
@@ -7696,8 +7749,7 @@ static void RenderStaticSunMap(const NativeGuestOutputRenderContext& context,
       // Finish just before the next expected sun-quantum rebuild. This
       // keeps motion continuous while ensuring the next history swap starts
       // from a fully converged atlas.
-      g_r.nsm_blend_seconds =
-          std::clamp(rebuild_interval * 0.9f, 0.15f, 1.5f);
+      g_r.nsm_blend_seconds = std::clamp(rebuild_interval * 0.9f, 0.15f, 1.5f);
     }
     g_r.nsm_blend_started = now;
   } else if (!progressive_build) {
@@ -7714,8 +7766,7 @@ static void RenderStaticSunMap(const NativeGuestOutputRenderContext& context,
   // it explicitly. A 600-frame timer on a fast GPU rebuilt thousands of
   // owned material ranges every ~2 seconds for no visual benefit.
   g_r.nsm_rebuild_frame =
-      owned_shadow ? std::numeric_limits<uint64_t>::max()
-                   : frame_number + 600;
+      owned_shadow ? std::numeric_limits<uint64_t>::max() : frame_number + 600;
   g_r.nsm_last_build_frame = frame_number;
   g_r.nsm_built_radius = radius;
   std::memcpy(g_r.nsm_sun, sun, sizeof(g_r.nsm_sun));
@@ -7798,8 +7849,7 @@ static void RenderStaticSunMap(const NativeGuestOutputRenderContext& context,
 
     nrhi::Cmd* progressive_cmd = context.cmd;
     if (g_r.static_sun_history_in_srv) {
-      progressive_cmd->Barrier(
-          g_r.static_sun_history,
+      progressive_cmd->Barrier(g_r.static_sun_history,
           nrhi::ResourceState::kPixelShaderResource,
           nrhi::ResourceState::kRenderTarget);
       progressive_cmd->FlushBarriers();
@@ -7836,16 +7886,15 @@ static void RenderStaticSunMap(const NativeGuestOutputRenderContext& context,
   cmd->SetConstantBuffer(9, g_r.bone_ring, bone_region);
   const float size = float(g_r.static_sun_size);
   uint32_t owned_caster_draws = 0;
-  const auto draw_owned_casters =
-      [&](const float* tvp, float cull, int phase) {
+  const auto draw_owned_casters = [&](const float* tvp, float cull, int phase) {
         float owned_origin[3] = {};
         if (!mechanics_sandbox::SandboxMapRenderOrigin(owned_origin)) {
           return;
         }
         const mechanics_sandbox::map::VisualWorld& owned_world =
             mechanics_sandbox::map::ActiveVisualWorld();
-        for (std::size_t chunk_index = 0;
-             chunk_index < owned_world.chunks.size(); ++chunk_index) {
+    for (std::size_t chunk_index = 0; chunk_index < owned_world.chunks.size();
+         ++chunk_index) {
           const mechanics_sandbox::map::VisualChunk& chunk =
               owned_world.chunks[chunk_index];
           float umin = std::numeric_limits<float>::max();
@@ -7853,26 +7902,20 @@ static void RenderStaticSunMap(const NativeGuestOutputRenderContext& context,
           float vmin = umin;
           float vmax = -umin;
           for (int corner = 0; corner < 8; ++corner) {
-            const float wx =
-                owned_origin[0] +
-                ((corner & 1) ? chunk.bounds_max[0] : chunk.bounds_min[0]);
-            const float wy =
-                owned_origin[1] +
-                ((corner & 2) ? chunk.bounds_max[1] : chunk.bounds_min[1]);
-            const float wz =
-                owned_origin[2] +
-                ((corner & 4) ? chunk.bounds_max[2] : chunk.bounds_min[2]);
-            const float u =
-                rows[0] * wx + rows[1] * wy + rows[2] * wz + rows[3];
-            const float v =
-                rows[4] * wx + rows[5] * wy + rows[6] * wz + rows[7];
+        const float wx = owned_origin[0] + ((corner & 1) ? chunk.bounds_max[0]
+                                                         : chunk.bounds_min[0]);
+        const float wy = owned_origin[1] + ((corner & 2) ? chunk.bounds_max[1]
+                                                         : chunk.bounds_min[1]);
+        const float wz = owned_origin[2] + ((corner & 4) ? chunk.bounds_max[2]
+                                                         : chunk.bounds_min[2]);
+        const float u = rows[0] * wx + rows[1] * wy + rows[2] * wz + rows[3];
+        const float v = rows[4] * wx + rows[5] * wy + rows[6] * wz + rows[7];
             umin = std::min(umin, u);
             umax = std::max(umax, u);
             vmin = std::min(vmin, v);
             vmax = std::max(vmax, v);
           }
-          if (umax < -cull || umin > cull || vmax < -cull ||
-              vmin > cull ||
+      if (umax < -cull || umin > cull || vmax < -cull || vmin > cull ||
               !EnsureSandboxMapChunk(context.device, chunk_index)) {
             continue;
           }
@@ -7898,25 +7941,23 @@ static void RenderStaticSunMap(const NativeGuestOutputRenderContext& context,
           }
           cmd->SetRootConstants(0, 52, constants, 0);
           cmd->SetBufferSrv(3, g_r.bone_ring, bone_region);
-          cmd->SetVertexBuffer(mit->second.vb_view.buffer,
-                               mit->second.vb_view.offset,
-                               mit->second.vb_view.size_bytes,
-                               mit->second.vb_view.stride);
+      cmd->SetVertexBuffer(
+          mit->second.vb_view.buffer, mit->second.vb_view.offset,
+          mit->second.vb_view.size_bytes, mit->second.vb_view.stride);
           cmd->SetIndexBuffer(mit->second.ib_view.buffer,
                               mit->second.ib_view.offset,
                               mit->second.ib_view.size_bytes);
           for (const mechanics_sandbox::map::VisualDraw& draw : chunk.draws) {
             const bool mask =
-                draw.alpha_mode ==
-                skate::world::SurfaceMaterial::AlphaMode::Mask;
+            draw.alpha_mode == skate::world::SurfaceMaterial::AlphaMode::Mask;
             if (draw.alpha_mode ==
                     skate::world::SurfaceMaterial::AlphaMode::Blend ||
                 mask != (phase == 1)) {
               continue;
             }
             if (phase == 1) {
-              cmd->SetTexture(
-                  1, ResolveOwnedMapTexture(context, draw.albedo_texture));
+          cmd->SetTexture(1,
+                          ResolveOwnedMapTexture(context, draw.albedo_texture));
             }
             cmd->DrawIndexed(draw.index_count, draw.first_index, 0);
             ++owned_caster_draws;
@@ -7933,8 +7974,7 @@ static void RenderStaticSunMap(const NativeGuestOutputRenderContext& context,
     const float cull = tile == 0   ? 1.05f / kRatioInner
                        : tile == 1 ? 1.05f / kRatioMid
                                    : 1.05f;
-    cmd->SetViewport(
-        nrhi::Viewport{size * tile, 0.0f, size, size, 0.0f, 1.0f});
+    cmd->SetViewport(nrhi::Viewport{size * tile, 0.0f, size, size, 0.0f, 1.0f});
     cmd->SetScissor(nrhi::Rect{int32_t(g_r.static_sun_size) * tile, 0,
                                int32_t(g_r.static_sun_size) * (tile + 1),
                                int32_t(g_r.static_sun_size)});
@@ -7973,10 +8013,10 @@ static void RenderStaticSunMap(const NativeGuestOutputRenderContext& context,
             w[a] = px * rec.world[0 + a] + py * rec.world[4 + a] +
                    pz * rec.world[8 + a] + rec.world[12 + a];
           }
-          const float u = rows[0] * w[0] + rows[1] * w[1] + rows[2] * w[2] +
-                          rows[3];
-          const float v = rows[4] * w[0] + rows[5] * w[1] + rows[6] * w[2] +
-                          rows[7];
+          const float u =
+              rows[0] * w[0] + rows[1] * w[1] + rows[2] * w[2] + rows[3];
+          const float v =
+              rows[4] * w[0] + rows[5] * w[1] + rows[6] * w[2] + rows[7];
           umin = std::min(umin, u);
           umax = std::max(umax, u);
           vmin = std::min(vmin, v);
@@ -8003,10 +8043,9 @@ static void RenderStaticSunMap(const NativeGuestOutputRenderContext& context,
           nrhi::TextureView* srv = LookupResolvedTexture(rec.diffuse_tex);
           cmd->SetTexture(1, srv != nullptr ? srv : g_r.white.srv);
         }
-        cmd->SetVertexBuffer(mit->second.vb_view.buffer,
-                             mit->second.vb_view.offset,
-                             mit->second.vb_view.size_bytes,
-                             mit->second.vb_view.stride);
+        cmd->SetVertexBuffer(
+            mit->second.vb_view.buffer, mit->second.vb_view.offset,
+            mit->second.vb_view.size_bytes, mit->second.vb_view.stride);
         cmd->SetIndexBuffer(mit->second.ib_view.buffer,
                             mit->second.ib_view.offset,
                             mit->second.ib_view.size_bytes);
@@ -8014,8 +8053,7 @@ static void RenderStaticSunMap(const NativeGuestOutputRenderContext& context,
           if (draw.prim == 4) {
             cmd->SetPrimitiveTopology(nrhi::PrimitiveTopology::kTriangleList);
           } else if (draw.prim == 6) {
-            cmd->SetPrimitiveTopology(
-                nrhi::PrimitiveTopology::kTriangleStrip);
+            cmd->SetPrimitiveTopology(nrhi::PrimitiveTopology::kTriangleStrip);
           } else {
             continue;
           }
@@ -8088,9 +8126,9 @@ bool RenderShadowAtlas(const NativeGuestOutputRenderContext& context,
         k, path.string());
     ++g_r.shadow_dump_written;
   }
-  if (SceneShadowsEnabled() && shadow_rows_valid &&
-      g_r.shadow_raw != nullptr && g_r.pso_shadow_caster != nullptr &&
-      g_r.pso_shadow_blur != nullptr && debug_mode == 0) {
+  if (SceneShadowsEnabled() && shadow_rows_valid && g_r.shadow_raw != nullptr &&
+      g_r.pso_shadow_caster != nullptr && g_r.pso_shadow_blur != nullptr &&
+      debug_mode == 0) {
     struct Caster {
       const DrawItem* item;
       uint32_t bone_offset;
@@ -8162,7 +8200,8 @@ bool RenderShadowAtlas(const NativeGuestOutputRenderContext& context,
         if (offset + bytes > RendererState::kBoneRegionSize) {
           continue;
         }
-        std::memcpy(g_r.bone_ring_cpu + bone_region + offset, item.bones.data(), bytes);
+        std::memcpy(g_r.bone_ring_cpu + bone_region + offset, item.bones.data(),
+                    bytes);
         g_r.bone_ring_offset = offset + bytes;
         c.bone_offset = offset;
         c.bones = true;
@@ -8174,7 +8213,8 @@ bool RenderShadowAtlas(const NativeGuestOutputRenderContext& context,
     }
     if (!casters.empty()) {
       if (g_r.shadow_in_srv_state) {
-        for (nrhi::Texture* res : {g_r.shadow_raw, g_r.shadow_mid, g_r.shadow_final}) {
+        for (nrhi::Texture* res :
+             {g_r.shadow_raw, g_r.shadow_mid, g_r.shadow_final}) {
           cmd->Barrier(res, nrhi::ResourceState::kPixelShaderResource,
                        nrhi::ResourceState::kRenderTarget);
         }
@@ -8193,9 +8233,15 @@ bool RenderShadowAtlas(const NativeGuestOutputRenderContext& context,
         // Cascade scale/offset (cascade 0 = identity; PS c1/c2 for 1/2).
         float sx = 1.0f, sy = 1.0f, ox = 0.0f, oy = 0.0f;
         if (ci == 1) {
-          sx = sh[4]; sy = sh[5]; ox = sh[6]; oy = sh[7];
+          sx = sh[4];
+          sy = sh[5];
+          ox = sh[6];
+          oy = sh[7];
         } else if (ci == 2) {
-          sx = sh[8]; sy = sh[9]; ox = sh[10]; oy = sh[11];
+          sx = sh[8];
+          sy = sh[9];
+          ox = sh[10];
+          oy = sh[11];
         }
         // Light view-proj, row-vector convention: clip.x = ls_i.x,
         // clip.y = ls_i.y, clip.z = the height-ramp depth, clip.w = 1,
@@ -8247,13 +8293,12 @@ bool RenderShadowAtlas(const NativeGuestOutputRenderContext& context,
             cmd->SetBufferSrv(3, g_r.bone_ring,
                               bone_region + (c.bones ? c.bone_offset : 0));
             if (phase == 1) {
-              cmd->SetTexture(1, c.clip_srv != nullptr ? c.clip_srv
-                                                       : g_r.white.srv);
+              cmd->SetTexture(
+                  1, c.clip_srv != nullptr ? c.clip_srv : g_r.white.srv);
             }
-            cmd->SetVertexBuffer(mit->second.vb_view.buffer,
-                                 mit->second.vb_view.offset,
-                                 mit->second.vb_view.size_bytes,
-                                 mit->second.vb_view.stride);
+            cmd->SetVertexBuffer(
+                mit->second.vb_view.buffer, mit->second.vb_view.offset,
+                mit->second.vb_view.size_bytes, mit->second.vb_view.stride);
             cmd->SetIndexBuffer(mit->second.ib_view.buffer,
                                 mit->second.ib_view.offset,
                                 mit->second.ib_view.size_bytes);
@@ -8304,11 +8349,18 @@ bool RenderShadowAtlas(const NativeGuestOutputRenderContext& context,
         // hardware; 512 reproduces the softer original-360 look). Scaling
         // the step by tile/512 to hold a console-width penumbra was tried
         // and made receivers visibly blurrier than the emulated reference.
-        const float bc[12] = {horizontal ? 1.0f : 0.0f, horizontal ? 0.0f : 1.0f,
-                              ntaps[ci], src_raw ? 1.0f : 0.0f,
-                              kernels[ci][0], kernels[ci][1], kernels[ci][2], 0.0f,
-                              float(tile) * ci, float(tile) * (ci + 1) - 1.0f,
-                              float(tile) - 1.0f, 0.0f};
+        const float bc[12] = {horizontal ? 1.0f : 0.0f,
+                              horizontal ? 0.0f : 1.0f,
+                              ntaps[ci],
+                              src_raw ? 1.0f : 0.0f,
+                              kernels[ci][0],
+                              kernels[ci][1],
+                              kernels[ci][2],
+                              0.0f,
+                              float(tile) * ci,
+                              float(tile) * (ci + 1) - 1.0f,
+                              float(tile) - 1.0f,
+                              0.0f};
         cmd->SetRootConstants(0, 12, bc, 0);
         cmd->SetTexture(1, src);
         cmd->Draw(3, 0);
@@ -8349,7 +8401,8 @@ bool RenderShadowAtlas(const NativeGuestOutputRenderContext& context,
                   : nullptr;
         }
         if (g_r.shadow_dump_ptr[k] != nullptr) {
-          cmd->Barrier(g_r.shadow_raw, nrhi::ResourceState::kPixelShaderResource,
+          cmd->Barrier(g_r.shadow_raw,
+                       nrhi::ResourceState::kPixelShaderResource,
                        nrhi::ResourceState::kCopySource);
           cmd->Barrier(g_r.shadow_final,
                        nrhi::ResourceState::kPixelShaderResource,
@@ -8386,8 +8439,7 @@ bool RenderShadowAtlas(const NativeGuestOutputRenderContext& context,
   // map until the transform changes (streaming region switch), which
   // re-primes it.
   if (g_r.world_shadow != nullptr && g_r.pso_shadow_caster != nullptr &&
-      debug_mode == 0 && scene.dynobj_ws_valid &&
-      SceneShadowsEnabled() &&
+      debug_mode == 0 && scene.dynobj_ws_valid && SceneShadowsEnabled() &&
       REXCVAR_GET(skate3_native_render_scene_dynobj_v2)) {
     bool changed = !g_r.world_shadow_primed;
     for (int k = 0; k < 12 && !changed; ++k) {
@@ -8401,7 +8453,8 @@ bool RenderShadowAtlas(const NativeGuestOutputRenderContext& context,
     // negligible steady-state cost; a transform change renders immediately.
     if (changed || (ws_pass_counter & 3u) == 0) {
       if (g_r.world_shadow_in_srv) {
-        cmd->Barrier(g_r.world_shadow, nrhi::ResourceState::kPixelShaderResource,
+        cmd->Barrier(g_r.world_shadow,
+                     nrhi::ResourceState::kPixelShaderResource,
                      nrhi::ResourceState::kRenderTarget);
         cmd->FlushBarriers();
         g_r.world_shadow_in_srv = false;
@@ -8437,7 +8490,8 @@ bool RenderShadowAtlas(const NativeGuestOutputRenderContext& context,
       cmd->SetPipeline(g_r.pso_shadow_caster);
       cmd->SetConstantBuffer(9, g_r.bone_ring, bone_region);
       const float ws_size = float(RendererState::kWorldShadowSize);
-      cmd->SetViewport(nrhi::Viewport{0.0f, 0.0f, ws_size, ws_size, 0.0f, 1.0f});
+      cmd->SetViewport(
+          nrhi::Viewport{0.0f, 0.0f, ws_size, ws_size, 0.0f, 1.0f});
       cmd->SetScissor(nrhi::Rect{0, 0, int32_t(RendererState::kWorldShadowSize),
                                  int32_t(RendererState::kWorldShadowSize)});
       for (const DrawItem& item : scene.items) {
@@ -8483,10 +8537,9 @@ bool RenderShadowAtlas(const NativeGuestOutputRenderContext& context,
         }
         cmd->SetRootConstants(0, 52, constants, 0);
         cmd->SetBufferSrv(3, g_r.bone_ring, bone_region);
-        cmd->SetVertexBuffer(mit->second.vb_view.buffer,
-                             mit->second.vb_view.offset,
-                             mit->second.vb_view.size_bytes,
-                             mit->second.vb_view.stride);
+        cmd->SetVertexBuffer(
+            mit->second.vb_view.buffer, mit->second.vb_view.offset,
+            mit->second.vb_view.size_bytes, mit->second.vb_view.stride);
         cmd->SetIndexBuffer(mit->second.ib_view.buffer,
                             mit->second.ib_view.offset,
                             mit->second.ib_view.size_bytes);
@@ -8498,7 +8551,8 @@ bool RenderShadowAtlas(const NativeGuestOutputRenderContext& context,
           } else {
             continue;
           }
-          cmd->DrawIndexed(draw.index_count, draw.start_index, draw.base_vertex);
+          cmd->DrawIndexed(draw.index_count, draw.start_index,
+                           draw.base_vertex);
         }
       }
       cmd->Barrier(g_r.world_shadow, nrhi::ResourceState::kRenderTarget,
@@ -8555,8 +8609,7 @@ bool RenderOutlineMask(const NativeGuestOutputRenderContext& context,
       const float mask_clear[4] = {0.0f, 0.0f, 0.0f, 0.0f};
       cmd->ClearRenderTarget(g_r.outline_mask, mask_clear);
       cmd->SetRenderTargets(g_r.outline_mask, nullptr);
-      cmd->SetViewport(nrhi::Viewport{0.0f, 0.0f,
-                                      float(g_r.outline_mask_width),
+      cmd->SetViewport(nrhi::Viewport{0.0f, 0.0f, float(g_r.outline_mask_width),
                                       float(g_r.outline_mask_height), 0.0f,
                                       1.0f});
       cmd->SetScissor(nrhi::Rect{0, 0, int32_t(g_r.outline_mask_width),
@@ -8564,7 +8617,8 @@ bool RenderOutlineMask(const NativeGuestOutputRenderContext& context,
       cmd->SetPipeline(g_r.pso_outline_mask);
       for (const DrawItem* item : sel) {
         auto mit = g_r.meshes.find(item->mesh);
-        if (mit == g_r.meshes.end() || mit->second.fingerprint != item->fingerprint) {
+        if (mit == g_r.meshes.end() ||
+            mit->second.fingerprint != item->fingerprint) {
           continue;  // decoded by the main pass this frame; masks from the next
         }
         float constants[52] = {};
@@ -8585,10 +8639,9 @@ bool RenderOutlineMask(const NativeGuestOutputRenderContext& context,
         constants[32] = 1.0f;
         constants[35] = 1.0f;
         cmd->SetRootConstants(0, 52, constants, 0);
-        cmd->SetVertexBuffer(mit->second.vb_view.buffer,
-                             mit->second.vb_view.offset,
-                             mit->second.vb_view.size_bytes,
-                             mit->second.vb_view.stride);
+        cmd->SetVertexBuffer(
+            mit->second.vb_view.buffer, mit->second.vb_view.offset,
+            mit->second.vb_view.size_bytes, mit->second.vb_view.stride);
         cmd->SetIndexBuffer(mit->second.ib_view.buffer,
                             mit->second.ib_view.offset,
                             mit->second.ib_view.size_bytes);
@@ -8665,7 +8718,8 @@ void LogFrameStats(const FrameScene& scene, uint64_t frames, uint32_t drawn,
   }
   const uint64_t interval = uint64_t(
       std::max(60, REXCVAR_GET(skate3_native_render_scene_perf_interval)));
-  if (frames % interval == 0 && REXCVAR_GET(skate3_native_render_scene_perf_log)) {
+  if (frames % interval == 0 &&
+      REXCVAR_GET(skate3_native_render_scene_perf_log)) {
     // CPU-side perf snapshot for this window. guest_fps is derived
     // from the guest frame interval; capture/build run on the guest render
     // thread (they extend guest frame time directly), render/items/shadow on
@@ -8680,30 +8734,32 @@ void LogFrameStats(const FrameScene& scene, uint64_t frames, uint32_t drawn,
         "items={:.2f}/{:.2f}ms shadow={:.2f}/{:.2f}ms "
         "pre={:.2f}/{:.2f}ms settle[{:.2f}/{:.2f}ms n={} dec={} def={}] "
         "tail={:.2f}/{:.2f}ms twod={:.2f}/{:.2f}ms "
-        "decode[mesh n={} avg={:.2f} max={:.2f}ms tex n={} avg={:.2f} max={:.2f}ms] "
-        "commit={:.2f}/{:.2f}ms itemcache[hit={} build={}] cam[chg={} rep={} maxstreak={}]",
+        "decode[mesh n={} avg={:.2f} max={:.2f}ms tex n={} avg={:.2f} "
+        "max={:.2f}ms] "
+        "commit={:.2f}/{:.2f}ms itemcache[hit={} build={}] cam[chg={} rep={} "
+        "maxstreak={}]",
         guest_dt_ms > 0.0 ? 1000.0 / guest_dt_ms : 0.0, g_pw_guest_dt.MaxMs(),
         g_pw_capture.AvgMs(), g_pw_capture.MaxMs(), g_pw_build.AvgMs(),
-        g_pw_build.MaxMs(), g_pw_b2d.AvgMs(), g_pw_b2d.MaxMs(), g_pw_bspl.AvgMs(),
-        g_pw_bspl.MaxMs(), g_pw_bpal.AvgMs(), g_pw_bpal.MaxMs(),
-        g_dt_hist[0].exchange(0, std::memory_order_relaxed),
+        g_pw_build.MaxMs(), g_pw_b2d.AvgMs(), g_pw_b2d.MaxMs(),
+        g_pw_bspl.AvgMs(), g_pw_bspl.MaxMs(), g_pw_bpal.AvgMs(),
+        g_pw_bpal.MaxMs(), g_dt_hist[0].exchange(0, std::memory_order_relaxed),
         g_dt_hist[1].exchange(0, std::memory_order_relaxed),
         g_dt_hist[2].exchange(0, std::memory_order_relaxed),
         g_dt_hist[3].exchange(0, std::memory_order_relaxed),
         g_dt_hist[4].exchange(0, std::memory_order_relaxed),
-        g_pw_pal_tail.AvgMs(), g_pw_pal_tail.MaxMs(),
-        g_pw_render.AvgMs(), g_pw_render.MaxMs(),
-        g_pw_items.AvgMs(), g_pw_items.MaxMs(), g_pw_shadow.AvgMs(),
-        g_pw_shadow.MaxMs(), g_pw_pre.AvgMs(), g_pw_pre.MaxMs(),
-        g_pw_settle.AvgMs(), g_pw_settle.MaxMs(),
+        g_pw_pal_tail.AvgMs(), g_pw_pal_tail.MaxMs(), g_pw_render.AvgMs(),
+        g_pw_render.MaxMs(), g_pw_items.AvgMs(), g_pw_items.MaxMs(),
+        g_pw_shadow.AvgMs(), g_pw_shadow.MaxMs(), g_pw_pre.AvgMs(),
+        g_pw_pre.MaxMs(), g_pw_settle.AvgMs(), g_pw_settle.MaxMs(),
         g_pw_settle.count.load(std::memory_order_relaxed),
         g_warm_decodes.exchange(0, std::memory_order_relaxed),
         g_warm_deferred.exchange(0, std::memory_order_relaxed),
         g_pw_tail.AvgMs(), g_pw_tail.MaxMs(), g_pw_2d.AvgMs(), g_pw_2d.MaxMs(),
         g_pw_mesh_decode.count.load(std::memory_order_relaxed),
         g_pw_mesh_decode.AvgMs(), g_pw_mesh_decode.MaxMs(),
-        g_pw_tex_decode.count.load(std::memory_order_relaxed), g_pw_tex_decode.AvgMs(),
-        g_pw_tex_decode.MaxMs(), g_pw_commit.AvgMs(), g_pw_commit.MaxMs(),
+        g_pw_tex_decode.count.load(std::memory_order_relaxed),
+        g_pw_tex_decode.AvgMs(), g_pw_tex_decode.MaxMs(), g_pw_commit.AvgMs(),
+        g_pw_commit.MaxMs(),
         g_item_cache_hits.exchange(0, std::memory_order_relaxed),
         g_item_cache_builds.exchange(0, std::memory_order_relaxed),
         g_cam_changes.exchange(0, std::memory_order_relaxed),
@@ -8718,20 +8774,19 @@ void LogFrameStats(const FrameScene& scene, uint64_t frames, uint32_t drawn,
         "remote={:.3f}/{:.3f}ms "
         "total={:.3f}/{:.3f}ms",
         g_pw_mp_total.count.load(std::memory_order_relaxed),
-        g_pw_mp_local_pose.AvgMs(),
-        g_pw_mp_local_pose.MaxMs(),
-        g_pw_mp_local_appearance.AvgMs(),
-        g_pw_mp_local_appearance.MaxMs(),
-        g_pw_mp_tick.AvgMs(), g_pw_mp_tick.MaxMs(),
-        g_pw_mp_install.AvgMs(), g_pw_mp_install.MaxMs(),
-        g_pw_mp_remote.AvgMs(), g_pw_mp_remote.MaxMs(),
+        g_pw_mp_local_pose.AvgMs(), g_pw_mp_local_pose.MaxMs(),
+        g_pw_mp_local_appearance.AvgMs(), g_pw_mp_local_appearance.MaxMs(),
+        g_pw_mp_tick.AvgMs(), g_pw_mp_tick.MaxMs(), g_pw_mp_install.AvgMs(),
+        g_pw_mp_install.MaxMs(), g_pw_mp_remote.AvgMs(), g_pw_mp_remote.MaxMs(),
         g_pw_mp_total.AvgMs(), g_pw_mp_total.MaxMs());
     // Deep per-item attribution (see the perf-items cvar): visibility-class
     // draw costs, completed-draw stage split, build-walk decomposition, and
     // the off-screen retention pass. Averages are per item (the windows Add
     // once per item), so av= is the per-item unit cost in microseconds.
     if (REXCVAR_GET(skate3_native_render_scene_perf_items)) {
-      const auto avg_us = [](const PerfWindow& w) { return w.AvgMs() * 1000.0; };
+      const auto avg_us = [](const PerfWindow& w) {
+        return w.AvgMs() * 1000.0;
+      };
       REXLOG_INFO(
           "native-scene perf-items: draw[vis n={} av={:.2f}us mx={:.2f}ms | "
           "occ n={} av={:.2f}us mx={:.2f}ms | out n={} av={:.2f}us "
@@ -8742,8 +8797,7 @@ void LogFrameStats(const FrameScene& scene, uint64_t frames, uint32_t drawn,
           "fetch av={:.2f}] wloop[{:.2f}/{:.2f}ms recs={}] "
           "retain[{:.2f}/{:.2f}ms app={} live={}]",
           g_pw_di_in.count.load(std::memory_order_relaxed), avg_us(g_pw_di_in),
-          g_pw_di_in.MaxMs(),
-          g_pw_di_occ.count.load(std::memory_order_relaxed),
+          g_pw_di_in.MaxMs(), g_pw_di_occ.count.load(std::memory_order_relaxed),
           avg_us(g_pw_di_occ), g_pw_di_occ.MaxMs(),
           g_pw_di_out.count.load(std::memory_order_relaxed),
           avg_us(g_pw_di_out), g_pw_di_out.MaxMs(),
@@ -8767,18 +8821,41 @@ void LogFrameStats(const FrameScene& scene, uint64_t frames, uint32_t drawn,
           g_retained_appended.exchange(0, std::memory_order_relaxed),
           g_retained_live.load(std::memory_order_relaxed));
     }
-    for (PerfWindow* w : {&g_pw_guest_dt, &g_pw_capture, &g_pw_build, &g_pw_pal_tail,
-                          &g_pw_b2d, &g_pw_bspl, &g_pw_bpal,
-                          &g_pw_render, &g_pw_items, &g_pw_shadow, &g_pw_pre,
-                          &g_pw_settle, &g_pw_tail, &g_pw_2d, &g_pw_mesh_decode,
-                          &g_pw_tex_decode, &g_pw_commit,
-                          &g_pw_mp_local_pose, &g_pw_mp_local_appearance,
-                          &g_pw_mp_tick, &g_pw_mp_install, &g_pw_mp_remote,
+    for (PerfWindow* w : {&g_pw_guest_dt,
+                          &g_pw_capture,
+                          &g_pw_build,
+                          &g_pw_pal_tail,
+                          &g_pw_b2d,
+                          &g_pw_bspl,
+                          &g_pw_bpal,
+                          &g_pw_render,
+                          &g_pw_items,
+                          &g_pw_shadow,
+                          &g_pw_pre,
+                          &g_pw_settle,
+                          &g_pw_tail,
+                          &g_pw_2d,
+                          &g_pw_mesh_decode,
+                          &g_pw_tex_decode,
+                          &g_pw_commit,
+                          &g_pw_mp_local_pose,
+                          &g_pw_mp_local_appearance,
+                          &g_pw_mp_tick,
+                          &g_pw_mp_install,
+                          &g_pw_mp_remote,
                           &g_pw_mp_total,
-                          &g_pw_di_in, &g_pw_di_occ, &g_pw_di_out,
-                          &g_pw_di_mesh, &g_pw_di_tex, &g_pw_di_const,
-                          &g_pw_di_submit, &g_pw_bi_core, &g_pw_bi_fp,
-                          &g_pw_bi_walk, &g_pw_bi_fetch, &g_pw_bi_wloop,
+                          &g_pw_di_in,
+                          &g_pw_di_occ,
+                          &g_pw_di_out,
+                          &g_pw_di_mesh,
+                          &g_pw_di_tex,
+                          &g_pw_di_const,
+                          &g_pw_di_submit,
+                          &g_pw_bi_core,
+                          &g_pw_bi_fp,
+                          &g_pw_bi_walk,
+                          &g_pw_bi_fetch,
+                          &g_pw_bi_wloop,
                           &g_pw_bi_retain}) {
       w->Reset();
     }
@@ -8787,54 +8864,55 @@ void LogFrameStats(const FrameScene& scene, uint64_t frames, uint32_t drawn,
     g_warm_tex_log_budget.store(4, std::memory_order_relaxed);
     g_slow_frame_log_budget.store(3, std::memory_order_relaxed);
   }
-  if (frames % interval == 0 && REXCVAR_GET(skate3_native_render_scene_perf_log)) {
+  if (frames % interval == 0 &&
+      REXCVAR_GET(skate3_native_render_scene_perf_log)) {
     uint32_t lw_ctxs = 0, lw_ents = 0;
     skate3::native_lw::QueryLwStats(&lw_ctxs, &lw_ents);
     REXLOG_INFO(
         "native-scene: frame {} items={} draws={} draws_2d={} drawn_2d={} "
         "splines[{}/{}] "
-        "2d[other={} dropped={} askip={} astale={} textures={}] cached_meshes={} mesh_mb={} textures={} tex_mb={} "
-        "vs_uploads={} palettes={} palette_base_plus1={} ropa[rigid={} stale={} rescued={} relax={} caster={} incoh={} stretch={} blend={} blendmiss={}] dyn_gap={} skinned={} skinned_skipped={} foreign_bank={} "
+        "2d[other={} dropped={} askip={} astale={} textures={}] "
+        "cached_meshes={} mesh_mb={} textures={} tex_mb={} "
+        "vs_uploads={} palettes={} palette_base_plus1={} ropa[rigid={} "
+        "stale={} rescued={} relax={} caster={} incoh={} stretch={} blend={} "
+        "blendmiss={}] dyn_gap={} skinned={} skinned_skipped={} "
+        "foreign_bank={} "
         "rigid[pending={} dropped={} worldprops={}] "
         "rej[dyn={} range={} chain={} geom={} draws={} bbox={}] "
         "rr[decode_fail={} no_bones={} mesh_deferred={} tex_deferred={}] "
         "store[n={} routes={} evict={}] "
-        "heal[vfail={} demote={}] serve[sticky={} skipnew={} adstale={} adnone={}] "
+        "heal[vfail={} demote={}] serve[sticky={} skipnew={} adstale={} "
+        "adnone={}] "
         "shadow[valid={} ready={} draws={}] char[attempt={} valid={} drawn={} "
         "reused={}] dynobj[valid={} drawn={}] water[valid={} drawn={}] "
         "lw[ctxs={} ents={} stamp={} fade0={} resc={} fill={} pal={} rows={}] "
         "refl[pair={} flat={} gate={:#x}] flips={} alt[bones={} shadow={}] "
         "rows_inst={} pal_srv={} occl_culled={} guest_skip={} build_skip={}",
         frames, scene.items.size(), drawn, g_draws_2d.load(), drawn_2d,
-        drawn_spline, g_draws_spline.load(),
-        g_draws_2d_other.load(), g_draws_2d_dropped.load(),
-        g_2d_async_skip.load(), g_2d_async_stale.load(), g_r.tex_store.size(),
-        g_r.meshes.size(), g_mesh_store_bytes >> 20, g_r.tex_store.size(),
-        g_tex_store_bytes >> 20,
-        g_vs_uploads.load(), g_palette_snapshots.load(), g_palette_base_plus1.load(),
-        g_ropa_rigid.load(), g_ropa_stale.load(), g_ropa_rescued.load(),
-        g_ropa_relaxed.load(), g_ropa_caster.load(), g_pub_incoherent.load(),
-        g_stretch_veto.load(),
+        drawn_spline, g_draws_spline.load(), g_draws_2d_other.load(),
+        g_draws_2d_dropped.load(), g_2d_async_skip.load(),
+        g_2d_async_stale.load(), g_r.tex_store.size(), g_r.meshes.size(),
+        g_mesh_store_bytes >> 20, g_r.tex_store.size(), g_tex_store_bytes >> 20,
+        g_vs_uploads.load(), g_palette_snapshots.load(),
+        g_palette_base_plus1.load(), g_ropa_rigid.load(), g_ropa_stale.load(),
+        g_ropa_rescued.load(), g_ropa_relaxed.load(), g_ropa_caster.load(),
+        g_pub_incoherent.load(), g_stretch_veto.load(),
         g_ropa_blend_drawn.load(), g_ropa_blend_miss.load(), g_dyn_gap.load(),
-        g_skinned_items.load(),
-        g_skinned_skipped.load(), g_capture_foreign_bank.load(),
-        g_rigid_pending.load(), g_rigid_dropped.load(),
-        g_world_props.load(),
-        g_rej_no_dynstate.load(), g_rej_dyn_range.load(),
-        g_rej_chain.load(), g_rej_geom.load(), g_rej_draws.load(), g_rej_bbox.load(),
-        g_rr_decode_fail.load(), g_rr_no_bones.load(), g_rr_mesh_deferred.load(),
+        g_skinned_items.load(), g_skinned_skipped.load(),
+        g_capture_foreign_bank.load(), g_rigid_pending.load(),
+        g_rigid_dropped.load(), g_world_props.load(), g_rej_no_dynstate.load(),
+        g_rej_dyn_range.load(), g_rej_chain.load(), g_rej_geom.load(),
+        g_rej_draws.load(), g_rej_bbox.load(), g_rr_decode_fail.load(),
+        g_rr_no_bones.load(), g_rr_mesh_deferred.load(),
         g_rr_tex_deferred.load(), g_r.tex_store.size(), g_r.tex_routes.size(),
-        g_store_evicted.load(), g_heal_verify_fail.load(),
-        g_demote_hold.load(),
+        g_store_evicted.load(), g_heal_verify_fail.load(), g_demote_hold.load(),
         g_tex_sticky_served.load(), g_skip_new.load(), g_ad_stale_served.load(),
-        g_ad_placeholder.load(), scene.shadow_valid,
-        shadow_ready, shadow_draws,
+        g_ad_placeholder.load(), scene.shadow_valid, shadow_ready, shadow_draws,
         g_char_attempts.load(), g_char_valid.load(), g_char_drawn.load(),
-        g_char_rows_reused.load(), scene.dynobj_valid,
-        g_dynobj_drawn.load(), scene.water_valid, g_water_drawn.load(),
-        lw_ctxs, lw_ents, g_lw_stamped.load(),
-        g_lw_fade0.load(), g_lw_ctx_rescued.load(), g_lw_gap_filled.load(),
-        g_lw_pal_sub.load(), g_lw_rows_served.load(),
+        g_char_rows_reused.load(), scene.dynobj_valid, g_dynobj_drawn.load(),
+        scene.water_valid, g_water_drawn.load(), lw_ctxs, lw_ents,
+        g_lw_stamped.load(), g_lw_fade0.load(), g_lw_ctx_rescued.load(),
+        g_lw_gap_filled.load(), g_lw_pal_sub.load(), g_lw_rows_served.load(),
         g_refl_pair.load(), g_refl_flat.load(), g_refl_gate.load(),
         g_hair_route_flips.load(), g_hair_bone_alternations.load(),
         g_shadow_alternations.load(), g_char_rows_inst_served.load(),
@@ -9004,8 +9082,7 @@ static void TickShowcase(uint32_t output_width, bool hdr_on) {
     // (the materials look subsumes the albedo/lighting bits, so those two
     // stop counting once materials is in; the subtractive bits are either
     // revealed steps or folded in above, so they never force the step).
-    const bool covered =
-        (cum & 4u) != 0 && ((avail_mask & ~cum) & 0xF8u) == 0u;
+    const bool covered = (cum & 4u) != 0 && ((avail_mask & ~cum) & 0xF8u) == 0u;
     if (!covered) {
       s.steps.push_back({0.0f, "full render"});
     }
@@ -9013,8 +9090,10 @@ static void TickShowcase(uint32_t output_width, bool hdr_on) {
     s.steps.push_back({float(256u + 1024u), "black (end marker)"});
     // Durations snapshot at start so a live cvar edit cannot jump the
     // elapsed-time -> step mapping mid-run.
-    s.wipe_s = std::max(0.2, REXCVAR_GET(skate3_native_render_scene_showcase_wipe));
-    s.hold_s = std::max(0.0, REXCVAR_GET(skate3_native_render_scene_showcase_hold));
+    s.wipe_s =
+        std::max(0.2, REXCVAR_GET(skate3_native_render_scene_showcase_wipe));
+    s.hold_s =
+        std::max(0.0, REXCVAR_GET(skate3_native_render_scene_showcase_hold));
     s.t0 = PerfClock::now();
     s.logged = -1;
     s.active = true;
@@ -9151,7 +9230,8 @@ std::atomic<int64_t> g_occl_pub_ms{0};
 }  // namespace
 
 bool CopyOcclusionCulledCtxs(std::vector<uint32_t>& out) {
-  const int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+  const int64_t now_ms =
+      std::chrono::duration_cast<std::chrono::milliseconds>(
                              std::chrono::steady_clock::now().time_since_epoch())
                              .count();
   if (now_ms - g_occl_pub_ms.load(std::memory_order_relaxed) > 250) {
@@ -9191,14 +9271,13 @@ bool SandboxShouldDrawItem(const DrawItem& item) {
 
 RaytracedDynamicScene BuildRaytracedLocalPresentation(
     const FrameScene& scene,
-    const std::unordered_map<const DrawItem*,
-                             const GuestTexture*>& diffuse_by_item) {
+    const std::unordered_map<const DrawItem*, const GuestTexture*>&
+        diffuse_by_item) {
   RaytracedDynamicScene result;
 
   const auto normalize3 = [](float value[3]) {
     const float length_squared =
-        value[0] * value[0] + value[1] * value[1] +
-        value[2] * value[2];
+        value[0] * value[0] + value[1] * value[1] + value[2] * value[2];
     if (length_squared > 1.0e-12f) {
       const float inverse = 1.0f / std::sqrt(length_squared);
       value[0] *= inverse;
@@ -9211,37 +9290,30 @@ RaytracedDynamicScene BuildRaytracedLocalPresentation(
     }
   };
   const auto transform_position = [](const float matrix[16],
-                                     const float input[3],
-                                     float output[3]) {
+                                     const float input[3], float output[3]) {
     for (int column = 0; column < 3; ++column) {
-      output[column] =
-          input[0] * matrix[column] +
+      output[column] = input[0] * matrix[column] +
           input[1] * matrix[4 + column] +
-          input[2] * matrix[8 + column] +
-          matrix[12 + column];
+                       input[2] * matrix[8 + column] + matrix[12 + column];
     }
   };
-  const auto transform_normal = [](const float matrix[16],
-                                   const float input[3],
+  const auto transform_normal = [](const float matrix[16], const float input[3],
                                    float output[3]) {
     for (int column = 0; column < 3; ++column) {
-      output[column] =
-          input[0] * matrix[column] +
+      output[column] = input[0] * matrix[column] +
           input[1] * matrix[4 + column] +
           input[2] * matrix[8 + column];
     }
   };
 
   for (const DrawItem& item : scene.items) {
-    if (!item.dyn_entity || item.ctx == 0 ||
-        !SandboxShouldDrawItem(item)) {
+    if (!item.dyn_entity || item.ctx == 0 || !SandboxShouldDrawItem(item)) {
       continue;
     }
     native_entity::CtxInfo identity;
     if (!native_entity::LookupCtx(item.ctx, &identity) ||
         mechanics_sandbox::ClassifyPresentationEntity(
-            identity.entity,
-            static_cast<uint8_t>(identity.cls)) !=
+            identity.entity, static_cast<uint8_t>(identity.cls)) !=
             mechanics_sandbox::PresentationDecision::Keep) {
       continue;
     }
@@ -9250,8 +9322,7 @@ RaytracedDynamicScene BuildRaytracedLocalPresentation(
       continue;
     }
     const MeshBuffers& buffers = mesh_it->second;
-    const std::vector<float>& decoded =
-        item.ropa && !buffers.ropa_verts.empty()
+    const std::vector<float>& decoded = item.ropa && !buffers.ropa_verts.empty()
             ? buffers.ropa_verts
             : buffers.raytracing_verts;
     if (decoded.empty() || decoded.size() % 14 != 0 ||
@@ -9259,10 +9330,8 @@ RaytracedDynamicScene BuildRaytracedLocalPresentation(
       continue;
     }
 
-    const uint32_t vertex_base =
-        static_cast<uint32_t>(result.vertices.size());
-    const uint32_t vertex_count =
-        static_cast<uint32_t>(decoded.size() / 14);
+    const uint32_t vertex_base = static_cast<uint32_t>(result.vertices.size());
+    const uint32_t vertex_count = static_cast<uint32_t>(decoded.size() / 14);
     result.vertices.reserve(result.vertices.size() + vertex_count);
     for (uint32_t vertex = 0; vertex < vertex_count; ++vertex) {
       const float* source = decoded.data() + size_t(vertex) * 14;
@@ -9278,10 +9347,8 @@ RaytracedDynamicScene BuildRaytracedLocalPresentation(
         float weight_sum = 0.0f;
         for (int influence = 0; influence < 4; ++influence) {
           const float weight =
-              float((packed_weights >> (influence * 8)) & 0xffu) /
-              255.0f;
-          const uint32_t bone =
-              (packed_indices >> (influence * 8)) & 0xffu;
+              float((packed_weights >> (influence * 8)) & 0xffu) / 255.0f;
+          const uint32_t bone = (packed_indices >> (influence * 8)) & 0xffu;
           const size_t row = size_t(bone) * 12;
           if (weight <= 0.0f || row + 11 >= item.bones.size()) {
             continue;
@@ -9290,13 +9357,11 @@ RaytracedDynamicScene BuildRaytracedLocalPresentation(
           for (int axis = 0; axis < 3; ++axis) {
             const float* r = b + axis * 4;
             skinned_position[axis] +=
-                weight * (position[0] * r[0] +
-                          position[1] * r[1] +
+                weight * (position[0] * r[0] + position[1] * r[1] +
                           position[2] * r[2] + r[3]);
             skinned_normal[axis] +=
-                weight * (normal[0] * r[0] +
-                          normal[1] * r[1] +
-                          normal[2] * r[2]);
+                weight *
+                (normal[0] * r[0] + normal[1] * r[1] + normal[2] * r[2]);
           }
           weight_sum += weight;
         }
@@ -9331,57 +9396,47 @@ RaytracedDynamicScene BuildRaytracedLocalPresentation(
       material.color[1] = std::max(0.03f, item.tint[1]);
       material.color[2] = std::max(0.03f, item.tint[2]);
     } else {
-      static constexpr float palette[][3] = {
-          {0.18f, 0.20f, 0.23f}, {0.48f, 0.12f, 0.08f},
-          {0.11f, 0.22f, 0.32f}, {0.52f, 0.39f, 0.20f},
+      static constexpr float palette[][3] = {{0.18f, 0.20f, 0.23f},
+                                             {0.48f, 0.12f, 0.08f},
+                                             {0.11f, 0.22f, 0.32f},
+                                             {0.52f, 0.39f, 0.20f},
           {0.32f, 0.34f, 0.36f}};
       const auto& color = palette[(item.mesh >> 4) % std::size(palette)];
       std::memcpy(material.color, color, sizeof(material.color));
     }
     const auto texture_it = diffuse_by_item.find(&item);
-    if (texture_it != diffuse_by_item.end() &&
-        texture_it->second != nullptr &&
+    if (texture_it != diffuse_by_item.end() && texture_it->second != nullptr &&
         texture_it->second->texture != nullptr &&
         texture_it->second->srv != nullptr) {
       const auto existing = std::find_if(
-          result.diffuse_textures.begin(),
-          result.diffuse_textures.end(),
+          result.diffuse_textures.begin(), result.diffuse_textures.end(),
           [texture_it](const RaytracedDynamicScene::TextureBinding& binding) {
             return binding.view == texture_it->second->srv;
           });
       if (existing != result.diffuse_textures.end()) {
-        material.texture_index =
-            static_cast<std::uint32_t>(
+        material.texture_index = static_cast<std::uint32_t>(
                 existing - result.diffuse_textures.begin());
       } else if (result.diffuse_textures.size() <
                  kRaytracedDynamicTextureLimit) {
         material.texture_index =
-            static_cast<std::uint32_t>(
-                result.diffuse_textures.size());
+            static_cast<std::uint32_t>(result.diffuse_textures.size());
         result.diffuse_textures.push_back(
-            {texture_it->second->texture,
-             texture_it->second->srv});
+            {texture_it->second->texture, texture_it->second->srv});
       }
     }
-    material.roughness =
-        item.char_family == 0 ? 0.55f : 0.78f;
-    if (item.char_family != 0 &&
-        item.char_rows[14 * 4 + 1] > 0.0f) {
+    material.roughness = item.char_family == 0 ? 0.55f : 0.78f;
+    if (item.char_family != 0 && item.char_rows[14 * 4 + 1] > 0.0f) {
       material.lighting_index =
-          static_cast<uint32_t>(
-              result.character_lighting.size());
+          static_cast<uint32_t>(result.character_lighting.size());
       material.character_family = item.char_family;
       RaytracedCharacterLighting lighting;
-      std::memcpy(
-          lighting.rows, item.char_rows,
-          sizeof(lighting.rows));
+      std::memcpy(lighting.rows, item.char_rows, sizeof(lighting.rows));
       result.character_lighting.push_back(lighting);
     }
 
-    const auto append_triangle =
-        [&](uint32_t a, uint32_t b, uint32_t c) {
-          if (a >= vertex_count || b >= vertex_count ||
-              c >= vertex_count || a == b || b == c || a == c) {
+    const auto append_triangle = [&](uint32_t a, uint32_t b, uint32_t c) {
+      if (a >= vertex_count || b >= vertex_count || c >= vertex_count ||
+          a == b || b == c || a == c) {
             return;
           }
           result.indices.push_back(vertex_base + a);
@@ -9398,20 +9453,16 @@ RaytracedDynamicScene BuildRaytracedLocalPresentation(
           buffers.raytracing_indices.data() + draw.start_index;
       if (draw.prim == 4) {
         for (uint32_t i = 0; i + 2 < draw.index_count; i += 3) {
-          append_triangle(
-              uint32_t(indices[i]) + draw.base_vertex,
+          append_triangle(uint32_t(indices[i]) + draw.base_vertex,
               uint32_t(indices[i + 1]) + draw.base_vertex,
               uint32_t(indices[i + 2]) + draw.base_vertex);
         }
       } else if (draw.prim == 6) {
         for (uint32_t i = 0; i + 2 < draw.index_count; ++i) {
-          const uint32_t a =
-              uint32_t(indices[i + (i & 1u)]) + draw.base_vertex;
+          const uint32_t a = uint32_t(indices[i + (i & 1u)]) + draw.base_vertex;
           const uint32_t b =
-              uint32_t(indices[i + ((i & 1u) ? 0u : 1u)]) +
-              draw.base_vertex;
-          const uint32_t c =
-              uint32_t(indices[i + 2]) + draw.base_vertex;
+              uint32_t(indices[i + ((i & 1u) ? 0u : 1u)]) + draw.base_vertex;
+          const uint32_t c = uint32_t(indices[i + 2]) + draw.base_vertex;
           append_triangle(a, b, c);
         }
       }
@@ -9422,21 +9473,17 @@ RaytracedDynamicScene BuildRaytracedLocalPresentation(
     const mechanics_sandbox::map::VisualMesh& sphere =
         mechanics_sandbox::map::ActiveMovingLightVisualMesh();
     for (std::size_t light_index = 0;
-         light_index <
-             mechanics_sandbox::map::ActiveMovingLightCount();
+         light_index < mechanics_sandbox::map::ActiveMovingLightCount();
          ++light_index) {
       mechanics_sandbox::map::MovingLightSnapshot light;
-      if (!mechanics_sandbox::map::ActiveMovingLightSnapshot(
-              light_index, light)) {
+      if (!mechanics_sandbox::map::ActiveMovingLightSnapshot(light_index,
+                                                             light)) {
         continue;
       }
       RaytracedMovingLight rt_light;
-      rt_light.position_range[0] =
-          map_origin[0] + light.position[0];
-      rt_light.position_range[1] =
-          map_origin[1] + light.position[1];
-      rt_light.position_range[2] =
-          map_origin[2] + light.position[2];
+      rt_light.position_range[0] = map_origin[0] + light.position[0];
+      rt_light.position_range[1] = map_origin[1] + light.position[1];
+      rt_light.position_range[2] = map_origin[2] + light.position[2];
       rt_light.position_range[3] = light.influence_radius;
       rt_light.color_intensity[0] = light.color[0];
       rt_light.color_intensity[1] = light.color[1];
@@ -9450,8 +9497,7 @@ RaytracedDynamicScene BuildRaytracedLocalPresentation(
       }
       const std::uint32_t vertex_base =
           static_cast<std::uint32_t>(result.vertices.size());
-      result.vertices.reserve(
-          result.vertices.size() + sphere.vertices.size());
+      result.vertices.reserve(result.vertices.size() + sphere.vertices.size());
       for (const mechanics_sandbox::map::VisualVertex& source :
            sphere.vertices) {
         result.vertices.push_back(
@@ -9470,30 +9516,22 @@ RaytracedDynamicScene BuildRaytracedLocalPresentation(
       emissive.color[2] = light.color[2] * 4.5f;
       emissive.roughness = 0.08f;
       emissive.texture_flags = 1u;
-      for (std::size_t index = 0;
-           index + 2 < sphere.indices.size(); index += 3) {
-        result.indices.push_back(
-            vertex_base + sphere.indices[index]);
-        result.indices.push_back(
-            vertex_base + sphere.indices[index + 1]);
-        result.indices.push_back(
-            vertex_base + sphere.indices[index + 2]);
+      for (std::size_t index = 0; index + 2 < sphere.indices.size();
+           index += 3) {
+        result.indices.push_back(vertex_base + sphere.indices[index]);
+        result.indices.push_back(vertex_base + sphere.indices[index + 1]);
+        result.indices.push_back(vertex_base + sphere.indices[index + 2]);
         result.triangle_materials.push_back(emissive);
       }
     }
     mechanics_sandbox::map::MovingLightSnapshot lightning;
     if (result.moving_lights.size() < 4 &&
-        mechanics_sandbox::map::ActiveLightningLightSnapshot(
-            lightning)) {
+        mechanics_sandbox::map::ActiveLightningLightSnapshot(lightning)) {
       RaytracedMovingLight rt_light;
-      rt_light.position_range[0] =
-          map_origin[0] + lightning.position[0];
-      rt_light.position_range[1] =
-          map_origin[1] + lightning.position[1];
-      rt_light.position_range[2] =
-          map_origin[2] + lightning.position[2];
-      rt_light.position_range[3] =
-          lightning.influence_radius;
+      rt_light.position_range[0] = map_origin[0] + lightning.position[0];
+      rt_light.position_range[1] = map_origin[1] + lightning.position[1];
+      rt_light.position_range[2] = map_origin[2] + lightning.position[2];
+      rt_light.position_range[3] = lightning.influence_radius;
       rt_light.color_intensity[0] = lightning.color[0];
       rt_light.color_intensity[1] = lightning.color[1];
       rt_light.color_intensity[2] = lightning.color[2];
@@ -9587,11 +9625,9 @@ enum NetworkAppearancePieceFlags : uint32_t {
   kNetworkPieceShadow = 1u << 4,
 };
 
-void NormalizeRemoteAppearanceTransientRows(
-    DrawItem& item, uint32_t role) {
+void NormalizeRemoteAppearanceTransientRows(DrawItem& item, uint32_t role) {
   const float captured_fade = item.char_rows[14 * 4 + 0];
-  const float captured_hair_scale =
-      item.char_rows[13 * 4 + 3];
+  const float captured_hair_scale = item.char_rows[13 * 4 + 3];
   // Appearance rows are transmitted once, but these fields are per-frame
   // entity fades. Capturing a player during map-entry fade permanently made
   // ordinary pieces invisible and multiplied hair strand coverage by values
@@ -9602,30 +9638,25 @@ void NormalizeRemoteAppearanceTransientRows(
   if (item.hair) {
     item.char_rows[13 * 4 + 3] = 1.0f;
   }
-  if (captured_fade < 0.999f ||
-      (item.hair && captured_hair_scale < 0.999f)) {
+  if (captured_fade < 0.999f || (item.hair && captured_hair_scale < 0.999f)) {
     REXLOG_INFO(
         "multiplayer-appearance-normalize: role={} mesh={:08X} "
         "kind={} fade={:.3f}->1.000 hair_scale={:.3f}->{}",
-        role, item.mesh, item.hair ? "hair" : "character",
-        captured_fade, captured_hair_scale,
-        item.hair ? "1.000" : "unchanged");
+        role, item.mesh, item.hair ? "hair" : "character", captured_fade,
+        captured_hair_scale, item.hair ? "1.000" : "unchanged");
   }
 }
 
 template <typename T>
-void AppendAppearancePod(
-    std::vector<uint8_t>& bytes, const T& value) {
+void AppendAppearancePod(std::vector<uint8_t>& bytes, const T& value) {
   static_assert(std::is_trivially_copyable_v<T>);
-  const auto* begin =
-      reinterpret_cast<const uint8_t*>(&value);
+  const auto* begin = reinterpret_cast<const uint8_t*>(&value);
   bytes.insert(bytes.end(), begin, begin + sizeof(T));
 }
 
 template <typename T>
-bool ReadAppearancePod(
-    const std::vector<uint8_t>& bytes,
-    size_t& cursor, T& value) {
+bool ReadAppearancePod(const std::vector<uint8_t>& bytes, size_t& cursor,
+                       T& value) {
   static_assert(std::is_trivially_copyable_v<T>);
   if (cursor + sizeof(T) > bytes.size()) {
     return false;
@@ -9635,10 +9666,8 @@ bool ReadAppearancePod(
   return true;
 }
 
-uint64_t AppearanceHashBytes(
-    uint64_t hash, const void* data, size_t bytes) {
-  const auto* source =
-      static_cast<const uint8_t*>(data);
+uint64_t AppearanceHashBytes(uint64_t hash, const void* data, size_t bytes) {
+  const auto* source = static_cast<const uint8_t*>(data);
   for (size_t index = 0; index < bytes; ++index) {
     hash = (hash ^ source[index]) * 1099511628211ull;
   }
@@ -9650,11 +9679,9 @@ struct CapturedAppearanceTexture {
   std::vector<uint8_t> payload;
 };
 
-using AppearanceWeightedRows =
-    multiplayer::render_cache::WeightedPaletteRows;
+using AppearanceWeightedRows = multiplayer::render_cache::WeightedPaletteRows;
 
-bool CaptureAppearanceTexture(
-    const NativeGuestOutputRenderContext& context,
+bool CaptureAppearanceTexture(const NativeGuestOutputRenderContext& context,
     uint8_t* base, uint32_t texture_object,
     CapturedAppearanceTexture& output) {
   if (base == nullptr || texture_object == 0) {
@@ -9668,12 +9695,10 @@ bool CaptureAppearanceTexture(
   StagedTexCommit commit;
   g_tex_stage_out = &commit;
   const bool decoded =
-      EnsureGuestTextureFromWords(
-          context, base, words, staged);
+      EnsureGuestTextureFromWords(context, base, words, staged);
   g_tex_stage_out = nullptr;
-  if (!decoded || staged.texture == nullptr ||
-      staged.upload == nullptr || commit.mip_count == 0 ||
-      commit.mip_count > 16 ||
+  if (!decoded || staged.texture == nullptr || staged.upload == nullptr ||
+      commit.mip_count == 0 || commit.mip_count > 16 ||
       commit.copy_format == nrhi::Format::kUnknown ||
       commit.srv_format == nrhi::Format::kUnknown ||
       staged.upload->size() == 0 ||
@@ -9690,29 +9715,20 @@ bool CaptureAppearanceTexture(
   }
   output = {};
   output.header.source_key = FetchWordsKey(words);
-  output.header.copy_format =
-      static_cast<uint32_t>(commit.copy_format);
-  output.header.srv_format =
-      static_cast<uint32_t>(commit.srv_format);
-  output.header.payload_bytes =
-      static_cast<uint32_t>(staged.upload->size());
-  output.header.mip_count =
-      static_cast<uint16_t>(commit.mip_count);
+  output.header.copy_format = static_cast<uint32_t>(commit.copy_format);
+  output.header.srv_format = static_cast<uint32_t>(commit.srv_format);
+  output.header.payload_bytes = static_cast<uint32_t>(staged.upload->size());
+  output.header.mip_count = static_cast<uint16_t>(commit.mip_count);
   for (size_t component = 0; component < 4; ++component) {
     output.header.swizzle[component] =
         static_cast<uint8_t>(commit.swizzle[component]);
   }
   for (size_t mip = 0; mip < commit.mip_count; ++mip) {
-    output.header.mips[mip] = {
-        commit.mips[mip].offset,
-        commit.mips[mip].pitch,
-        commit.mips[mip].w,
-        commit.mips[mip].h};
+    output.header.mips[mip] = {commit.mips[mip].offset, commit.mips[mip].pitch,
+                               commit.mips[mip].w, commit.mips[mip].h};
   }
   output.payload.resize(staged.upload->size());
-  std::memcpy(
-      output.payload.data(), mapping,
-      output.payload.size());
+  std::memcpy(output.payload.data(), mapping, output.payload.size());
   context.device->Unmap(staged.upload);
   context.device->DestroyDeferred(staged.texture);
   context.device->DestroyDeferred(staged.upload);
@@ -9729,14 +9745,11 @@ multiplayer::AppearanceBlob BuildLocalRecipeAppearanceBlob(
   static std::vector<uint8_t> profile_recipe_bytes;
   static multiplayer_assets::RecipeAppearance cached_recipe;
   static multiplayer::AppearanceBlob cached_blob;
-  uint8_t* base =
-      g_guest_base.load(std::memory_order_relaxed);
-  if (base == nullptr || items.empty() ||
-      !animation.presentation_root_valid) {
+  uint8_t* base = g_guest_base.load(std::memory_order_relaxed);
+  if (base == nullptr || items.empty() || !animation.presentation_root_valid) {
     return {};
   }
-  multiplayer_assets::PollLocalProfileRecipe(
-      profile_recipe_bytes);
+  multiplayer_assets::PollLocalProfileRecipe(profile_recipe_bytes);
   std::array<uint8_t, kRecipeReadBytes> recipe_buffer{};
   const uint8_t* recipe_data = nullptr;
   size_t recipe_size = 0;
@@ -9744,14 +9757,12 @@ multiplayer::AppearanceBlob BuildLocalRecipeAppearanceBlob(
     recipe_data = profile_recipe_bytes.data();
     recipe_size = profile_recipe_bytes.size();
   } else {
-    if (!GuestTryCopy(
-            recipe_buffer.data(), base + kRecipeGuestAddress,
+    if (!GuestTryCopy(recipe_buffer.data(), base + kRecipeGuestAddress,
             recipe_buffer.size())) {
       return {};
     }
     recipe_size = recipe_buffer.size();
-    while (recipe_size != 0 &&
-           recipe_buffer[recipe_size - 1] == 0) {
+    while (recipe_size != 0 && recipe_buffer[recipe_size - 1] == 0) {
       --recipe_size;
     }
     recipe_data = recipe_buffer.data();
@@ -9759,15 +9770,12 @@ multiplayer::AppearanceBlob BuildLocalRecipeAppearanceBlob(
   if (recipe_data == nullptr || recipe_size < 64) {
     return {};
   }
-  const uint64_t recipe_identity = AppearanceHashBytes(
-      1469598103934665603ull,
-      recipe_data, recipe_size);
+  const uint64_t recipe_identity =
+      AppearanceHashBytes(1469598103934665603ull, recipe_data, recipe_size);
   if (recipe_identity != cached_recipe_identity) {
-    std::vector<uint8_t> recipe(
-        recipe_data, recipe_data + recipe_size);
+    std::vector<uint8_t> recipe(recipe_data, recipe_data + recipe_size);
     multiplayer_assets::RecipeAppearance resolved;
-    if (!multiplayer_assets::ResolveRecipeAppearance(
-            recipe, false, resolved)) {
+    if (!multiplayer_assets::ResolveRecipeAppearance(recipe, false, resolved)) {
       return cached_blob;
     }
     cached_recipe_identity = recipe_identity;
@@ -9788,8 +9796,7 @@ multiplayer::AppearanceBlob BuildLocalRecipeAppearanceBlob(
   // model so a transiently absent deck, truck, wheel, or garment does not
   // replace its real sender track key with zero and churn the appearance.
   static uint64_t cached_binding_recipe_identity = 0;
-  static std::unordered_map<uint64_t, BindingBuild>
-      cached_bindings;
+  static std::unordered_map<uint64_t, BindingBuild> cached_bindings;
   if (cached_binding_recipe_identity != recipe_identity) {
     cached_binding_recipe_identity = recipe_identity;
     cached_bindings.clear();
@@ -9803,8 +9810,7 @@ multiplayer::AppearanceBlob BuildLocalRecipeAppearanceBlob(
     BindingBuild binding;
     binding.wire.model_id = recipe_piece.model_id;
     const uint64_t recipe_topology = AppearanceHashBytes(
-        1469598103934665603ull,
-        recipe_piece.mesh.indices.data(),
+        1469598103934665603ull, recipe_piece.mesh.indices.data(),
         recipe_piece.mesh.indices.size() * sizeof(uint16_t));
     const DrawItem* match = nullptr;
     for (const DrawItem* item : items) {
@@ -9821,10 +9827,8 @@ multiplayer::AppearanceBlob BuildLocalRecipeAppearanceBlob(
         continue;
       }
       const uint64_t item_topology = AppearanceHashBytes(
-          1469598103934665603ull,
-          mesh->second.raytracing_indices.data(),
-          mesh->second.raytracing_indices.size() *
-              sizeof(uint16_t));
+          1469598103934665603ull, mesh->second.raytracing_indices.data(),
+          mesh->second.raytracing_indices.size() * sizeof(uint16_t));
       if (item_topology == recipe_topology) {
         match = item;
         break;
@@ -9839,48 +9843,38 @@ multiplayer::AppearanceBlob BuildLocalRecipeAppearanceBlob(
       // bind mesh double-deforms it into a long ribbon. Leave ROPA recipe
       // pieces on the canonical body track and use the recipe mesh's own
       // palette mapping. Detached-board tracks remain exact.
-      binding.wire.track_key =
-          match->ropa ? 0u : match->mesh;
-      binding.wire.flags =
-          (match->skinned ? kNetworkPieceSkinned : 0u) |
+      binding.wire.track_key = match->ropa ? 0u : match->mesh;
+      binding.wire.flags = (match->skinned ? kNetworkPieceSkinned : 0u) |
           (match->hair ? kNetworkPieceHair : 0u) |
           (match->ropa ? kNetworkPieceRopa : 0u) |
           (match->char_alpha ? kNetworkPieceCharAlpha : 0u) |
           (match->shadow_caster ? kNetworkPieceShadow : 0u);
       binding.wire.char_family = match->char_family;
-      std::copy_n(
-          match->char_rows, 72, binding.wire.char_rows);
-      std::copy_n(
-          match->tint, 4, binding.wire.tint);
+      std::copy_n(match->char_rows, 72, binding.wire.char_rows);
+      std::copy_n(match->tint, 4, binding.wire.tint);
       if (match->ropa) {
-        binding.remap =
-            recipe_piece.mesh.palette_to_canonical;
+        binding.remap = recipe_piece.mesh.palette_to_canonical;
       } else {
         native_palette::CanonicalRigSample rig;
-        if (native_palette::LookupCanonicalRig(
-                match->ctx, match->mesh, rig) &&
+        if (native_palette::LookupCanonicalRig(match->ctx, match->mesh, rig) &&
             !rig.palette_to_canonical.empty()) {
-          binding.remap.assign(
-              rig.palette_to_canonical.begin(),
+          binding.remap.assign(rig.palette_to_canonical.begin(),
               rig.palette_to_canonical.end());
         }
       }
     } else {
-      const auto cached_binding =
-          cached_bindings.find(recipe_piece.model_id);
+      const auto cached_binding = cached_bindings.find(recipe_piece.model_id);
       if (cached_binding != cached_bindings.end()) {
         binding = cached_binding->second;
       }
     }
     if (binding.remap.empty()) {
-      binding.remap =
-          recipe_piece.mesh.palette_to_canonical;
+      binding.remap = recipe_piece.mesh.palette_to_canonical;
     }
     if (binding.remap.size() > 256) {
       binding.remap.resize(256);
     }
-    binding.wire.remap_count =
-        static_cast<uint16_t>(binding.remap.size());
+    binding.wire.remap_count = static_cast<uint16_t>(binding.remap.size());
     if (match != nullptr) {
       cached_bindings[recipe_piece.model_id] = binding;
     }
@@ -9892,55 +9886,37 @@ multiplayer::AppearanceBlob BuildLocalRecipeAppearanceBlob(
 
   uint64_t identity = recipe_identity;
   for (const BindingBuild& binding : bindings) {
-    identity = AppearanceHashBytes(
-        identity, &binding.wire.model_id,
+    identity = AppearanceHashBytes(identity, &binding.wire.model_id,
         sizeof(binding.wire.model_id));
-    identity = AppearanceHashBytes(
-        identity, &binding.wire.track_key,
+    identity = AppearanceHashBytes(identity, &binding.wire.track_key,
         sizeof(binding.wire.track_key));
-    identity = AppearanceHashBytes(
-        identity, &binding.wire.flags,
+    identity = AppearanceHashBytes(identity, &binding.wire.flags,
         sizeof(binding.wire.flags));
-    identity = AppearanceHashBytes(
-        identity, &binding.wire.char_family,
+    identity = AppearanceHashBytes(identity, &binding.wire.char_family,
         sizeof(binding.wire.char_family));
-    identity = AppearanceHashBytes(
-        identity, binding.wire.tint,
+    identity = AppearanceHashBytes(identity, binding.wire.tint,
         sizeof(binding.wire.tint));
     if (!binding.remap.empty()) {
-      identity = AppearanceHashBytes(
-          identity, binding.remap.data(),
+      identity = AppearanceHashBytes(identity, binding.remap.data(),
           binding.remap.size() * sizeof(uint16_t));
     }
   }
-  if (cached_blob.identity == identity &&
-      cached_blob.bytes != nullptr) {
+  if (cached_blob.identity == identity && cached_blob.bytes != nullptr) {
     return cached_blob;
   }
 
   NetworkRecipeAppearanceHeader header;
-  header.binding_count =
-      static_cast<uint16_t>(bindings.size());
-  header.recipe_bytes =
-      static_cast<uint32_t>(recipe.size());
-  std::copy_n(
-      animation.presentation_root_position, 3,
-      header.root_position);
-  std::copy_n(
-      animation.presentation_root_x_axis, 3,
-      header.root_x_axis);
-  std::copy_n(
-      animation.presentation_root_z_axis, 3,
-      header.root_z_axis);
-  auto bytes =
-      std::make_shared<std::vector<uint8_t>>();
-  bytes->reserve(
-      sizeof(header) + recipe.size() +
+  header.binding_count = static_cast<uint16_t>(bindings.size());
+  header.recipe_bytes = static_cast<uint32_t>(recipe.size());
+  std::copy_n(animation.presentation_root_position, 3, header.root_position);
+  std::copy_n(animation.presentation_root_x_axis, 3, header.root_x_axis);
+  std::copy_n(animation.presentation_root_z_axis, 3, header.root_z_axis);
+  auto bytes = std::make_shared<std::vector<uint8_t>>();
+  bytes->reserve(sizeof(header) + recipe.size() +
       bindings.size() *
           (sizeof(NetworkRecipeAppearanceBinding) + 64));
   AppendAppearancePod(*bytes, header);
-  bytes->insert(
-      bytes->end(), recipe.begin(), recipe.end());
+  bytes->insert(bytes->end(), recipe.begin(), recipe.end());
   for (const BindingBuild& binding : bindings) {
     AppendAppearancePod(*bytes, binding.wire);
     for (uint16_t remap : binding.remap) {
@@ -9952,9 +9928,8 @@ multiplayer::AppearanceBlob BuildLocalRecipeAppearanceBlob(
   REXLOG_INFO(
       "multiplayer: built recipe appearance id={:016X} "
       "recipe_bytes={} wire_bytes={} pieces={} matched={}",
-      cached_blob.identity, recipe.size(),
-      cached_blob.bytes->size(), bindings.size(),
-      matched_pieces);
+      cached_blob.identity, recipe.size(), cached_blob.bytes->size(),
+      bindings.size(), matched_pieces);
   return cached_blob;
 }
 
@@ -9976,18 +9951,14 @@ multiplayer::AppearanceBlob BuildLocalAppearanceBlob(
   static multiplayer::AppearanceBlob cached;
   static std::vector<uint64_t> cached_piece_identities;
   static uint64_t observed_identity = 0;
-  static std::chrono::steady_clock::time_point
-      observed_since{};
-  static std::unordered_map<uint32_t, ObservedAppearancePiece>
-      observed_pieces;
+  static std::chrono::steady_clock::time_point observed_since{};
+  static std::unordered_map<uint32_t, ObservedAppearancePiece> observed_pieces;
   static uint32_t observed_presentation = 0;
   static size_t observed_ready_count = 0;
   static size_t logged_observed_count = 0;
   static size_t logged_ready_count = 0;
-  uint8_t* base =
-      g_guest_base.load(std::memory_order_relaxed);
-  if (base == nullptr || items.empty() ||
-      !animation.presentation_root_valid) {
+  uint8_t* base = g_guest_base.load(std::memory_order_relaxed);
+  if (base == nullptr || items.empty() || !animation.presentation_root_valid) {
     return {};
   }
 
@@ -10001,13 +9972,11 @@ multiplayer::AppearanceBlob BuildLocalAppearanceBlob(
   // identity instead. Mesh and texture object identity detect equipped
   // asset replacement without importing renderer cache churn into the
   // network protocol.
-  const auto piece_identity_for =
-      [](const DrawItem& item) {
+  const auto piece_identity_for = [](const DrawItem& item) {
     uint64_t piece_identity = 1469598103934665603ull;
-    const auto mix = [&piece_identity](
-                         const auto& value) {
-      piece_identity = AppearanceHashBytes(
-          piece_identity, &value, sizeof(value));
+    const auto mix = [&piece_identity](const auto& value) {
+      piece_identity =
+          AppearanceHashBytes(piece_identity, &value, sizeof(value));
     };
     mix(item.mesh);
     mix(item.vb_bytes);
@@ -10017,14 +9986,12 @@ multiplayer::AppearanceBlob BuildLocalAppearanceBlob(
     mix(item.uv_fmt);
     mix(item.uv2_fmt);
     mix(item.char_family);
-    const uint32_t flags =
-        (item.skinned ? kNetworkPieceSkinned : 0u) |
+    const uint32_t flags = (item.skinned ? kNetworkPieceSkinned : 0u) |
         (item.hair ? kNetworkPieceHair : 0u) |
         (item.ropa ? kNetworkPieceRopa : 0u) |
         (item.char_alpha ? kNetworkPieceCharAlpha : 0u);
     mix(flags);
-    const uint32_t texture_objects[4] = {
-        item.diffuse_tex, item.water_normal,
+    const uint32_t texture_objects[4] = {item.diffuse_tex, item.water_normal,
         item.hair_alpha_tex, item.spec_tex};
     for (uint32_t texture_object : texture_objects) {
       // The texture object is the equipped material binding. Fetch-word
@@ -10033,11 +10000,11 @@ multiplayer::AppearanceBlob BuildLocalAppearanceBlob(
       // would resend the same clothing while skating around the map.
       mix(texture_object);
     }
-    piece_identity = AppearanceHashBytes(
-        piece_identity, item.tint, sizeof(item.tint));
+    piece_identity =
+        AppearanceHashBytes(piece_identity, item.tint, sizeof(item.tint));
     if (!item.draws.empty()) {
-      piece_identity = AppearanceHashBytes(
-          piece_identity, item.draws.data(),
+      piece_identity =
+          AppearanceHashBytes(piece_identity, item.draws.data(),
           item.draws.size() * sizeof(DrawEntry));
     }
     return piece_identity;
@@ -10046,8 +10013,7 @@ multiplayer::AppearanceBlob BuildLocalAppearanceBlob(
   const auto now = std::chrono::steady_clock::now();
   const uint32_t local_presentation =
       mechanics_sandbox::LocalPresentationCandidate();
-  if (local_presentation != 0 &&
-      local_presentation != observed_presentation) {
+  if (local_presentation != 0 && local_presentation != observed_presentation) {
     observed_pieces.clear();
     observed_identity = 0;
     observed_since = now;
@@ -10059,10 +10025,8 @@ multiplayer::AppearanceBlob BuildLocalAppearanceBlob(
     if (item == nullptr || item->mesh == 0) {
       continue;
     }
-    const uint64_t piece_identity =
-        piece_identity_for(*item);
-    auto [found, inserted] = observed_pieces.try_emplace(
-        item->mesh);
+    const uint64_t piece_identity = piece_identity_for(*item);
+    auto [found, inserted] = observed_pieces.try_emplace(item->mesh);
     ObservedAppearancePiece& observed = found->second;
     if (inserted || observed.identity != piece_identity) {
       observed_changed = true;
@@ -10093,8 +10057,7 @@ multiplayer::AppearanceBlob BuildLocalAppearanceBlob(
   for (auto& [mesh_key, observed] : observed_pieces) {
     (void)mesh_key;
     const auto mesh = g_r.meshes.find(observed.item.mesh);
-    if (mesh == g_r.meshes.end() ||
-        mesh->second.raytracing_verts.empty() ||
+    if (mesh == g_r.meshes.end() || mesh->second.raytracing_verts.empty() ||
         mesh->second.raytracing_indices.empty()) {
       continue;
     }
@@ -10116,25 +10079,20 @@ multiplayer::AppearanceBlob BuildLocalAppearanceBlob(
         observed_pieces.size(), ready_pieces,
         cached.bytes != nullptr ? cached_piece_identities.size() : 0);
   }
-  if (observed_pieces.empty() ||
-      ready_pieces != observed_pieces.size()) {
+  if (observed_pieces.empty() || ready_pieces != observed_pieces.size()) {
     return cached;
   }
   if (ready_pieces == 0) {
     return cached;
   }
-  std::sort(
-      piece_identities.begin(), piece_identities.end());
+  std::sort(piece_identities.begin(), piece_identities.end());
   uint64_t identity = 1469598103934665603ull;
   for (uint64_t piece_identity : piece_identities) {
-    identity = AppearanceHashBytes(
-        identity, &piece_identity,
-        sizeof(piece_identity));
+    identity =
+        AppearanceHashBytes(identity, &piece_identity, sizeof(piece_identity));
   }
-  identity = AppearanceHashBytes(
-      identity, &ready_pieces, sizeof(ready_pieces));
-  if (identity == cached_identity &&
-      cached.bytes != nullptr) {
+  identity = AppearanceHashBytes(identity, &ready_pieces, sizeof(ready_pieces));
+  if (identity == cached_identity && cached.bytes != nullptr) {
     return cached;
   }
   if (identity != observed_identity) {
@@ -10153,19 +10111,13 @@ multiplayer::AppearanceBlob BuildLocalAppearanceBlob(
   // edit and can replace the cache promptly.
   const bool candidate_is_subset =
       !cached_piece_identities.empty() &&
-      piece_identities.size() <
-          cached_piece_identities.size() &&
-      std::includes(
-          cached_piece_identities.begin(),
-          cached_piece_identities.end(),
-          piece_identities.begin(),
+      piece_identities.size() < cached_piece_identities.size() &&
+      std::includes(cached_piece_identities.begin(),
+                    cached_piece_identities.end(), piece_identities.begin(),
           piece_identities.end());
   const auto appearance_settle_time =
-      candidate_is_subset
-          ? std::chrono::seconds(20)
-          : std::chrono::seconds(5);
-  if (observed_since ==
-          std::chrono::steady_clock::time_point{} ||
+      candidate_is_subset ? std::chrono::seconds(20) : std::chrono::seconds(5);
+  if (observed_since == std::chrono::steady_clock::time_point{} ||
       now - observed_since < appearance_settle_time) {
     return cached;
   }
@@ -10176,20 +10128,17 @@ multiplayer::AppearanceBlob BuildLocalAppearanceBlob(
     native_palette::CanonicalRigSample rig;
     multiplayer_assets::BindMesh bind_mesh;
     bool use_bind_mesh = false;
-    uint16_t textures[4] = {
-        0xFFFFu, 0xFFFFu, 0xFFFFu, 0xFFFFu};
+    uint16_t textures[4] = {0xFFFFu, 0xFFFFu, 0xFFFFu, 0xFFFFu};
   };
   std::vector<PieceBuild> pieces;
   std::vector<CapturedAppearanceTexture> textures;
   std::unordered_map<uint64_t, uint16_t> texture_by_key;
-  const auto texture_index =
-      [&](uint32_t texture_object) -> uint16_t {
+  const auto texture_index = [&](uint32_t texture_object) -> uint16_t {
         if (texture_object == 0) {
           return 0xFFFFu;
         }
         uint32_t words[6] = {};
-        if (!ReadStableTexWords(
-                base, texture_object, words)) {
+    if (!ReadStableTexWords(base, texture_object, words)) {
           return 0xFFFFu;
         }
         const uint64_t key = FetchWordsKey(words);
@@ -10201,13 +10150,10 @@ multiplayer::AppearanceBlob BuildLocalAppearanceBlob(
           return 0xFFFFu;
         }
         CapturedAppearanceTexture captured;
-        if (!CaptureAppearanceTexture(
-                context, base, texture_object,
-                captured)) {
+    if (!CaptureAppearanceTexture(context, base, texture_object, captured)) {
           return 0xFFFFu;
         }
-        const uint16_t index =
-            static_cast<uint16_t>(textures.size());
+    const uint16_t index = static_cast<uint16_t>(textures.size());
         texture_by_key.emplace(key, index);
         textures.push_back(std::move(captured));
         return index;
@@ -10218,29 +10164,22 @@ multiplayer::AppearanceBlob BuildLocalAppearanceBlob(
       continue;
     }
     const auto mesh = g_r.meshes.find(item->mesh);
-    if (mesh == g_r.meshes.end() ||
-        mesh->second.raytracing_verts.empty() ||
+    if (mesh == g_r.meshes.end() || mesh->second.raytracing_verts.empty() ||
         mesh->second.raytracing_indices.empty()) {
       continue;
     }
     PieceBuild piece;
     piece.item = item;
     piece.mesh = &mesh->second;
-    native_palette::LookupCanonicalRig(
-        item->ctx, item->mesh, piece.rig);
+    native_palette::LookupCanonicalRig(item->ctx, item->mesh, piece.rig);
     if (item->ropa) {
       const uint64_t topology_hash = AppearanceHashBytes(
-          1469598103934665603ull,
-          mesh->second.raytracing_indices.data(),
-          mesh->second.raytracing_indices.size() *
-              sizeof(uint16_t));
-      piece.use_bind_mesh =
-          multiplayer_assets::ResolveRopaBindMesh(
+          1469598103934665603ull, mesh->second.raytracing_indices.data(),
+          mesh->second.raytracing_indices.size() * sizeof(uint16_t));
+      piece.use_bind_mesh = multiplayer_assets::ResolveRopaBindMesh(
               item->char_family,
-              static_cast<uint32_t>(
-                  mesh->second.raytracing_verts.size() / 14),
-              static_cast<uint32_t>(
-                  mesh->second.raytracing_indices.size()),
+          static_cast<uint32_t>(mesh->second.raytracing_verts.size() / 14),
+          static_cast<uint32_t>(mesh->second.raytracing_indices.size()),
               topology_hash, piece.bind_mesh);
       if (piece.use_bind_mesh) {
         // UpdateBoneTransforms publishes the exact live remap used by the
@@ -10255,8 +10194,7 @@ multiplayer::AppearanceBlob BuildLocalAppearanceBlob(
             piece.bind_mesh.palette_to_canonical.size();
         size_t remap_differences = 0;
         if (have_exact_runtime_remap) {
-          for (size_t index = 0;
-               index < piece.rig.palette_to_canonical.size();
+          for (size_t index = 0; index < piece.rig.palette_to_canonical.size();
                ++index) {
             remap_differences +=
                 piece.rig.palette_to_canonical[index] !=
@@ -10265,14 +10203,12 @@ multiplayer::AppearanceBlob BuildLocalAppearanceBlob(
                     : 0;
           }
         } else {
-          piece.rig.palette_to_canonical =
-              piece.bind_mesh.palette_to_canonical;
+          piece.rig.palette_to_canonical = piece.bind_mesh.palette_to_canonical;
         }
         REXLOG_INFO(
             "multiplayer: ROPA palette mesh={:08X} source={} "
             "bones={} name_map_differences={}",
-            item->mesh,
-            have_exact_runtime_remap ? "runtime" : "rx2-names",
+            item->mesh, have_exact_runtime_remap ? "runtime" : "rx2-names",
             piece.rig.palette_to_canonical.size(),
             have_exact_runtime_remap ? remap_differences : 0);
       }
@@ -10287,12 +10223,9 @@ multiplayer::AppearanceBlob BuildLocalAppearanceBlob(
     return cached;
   }
   const multiplayer::AnimationTrack* canonical_track = nullptr;
-  for (const multiplayer::AnimationTrack& track :
-       animation.tracks) {
-    if (track.mesh_key ==
-            multiplayer::kCanonicalSkeletonTrackKey &&
-        !track.bone_rows.empty() &&
-        track.bone_rows.size() % 12 == 0) {
+  for (const multiplayer::AnimationTrack& track : animation.tracks) {
+    if (track.mesh_key == multiplayer::kCanonicalSkeletonTrackKey &&
+        !track.bone_rows.empty() && track.bone_rows.size() % 12 == 0) {
       canonical_track = &track;
       break;
     }
@@ -10303,11 +10236,10 @@ multiplayer::AppearanceBlob BuildLocalAppearanceBlob(
     }
     const AppearanceWeightedRows weighted =
         multiplayer::render_cache::FindWeightedPaletteRows(
-            piece.bind_mesh.vertices,
-            piece.rig.palette_to_canonical.size());
+            piece.bind_mesh.vertices, piece.rig.palette_to_canonical.size());
     std::string mapping;
-    for (std::size_t palette_row = 0;
-         palette_row < weighted.used.size(); ++palette_row) {
+    for (std::size_t palette_row = 0; palette_row < weighted.used.size();
+         ++palette_row) {
       if (!weighted.used[palette_row]) {
         continue;
       }
@@ -10317,26 +10249,21 @@ multiplayer::AppearanceBlob BuildLocalAppearanceBlob(
       mapping += std::to_string(palette_row);
       mapping += "->";
       mapping +=
-          palette_row <
-                  piece.rig.palette_to_canonical.size()
-              ? std::to_string(
-                    piece.rig
-                        .palette_to_canonical[palette_row])
+          palette_row < piece.rig.palette_to_canonical.size()
+              ? std::to_string(piece.rig.palette_to_canonical[palette_row])
               : "x";
     }
     REXLOG_INFO(
         "multiplayer-bind-contract: mesh={:08X} "
         "asset={:016X} palette={} weighted={} invalid={} map=[{}]",
         piece.item->mesh, piece.bind_mesh.asset_id,
-        piece.rig.palette_to_canonical.size(),
-        weighted.count, weighted.invalid_influences, mapping);
-    if (canonical_track == nullptr ||
-        piece.mesh->raytracing_verts.size() !=
+        piece.rig.palette_to_canonical.size(), weighted.count,
+        weighted.invalid_influences, mapping);
+    if (canonical_track == nullptr || piece.mesh->raytracing_verts.size() !=
             piece.bind_mesh.vertices.size()) {
       continue;
     }
-    const std::size_t canonical_bones =
-        canonical_track->bone_rows.size() / 12;
+    const std::size_t canonical_bones = canonical_track->bone_rows.size() / 12;
     double raw_error = 0.0;
     double world_error = 0.0;
     double transpose_raw_error = 0.0;
@@ -10351,156 +10278,109 @@ multiplayer::AppearanceBlob BuildLocalAppearanceBlob(
     double uv1_max = 0.0;
     std::size_t compared = 0;
     std::size_t invalid = 0;
-    for (std::size_t vertex = 0;
-         vertex + 14 <= piece.bind_mesh.vertices.size();
+    for (std::size_t vertex = 0; vertex + 14 <= piece.bind_mesh.vertices.size();
          vertex += 14) {
-      const float* bind =
-          piece.bind_mesh.vertices.data() + vertex;
-      const float* live =
-          piece.mesh->raytracing_verts.data() + vertex;
-      for (std::size_t component = 0; component < 2;
-           ++component) {
+      const float* bind = piece.bind_mesh.vertices.data() + vertex;
+      const float* live = piece.mesh->raytracing_verts.data() + vertex;
+      for (std::size_t component = 0; component < 2; ++component) {
         const double uv0_delta =
-            double(bind[3 + component]) -
-            live[3 + component];
+            double(bind[3 + component]) - live[3 + component];
         const double uv1_delta =
-            double(bind[5 + component]) -
-            live[5 + component];
+            double(bind[5 + component]) - live[5 + component];
         uv0_error += uv0_delta * uv0_delta;
         uv1_error += uv1_delta * uv1_delta;
-        uv0_max = std::max(
-            uv0_max, std::abs(uv0_delta));
-        uv1_max = std::max(
-            uv1_max, std::abs(uv1_delta));
+        uv0_max = std::max(uv0_max, std::abs(uv0_delta));
+        uv1_max = std::max(uv1_max, std::abs(uv1_delta));
       }
       std::uint32_t packed_weights = 0;
       std::uint32_t packed_indices = 0;
-      std::memcpy(
-          &packed_weights, bind + 7,
-          sizeof(packed_weights));
-      std::memcpy(
-          &packed_indices, bind + 8,
-          sizeof(packed_indices));
+      std::memcpy(&packed_weights, bind + 7, sizeof(packed_weights));
+      std::memcpy(&packed_indices, bind + 8, sizeof(packed_indices));
       float predicted[3] = {};
       float predicted_transpose[3] = {};
       float weight_sum = 0.0f;
       bool vertex_valid = true;
-      for (std::size_t influence = 0; influence < 4;
-           ++influence) {
+      for (std::size_t influence = 0; influence < 4; ++influence) {
         const std::uint8_t weight_byte =
-            static_cast<std::uint8_t>(
-                packed_weights >> (influence * 8));
+            static_cast<std::uint8_t>(packed_weights >> (influence * 8));
         if (weight_byte == 0) {
           continue;
         }
         const std::uint8_t palette_row =
-            static_cast<std::uint8_t>(
-                packed_indices >> (influence * 8));
-        if (palette_row >=
-            piece.rig.palette_to_canonical.size()) {
+            static_cast<std::uint8_t>(packed_indices >> (influence * 8));
+        if (palette_row >= piece.rig.palette_to_canonical.size()) {
           vertex_valid = false;
           ++invalid;
           break;
         }
         const std::size_t canonical_bone =
-            piece.rig
-                .palette_to_canonical[palette_row];
+            piece.rig.palette_to_canonical[palette_row];
         if (canonical_bone >= canonical_bones) {
           vertex_valid = false;
           ++invalid;
           break;
         }
-        const float weight =
-            static_cast<float>(weight_byte) / 255.0f;
+        const float weight = static_cast<float>(weight_byte) / 255.0f;
         const float* bone =
-            canonical_track->bone_rows.data() +
-            canonical_bone * 12;
+            canonical_track->bone_rows.data() + canonical_bone * 12;
         for (std::size_t row = 0; row < 3; ++row) {
           predicted[row] +=
               weight *
-              (bind[0] * bone[row * 4 + 0] +
-               bind[1] * bone[row * 4 + 1] +
-               bind[2] * bone[row * 4 + 2] +
-               bone[row * 4 + 3]);
+              (bind[0] * bone[row * 4 + 0] + bind[1] * bone[row * 4 + 1] +
+               bind[2] * bone[row * 4 + 2] + bone[row * 4 + 3]);
           predicted_transpose[row] +=
               weight *
-              (bind[0] * bone[0 * 4 + row] +
-               bind[1] * bone[1 * 4 + row] +
-               bind[2] * bone[2 * 4 + row] +
-               bone[row * 4 + 3]);
+              (bind[0] * bone[0 * 4 + row] + bind[1] * bone[1 * 4 + row] +
+               bind[2] * bone[2 * 4 + row] + bone[row * 4 + 3]);
         }
         weight_sum += weight;
       }
       if (!vertex_valid || weight_sum <= 1.0e-6f) {
         continue;
       }
-      for (std::size_t component = 0; component < 3;
-           ++component) {
+      for (std::size_t component = 0; component < 3; ++component) {
         predicted[component] /= weight_sum;
         predicted_transpose[component] /= weight_sum;
       }
       float live_world[3] = {};
-      for (std::size_t component = 0; component < 3;
-           ++component) {
-        live_world[component] =
-            live[0] * piece.item->world[component] +
+      for (std::size_t component = 0; component < 3; ++component) {
+        live_world[component] = live[0] * piece.item->world[component] +
             live[1] * piece.item->world[4 + component] +
             live[2] * piece.item->world[8 + component] +
             piece.item->world[12 + component];
       }
-      for (std::size_t component = 0; component < 3;
-           ++component) {
-        const double raw =
-            double(predicted[component]) - live[component];
+      for (std::size_t component = 0; component < 3; ++component) {
+        const double raw = double(predicted[component]) - live[component];
         const double world =
-            double(predicted[component]) -
-            live_world[component];
+            double(predicted[component]) - live_world[component];
         const double transpose_raw =
-            double(predicted_transpose[component]) -
-            live[component];
+            double(predicted_transpose[component]) - live[component];
         const double transpose_world =
-            double(predicted_transpose[component]) -
-            live_world[component];
+            double(predicted_transpose[component]) - live_world[component];
         raw_error += raw * raw;
         world_error += world * world;
-        transpose_raw_error +=
-            transpose_raw * transpose_raw;
-        transpose_world_error +=
-            transpose_world * transpose_world;
+        transpose_raw_error += transpose_raw * transpose_raw;
+        transpose_world_error += transpose_world * transpose_world;
         raw_delta[component] += raw;
         world_delta[component] += world;
         transpose_raw_delta[component] += transpose_raw;
-        transpose_world_delta[component] +=
-            transpose_world;
+        transpose_world_delta[component] += transpose_world;
       }
       ++compared;
     }
-    const auto rms =
-        [compared](double error) {
-          return compared == 0
-                     ? -1.0
-                     : std::sqrt(
-                           error /
-                           (double(compared) * 3.0));
+    const auto rms = [compared](double error) {
+      return compared == 0 ? -1.0 : std::sqrt(error / (double(compared) * 3.0));
         };
-    const auto centered_rms =
-        [compared](double error,
-                   const double delta[3]) {
+    const auto centered_rms = [compared](double error, const double delta[3]) {
           if (compared == 0) {
             return -1.0;
           }
-          const double inverse =
-              1.0 / double(compared);
+      const double inverse = 1.0 / double(compared);
           double centered = error;
-          for (std::size_t component = 0;
-               component < 3; ++component) {
-            centered -=
-                delta[component] * delta[component] *
-                inverse;
-          }
-          return std::sqrt(
-              std::max(centered, 0.0) /
-              (double(compared) * 3.0));
+      for (std::size_t component = 0; component < 3; ++component) {
+        centered -= delta[component] * delta[component] * inverse;
+      }
+      return std::sqrt(std::max(centered, 0.0) / (double(compared) * 3.0));
         };
     REXLOG_INFO(
         "multiplayer-bind-invariant: mesh={:08X} asset={:016X} "
@@ -10509,113 +10389,72 @@ multiplayer::AppearanceBlob BuildLocalAppearanceBlob(
         "transpose_raw={:.5f}/{:.5f} "
         "transpose_world={:.5f}/{:.5f} "
         "uv0={:.6f}/{:.6f} uv1={:.6f}/{:.6f}",
-        piece.item->mesh, piece.bind_mesh.asset_id,
-        compared, invalid,
-        rms(raw_error),
-        centered_rms(raw_error, raw_delta),
-        rms(world_error),
-        centered_rms(world_error, world_delta),
-        rms(transpose_raw_error),
-        centered_rms(
-            transpose_raw_error, transpose_raw_delta),
+        piece.item->mesh, piece.bind_mesh.asset_id, compared, invalid,
+        rms(raw_error), centered_rms(raw_error, raw_delta), rms(world_error),
+        centered_rms(world_error, world_delta), rms(transpose_raw_error),
+        centered_rms(transpose_raw_error, transpose_raw_delta),
         rms(transpose_world_error),
-        centered_rms(
-            transpose_world_error,
-            transpose_world_delta),
-        compared == 0
-            ? -1.0
-            : std::sqrt(
-                  uv0_error /
-                  (double(compared) * 2.0)),
+        centered_rms(transpose_world_error, transpose_world_delta),
+        compared == 0 ? -1.0 : std::sqrt(uv0_error / (double(compared) * 2.0)),
         uv0_max,
-        compared == 0
-            ? -1.0
-            : std::sqrt(
-                  uv1_error /
-                  (double(compared) * 2.0)),
+        compared == 0 ? -1.0 : std::sqrt(uv1_error / (double(compared) * 2.0)),
         uv1_max);
   }
   NetworkAppearanceHeader header;
-  std::copy_n(
-      animation.presentation_root_position, 3,
-      header.root_position);
-  std::copy_n(
-      animation.presentation_root_x_axis, 3,
-      header.root_x_axis);
-  std::copy_n(
-      animation.presentation_root_z_axis, 3,
-      header.root_z_axis);
-  header.texture_count =
-      static_cast<uint16_t>(textures.size());
-  header.piece_count =
-      static_cast<uint16_t>(pieces.size());
-  auto bytes =
-      std::make_shared<std::vector<uint8_t>>();
+  std::copy_n(animation.presentation_root_position, 3, header.root_position);
+  std::copy_n(animation.presentation_root_x_axis, 3, header.root_x_axis);
+  std::copy_n(animation.presentation_root_z_axis, 3, header.root_z_axis);
+  header.texture_count = static_cast<uint16_t>(textures.size());
+  header.piece_count = static_cast<uint16_t>(pieces.size());
+  auto bytes = std::make_shared<std::vector<uint8_t>>();
   bytes->reserve(1024 * 1024);
   AppendAppearancePod(*bytes, header);
-  for (const CapturedAppearanceTexture& texture :
-       textures) {
+  for (const CapturedAppearanceTexture& texture : textures) {
     AppendAppearancePod(*bytes, texture.header);
-    bytes->insert(
-        bytes->end(), texture.payload.begin(),
-        texture.payload.end());
+    bytes->insert(bytes->end(), texture.payload.begin(), texture.payload.end());
   }
   for (const PieceBuild& piece : pieces) {
     const std::vector<float>& appearance_vertices =
-        piece.use_bind_mesh
-            ? piece.bind_mesh.vertices
+        piece.use_bind_mesh ? piece.bind_mesh.vertices
             : piece.mesh->raytracing_verts;
     const std::vector<uint16_t>& appearance_indices =
-        piece.use_bind_mesh
-            ? piece.bind_mesh.indices
+        piece.use_bind_mesh ? piece.bind_mesh.indices
             : piece.mesh->raytracing_indices;
     NetworkAppearancePiece wire;
     wire.track_key = piece.item->mesh;
     wire.fingerprint = piece.item->fingerprint;
     wire.flags =
-        ((piece.item->skinned || piece.use_bind_mesh)
-             ? kNetworkPieceSkinned
+        ((piece.item->skinned || piece.use_bind_mesh) ? kNetworkPieceSkinned
              : 0u) |
         (piece.item->hair ? kNetworkPieceHair : 0u) |
-        ((piece.item->ropa && !piece.use_bind_mesh)
-             ? kNetworkPieceRopa
-             : 0u) |
+        ((piece.item->ropa && !piece.use_bind_mesh) ? kNetworkPieceRopa : 0u) |
         (piece.item->char_alpha ? kNetworkPieceCharAlpha : 0u) |
         (piece.item->shadow_caster ? kNetworkPieceShadow : 0u);
     wire.char_family = piece.item->char_family;
-    wire.bone_count = static_cast<uint16_t>(
-        std::min<size_t>(
-            piece.use_bind_mesh
-                ? piece.rig.palette_to_canonical.size()
+    wire.bone_count = static_cast<uint16_t>(std::min<size_t>(
+        piece.use_bind_mesh ? piece.rig.palette_to_canonical.size()
                 : piece.item->bones.size() / 12,
             256));
-    wire.draw_count = static_cast<uint16_t>(
-        std::min<size_t>(
-            piece.item->draws.size(), 256));
+    wire.draw_count =
+        static_cast<uint16_t>(std::min<size_t>(piece.item->draws.size(), 256));
     wire.remap_count = static_cast<uint16_t>(
-        std::min<size_t>(
-            piece.rig.palette_to_canonical.size(), 256));
-    wire.vertex_count = static_cast<uint32_t>(
-        appearance_vertices.size() / 14);
-    wire.index_count = static_cast<uint32_t>(
-        appearance_indices.size());
+        std::min<size_t>(piece.rig.palette_to_canonical.size(), 256));
+    wire.vertex_count = static_cast<uint32_t>(appearance_vertices.size() / 14);
+    wire.index_count = static_cast<uint32_t>(appearance_indices.size());
     wire.diffuse_texture = piece.textures[0];
     wire.normal_texture = piece.textures[1];
     wire.alpha_texture = piece.textures[2];
     wire.spec_texture = piece.textures[3];
     if (piece.item->ropa && !piece.use_bind_mesh) {
       const uint64_t topology_hash = AppearanceHashBytes(
-          1469598103934665603ull,
-          piece.mesh->raytracing_indices.data(),
-          piece.mesh->raytracing_indices.size() *
-              sizeof(uint16_t));
+          1469598103934665603ull, piece.mesh->raytracing_indices.data(),
+          piece.mesh->raytracing_indices.size() * sizeof(uint16_t));
       REXLOG_INFO(
           "multiplayer: ropa asset signature mesh={:08X} fam={} "
           "verts={} indices={} draws={} stride={} topology={:016X} "
           "bbox=({:.4f},{:.4f},{:.4f})..({:.4f},{:.4f},{:.4f})",
-          piece.item->mesh, piece.item->char_family,
-          wire.vertex_count, wire.index_count, wire.draw_count,
-          piece.item->stride, topology_hash,
+          piece.item->mesh, piece.item->char_family, wire.vertex_count,
+          wire.index_count, wire.draw_count, piece.item->stride, topology_hash,
           piece.item->bbox_min[0], piece.item->bbox_min[1],
           piece.item->bbox_min[2], piece.item->bbox_max[0],
           piece.item->bbox_max[1], piece.item->bbox_max[2]);
@@ -10624,12 +10463,10 @@ multiplayer::AppearanceBlob BuildLocalAppearanceBlob(
       REXLOG_INFO(
           "multiplayer: bind-skinned ROPA mesh={:08X} "
           "asset={:016X} fam={} verts={} indices={} bones={}",
-          piece.item->mesh, piece.bind_mesh.asset_id,
-          piece.item->char_family, wire.vertex_count,
-          wire.index_count, wire.bone_count);
+          piece.item->mesh, piece.bind_mesh.asset_id, piece.item->char_family,
+          wire.vertex_count, wire.index_count, wire.bone_count);
     }
-    std::copy_n(
-        piece.item->char_rows, 72, wire.char_rows);
+    std::copy_n(piece.item->char_rows, 72, wire.char_rows);
     std::copy_n(piece.item->tint, 4, wire.tint);
     if (piece.use_bind_mesh) {
       // The replicated canonical palette maps bind-model vertices directly
@@ -10644,44 +10481,29 @@ multiplayer::AppearanceBlob BuildLocalAppearanceBlob(
       std::copy_n(piece.item->world, 16, wire.world);
     }
     std::copy_n(
-        piece.use_bind_mesh
-            ? piece.bind_mesh.bbox_min
-            : piece.item->bbox_min,
+        piece.use_bind_mesh ? piece.bind_mesh.bbox_min : piece.item->bbox_min,
         3, wire.bbox_min);
     std::copy_n(
-        piece.use_bind_mesh
-            ? piece.bind_mesh.bbox_max
-            : piece.item->bbox_max,
+        piece.use_bind_mesh ? piece.bind_mesh.bbox_max : piece.item->bbox_max,
         3, wire.bbox_max);
     AppendAppearancePod(*bytes, wire);
-    bytes->insert(
-        bytes->end(),
-        reinterpret_cast<const uint8_t*>(
-            piece.item->draws.data()),
-        reinterpret_cast<const uint8_t*>(
-            piece.item->draws.data() + wire.draw_count));
-    for (size_t index = 0;
-         index < wire.remap_count; ++index) {
-      const uint16_t mapped =
-          static_cast<uint16_t>(
-              std::min<size_t>(
-                  piece.rig.palette_to_canonical[index],
-                  0xFFFFu));
+    bytes->insert(bytes->end(),
+                  reinterpret_cast<const uint8_t*>(piece.item->draws.data()),
+                  reinterpret_cast<const uint8_t*>(piece.item->draws.data() +
+                                                   wire.draw_count));
+    for (size_t index = 0; index < wire.remap_count; ++index) {
+      const uint16_t mapped = static_cast<uint16_t>(
+          std::min<size_t>(piece.rig.palette_to_canonical[index], 0xFFFFu));
       AppendAppearancePod(*bytes, mapped);
     }
     bytes->insert(
         bytes->end(),
-        reinterpret_cast<const uint8_t*>(
-            appearance_vertices.data()),
-        reinterpret_cast<const uint8_t*>(
-            appearance_vertices.data() +
+        reinterpret_cast<const uint8_t*>(appearance_vertices.data()),
+        reinterpret_cast<const uint8_t*>(appearance_vertices.data() +
             size_t(wire.vertex_count) * 14));
-    bytes->insert(
-        bytes->end(),
-        reinterpret_cast<const uint8_t*>(
-            appearance_indices.data()),
-        reinterpret_cast<const uint8_t*>(
-            appearance_indices.data() +
+    bytes->insert(bytes->end(),
+                  reinterpret_cast<const uint8_t*>(appearance_indices.data()),
+                  reinterpret_cast<const uint8_t*>(appearance_indices.data() +
             wire.index_count));
     if (bytes->size() > 16u * 1024u * 1024u) {
       REXLOG_WARN(
@@ -10697,8 +10519,7 @@ multiplayer::AppearanceBlob BuildLocalAppearanceBlob(
   REXLOG_INFO(
       "multiplayer: built appearance id={:016X} pieces={} "
       "textures={} bytes={}",
-      identity, pieces.size(), textures.size(),
-      cached.bytes->size());
+      identity, pieces.size(), textures.size(), cached.bytes->size());
   return cached;
 }
 
@@ -10727,8 +10548,7 @@ struct RemoteAppearanceRenderState {
   std::vector<uint64_t> texture_store_keys;
 };
 
-std::unordered_map<uint32_t, RemoteAppearanceRenderState>
-    g_remote_appearances;
+std::unordered_map<uint32_t, RemoteAppearanceRenderState> g_remote_appearances;
 
 struct RemoteRecipeAppearanceBinding {
   NetworkRecipeAppearanceBinding wire;
@@ -10739,18 +10559,15 @@ struct PendingRemoteRecipeInstall {
   uint64_t identity = 0;
   uint32_t session = 0;
   uint8_t resource_slot = 0;
-  std::shared_ptr<const multiplayer_assets::RecipeAppearance>
-      resolved;
-  std::unordered_map<uint64_t, RemoteRecipeAppearanceBinding>
-      bindings;
+  std::shared_ptr<const multiplayer_assets::RecipeAppearance> resolved;
+  std::unordered_map<uint64_t, RemoteRecipeAppearanceBinding> bindings;
   std::vector<uint64_t> texture_ids;
   std::unordered_map<uint64_t, uint32_t> texture_objects;
   std::size_t texture_index = 0;
   std::size_t piece_index = 0;
   RemoteAppearanceRenderState staged;
   std::chrono::steady_clock::time_point started;
-  uint64_t last_progress_frame =
-      std::numeric_limits<uint64_t>::max();
+  uint64_t last_progress_frame = std::numeric_limits<uint64_t>::max();
   uint32_t progress_frames = 0;
   uint32_t operations = 0;
   double operation_ms_sum = 0.0;
@@ -10769,8 +10586,7 @@ struct RemoteAppearanceInstallFrameBudget {
   std::chrono::steady_clock::time_point started;
 };
 
-RemoteAppearanceInstallFrameBudget
-    g_remote_appearance_install_budget;
+RemoteAppearanceInstallFrameBudget g_remote_appearance_install_budget;
 
 struct RemoteAppearanceResourceAudit {
   std::size_t installed_roles = 0;
@@ -10785,14 +10601,12 @@ struct RemoteAppearanceResourceAudit {
   std::size_t duplicate_texture_owners = 0;
 };
 
-RemoteAppearanceResourceAudit
-CollectRemoteAppearanceResourceAudit() {
+RemoteAppearanceResourceAudit CollectRemoteAppearanceResourceAudit() {
   RemoteAppearanceResourceAudit audit;
   std::unordered_set<uint32_t> owned_meshes;
   std::unordered_set<uint64_t> owned_textures;
 
-  const auto observe_state =
-      [&audit, &owned_meshes, &owned_textures](
+  const auto observe_state = [&audit, &owned_meshes, &owned_textures](
           const RemoteAppearanceRenderState& state,
           bool pending) {
         if (state.identity == 0 && state.items.empty() &&
@@ -10802,13 +10616,11 @@ CollectRemoteAppearanceResourceAudit() {
         if (pending) {
           ++audit.pending_roles;
           audit.pending_meshes += state.items.size();
-          audit.pending_textures +=
-              state.texture_store_keys.size();
+      audit.pending_textures += state.texture_store_keys.size();
         } else {
           ++audit.installed_roles;
           audit.installed_meshes += state.items.size();
-          audit.installed_textures +=
-              state.texture_store_keys.size();
+      audit.installed_textures += state.texture_store_keys.size();
         }
         for (const DrawItem& item : state.items) {
           if (!owned_meshes.insert(item.mesh).second) {
@@ -10818,8 +10630,7 @@ CollectRemoteAppearanceResourceAudit() {
             ++audit.missing_meshes;
           }
         }
-        for (uint64_t store_key :
-             state.texture_store_keys) {
+    for (uint64_t store_key : state.texture_store_keys) {
           if (!owned_textures.insert(store_key).second) {
             ++audit.duplicate_texture_owners;
           }
@@ -10833,8 +10644,7 @@ CollectRemoteAppearanceResourceAudit() {
     static_cast<void>(role);
     observe_state(state, false);
   }
-  for (const auto& [role, transaction] :
-       g_pending_remote_recipe_installs) {
+  for (const auto& [role, transaction] : g_pending_remote_recipe_installs) {
     static_cast<void>(role);
     observe_state(transaction.staged, true);
   }
@@ -10842,12 +10652,10 @@ CollectRemoteAppearanceResourceAudit() {
   return audit;
 }
 
-void LogRemoteAppearanceResourceAudit(
-    const char* event, uint32_t role) {
+void LogRemoteAppearanceResourceAudit(const char* event, uint32_t role) {
   const RemoteAppearanceResourceAudit audit =
       CollectRemoteAppearanceResourceAudit();
-  const std::size_t faults =
-      audit.missing_meshes + audit.missing_textures +
+  const std::size_t faults = audit.missing_meshes + audit.missing_textures +
       audit.duplicate_mesh_owners +
       audit.duplicate_texture_owners;
   if (faults == 0) {
@@ -10856,9 +10664,8 @@ void LogRemoteAppearanceResourceAudit(
         "installed_roles={} pending_roles={} "
         "installed_meshes={} pending_meshes={} "
         "installed_textures={} pending_textures={} faults=0",
-        event, role, audit.installed_roles,
-        audit.pending_roles, audit.installed_meshes,
-        audit.pending_meshes, audit.installed_textures,
+        event, role, audit.installed_roles, audit.pending_roles,
+        audit.installed_meshes, audit.pending_meshes, audit.installed_textures,
         audit.pending_textures);
     return;
   }
@@ -10869,12 +10676,10 @@ void LogRemoteAppearanceResourceAudit(
       "installed_textures={} pending_textures={} faults={} "
       "missing_meshes={} missing_textures={} "
       "duplicate_meshes={} duplicate_textures={}",
-      event, role, audit.installed_roles,
-      audit.pending_roles, audit.installed_meshes,
-      audit.pending_meshes, audit.installed_textures,
-      audit.pending_textures, faults,
-      audit.missing_meshes, audit.missing_textures,
-      audit.duplicate_mesh_owners,
+      event, role, audit.installed_roles, audit.pending_roles,
+      audit.installed_meshes, audit.pending_meshes, audit.installed_textures,
+      audit.pending_textures, faults, audit.missing_meshes,
+      audit.missing_textures, audit.duplicate_mesh_owners,
       audit.duplicate_texture_owners);
 }
 
@@ -10886,11 +10691,8 @@ bool AcquireRemoteAppearanceInstallOperation(uint64_t frame) {
     budget.operations = 0;
     budget.started = std::chrono::steady_clock::now();
   }
-  const uint32_t max_operations =
-      static_cast<uint32_t>(std::clamp(
-          REXCVAR_GET(
-              skate3_multiplayer_appearance_install_ops_per_frame),
-          1, 16));
+  const uint32_t max_operations = static_cast<uint32_t>(std::clamp(
+      REXCVAR_GET(skate3_multiplayer_appearance_install_ops_per_frame), 1, 16));
   if (budget.operations >= max_operations) {
     return false;
   }
@@ -10899,9 +10701,8 @@ bool AcquireRemoteAppearanceInstallOperation(uint64_t frame) {
         std::chrono::duration<double, std::milli>(
             std::chrono::steady_clock::now() - budget.started)
             .count();
-    const double max_ms = std::clamp(
-        REXCVAR_GET(
-            skate3_multiplayer_appearance_install_budget_ms),
+    const double max_ms =
+        std::clamp(REXCVAR_GET(skate3_multiplayer_appearance_install_budget_ms),
         0.25, 16.0);
     if (elapsed_ms >= max_ms) {
       return false;
@@ -10911,8 +10712,7 @@ bool AcquireRemoteAppearanceInstallOperation(uint64_t frame) {
   return true;
 }
 
-bool ResolveRemoteAppearanceRigCache(
-    const DrawItem& item,
+bool ResolveRemoteAppearanceRigCache(const DrawItem& item,
     RemoteAppearancePieceRenderCache& cache) {
   if (cache.rig_lookup_complete) {
     return !cache.palette_to_canonical.empty();
@@ -10928,47 +10728,35 @@ bool ResolveRemoteAppearanceRigCache(
     cache.rig_lookup_complete = true;
   } else {
     native_palette::CanonicalRigSample rig;
-    if (native_palette::LookupCanonicalRig(
-            item.ctx, item.mesh, rig) &&
+    if (native_palette::LookupCanonicalRig(item.ctx, item.mesh, rig) &&
         !rig.palette_to_canonical.empty()) {
-      cache.palette_to_canonical =
-          std::move(rig.palette_to_canonical);
+      cache.palette_to_canonical = std::move(rig.palette_to_canonical);
       cache.rig_lookup_complete = true;
     }
   }
   if (cache.rig_lookup_complete) {
-    cache.skateboard_piece =
-        std::any_of(
-            cache.palette_to_canonical.begin(),
-            cache.palette_to_canonical.end(),
+    cache.skateboard_piece = std::any_of(
+        cache.palette_to_canonical.begin(), cache.palette_to_canonical.end(),
             [](std::size_t canonical_bone) {
-              return canonical_bone >= 25 &&
-                     canonical_bone <= 31;
+          return canonical_bone >= 25 && canonical_bone <= 31;
             });
   }
   return !cache.palette_to_canonical.empty();
 }
 
 void BuildRemoteAppearancePieceRenderCache(
-    const DrawItem& item,
-    RemoteAppearancePieceRenderCache& cache,
-    std::size_t& scanned_vertices,
-    std::size_t& weighted_rows,
+    const DrawItem& item, RemoteAppearancePieceRenderCache& cache,
+    std::size_t& scanned_vertices, std::size_t& weighted_rows,
     std::size_t& resolved_rigs) {
   cache.track_key =
-      item.multiplayer_track_key != 0
-          ? item.multiplayer_track_key
-          : item.mesh;
+      item.multiplayer_track_key != 0 ? item.multiplayer_track_key : item.mesh;
   const std::size_t palette_bones = item.bones.size() / 12;
   const auto installed_mesh = g_r.meshes.find(item.mesh);
   if (item.skinned && palette_bones != 0 &&
       installed_mesh != g_r.meshes.end()) {
-    cache.weighted_rows =
-        multiplayer::render_cache::FindWeightedPaletteRows(
-            installed_mesh->second.raytracing_verts,
-            palette_bones);
-    scanned_vertices +=
-        installed_mesh->second.raytracing_verts.size() / 14;
+    cache.weighted_rows = multiplayer::render_cache::FindWeightedPaletteRows(
+        installed_mesh->second.raytracing_verts, palette_bones);
+    scanned_vertices += installed_mesh->second.raytracing_verts.size() / 14;
     weighted_rows += cache.weighted_rows.count;
   }
   if (ResolveRemoteAppearanceRigCache(item, cache)) {
@@ -10976,8 +10764,8 @@ void BuildRemoteAppearancePieceRenderCache(
   }
 }
 
-void BuildRemoteAppearanceRenderCaches(
-    uint32_t role, RemoteAppearanceRenderState& state) {
+void BuildRemoteAppearanceRenderCaches(uint32_t role,
+                                       RemoteAppearanceRenderState& state) {
   state.piece_caches.clear();
   state.piece_caches.reserve(state.items.size());
   state.canonical_track_index =
@@ -10987,18 +10775,16 @@ void BuildRemoteAppearanceRenderCaches(
   std::size_t resolved_rigs = 0;
   for (const DrawItem& item : state.items) {
     RemoteAppearancePieceRenderCache cache;
-    BuildRemoteAppearancePieceRenderCache(
-        item, cache, scanned_vertices, weighted_rows,
-        resolved_rigs);
+    BuildRemoteAppearancePieceRenderCache(item, cache, scanned_vertices,
+                                          weighted_rows, resolved_rigs);
     state.piece_caches.push_back(std::move(cache));
   }
   REXLOG_INFO(
       "multiplayer-render-cache: prepared role={} session={} "
       "appearance={:016X} pieces={} vertices={} weighted_rows={} "
       "resolved_rigs={}",
-      role, state.session, state.identity,
-      state.piece_caches.size(), scanned_vertices,
-      weighted_rows, resolved_rigs);
+      role, state.session, state.identity, state.piece_caches.size(),
+      scanned_vertices, weighted_rows, resolved_rigs);
 }
 
 struct RemoteVisualTelemetryState {
@@ -11056,8 +10842,7 @@ struct VisibleVertexMeshSample {
   std::size_t count = 0;
 };
 
-std::unordered_map<uint32_t, VisibleVertexMeshSample>
-    g_visible_vertex_samples;
+std::unordered_map<uint32_t, VisibleVertexMeshSample> g_visible_vertex_samples;
 
 std::uint64_t PoseCadenceNowMicroseconds() {
   return static_cast<std::uint64_t>(
@@ -11066,11 +10851,10 @@ std::uint64_t PoseCadenceNowMicroseconds() {
           .count());
 }
 
-bool SampleSkinnedVisiblePoint(
-    const DrawItem& item, float output[3],
+bool SampleSkinnedVisiblePoint(const DrawItem& item, float output[3],
     std::size_t* vertex_count = nullptr) {
-  if (!item.skinned || item.bones.empty() ||
-      item.bones.size() % 12 != 0 || output == nullptr) {
+  if (!item.skinned || item.bones.empty() || item.bones.size() % 12 != 0 ||
+      output == nullptr) {
     return false;
   }
   const auto mesh = g_r.meshes.find(item.mesh);
@@ -11078,8 +10862,7 @@ bool SampleSkinnedVisiblePoint(
     return false;
   }
   const MeshBuffers& buffers = mesh->second;
-  const std::vector<float>& decoded =
-      item.ropa && !buffers.ropa_verts.empty()
+  const std::vector<float>& decoded = item.ropa && !buffers.ropa_verts.empty()
           ? buffers.ropa_verts
           : buffers.raytracing_verts;
   if (decoded.empty() || decoded.size() % 14 != 0) {
@@ -11090,42 +10873,29 @@ bool SampleSkinnedVisiblePoint(
   if (vertex_count != nullptr) {
     *vertex_count = decoded_vertex_count;
   }
-  VisibleVertexMeshSample& cached =
-      g_visible_vertex_samples[item.mesh];
+  VisibleVertexMeshSample& cached = g_visible_vertex_samples[item.mesh];
   if (cached.fingerprint != buffers.fingerprint ||
       cached.vertex_count != decoded_vertex_count) {
     cached = {};
     cached.fingerprint = buffers.fingerprint;
     cached.vertex_count = decoded_vertex_count;
-    const std::array<std::size_t, 3> starts = {
-        decoded_vertex_count / 4,
+    const std::array<std::size_t, 3> starts = {decoded_vertex_count / 4,
         decoded_vertex_count / 2,
         decoded_vertex_count * 3 / 4};
     for (std::size_t start : starts) {
-      for (std::size_t offset = 0;
-           offset < decoded_vertex_count; ++offset) {
-        const std::size_t index =
-            (start + offset) % decoded_vertex_count;
-        const float* source =
-            decoded.data() + index * 14;
+      for (std::size_t offset = 0; offset < decoded_vertex_count; ++offset) {
+        const std::size_t index = (start + offset) % decoded_vertex_count;
+        const float* source = decoded.data() + index * 14;
         uint32_t packed_weights = 0;
         uint32_t packed_indices = 0;
-        std::memcpy(
-            &packed_weights, source + 7,
-            sizeof(packed_weights));
-        std::memcpy(
-            &packed_indices, source + 8,
-            sizeof(packed_indices));
+        std::memcpy(&packed_weights, source + 7, sizeof(packed_weights));
+        std::memcpy(&packed_indices, source + 8, sizeof(packed_indices));
         bool usable = false;
-        for (std::size_t influence = 0;
-             influence < 4; ++influence) {
-          const uint32_t weight =
-              (packed_weights >> (influence * 8)) & 0xFFu;
-          const uint32_t bone =
-              (packed_indices >> (influence * 8)) & 0xFFu;
+        for (std::size_t influence = 0; influence < 4; ++influence) {
+          const uint32_t weight = (packed_weights >> (influence * 8)) & 0xFFu;
+          const uint32_t bone = (packed_indices >> (influence * 8)) & 0xFFu;
           if (weight != 0 &&
-              (std::size_t(bone) + 1) * 12 <=
-                  item.bones.size()) {
+              (std::size_t(bone) + 1) * 12 <= item.bones.size()) {
             usable = true;
             break;
           }
@@ -11133,8 +10903,7 @@ bool SampleSkinnedVisiblePoint(
         if (!usable) {
           continue;
         }
-        VisibleVertexInfluenceSample& sample =
-            cached.vertices[cached.count++];
+        VisibleVertexInfluenceSample& sample = cached.vertices[cached.count++];
         std::copy_n(source, 3, sample.position);
         sample.packed_weights = packed_weights;
         sample.packed_indices = packed_indices;
@@ -11148,38 +10917,28 @@ bool SampleSkinnedVisiblePoint(
 
   float accumulated[3] = {};
   std::size_t accumulated_samples = 0;
-  for (std::size_t sample_index = 0;
-       sample_index < cached.count; ++sample_index) {
-    const VisibleVertexInfluenceSample& sample =
-        cached.vertices[sample_index];
+  for (std::size_t sample_index = 0; sample_index < cached.count;
+       ++sample_index) {
+    const VisibleVertexInfluenceSample& sample = cached.vertices[sample_index];
     float skinned[3] = {};
     float weight_sum = 0.0f;
-    for (std::size_t influence = 0;
-         influence < 4; ++influence) {
+    for (std::size_t influence = 0; influence < 4; ++influence) {
       const float weight =
-          static_cast<float>(
-              (sample.packed_weights >>
-               (influence * 8)) &
+          static_cast<float>((sample.packed_weights >> (influence * 8)) &
               0xFFu) /
           255.0f;
-      const uint32_t bone =
-          (sample.packed_indices >>
-           (influence * 8)) &
-          0xFFu;
+      const uint32_t bone = (sample.packed_indices >> (influence * 8)) & 0xFFu;
       const std::size_t row = std::size_t(bone) * 12;
-      if (weight <= 0.0f ||
-          row + 11 >= item.bones.size()) {
+      if (weight <= 0.0f || row + 11 >= item.bones.size()) {
         continue;
       }
       const float* matrix = item.bones.data() + row;
       for (std::size_t axis = 0; axis < 3; ++axis) {
         const float* matrix_row = matrix + axis * 4;
         skinned[axis] +=
-            weight *
-            (sample.position[0] * matrix_row[0] +
+            weight * (sample.position[0] * matrix_row[0] +
              sample.position[1] * matrix_row[1] +
-             sample.position[2] * matrix_row[2] +
-             matrix_row[3]);
+                      sample.position[2] * matrix_row[2] + matrix_row[3]);
       }
       weight_sum += weight;
     }
@@ -11191,10 +10950,8 @@ bool SampleSkinnedVisiblePoint(
     }
     for (std::size_t axis = 0; axis < 3; ++axis) {
       accumulated[axis] +=
-          skinned[0] * item.world[axis] +
-          skinned[1] * item.world[4 + axis] +
-          skinned[2] * item.world[8 + axis] +
-          item.world[12 + axis];
+          skinned[0] * item.world[axis] + skinned[1] * item.world[4 + axis] +
+          skinned[2] * item.world[8 + axis] + item.world[12 + axis];
     }
     ++accumulated_samples;
   }
@@ -11202,9 +10959,7 @@ bool SampleSkinnedVisiblePoint(
     return false;
   }
   for (std::size_t axis = 0; axis < 3; ++axis) {
-    output[axis] =
-        accumulated[axis] /
-        static_cast<float>(accumulated_samples);
+    output[axis] = accumulated[axis] / static_cast<float>(accumulated_samples);
     if (!std::isfinite(output[axis])) {
       return false;
     }
@@ -11213,22 +10968,18 @@ bool SampleSkinnedVisiblePoint(
 }
 
 void RecordProjectedVisibleMotion(
-    multiplayer::motion::Window& screen_motion,
-    double& distance_sum, double& distance_min,
-    double& distance_max, std::uint64_t& distance_samples,
-    std::uint64_t& offscreen_samples,
-    const float world_position[3], const FrameScene& scene,
-    uint32_t viewport_width, uint32_t viewport_height) {
-  if (world_position == nullptr ||
-      viewport_width == 0 || viewport_height == 0) {
+    multiplayer::motion::Window& screen_motion, double& distance_sum,
+    double& distance_min, double& distance_max, std::uint64_t& distance_samples,
+    std::uint64_t& offscreen_samples, const float world_position[3],
+    const FrameScene& scene, uint32_t viewport_width,
+    uint32_t viewport_height) {
+  if (world_position == nullptr || viewport_width == 0 ||
+      viewport_height == 0) {
     return;
   }
-  const double dx =
-      static_cast<double>(world_position[0]) - scene.cam_pos[0];
-  const double dy =
-      static_cast<double>(world_position[1]) - scene.cam_pos[1];
-  const double dz =
-      static_cast<double>(world_position[2]) - scene.cam_pos[2];
+  const double dx = static_cast<double>(world_position[0]) - scene.cam_pos[0];
+  const double dy = static_cast<double>(world_position[1]) - scene.cam_pos[1];
+  const double dz = static_cast<double>(world_position[2]) - scene.cam_pos[2];
   const double distance = std::sqrt(dx * dx + dy * dy + dz * dz);
   distance_sum += distance;
   distance_min = std::min(distance_min, distance);
@@ -11237,8 +10988,7 @@ void RecordProjectedVisibleMotion(
 
   float clip[4] = {};
   for (std::size_t column = 0; column < 4; ++column) {
-    clip[column] =
-        world_position[0] * scene.view_proj[column] +
+    clip[column] = world_position[0] * scene.view_proj[column] +
         world_position[1] * scene.view_proj[4 + column] +
         world_position[2] * scene.view_proj[8 + column] +
         scene.view_proj[12 + column];
@@ -11259,13 +11009,9 @@ void RecordProjectedVisibleMotion(
     return;
   }
   const float viewport_position[3] = {
-      (ndc_x * 0.5f + 0.5f) *
-          static_cast<float>(viewport_width),
-      (0.5f - ndc_y * 0.5f) *
-          static_cast<float>(viewport_height),
-      0.0f};
-  screen_motion.Record(
-      PoseCadenceNowMicroseconds(), viewport_position);
+      (ndc_x * 0.5f + 0.5f) * static_cast<float>(viewport_width),
+      (0.5f - ndc_y * 0.5f) * static_cast<float>(viewport_height), 0.0f};
+  screen_motion.Record(PoseCadenceNowMicroseconds(), viewport_position);
 }
 
 void RecordLocalVisibleMotion(
@@ -11281,8 +11027,7 @@ void RecordLocalVisibleMotion(
     }
     std::size_t candidate_vertex_count = 0;
     float candidate_position[3] = {};
-    if (!SampleSkinnedVisiblePoint(
-            *item, candidate_position,
+    if (!SampleSkinnedVisiblePoint(*item, candidate_position,
             &candidate_vertex_count) ||
         candidate_vertex_count <= selected_vertex_count) {
       continue;
@@ -11298,27 +11043,24 @@ void RecordLocalVisibleMotion(
     g_local_visible_motion = {};
     g_local_visible_motion.mesh = selected->mesh;
   }
-  g_local_visible_motion.motion.Record(
-      PoseCadenceNowMicroseconds(), selected_position);
+  g_local_visible_motion.motion.Record(PoseCadenceNowMicroseconds(),
+                                       selected_position);
   RecordProjectedVisibleMotion(
-      g_local_visible_motion.screen_motion,
-      g_local_visible_motion.distance_sum,
-      g_local_visible_motion.distance_min,
-      g_local_visible_motion.distance_max,
+      g_local_visible_motion.screen_motion, g_local_visible_motion.distance_sum,
+      g_local_visible_motion.distance_min, g_local_visible_motion.distance_max,
       g_local_visible_motion.distance_samples,
-      g_local_visible_motion.offscreen_samples,
-      selected_position, scene, viewport_width, viewport_height);
+      g_local_visible_motion.offscreen_samples, selected_position, scene,
+      viewport_width, viewport_height);
 }
 
-void RecordRemoteVisibleMotion(
-    uint32_t role, uint32_t session, uint32_t mesh,
+void RecordRemoteVisibleMotion(uint32_t role, uint32_t session, uint32_t mesh,
     const float position[3], const FrameScene& scene,
-    uint32_t viewport_width, uint32_t viewport_height) {
+                               uint32_t viewport_width,
+                               uint32_t viewport_height) {
   if (mesh == 0 || position == nullptr) {
     return;
   }
-  RemoteRenderMotionTelemetry& remote =
-      g_remote_render_motion[role];
+  RemoteRenderMotionTelemetry& remote = g_remote_render_motion[role];
   if (remote.session != session) {
     remote = {};
     remote.session = session;
@@ -11327,75 +11069,61 @@ void RecordRemoteVisibleMotion(
     remote.visible_motion = {};
     remote.visible_mesh = mesh;
   }
-  remote.visible_motion.Record(
-      PoseCadenceNowMicroseconds(), position);
+  remote.visible_motion.Record(PoseCadenceNowMicroseconds(), position);
   RecordProjectedVisibleMotion(
-      remote.screen_motion, remote.distance_sum,
-      remote.distance_min, remote.distance_max,
-      remote.distance_samples, remote.offscreen_samples,
+      remote.screen_motion, remote.distance_sum, remote.distance_min,
+      remote.distance_max, remote.distance_samples, remote.offscreen_samples,
       position, scene, viewport_width, viewport_height);
 }
 
-std::uint64_t HashAnimationPose(
-    const multiplayer::AnimationPose& animation) {
+std::uint64_t HashAnimationPose(const multiplayer::AnimationPose& animation) {
   std::uint64_t hash = 1469598103934665603ull;
-  hash = AppearanceHashBytes(
-      hash, &animation.root_bone, sizeof(animation.root_bone));
-  hash = AppearanceHashBytes(
-      hash, animation.root_position,
+  hash = AppearanceHashBytes(hash, &animation.root_bone,
+                             sizeof(animation.root_bone));
+  hash = AppearanceHashBytes(hash, animation.root_position,
       sizeof(animation.root_position));
-  hash = AppearanceHashBytes(
-      hash, &animation.presentation_root_valid,
+  hash = AppearanceHashBytes(hash, &animation.presentation_root_valid,
       sizeof(animation.presentation_root_valid));
-  hash = AppearanceHashBytes(
-      hash, animation.presentation_root_position,
+  hash = AppearanceHashBytes(hash, animation.presentation_root_position,
       sizeof(animation.presentation_root_position));
-  hash = AppearanceHashBytes(
-      hash, animation.presentation_root_x_axis,
+  hash = AppearanceHashBytes(hash, animation.presentation_root_x_axis,
       sizeof(animation.presentation_root_x_axis));
-  hash = AppearanceHashBytes(
-      hash, animation.presentation_root_z_axis,
+  hash = AppearanceHashBytes(hash, animation.presentation_root_z_axis,
       sizeof(animation.presentation_root_z_axis));
-  for (const multiplayer::AnimationTrack& track :
-       animation.tracks) {
-    hash = AppearanceHashBytes(
-        hash, &track.mesh_key, sizeof(track.mesh_key));
+  for (const multiplayer::AnimationTrack& track : animation.tracks) {
+    hash = AppearanceHashBytes(hash, &track.mesh_key, sizeof(track.mesh_key));
     const std::size_t row_count = track.bone_rows.size();
-    hash = AppearanceHashBytes(
-        hash, &row_count, sizeof(row_count));
+    hash = AppearanceHashBytes(hash, &row_count, sizeof(row_count));
     if (!track.bone_rows.empty()) {
-      hash = AppearanceHashBytes(
-          hash, track.bone_rows.data(),
+      hash = AppearanceHashBytes(hash, track.bone_rows.data(),
           track.bone_rows.size() * sizeof(float));
     }
   }
   return hash;
 }
 
-void RecordLocalCaptureCadence(
-    const multiplayer::AnimationPose& animation) {
+void RecordLocalCaptureCadence(const multiplayer::AnimationPose& animation) {
   if (animation.tracks.empty()) {
     return;
   }
-  g_local_capture_cadence.Record(
-      PoseCadenceNowMicroseconds(), animation.sequence,
+  g_local_capture_cadence.Record(PoseCadenceNowMicroseconds(),
+                                 animation.sequence,
       HashAnimationPose(animation));
 }
 
-void RecordRemoteAppliedPalette(
-    uint32_t role, uint32_t session, uint32_t sequence,
-    std::uint64_t palette_hash, std::size_t palette_bones) {
+void RecordRemoteAppliedPalette(uint32_t role, uint32_t session,
+                                uint32_t sequence, std::uint64_t palette_hash,
+                                std::size_t palette_bones) {
   if (palette_bones == 0) {
     return;
   }
-  RemoteRenderMotionTelemetry& remote =
-      g_remote_render_motion[role];
+  RemoteRenderMotionTelemetry& remote = g_remote_render_motion[role];
   if (remote.session != session) {
     remote = {};
     remote.session = session;
   }
-  remote.applied_palette.Record(
-      PoseCadenceNowMicroseconds(), sequence, palette_hash);
+  remote.applied_palette.Record(PoseCadenceNowMicroseconds(), sequence,
+                                palette_hash);
 }
 
 void RecordRemotePresentationHandoff(
@@ -11422,8 +11150,7 @@ void RecordRemotePresentationHandoff(
     telemetry.last_sequence = presentation.sequence;
     ++telemetry.unique_presentations;
   }
-  if (telemetry.last_log ==
-      std::chrono::steady_clock::time_point{}) {
+  if (telemetry.last_log == std::chrono::steady_clock::time_point{}) {
     telemetry.last_log = now;
     return;
   }
@@ -11432,16 +11159,12 @@ void RecordRemotePresentationHandoff(
   }
 
   const double seconds =
-      std::chrono::duration<double>(
-          now - telemetry.last_log)
-          .count();
+      std::chrono::duration<double>(now - telemetry.last_log).count();
   REXLOG_INFO(
       "multiplayer-render-handoff: calls={} unique={} repeated={} "
       "skipped={} rates={:.1f}/{:.1f}Hz",
-      telemetry.render_calls,
-      telemetry.unique_presentations,
-      telemetry.repeated_presentations,
-      telemetry.skipped_presentations,
+      telemetry.render_calls, telemetry.unique_presentations,
+      telemetry.repeated_presentations, telemetry.skipped_presentations,
       static_cast<double>(telemetry.render_calls) / seconds,
       static_cast<double>(telemetry.unique_presentations) / seconds);
   const multiplayer::pose_cadence::Snapshot local_capture =
@@ -11450,11 +11173,9 @@ void RecordRemotePresentationHandoff(
       "multiplayer-pose-cadence: stage=capture role=local "
       "samples={} changes={} repeats={} seq_changes={} "
       "alternations={} max_repeat={} hold={:.1f}ms",
-      local_capture.samples, local_capture.changes,
-      local_capture.repeats, local_capture.sequence_changes,
-      local_capture.alternations,
-      local_capture.maximum_repeat_run,
-      local_capture.maximum_hold_ms);
+      local_capture.samples, local_capture.changes, local_capture.repeats,
+      local_capture.sequence_changes, local_capture.alternations,
+      local_capture.maximum_repeat_run, local_capture.maximum_hold_ms);
   const multiplayer::motion::Snapshot local_visible =
       g_local_visible_motion.motion.ReadAndReset();
   REXLOG_INFO(
@@ -11462,12 +11183,9 @@ void RecordRemotePresentationHandoff(
       "mesh={:08X} n={} dt={:.2f}/{:.2f}/{:.2f}ms "
       "speed={:.3f} speed_change={:.3f}/{:.3f}",
       g_local_visible_motion.mesh, local_visible.samples,
-      local_visible.average_interval_ms,
-      local_visible.minimum_interval_ms,
-      local_visible.maximum_interval_ms,
-      local_visible.average_speed,
-      local_visible.average_speed_change,
-      local_visible.maximum_speed_change);
+      local_visible.average_interval_ms, local_visible.minimum_interval_ms,
+      local_visible.maximum_interval_ms, local_visible.average_speed,
+      local_visible.average_speed_change, local_visible.maximum_speed_change);
   const multiplayer::motion::Snapshot local_screen =
       g_local_visible_motion.screen_motion.ReadAndReset();
   REXLOG_INFO(
@@ -11476,41 +11194,32 @@ void RecordRemotePresentationHandoff(
       "speed={:.1f}px/s speed_change={:.1f}/{:.1f}px/s "
       "distance={:.2f}/{:.2f}/{:.2f} offscreen={}",
       g_local_visible_motion.mesh, local_screen.samples,
-      local_screen.average_interval_ms,
-      local_screen.minimum_interval_ms,
-      local_screen.maximum_interval_ms,
-      local_screen.average_speed,
-      local_screen.average_speed_change,
-      local_screen.maximum_speed_change,
+      local_screen.average_interval_ms, local_screen.minimum_interval_ms,
+      local_screen.maximum_interval_ms, local_screen.average_speed,
+      local_screen.average_speed_change, local_screen.maximum_speed_change,
       g_local_visible_motion.distance_samples == 0
           ? 0.0
           : g_local_visible_motion.distance_sum /
-                static_cast<double>(
-                    g_local_visible_motion.distance_samples),
+                static_cast<double>(g_local_visible_motion.distance_samples),
       g_local_visible_motion.distance_samples == 0
           ? 0.0
           : g_local_visible_motion.distance_min,
       g_local_visible_motion.distance_max,
       g_local_visible_motion.offscreen_samples);
   g_local_visible_motion.distance_sum = 0.0;
-  g_local_visible_motion.distance_min =
-      std::numeric_limits<double>::max();
+  g_local_visible_motion.distance_min = std::numeric_limits<double>::max();
   g_local_visible_motion.distance_max = 0.0;
   g_local_visible_motion.distance_samples = 0;
   g_local_visible_motion.offscreen_samples = 0;
   for (auto& [role, remote] : g_remote_render_motion) {
-    const multiplayer::motion::Snapshot motion =
-        remote.motion.ReadAndReset();
+    const multiplayer::motion::Snapshot motion = remote.motion.ReadAndReset();
     REXLOG_INFO(
         "multiplayer-render-motion: role={} session={} "
         "n={} dt={:.2f}/{:.2f}/{:.2f}ms "
         "speed={:.3f} speed_change={:.3f}/{:.3f}",
-        role, remote.session, motion.samples,
-        motion.average_interval_ms,
-        motion.minimum_interval_ms,
-        motion.maximum_interval_ms,
-        motion.average_speed,
-        motion.average_speed_change,
+        role, remote.session, motion.samples, motion.average_interval_ms,
+        motion.minimum_interval_ms, motion.maximum_interval_ms,
+        motion.average_speed, motion.average_speed_change,
         motion.maximum_speed_change);
     const multiplayer::motion::Snapshot visible_motion =
         remote.visible_motion.ReadAndReset();
@@ -11519,12 +11228,9 @@ void RecordRemotePresentationHandoff(
         "session={} mesh={:08X} n={} "
         "dt={:.2f}/{:.2f}/{:.2f}ms "
         "speed={:.3f} speed_change={:.3f}/{:.3f}",
-        role, remote.session, remote.visible_mesh,
-        visible_motion.samples,
-        visible_motion.average_interval_ms,
-        visible_motion.minimum_interval_ms,
-        visible_motion.maximum_interval_ms,
-        visible_motion.average_speed,
+        role, remote.session, remote.visible_mesh, visible_motion.samples,
+        visible_motion.average_interval_ms, visible_motion.minimum_interval_ms,
+        visible_motion.maximum_interval_ms, visible_motion.average_speed,
         visible_motion.average_speed_change,
         visible_motion.maximum_speed_change);
     const multiplayer::motion::Snapshot screen_motion =
@@ -11535,22 +11241,15 @@ void RecordRemotePresentationHandoff(
         "dt={:.2f}/{:.2f}/{:.2f}ms "
         "speed={:.1f}px/s speed_change={:.1f}/{:.1f}px/s "
         "distance={:.2f}/{:.2f}/{:.2f} offscreen={}",
-        role, remote.session, remote.visible_mesh,
-        screen_motion.samples,
-        screen_motion.average_interval_ms,
-        screen_motion.minimum_interval_ms,
-        screen_motion.maximum_interval_ms,
-        screen_motion.average_speed,
-        screen_motion.average_speed_change,
-        screen_motion.maximum_speed_change,
+        role, remote.session, remote.visible_mesh, screen_motion.samples,
+        screen_motion.average_interval_ms, screen_motion.minimum_interval_ms,
+        screen_motion.maximum_interval_ms, screen_motion.average_speed,
+        screen_motion.average_speed_change, screen_motion.maximum_speed_change,
         remote.distance_samples == 0
             ? 0.0
             : remote.distance_sum /
-                  static_cast<double>(
-                      remote.distance_samples),
-        remote.distance_samples == 0
-            ? 0.0
-            : remote.distance_min,
+                  static_cast<double>(remote.distance_samples),
+        remote.distance_samples == 0 ? 0.0 : remote.distance_min,
         remote.distance_max, remote.offscreen_samples);
     remote.distance_sum = 0.0;
     remote.distance_min = std::numeric_limits<double>::max();
@@ -11564,11 +11263,9 @@ void RecordRemotePresentationHandoff(
         "role={} session={} samples={} changes={} repeats={} "
         "seq_changes={} alternations={} max_repeat={} "
         "hold={:.1f}ms",
-        role, remote.session, interpolated.samples,
-        interpolated.changes, interpolated.repeats,
-        interpolated.sequence_changes,
-        interpolated.alternations,
-        interpolated.maximum_repeat_run,
+        role, remote.session, interpolated.samples, interpolated.changes,
+        interpolated.repeats, interpolated.sequence_changes,
+        interpolated.alternations, interpolated.maximum_repeat_run,
         interpolated.maximum_hold_ms);
     const multiplayer::pose_cadence::Snapshot applied =
         remote.applied_palette.ReadAndReset();
@@ -11577,11 +11274,9 @@ void RecordRemotePresentationHandoff(
         "role={} session={} samples={} changes={} repeats={} "
         "seq_changes={} alternations={} max_repeat={} "
         "hold={:.1f}ms",
-        role, remote.session, applied.samples,
-        applied.changes, applied.repeats,
+        role, remote.session, applied.samples, applied.changes, applied.repeats,
         applied.sequence_changes, applied.alternations,
-        applied.maximum_repeat_run,
-        applied.maximum_hold_ms);
+        applied.maximum_repeat_run, applied.maximum_hold_ms);
   }
   telemetry.render_calls = 0;
   telemetry.unique_presentations = 0;
@@ -11590,43 +11285,35 @@ void RecordRemotePresentationHandoff(
   telemetry.last_log = now;
 }
 
-void RecordRemoteRenderMotion(
-    uint32_t role, uint32_t session,
+void RecordRemoteRenderMotion(uint32_t role, uint32_t session,
     const multiplayer::AnimationPose& animation) {
   if (animation.sender_time_us == 0) {
     return;
   }
-  RemoteRenderMotionTelemetry& remote =
-      g_remote_render_motion[role];
+  RemoteRenderMotionTelemetry& remote = g_remote_render_motion[role];
   if (remote.session != session) {
     remote = {};
     remote.session = session;
   }
-  remote.motion.Record(
-      animation.sender_time_us, animation.root_position);
-  remote.interpolated_pose.Record(
-      PoseCadenceNowMicroseconds(), animation.sequence,
+  remote.motion.Record(animation.sender_time_us, animation.root_position);
+  remote.interpolated_pose.Record(PoseCadenceNowMicroseconds(),
+                                  animation.sequence,
       HashAnimationPose(animation));
 }
 
 void ReleaseRemoteAppearanceResources(
-    const NativeGuestOutputRenderContext& context,
-    uint32_t role,
-    const RemoteAppearanceRenderState& state,
-    const char* reason) {
+    const NativeGuestOutputRenderContext& context, uint32_t role,
+    const RemoteAppearanceRenderState& state, const char* reason) {
   std::size_t released_textures = 0;
   std::size_t released_texture_routes = 0;
   for (uint64_t store_key : state.texture_store_keys) {
     const auto texture = g_r.tex_store.find(store_key);
     if (texture != g_r.tex_store.end()) {
-      RetireGuestTexture(
-          texture->second,
-          context.device->CurrentSubmission());
+      RetireGuestTexture(texture->second, context.device->CurrentSubmission());
       g_r.tex_store.erase(texture);
       ++released_textures;
     }
-    for (auto route = g_r.tex_routes.begin();
-         route != g_r.tex_routes.end();) {
+    for (auto route = g_r.tex_routes.begin(); route != g_r.tex_routes.end();) {
       if (route->second.key == store_key) {
         route = g_r.tex_routes.erase(route);
         ++released_texture_routes;
@@ -11653,59 +11340,50 @@ void ReleaseRemoteAppearanceResources(
     ++released_meshes;
   }
 
-  const auto mismatch =
-      [](std::size_t expected, std::size_t actual) {
-        return expected > actual ? expected - actual
-                                 : actual - expected;
+  const auto mismatch = [](std::size_t expected, std::size_t actual) {
+    return expected > actual ? expected - actual : actual - expected;
       };
   const std::size_t release_faults =
-      mismatch(state.texture_store_keys.size(),
-               released_textures) +
+      mismatch(state.texture_store_keys.size(), released_textures) +
       mismatch(released_mesh_keys.size(), released_meshes) +
-      mismatch(state.texture_store_keys.size(),
-               released_texture_routes);
+      mismatch(state.texture_store_keys.size(), released_texture_routes);
   if (release_faults == 0) {
     REXLOG_INFO(
         "multiplayer: released renderer appearance role={} "
         "session={} id={:016X} meshes={}/{} textures={}/{} "
         "routes={}/{} faults=0 reason={}",
-        role, state.session, state.identity,
-        released_meshes, released_mesh_keys.size(),
-        released_textures, state.texture_store_keys.size(),
-        released_texture_routes,
+        role, state.session, state.identity, released_meshes,
+        released_mesh_keys.size(), released_textures,
+        state.texture_store_keys.size(), released_texture_routes,
         state.texture_store_keys.size(), reason);
   } else {
     REXLOG_WARN(
         "multiplayer: released renderer appearance role={} "
         "session={} id={:016X} meshes={}/{} textures={}/{} "
         "routes={}/{} faults={} reason={}",
-        role, state.session, state.identity,
-        released_meshes, released_mesh_keys.size(),
-        released_textures, state.texture_store_keys.size(),
-        released_texture_routes,
-        state.texture_store_keys.size(), release_faults,
-        reason);
+        role, state.session, state.identity, released_meshes,
+        released_mesh_keys.size(), released_textures,
+        state.texture_store_keys.size(), released_texture_routes,
+        state.texture_store_keys.size(), release_faults, reason);
   }
 }
 
 void CancelPendingRemoteRecipeInstall(
-    const NativeGuestOutputRenderContext& context,
-    uint32_t role, const char* reason) {
-  const auto pending =
-      g_pending_remote_recipe_installs.find(role);
+    const NativeGuestOutputRenderContext& context, uint32_t role,
+    const char* reason) {
+  const auto pending = g_pending_remote_recipe_installs.find(role);
   if (pending == g_pending_remote_recipe_installs.end()) {
     return;
   }
-  ReleaseRemoteAppearanceResources(
-      context, role, pending->second.staged, reason);
-  multiplayer_assets::ForgetRecipeAppearanceResolve(
-      role, pending->second.session);
+  ReleaseRemoteAppearanceResources(context, role, pending->second.staged,
+                                   reason);
+  multiplayer_assets::ForgetRecipeAppearanceResolve(role,
+                                                    pending->second.session);
   REXLOG_INFO(
       "multiplayer-appearance-install-cancel: role={} session={} "
       "appearance={:016X} textures={}/{} pieces={}/{} reason={}",
       role, pending->second.session, pending->second.identity,
-      pending->second.texture_index,
-      pending->second.texture_ids.size(),
+      pending->second.texture_index, pending->second.texture_ids.size(),
       pending->second.piece_index,
       pending->second.resolved == nullptr
           ? 0
@@ -11716,15 +11394,13 @@ void CancelPendingRemoteRecipeInstall(
 }
 
 void ObserveRemoteAppearanceSession(
-    const NativeGuestOutputRenderContext& context,
-    uint32_t role, uint32_t session) {
-  const auto pending =
-      g_pending_remote_recipe_installs.find(role);
+    const NativeGuestOutputRenderContext& context, uint32_t role,
+    uint32_t session) {
+  const auto pending = g_pending_remote_recipe_installs.find(role);
   if (pending != g_pending_remote_recipe_installs.end() &&
       multiplayer::lifecycle::RemoteAppearanceSessionChanged(
           pending->second.session, session)) {
-    CancelPendingRemoteRecipeInstall(
-        context, role, "pending session changed");
+    CancelPendingRemoteRecipeInstall(context, role, "pending session changed");
   }
   const auto installed = g_remote_appearances.find(role);
   if (installed == g_remote_appearances.end()) {
@@ -11732,87 +11408,74 @@ void ObserveRemoteAppearanceSession(
   }
   if (multiplayer::lifecycle::RemoteAppearanceSessionChanged(
           installed->second.session, session)) {
-    if (REXCVAR_GET(
-            skate3_multiplayer_async_appearance_prepare)) {
+    if (REXCVAR_GET(skate3_multiplayer_async_appearance_prepare)) {
       multiplayer_assets::ForgetRecipeAppearanceResolve(
           role, installed->second.session);
     }
-    ReleaseRemoteAppearanceResources(
-        context, role, installed->second, "session changed");
+    ReleaseRemoteAppearanceResources(context, role, installed->second,
+                                     "session changed");
     g_remote_appearances.erase(installed);
   g_remote_visual_telemetry.erase(role);
   g_remote_render_motion.erase(role);
-    LogRemoteAppearanceResourceAudit(
-        "session-release", role);
+    LogRemoteAppearanceResourceAudit("session-release", role);
   }
 }
 
 void ReleaseRetiredRemoteAppearance(
     const NativeGuestOutputRenderContext& context,
     const multiplayer::RemotePeerRetirement& retirement) {
-  if (REXCVAR_GET(
-          skate3_multiplayer_async_appearance_prepare)) {
-    multiplayer_assets::ForgetRecipeAppearanceResolve(
-        retirement.role, retirement.session);
+  if (REXCVAR_GET(skate3_multiplayer_async_appearance_prepare)) {
+    multiplayer_assets::ForgetRecipeAppearanceResolve(retirement.role,
+                                                      retirement.session);
   }
-  const auto pending =
-      g_pending_remote_recipe_installs.find(retirement.role);
+  const auto pending = g_pending_remote_recipe_installs.find(retirement.role);
   if (pending != g_pending_remote_recipe_installs.end() &&
       multiplayer::lifecycle::RemoteAppearanceRetirementMatches(
           pending->second.session, retirement.session)) {
-    CancelPendingRemoteRecipeInstall(
-        context, retirement.role, "pending peer retired");
+    CancelPendingRemoteRecipeInstall(context, retirement.role,
+                                     "pending peer retired");
   }
-  const auto installed =
-      g_remote_appearances.find(retirement.role);
+  const auto installed = g_remote_appearances.find(retirement.role);
   if (installed == g_remote_appearances.end() ||
       !multiplayer::lifecycle::RemoteAppearanceRetirementMatches(
           installed->second.session, retirement.session)) {
     return;
   }
-  ReleaseRemoteAppearanceResources(
-      context, retirement.role, installed->second,
+  ReleaseRemoteAppearanceResources(context, retirement.role, installed->second,
       "peer retired");
   g_remote_appearances.erase(installed);
   g_remote_visual_telemetry.erase(retirement.role);
   g_remote_render_motion.erase(retirement.role);
-  LogRemoteAppearanceResourceAudit(
-      "peer-retire", retirement.role);
+  LogRemoteAppearanceResourceAudit("peer-retire", retirement.role);
 }
 
 bool InstallRemoteRecipeAppearanceIncremental(
-    const NativeGuestOutputRenderContext& context,
-    uint64_t frame_number, uint32_t role, uint32_t session,
+    const NativeGuestOutputRenderContext& context, uint64_t frame_number,
+    uint32_t role, uint32_t session,
     const multiplayer::AppearanceBlob& appearance) {
   if (appearance.bytes == nullptr) {
     return false;
   }
-  RemoteAppearanceRenderState& installed_state =
-      g_remote_appearances[role];
+  RemoteAppearanceRenderState& installed_state = g_remote_appearances[role];
   if (installed_state.identity == appearance.identity &&
-      installed_state.session == session &&
-      !installed_state.items.empty()) {
+      installed_state.session == session && !installed_state.items.empty()) {
     bool meshes_ready = true;
     for (const DrawItem& item : installed_state.items) {
-      meshes_ready =
-          meshes_ready && g_r.meshes.contains(item.mesh);
+      meshes_ready = meshes_ready && g_r.meshes.contains(item.mesh);
     }
     if (meshes_ready) {
       return true;
     }
-    ReleaseRemoteAppearanceResources(
-        context, role, installed_state,
+    ReleaseRemoteAppearanceResources(context, role, installed_state,
         "same appearance resources missing");
     installed_state = {};
   }
 
-  auto pending =
-      g_pending_remote_recipe_installs.find(role);
+  auto pending = g_pending_remote_recipe_installs.find(role);
   if (pending != g_pending_remote_recipe_installs.end() &&
       (pending->second.identity != appearance.identity ||
        pending->second.session != session)) {
-    CancelPendingRemoteRecipeInstall(
-        context, role, "appearance superseded");
+    CancelPendingRemoteRecipeInstall(context, role, "appearance superseded");
     pending = g_pending_remote_recipe_installs.end();
   }
 
@@ -11821,35 +11484,26 @@ bool InstallRemoteRecipeAppearanceIncremental(
     size_t cursor = 0;
     NetworkRecipeAppearanceHeader header;
     if (!ReadAppearancePod(bytes, cursor, header) ||
-        header.magic != 0x31504352u ||
-        header.version != 1 ||
-        header.binding_count == 0 ||
-        header.binding_count > 64 ||
-        header.recipe_bytes < 64 ||
-        header.recipe_bytes > 16u * 1024u ||
+        header.magic != 0x31504352u || header.version != 1 ||
+        header.binding_count == 0 || header.binding_count > 64 ||
+        header.recipe_bytes < 64 || header.recipe_bytes > 16u * 1024u ||
         cursor + header.recipe_bytes > bytes.size()) {
       return false;
     }
     const multiplayer_assets::RecipeResolveKey resolve_key = {
         role, session, appearance.identity};
-    std::shared_ptr<const multiplayer_assets::RecipeAppearance>
-        prepared;
+    std::shared_ptr<const multiplayer_assets::RecipeAppearance> prepared;
     const multiplayer_assets::RecipeResolveStatus status =
-        multiplayer_assets::PollRecipeAppearanceResolve(
-            resolve_key, prepared);
-    if (status ==
-            multiplayer_assets::RecipeResolveStatus::kPending ||
-        status ==
-            multiplayer_assets::RecipeResolveStatus::kFailed) {
+        multiplayer_assets::PollRecipeAppearanceResolve(resolve_key, prepared);
+    if (status == multiplayer_assets::RecipeResolveStatus::kPending ||
+        status == multiplayer_assets::RecipeResolveStatus::kFailed) {
       return false;
     }
-    if (status ==
-        multiplayer_assets::RecipeResolveStatus::kUnknown) {
-      std::vector<uint8_t> recipe(
-          bytes.begin() + cursor,
+    if (status == multiplayer_assets::RecipeResolveStatus::kUnknown) {
+      std::vector<uint8_t> recipe(bytes.begin() + cursor,
           bytes.begin() + cursor + header.recipe_bytes);
-      multiplayer_assets::QueueRecipeAppearanceResolve(
-          resolve_key, std::move(recipe));
+      multiplayer_assets::QueueRecipeAppearanceResolve(resolve_key,
+                                                       std::move(recipe));
       return false;
     }
     if (prepared == nullptr) {
@@ -11861,83 +11515,60 @@ bool InstallRemoteRecipeAppearanceIncremental(
     next.identity = appearance.identity;
     next.session = session;
     next.resource_slot =
-        multiplayer::lifecycle::
-            NextRemoteAppearanceResourceSlot(
+        multiplayer::lifecycle::NextRemoteAppearanceResourceSlot(
                 !installed_state.items.empty(),
-                installed_state.items.empty()
-                    ? 0
+            installed_state.items.empty() ? 0
                     : installed_state.items.front().mesh);
     next.resolved = std::move(prepared);
     next.started = std::chrono::steady_clock::now();
     next.bindings.reserve(header.binding_count);
-    for (size_t binding_index = 0;
-         binding_index < header.binding_count;
+    for (size_t binding_index = 0; binding_index < header.binding_count;
          ++binding_index) {
       RemoteRecipeAppearanceBinding binding;
       if (!ReadAppearancePod(bytes, cursor, binding.wire) ||
-          binding.wire.model_id == 0 ||
-          binding.wire.remap_count == 0 ||
+          binding.wire.model_id == 0 || binding.wire.remap_count == 0 ||
           binding.wire.remap_count > 256 ||
-          cursor +
-                  size_t(binding.wire.remap_count) *
-                      sizeof(uint16_t) >
+          cursor + size_t(binding.wire.remap_count) * sizeof(uint16_t) >
               bytes.size()) {
         return false;
       }
       binding.remap.resize(binding.wire.remap_count);
-      std::memcpy(
-          binding.remap.data(), bytes.data() + cursor,
+      std::memcpy(binding.remap.data(), bytes.data() + cursor,
           binding.remap.size() * sizeof(uint16_t));
       cursor += binding.remap.size() * sizeof(uint16_t);
-      next.bindings.emplace(
-          binding.wire.model_id, std::move(binding));
+      next.bindings.emplace(binding.wire.model_id, std::move(binding));
     }
     if (cursor != bytes.size() ||
         !multiplayer::lifecycle::CompleteAppearancePieceCount(
-            header.binding_count,
-            next.resolved->pieces.size())) {
+            header.binding_count, next.resolved->pieces.size())) {
       return false;
     }
     for (const multiplayer_assets::RecipePiece& source :
          next.resolved->pieces) {
       if (!next.bindings.contains(source.model_id) ||
-          source.mesh.vertices.empty() ||
-          source.mesh.indices.empty()) {
+          source.mesh.vertices.empty() || source.mesh.indices.empty()) {
         return false;
       }
     }
     next.staged.identity = appearance.identity;
     next.staged.session = session;
-    std::copy_n(
-        header.root_position, 3,
-        next.staged.root_position);
-    std::copy_n(
-        header.root_x_axis, 3,
-        next.staged.root_x_axis);
-    std::copy_n(
-        header.root_z_axis, 3,
-        next.staged.root_z_axis);
-    next.staged.items.reserve(
-        next.resolved->pieces.size());
-    next.staged.piece_caches.reserve(
-        next.resolved->pieces.size());
-    next.staged.texture_store_keys.reserve(
-        next.resolved->textures.size());
-    next.texture_ids.reserve(
-        next.resolved->textures.size());
-    for (const auto& [texture_id, source] :
-         next.resolved->textures) {
-      if (!source.bytes.empty() && source.width != 0 &&
-          source.height != 0 && source.row_pitch != 0) {
+    std::copy_n(header.root_position, 3, next.staged.root_position);
+    std::copy_n(header.root_x_axis, 3, next.staged.root_x_axis);
+    std::copy_n(header.root_z_axis, 3, next.staged.root_z_axis);
+    next.staged.items.reserve(next.resolved->pieces.size());
+    next.staged.piece_caches.reserve(next.resolved->pieces.size());
+    next.staged.texture_store_keys.reserve(next.resolved->textures.size());
+    next.texture_ids.reserve(next.resolved->textures.size());
+    for (const auto& [texture_id, source] : next.resolved->textures) {
+      if (!source.bytes.empty() && source.width != 0 && source.height != 0 &&
+          source.row_pitch != 0) {
         next.texture_ids.push_back(texture_id);
       }
     }
-    std::sort(
-        next.texture_ids.begin(), next.texture_ids.end());
+    std::sort(next.texture_ids.begin(), next.texture_ids.end());
     next.texture_objects.reserve(next.texture_ids.size());
     const auto [created, inserted] =
-        g_pending_remote_recipe_installs.emplace(
-            role, std::move(next));
+        g_pending_remote_recipe_installs.emplace(role, std::move(next));
     if (!inserted) {
       return false;
     }
@@ -11946,110 +11577,86 @@ bool InstallRemoteRecipeAppearanceIncremental(
         "multiplayer-appearance-install-start: role={} "
         "session={} appearance={:016X} slot={} pieces={} "
         "textures={}",
-        role, session, appearance.identity,
-        pending->second.resource_slot,
+        role, session, appearance.identity, pending->second.resource_slot,
         pending->second.resolved->pieces.size(),
         pending->second.texture_ids.size());
     LogRemoteAppearanceResourceAudit("start", role);
   }
 
-  PendingRemoteRecipeInstall& transaction =
-      pending->second;
-  if (!AcquireRemoteAppearanceInstallOperation(
-          frame_number)) {
+  PendingRemoteRecipeInstall& transaction = pending->second;
+  if (!AcquireRemoteAppearanceInstallOperation(frame_number)) {
     return false;
   }
   if (transaction.last_progress_frame != frame_number) {
     transaction.last_progress_frame = frame_number;
     ++transaction.progress_frames;
   }
-  const auto operation_start =
-      std::chrono::steady_clock::now();
+  const auto operation_start = std::chrono::steady_clock::now();
   const char* phase = "commit";
   std::size_t phase_index = 0;
   std::size_t phase_total = 1;
 
-  if (transaction.texture_index <
-      transaction.texture_ids.size()) {
+  if (transaction.texture_index < transaction.texture_ids.size()) {
     phase = "texture";
     phase_index = transaction.texture_index + 1;
     phase_total = transaction.texture_ids.size();
     const uint64_t texture_id =
-        transaction.texture_ids[
-            transaction.texture_index];
-    const auto source_it =
-        transaction.resolved->textures.find(texture_id);
-    if (source_it ==
-        transaction.resolved->textures.end()) {
-      CancelPendingRemoteRecipeInstall(
-          context, role, "missing staged texture");
+        transaction.texture_ids[transaction.texture_index];
+    const auto source_it = transaction.resolved->textures.find(texture_id);
+    if (source_it == transaction.resolved->textures.end()) {
+      CancelPendingRemoteRecipeInstall(context, role, "missing staged texture");
       return false;
     }
-    const multiplayer_assets::RecipeTexture& source =
-        source_it->second;
+    const multiplayer_assets::RecipeTexture& source = source_it->second;
     const uint64_t content_key = AppearanceHashBytes(
-        appearance.identity, &texture_id,
-        sizeof(texture_id));
+        appearance.identity, &texture_id, sizeof(texture_id));
     const uint64_t store_key =
-        multiplayer::lifecycle::
-            RemoteAppearanceTextureStoreKey(
-                role, content_key);
+        multiplayer::lifecycle::RemoteAppearanceTextureStoreKey(role,
+                                                                content_key);
     const uint32_t object_key =
-        multiplayer::lifecycle::
-            RemoteAppearanceTextureObjectKey(
-                transaction.resource_slot, role,
-                transaction.texture_index);
+        multiplayer::lifecycle::RemoteAppearanceTextureObjectKey(
+            transaction.resource_slot, role, transaction.texture_index);
     auto old = g_r.tex_store.find(store_key);
     if (old != g_r.tex_store.end()) {
-      RetireGuestTexture(
-          old->second,
-          context.device->CurrentSubmission());
+      RetireGuestTexture(old->second, context.device->CurrentSubmission());
       g_r.tex_store.erase(old);
     }
     nrhi::BufferDesc buffer_desc;
     buffer_desc.size = source.bytes.size();
     buffer_desc.heap = nrhi::HeapKind::kUpload;
-    buffer_desc.bind_class =
-        nrhi::BufferBindClass::kCopySrc;
-    nrhi::Buffer* upload =
-        context.device->CreateBuffer(buffer_desc);
+    buffer_desc.bind_class = nrhi::BufferBindClass::kCopySrc;
+    nrhi::Buffer* upload = context.device->CreateBuffer(buffer_desc);
     nrhi::TextureDesc texture_desc;
     texture_desc.kind = nrhi::TextureKind::k2D;
     texture_desc.width = source.width;
     texture_desc.height = source.height;
     texture_desc.mip_levels = 1;
     texture_desc.format =
-        source.format ==
-                multiplayer_assets::TextureFormat::kBc1
+        source.format == multiplayer_assets::TextureFormat::kBc1
             ? nrhi::Format::kBC1_UNORM
             : nrhi::Format::kBC3_UNORM;
-    texture_desc.initial_state =
-        nrhi::ResourceState::kCopyDest;
-    nrhi::Texture* gpu_texture =
-        context.device->CreateTexture(texture_desc);
+    texture_desc.initial_state = nrhi::ResourceState::kCopyDest;
+    nrhi::Texture* gpu_texture = context.device->CreateTexture(texture_desc);
     if (upload == nullptr || gpu_texture == nullptr) {
       context.device->DestroyDeferred(upload);
       context.device->DestroyDeferred(gpu_texture);
-      CancelPendingRemoteRecipeInstall(
-          context, role, "texture allocation failed");
+      CancelPendingRemoteRecipeInstall(context, role,
+                                       "texture allocation failed");
       return false;
     }
     void* mapping = context.device->Map(upload);
     if (mapping == nullptr) {
       context.device->DestroyDeferred(upload);
       context.device->DestroyDeferred(gpu_texture);
-      CancelPendingRemoteRecipeInstall(
-          context, role, "texture map failed");
+      CancelPendingRemoteRecipeInstall(context, role, "texture map failed");
       return false;
     }
-    std::memcpy(
-        mapping, source.bytes.data(), source.bytes.size());
+    std::memcpy(mapping, source.bytes.data(), source.bytes.size());
     context.device->Unmap(upload);
-    context.cmd->CopyBufferToTexture(
-        gpu_texture, 0, 0, upload, 0,
-        source.row_pitch, source.width, source.height, 1);
-    context.cmd->Barrier(
-        gpu_texture, nrhi::ResourceState::kCopyDest,
+    context.cmd->CopyBufferToTexture(gpu_texture, 0, 0, upload, 0,
+                                     source.row_pitch, source.width,
+                                     source.height, 1);
+    context.cmd->Barrier(gpu_texture, nrhi::ResourceState::kCopyDest,
         nrhi::ResourceState::kPixelShaderResource);
     nrhi::TextureViewDesc view_desc;
     view_desc.dimension = nrhi::ViewDimension::k2D;
@@ -12059,144 +11666,95 @@ bool InstallRemoteRecipeAppearanceIncremental(
     guest.texture = gpu_texture;
     context.device->DestroyDeferred(upload);
     guest.upload = nullptr;
-    guest.srv = context.device->CreateTextureView(
-        gpu_texture, view_desc);
+    guest.srv = context.device->CreateTextureView(gpu_texture, view_desc);
     guest.srv_format = view_desc.format;
     guest.srv_mips = 1;
     guest.valid = guest.srv != nullptr;
-    guest.last_used_frame =
-        std::numeric_limits<uint64_t>::max() / 2;
+    guest.last_used_frame = std::numeric_limits<uint64_t>::max() / 2;
     if (!guest.valid) {
-      RetireGuestTexture(
-          guest, context.device->CurrentSubmission());
-      CancelPendingRemoteRecipeInstall(
-          context, role, "texture view failed");
+      RetireGuestTexture(guest, context.device->CurrentSubmission());
+      CancelPendingRemoteRecipeInstall(context, role, "texture view failed");
       return false;
     }
     g_r.tex_store.emplace(store_key, std::move(guest));
-    transaction.staged.texture_store_keys.push_back(
-        store_key);
+    transaction.staged.texture_store_keys.push_back(store_key);
     RendererState::TexRoute route;
     route.key = store_key;
     route.demoted = true;
     g_r.tex_routes[object_key] = route;
-    transaction.texture_objects.emplace(
-        texture_id, object_key);
+    transaction.texture_objects.emplace(texture_id, object_key);
     ++transaction.texture_index;
-  } else if (
-      transaction.piece_index <
-      transaction.resolved->pieces.size()) {
+  } else if (transaction.piece_index < transaction.resolved->pieces.size()) {
     phase = "piece";
     phase_index = transaction.piece_index + 1;
     phase_total = transaction.resolved->pieces.size();
     const multiplayer_assets::RecipePiece& source =
-        transaction.resolved->pieces[
-            transaction.piece_index];
-    const auto binding =
-        transaction.bindings.find(source.model_id);
+        transaction.resolved->pieces[transaction.piece_index];
+    const auto binding = transaction.bindings.find(source.model_id);
     if (binding == transaction.bindings.end()) {
-      CancelPendingRemoteRecipeInstall(
-          context, role, "missing staged binding");
+      CancelPendingRemoteRecipeInstall(context, role, "missing staged binding");
       return false;
     }
-    const RemoteRecipeAppearanceBinding& metadata =
-        binding->second;
+    const RemoteRecipeAppearanceBinding& metadata = binding->second;
     DrawItem item{};
-    item.mesh =
-        multiplayer::lifecycle::RemoteAppearanceMeshKey(
-            transaction.resource_slot, role,
-            transaction.piece_index);
-    item.multiplayer_track_key =
-        metadata.wire.track_key;
+    item.mesh = multiplayer::lifecycle::RemoteAppearanceMeshKey(
+        transaction.resource_slot, role, transaction.piece_index);
+    item.multiplayer_track_key = metadata.wire.track_key;
     item.fingerprint = AppearanceHashBytes(
-        appearance.identity, &source.model_id,
-        sizeof(source.model_id));
+        appearance.identity, &source.model_id, sizeof(source.model_id));
     item.skinned = true;
-    item.hair =
-        (metadata.wire.flags & kNetworkPieceHair) != 0 ||
+    item.hair = (metadata.wire.flags & kNetworkPieceHair) != 0 ||
         source.category == "Hair";
     item.ropa = false;
-    item.char_alpha =
-        (metadata.wire.flags &
-         kNetworkPieceCharAlpha) != 0;
-    item.shadow_caster =
-        (metadata.wire.flags &
-         kNetworkPieceShadow) != 0;
-    item.char_family =
-        metadata.wire.char_family != 0
+    item.char_alpha = (metadata.wire.flags & kNetworkPieceCharAlpha) != 0;
+    item.shadow_caster = (metadata.wire.flags & kNetworkPieceShadow) != 0;
+    item.char_family = metadata.wire.char_family != 0
             ? metadata.wire.char_family
             : (item.hair ? 4 : 2);
     item.pending = false;
     item.retained = true;
     item.dyn_entity = true;
     item.lw_alpha = -1.0f;
-    item.ib_count =
-        static_cast<uint32_t>(
-            source.mesh.indices.size());
+    item.ib_count = static_cast<uint32_t>(source.mesh.indices.size());
     item.bones.resize(metadata.remap.size() * 12);
-    item.multiplayer_palette_to_canonical =
-        metadata.remap;
-    std::copy_n(
-        metadata.wire.char_rows, 72, item.char_rows);
-    std::copy_n(
-        metadata.wire.tint, 4, item.tint);
+    item.multiplayer_palette_to_canonical = metadata.remap;
+    std::copy_n(metadata.wire.char_rows, 72, item.char_rows);
+    std::copy_n(metadata.wire.tint, 4, item.tint);
     NormalizeRemoteAppearanceTransientRows(item, role);
-    if ((metadata.wire.flags &
-         kNetworkPieceRopa) != 0) {
+    if ((metadata.wire.flags & kNetworkPieceRopa) != 0) {
       REXLOG_INFO(
           "multiplayer-appearance-binding: role={} kind=ropa "
           "model={:016X} rx_mesh={:08X} route={} "
           "track={:08X} remap={}",
           role, source.model_id, item.mesh,
-          metadata.wire.track_key == 0
-              ? "canonical"
-              : "exact",
+          metadata.wire.track_key == 0 ? "canonical" : "exact",
           metadata.wire.track_key, metadata.remap.size());
     }
     item.world[0] = 1.0f;
     item.world[5] = 1.0f;
     item.world[10] = 1.0f;
     item.world[15] = 1.0f;
-    std::copy_n(
-        source.mesh.bbox_min, 3, item.bbox_min);
-    std::copy_n(
-        source.mesh.bbox_max, 3, item.bbox_max);
+    std::copy_n(source.mesh.bbox_min, 3, item.bbox_min);
+    std::copy_n(source.mesh.bbox_max, 3, item.bbox_max);
     item.draws.push_back(
-        DrawEntry{
-            4, 0, 0,
-            static_cast<uint32_t>(
-                source.mesh.indices.size())});
-    const auto texture_object =
-        [&transaction](uint64_t texture_id) {
-          const auto found =
-              transaction.texture_objects.find(texture_id);
-          return found ==
-                         transaction.texture_objects.end()
-                     ? 0u
-                     : found->second;
+        DrawEntry{4, 0, 0, static_cast<uint32_t>(source.mesh.indices.size())});
+    const auto texture_object = [&transaction](uint64_t texture_id) {
+      const auto found = transaction.texture_objects.find(texture_id);
+      return found == transaction.texture_objects.end() ? 0u : found->second;
         };
-    item.diffuse_tex =
-        texture_object(source.diffuse_texture);
-    item.water_normal =
-        texture_object(source.normal_texture);
-    item.hair_alpha_tex =
-        texture_object(source.alpha_texture);
-    item.spec_tex =
-        texture_object(source.specular_texture);
+    item.diffuse_tex = texture_object(source.diffuse_texture);
+    item.water_normal = texture_object(source.normal_texture);
+    item.hair_alpha_tex = texture_object(source.alpha_texture);
+    item.spec_tex = texture_object(source.specular_texture);
 
-    const size_t vertex_bytes =
-        source.mesh.vertices.size() * sizeof(float);
-    const size_t index_bytes =
-        source.mesh.indices.size() * sizeof(uint16_t);
-    nrhi::Buffer* vb = AcquireMeshUploadBuffer(
-        context.device, vertex_bytes);
-    nrhi::Buffer* ib = AcquireMeshUploadBuffer(
-        context.device, index_bytes);
+    const size_t vertex_bytes = source.mesh.vertices.size() * sizeof(float);
+    const size_t index_bytes = source.mesh.indices.size() * sizeof(uint16_t);
+    nrhi::Buffer* vb = AcquireMeshUploadBuffer(context.device, vertex_bytes);
+    nrhi::Buffer* ib = AcquireMeshUploadBuffer(context.device, index_bytes);
     if (vb == nullptr || ib == nullptr) {
       PoolMeshBuffer(context.device, vb);
       PoolMeshBuffer(context.device, ib);
-      CancelPendingRemoteRecipeInstall(
-          context, role, "mesh allocation failed");
+      CancelPendingRemoteRecipeInstall(context, role, "mesh allocation failed");
       return false;
     }
     void* vb_mapping = context.device->Map(vb);
@@ -12210,33 +11768,24 @@ bool InstallRemoteRecipeAppearanceIncremental(
       }
       PoolMeshBuffer(context.device, vb);
       PoolMeshBuffer(context.device, ib);
-      CancelPendingRemoteRecipeInstall(
-          context, role, "mesh map failed");
+      CancelPendingRemoteRecipeInstall(context, role, "mesh map failed");
       return false;
     }
-    std::memcpy(
-        vb_mapping, source.mesh.vertices.data(),
-        vertex_bytes);
-    std::memcpy(
-        ib_mapping, source.mesh.indices.data(),
-        index_bytes);
+    std::memcpy(vb_mapping, source.mesh.vertices.data(), vertex_bytes);
+    std::memcpy(ib_mapping, source.mesh.indices.data(), index_bytes);
     context.device->Unmap(vb);
     context.device->Unmap(ib);
     auto old_mesh = g_r.meshes.find(item.mesh);
     if (old_mesh != g_r.meshes.end()) {
-      PoolMeshBuffer(
-          context.device, old_mesh->second.vb);
-      PoolMeshBuffer(
-          context.device, old_mesh->second.ib);
+      PoolMeshBuffer(context.device, old_mesh->second.vb);
+      PoolMeshBuffer(context.device, old_mesh->second.ib);
       g_r.meshes.erase(old_mesh);
     }
     MeshBuffers buffers;
     buffers.vb = vb;
     buffers.ib = ib;
-    buffers.vb_view = {
-        vb, 0, static_cast<uint32_t>(vertex_bytes), 56};
-    buffers.ib_view = {
-        ib, 0, static_cast<uint32_t>(index_bytes)};
+    buffers.vb_view = {vb, 0, static_cast<uint32_t>(vertex_bytes), 56};
+    buffers.ib_view = {ib, 0, static_cast<uint32_t>(index_bytes)};
     buffers.fingerprint = item.fingerprint;
     buffers.raytracing_verts = source.mesh.vertices;
     buffers.raytracing_indices = source.mesh.indices;
@@ -12244,48 +11793,37 @@ bool InstallRemoteRecipeAppearanceIncremental(
     transaction.staged.items.push_back(std::move(item));
     RemoteAppearancePieceRenderCache cache;
     BuildRemoteAppearancePieceRenderCache(
-        transaction.staged.items.back(), cache,
-        transaction.scanned_vertices,
-        transaction.weighted_rows,
-        transaction.resolved_rigs);
-    transaction.staged.piece_caches.push_back(
-        std::move(cache));
+        transaction.staged.items.back(), cache, transaction.scanned_vertices,
+        transaction.weighted_rows, transaction.resolved_rigs);
+    transaction.staged.piece_caches.push_back(std::move(cache));
     ++transaction.piece_index;
   } else {
     if (!multiplayer::lifecycle::CompleteAppearancePieceCount(
-            transaction.bindings.size(),
-            transaction.staged.items.size())) {
-      CancelPendingRemoteRecipeInstall(
-          context, role, "staged piece count incomplete");
+            transaction.bindings.size(), transaction.staged.items.size())) {
+      CancelPendingRemoteRecipeInstall(context, role,
+                                       "staged piece count incomplete");
       return false;
     }
     REXLOG_INFO(
         "multiplayer-render-cache: prepared role={} "
         "session={} appearance={:016X} pieces={} vertices={} "
         "weighted_rows={} resolved_rigs={}",
-        role, transaction.staged.session,
-        transaction.staged.identity,
-        transaction.staged.piece_caches.size(),
-        transaction.scanned_vertices,
-        transaction.weighted_rows,
-        transaction.resolved_rigs);
+        role, transaction.staged.session, transaction.staged.identity,
+        transaction.staged.piece_caches.size(), transaction.scanned_vertices,
+        transaction.weighted_rows, transaction.resolved_rigs);
     RemoteAppearanceRenderState previous =
         std::move(g_remote_appearances[role]);
-    g_remote_appearances[role] =
-        std::move(transaction.staged);
-    if (previous.identity != 0 ||
-        !previous.items.empty() ||
+    g_remote_appearances[role] = std::move(transaction.staged);
+    if (previous.identity != 0 || !previous.items.empty() ||
         !previous.texture_store_keys.empty()) {
-      ReleaseRemoteAppearanceResources(
-          context, role, previous,
+      ReleaseRemoteAppearanceResources(context, role, previous,
           "transaction committed");
     }
   }
 
   const double operation_ms =
       std::chrono::duration<double, std::milli>(
-          std::chrono::steady_clock::now() -
-          operation_start)
+          std::chrono::steady_clock::now() - operation_start)
           .count();
   ++transaction.operations;
   transaction.operation_ms_sum += operation_ms;
@@ -12295,9 +11833,8 @@ bool InstallRemoteRecipeAppearanceIncremental(
       "multiplayer-appearance-install-step: role={} "
       "session={} appearance={:016X} phase={} index={}/{} "
       "upload={:.3f}ms frame={} operation={}",
-      role, session, appearance.identity, phase,
-      phase_index, phase_total, operation_ms,
-      transaction.progress_frames, transaction.operations);
+      role, session, appearance.identity, phase, phase_index, phase_total,
+      operation_ms, transaction.progress_frames, transaction.operations);
 
   if (phase[0] != 'c') {
     return false;
@@ -12305,23 +11842,16 @@ bool InstallRemoteRecipeAppearanceIncremental(
 
   const double wall_ms =
       std::chrono::duration<double, std::milli>(
-          std::chrono::steady_clock::now() -
-          transaction.started)
+          std::chrono::steady_clock::now() - transaction.started)
           .count();
-  const uint32_t progress_frames =
-      transaction.progress_frames;
+  const uint32_t progress_frames = transaction.progress_frames;
   const uint32_t operations = transaction.operations;
-  const double operation_ms_sum =
-      transaction.operation_ms_sum;
-  const double operation_ms_max =
-      transaction.operation_ms_max;
-  const std::size_t texture_count =
-      transaction.texture_objects.size();
-  const std::size_t piece_count =
-      g_remote_appearances[role].items.size();
+  const double operation_ms_sum = transaction.operation_ms_sum;
+  const double operation_ms_max = transaction.operation_ms_max;
+  const std::size_t texture_count = transaction.texture_objects.size();
+  const std::size_t piece_count = g_remote_appearances[role].items.size();
   transaction.resolved.reset();
-  multiplayer_assets::ForgetRecipeAppearanceResolve(
-      role, session);
+  multiplayer_assets::ForgetRecipeAppearanceResolve(role, session);
   g_pending_remote_recipe_installs.erase(role);
   LogRemoteAppearanceResourceAudit("commit", role);
   REXLOG_INFO(
@@ -12329,48 +11859,40 @@ bool InstallRemoteRecipeAppearanceIncremental(
       "appearance={:016X} upload={:.3f}ms total={:.3f}ms "
       "wall={:.3f}ms frames={} operations={} pieces={} "
       "textures={}",
-      role, session, appearance.identity,
-      operation_ms_max, operation_ms_sum, wall_ms,
-      progress_frames, operations, piece_count,
-      texture_count);
+      role, session, appearance.identity, operation_ms_max, operation_ms_sum,
+      wall_ms, progress_frames, operations, piece_count, texture_count);
   REXLOG_INFO(
       "multiplayer: installed recipe appearance role={} "
       "id={:016X} pieces={} textures={} wire_bytes={}",
-      role, appearance.identity, piece_count,
-      texture_count, appearance.bytes->size());
+      role, appearance.identity, piece_count, texture_count,
+      appearance.bytes->size());
   return true;
 }
 
 bool InstallRemoteRecipeAppearance(
-    const NativeGuestOutputRenderContext& context,
-    uint64_t frame_number,
-    uint32_t role,
-    uint32_t session,
+    const NativeGuestOutputRenderContext& context, uint64_t frame_number,
+    uint32_t role, uint32_t session,
     const multiplayer::AppearanceBlob& appearance) {
   if (appearance.bytes == nullptr) {
     return false;
   }
   const bool async_prepare =
       REXCVAR_GET(skate3_multiplayer_async_appearance_prepare);
-  if (REXCVAR_GET(
-          skate3_multiplayer_incremental_appearance_install) &&
+  if (REXCVAR_GET(skate3_multiplayer_incremental_appearance_install) &&
       async_prepare) {
-    return InstallRemoteRecipeAppearanceIncremental(
-        context, frame_number, role, session, appearance);
+    return InstallRemoteRecipeAppearanceIncremental(context, frame_number, role,
+                                                    session, appearance);
   }
   if (g_pending_remote_recipe_installs.contains(role)) {
-    CancelPendingRemoteRecipeInstall(
-        context, role, "incremental installer disabled");
+    CancelPendingRemoteRecipeInstall(context, role,
+                                     "incremental installer disabled");
   }
-  RemoteAppearanceRenderState& state =
-      g_remote_appearances[role];
-  if (state.identity == appearance.identity &&
-      state.session == session &&
+  RemoteAppearanceRenderState& state = g_remote_appearances[role];
+  if (state.identity == appearance.identity && state.session == session &&
       !state.items.empty()) {
     bool meshes_ready = true;
     for (const DrawItem& item : state.items) {
-      meshes_ready =
-          meshes_ready && g_r.meshes.contains(item.mesh);
+      meshes_ready = meshes_ready && g_r.meshes.contains(item.mesh);
     }
     if (meshes_ready) {
       return true;
@@ -12378,49 +11900,38 @@ bool InstallRemoteRecipeAppearance(
   }
   const multiplayer_assets::RecipeResolveKey resolve_key = {
       role, session, appearance.identity};
-  std::shared_ptr<const multiplayer_assets::RecipeAppearance>
-      prepared;
+  std::shared_ptr<const multiplayer_assets::RecipeAppearance> prepared;
   multiplayer_assets::RecipeResolveStatus resolve_status =
       multiplayer_assets::RecipeResolveStatus::kUnknown;
   if (async_prepare) {
     resolve_status =
-        multiplayer_assets::PollRecipeAppearanceResolve(
-            resolve_key, prepared);
-    if (resolve_status ==
-            multiplayer_assets::RecipeResolveStatus::kPending ||
-        resolve_status ==
-            multiplayer_assets::RecipeResolveStatus::kFailed) {
+        multiplayer_assets::PollRecipeAppearanceResolve(resolve_key, prepared);
+    if (resolve_status == multiplayer_assets::RecipeResolveStatus::kPending ||
+        resolve_status == multiplayer_assets::RecipeResolveStatus::kFailed) {
       return false;
     }
   }
-  const std::vector<uint8_t>& bytes =
-      *appearance.bytes;
+  const std::vector<uint8_t>& bytes = *appearance.bytes;
   size_t cursor = 0;
   NetworkRecipeAppearanceHeader header;
   if (!ReadAppearancePod(bytes, cursor, header) ||
-      header.magic != 0x31504352u ||
-      header.version != 1 ||
-      header.binding_count == 0 ||
-      header.binding_count > 64 ||
-      header.recipe_bytes < 64 ||
-      header.recipe_bytes > 16u * 1024u ||
+      header.magic != 0x31504352u || header.version != 1 ||
+      header.binding_count == 0 || header.binding_count > 64 ||
+      header.recipe_bytes < 64 || header.recipe_bytes > 16u * 1024u ||
       cursor + header.recipe_bytes > bytes.size()) {
     return false;
   }
   if (async_prepare &&
-      resolve_status ==
-          multiplayer_assets::RecipeResolveStatus::kUnknown) {
-    std::vector<uint8_t> recipe(
-        bytes.begin() + cursor,
+      resolve_status == multiplayer_assets::RecipeResolveStatus::kUnknown) {
+    std::vector<uint8_t> recipe(bytes.begin() + cursor,
         bytes.begin() + cursor + header.recipe_bytes);
-    multiplayer_assets::QueueRecipeAppearanceResolve(
-        resolve_key, std::move(recipe));
+    multiplayer_assets::QueueRecipeAppearanceResolve(resolve_key,
+                                                     std::move(recipe));
     return false;
   }
   std::vector<uint8_t> recipe;
   if (!async_prepare) {
-    recipe.assign(
-        bytes.begin() + cursor,
+    recipe.assign(bytes.begin() + cursor,
         bytes.begin() + cursor + header.recipe_bytes);
   }
   cursor += header.recipe_bytes;
@@ -12430,38 +11941,31 @@ bool InstallRemoteRecipeAppearance(
   };
   std::unordered_map<uint64_t, ParsedBinding> bindings;
   bindings.reserve(header.binding_count);
-  for (size_t binding_index = 0;
-       binding_index < header.binding_count;
+  for (size_t binding_index = 0; binding_index < header.binding_count;
        ++binding_index) {
     ParsedBinding binding;
     if (!ReadAppearancePod(bytes, cursor, binding.wire) ||
-        binding.wire.model_id == 0 ||
-        binding.wire.remap_count == 0 ||
+        binding.wire.model_id == 0 || binding.wire.remap_count == 0 ||
         binding.wire.remap_count > 256 ||
-        cursor +
-                size_t(binding.wire.remap_count) *
-                    sizeof(uint16_t) >
+        cursor + size_t(binding.wire.remap_count) * sizeof(uint16_t) >
             bytes.size()) {
       return false;
     }
     binding.remap.resize(binding.wire.remap_count);
-    std::memcpy(
-        binding.remap.data(), bytes.data() + cursor,
+    std::memcpy(binding.remap.data(), bytes.data() + cursor,
         binding.remap.size() * sizeof(uint16_t));
     cursor += binding.remap.size() * sizeof(uint16_t);
-    bindings.emplace(
-        binding.wire.model_id, std::move(binding));
+    bindings.emplace(binding.wire.model_id, std::move(binding));
   }
   if (cursor != bytes.size()) {
     return false;
   }
 
   multiplayer_assets::RecipeAppearance synchronous_resolved;
-  const multiplayer_assets::RecipeAppearance* resolved =
-      prepared.get();
+  const multiplayer_assets::RecipeAppearance* resolved = prepared.get();
   if (!async_prepare) {
-    if (!multiplayer_assets::ResolveRecipeAppearance(
-            recipe, true, synchronous_resolved)) {
+    if (!multiplayer_assets::ResolveRecipeAppearance(recipe, true,
+                                                     synchronous_resolved)) {
       return false;
     }
     resolved = &synchronous_resolved;
@@ -12479,10 +11983,8 @@ bool InstallRemoteRecipeAppearance(
         resolved->pieces.size());
     return false;
   }
-  for (const multiplayer_assets::RecipePiece& source :
-       resolved->pieces) {
-    if (!bindings.contains(source.model_id) ||
-        source.mesh.vertices.empty() ||
+  for (const multiplayer_assets::RecipePiece& source : resolved->pieces) {
+    if (!bindings.contains(source.model_id) || source.mesh.vertices.empty() ||
         source.mesh.indices.empty()) {
       return false;
     }
@@ -12490,64 +11992,49 @@ bool InstallRemoteRecipeAppearance(
   RemoteAppearanceRenderState installed;
   installed.identity = appearance.identity;
   installed.session = session;
-  std::copy_n(
-      header.root_position, 3, installed.root_position);
-  std::copy_n(
-      header.root_x_axis, 3, installed.root_x_axis);
-  std::copy_n(
-      header.root_z_axis, 3, installed.root_z_axis);
+  std::copy_n(header.root_position, 3, installed.root_position);
+  std::copy_n(header.root_x_axis, 3, installed.root_x_axis);
+  std::copy_n(header.root_z_axis, 3, installed.root_z_axis);
   installed.items.reserve(resolved->pieces.size());
-  installed.texture_store_keys.reserve(
-      resolved->textures.size());
+  installed.texture_store_keys.reserve(resolved->textures.size());
 
   std::unordered_map<uint64_t, uint32_t> texture_objects;
   texture_objects.reserve(resolved->textures.size());
   uint32_t texture_index = 0;
-  for (const auto& [texture_id, source] :
-       resolved->textures) {
-    if (source.bytes.empty() || source.width == 0 ||
-        source.height == 0 || source.row_pitch == 0) {
+  for (const auto& [texture_id, source] : resolved->textures) {
+    if (source.bytes.empty() || source.width == 0 || source.height == 0 ||
+        source.row_pitch == 0) {
       continue;
     }
     const uint64_t content_key = AppearanceHashBytes(
-        appearance.identity, &texture_id,
-        sizeof(texture_id));
+        appearance.identity, &texture_id, sizeof(texture_id));
     const uint64_t store_key =
-        multiplayer::lifecycle::RemoteAppearanceTextureStoreKey(
-            role, content_key);
+        multiplayer::lifecycle::RemoteAppearanceTextureStoreKey(role,
+                                                                content_key);
     const uint32_t object_key =
-        0xF1000000u |
-        ((role & 0xFFu) << 16) |
-        (texture_index & 0xFFFFu);
+        0xF1000000u | ((role & 0xFFu) << 16) | (texture_index & 0xFFFFu);
     ++texture_index;
     auto old = g_r.tex_store.find(store_key);
     if (old != g_r.tex_store.end()) {
-      RetireGuestTexture(
-          old->second,
-          context.device->CurrentSubmission());
+      RetireGuestTexture(old->second, context.device->CurrentSubmission());
       g_r.tex_store.erase(old);
     }
     nrhi::BufferDesc buffer_desc;
     buffer_desc.size = source.bytes.size();
     buffer_desc.heap = nrhi::HeapKind::kUpload;
-    buffer_desc.bind_class =
-        nrhi::BufferBindClass::kCopySrc;
-    nrhi::Buffer* upload =
-        context.device->CreateBuffer(buffer_desc);
+    buffer_desc.bind_class = nrhi::BufferBindClass::kCopySrc;
+    nrhi::Buffer* upload = context.device->CreateBuffer(buffer_desc);
     nrhi::TextureDesc texture_desc;
     texture_desc.kind = nrhi::TextureKind::k2D;
     texture_desc.width = source.width;
     texture_desc.height = source.height;
     texture_desc.mip_levels = 1;
     texture_desc.format =
-        source.format ==
-                multiplayer_assets::TextureFormat::kBc1
+        source.format == multiplayer_assets::TextureFormat::kBc1
             ? nrhi::Format::kBC1_UNORM
             : nrhi::Format::kBC3_UNORM;
-    texture_desc.initial_state =
-        nrhi::ResourceState::kCopyDest;
-    nrhi::Texture* gpu_texture =
-        context.device->CreateTexture(texture_desc);
+    texture_desc.initial_state = nrhi::ResourceState::kCopyDest;
+    nrhi::Texture* gpu_texture = context.device->CreateTexture(texture_desc);
     if (upload == nullptr || gpu_texture == nullptr) {
       context.device->DestroyDeferred(upload);
       context.device->DestroyDeferred(gpu_texture);
@@ -12559,14 +12046,12 @@ bool InstallRemoteRecipeAppearance(
       context.device->DestroyDeferred(gpu_texture);
       return false;
     }
-    std::memcpy(
-        mapping, source.bytes.data(), source.bytes.size());
+    std::memcpy(mapping, source.bytes.data(), source.bytes.size());
     context.device->Unmap(upload);
-    context.cmd->CopyBufferToTexture(
-        gpu_texture, 0, 0, upload, 0,
-        source.row_pitch, source.width, source.height, 1);
-    context.cmd->Barrier(
-        gpu_texture, nrhi::ResourceState::kCopyDest,
+    context.cmd->CopyBufferToTexture(gpu_texture, 0, 0, upload, 0,
+                                     source.row_pitch, source.width,
+                                     source.height, 1);
+    context.cmd->Barrier(gpu_texture, nrhi::ResourceState::kCopyDest,
         nrhi::ResourceState::kPixelShaderResource);
     nrhi::TextureViewDesc view_desc;
     view_desc.dimension = nrhi::ViewDimension::k2D;
@@ -12576,16 +12061,13 @@ bool InstallRemoteRecipeAppearance(
     guest.texture = gpu_texture;
     context.device->DestroyDeferred(upload);
     guest.upload = nullptr;
-    guest.srv = context.device->CreateTextureView(
-        gpu_texture, view_desc);
+    guest.srv = context.device->CreateTextureView(gpu_texture, view_desc);
     guest.srv_format = view_desc.format;
     guest.srv_mips = 1;
     guest.valid = guest.srv != nullptr;
-    guest.last_used_frame =
-        std::numeric_limits<uint64_t>::max() / 2;
+    guest.last_used_frame = std::numeric_limits<uint64_t>::max() / 2;
     if (!guest.valid) {
-      RetireGuestTexture(
-          guest, context.device->CurrentSubmission());
+      RetireGuestTexture(guest, context.device->CurrentSubmission());
       return false;
     }
     g_r.tex_store.emplace(store_key, std::move(guest));
@@ -12597,66 +12079,46 @@ bool InstallRemoteRecipeAppearance(
     texture_objects.emplace(texture_id, object_key);
   }
 
-  const auto texture_object =
-      [&texture_objects](uint64_t texture_id) {
-        const auto found =
-            texture_objects.find(texture_id);
-        return found == texture_objects.end()
-                   ? 0u
-                   : found->second;
+  const auto texture_object = [&texture_objects](uint64_t texture_id) {
+    const auto found = texture_objects.find(texture_id);
+    return found == texture_objects.end() ? 0u : found->second;
       };
   size_t piece_index = 0;
-  for (const multiplayer_assets::RecipePiece& source :
-       resolved->pieces) {
+  for (const multiplayer_assets::RecipePiece& source : resolved->pieces) {
     const auto binding = bindings.find(source.model_id);
-    if (binding == bindings.end() ||
-        source.mesh.vertices.empty() ||
+    if (binding == bindings.end() || source.mesh.vertices.empty() ||
         source.mesh.indices.empty()) {
       continue;
     }
     const ParsedBinding& metadata = binding->second;
     DrawItem item{};
-    item.mesh =
-        0xE1000000u |
-        ((role & 0xFFu) << 16) |
+    item.mesh = 0xE1000000u | ((role & 0xFFu) << 16) |
         static_cast<uint32_t>(piece_index++);
-    item.multiplayer_track_key =
-        metadata.wire.track_key;
+    item.multiplayer_track_key = metadata.wire.track_key;
     item.fingerprint = AppearanceHashBytes(
-        appearance.identity, &source.model_id,
-        sizeof(source.model_id));
+        appearance.identity, &source.model_id, sizeof(source.model_id));
     item.skinned = true;
-    item.hair =
-        (metadata.wire.flags & kNetworkPieceHair) != 0 ||
+    item.hair = (metadata.wire.flags & kNetworkPieceHair) != 0 ||
         source.category == "Hair";
     // Recipe geometry is the immutable bind mesh. ROPA's source flag means
     // its live local VB was CPU-deformed; carrying that flag to this bind
     // model would disable the canonical GPU skinning that keeps the shirt
     // attached.
     item.ropa = false;
-    item.char_alpha =
-        (metadata.wire.flags &
-         kNetworkPieceCharAlpha) != 0;
-    item.shadow_caster =
-        (metadata.wire.flags &
-         kNetworkPieceShadow) != 0;
-    item.char_family =
-        metadata.wire.char_family != 0
+    item.char_alpha = (metadata.wire.flags & kNetworkPieceCharAlpha) != 0;
+    item.shadow_caster = (metadata.wire.flags & kNetworkPieceShadow) != 0;
+    item.char_family = metadata.wire.char_family != 0
             ? metadata.wire.char_family
             : (item.hair ? 4 : 2);
     item.pending = false;
     item.retained = true;
     item.dyn_entity = true;
     item.lw_alpha = -1.0f;
-    item.ib_count =
-        static_cast<uint32_t>(source.mesh.indices.size());
+    item.ib_count = static_cast<uint32_t>(source.mesh.indices.size());
     item.bones.resize(metadata.remap.size() * 12);
-    item.multiplayer_palette_to_canonical =
-        metadata.remap;
-    std::copy_n(
-        metadata.wire.char_rows, 72, item.char_rows);
-    std::copy_n(
-        metadata.wire.tint, 4, item.tint);
+    item.multiplayer_palette_to_canonical = metadata.remap;
+    std::copy_n(metadata.wire.char_rows, 72, item.char_rows);
+    std::copy_n(metadata.wire.tint, 4, item.tint);
     NormalizeRemoteAppearanceTransientRows(item, role);
     if ((metadata.wire.flags & kNetworkPieceRopa) != 0) {
       REXLOG_INFO(
@@ -12671,32 +12133,19 @@ bool InstallRemoteRecipeAppearance(
     item.world[5] = 1.0f;
     item.world[10] = 1.0f;
     item.world[15] = 1.0f;
-    std::copy_n(
-        source.mesh.bbox_min, 3, item.bbox_min);
-    std::copy_n(
-        source.mesh.bbox_max, 3, item.bbox_max);
+    std::copy_n(source.mesh.bbox_min, 3, item.bbox_min);
+    std::copy_n(source.mesh.bbox_max, 3, item.bbox_max);
     item.draws.push_back(
-        DrawEntry{
-            4, 0, 0,
-            static_cast<uint32_t>(
-                source.mesh.indices.size())});
-    item.diffuse_tex =
-        texture_object(source.diffuse_texture);
-    item.water_normal =
-        texture_object(source.normal_texture);
-    item.hair_alpha_tex =
-        texture_object(source.alpha_texture);
-    item.spec_tex =
-        texture_object(source.specular_texture);
+        DrawEntry{4, 0, 0, static_cast<uint32_t>(source.mesh.indices.size())});
+    item.diffuse_tex = texture_object(source.diffuse_texture);
+    item.water_normal = texture_object(source.normal_texture);
+    item.hair_alpha_tex = texture_object(source.alpha_texture);
+    item.spec_tex = texture_object(source.specular_texture);
 
-    const size_t vertex_bytes =
-        source.mesh.vertices.size() * sizeof(float);
-    const size_t index_bytes =
-        source.mesh.indices.size() * sizeof(uint16_t);
-    nrhi::Buffer* vb = AcquireMeshUploadBuffer(
-        context.device, vertex_bytes);
-    nrhi::Buffer* ib = AcquireMeshUploadBuffer(
-        context.device, index_bytes);
+    const size_t vertex_bytes = source.mesh.vertices.size() * sizeof(float);
+    const size_t index_bytes = source.mesh.indices.size() * sizeof(uint16_t);
+    nrhi::Buffer* vb = AcquireMeshUploadBuffer(context.device, vertex_bytes);
+    nrhi::Buffer* ib = AcquireMeshUploadBuffer(context.device, index_bytes);
     if (vb == nullptr || ib == nullptr) {
       PoolMeshBuffer(context.device, vb);
       PoolMeshBuffer(context.device, ib);
@@ -12715,29 +12164,21 @@ bool InstallRemoteRecipeAppearance(
       PoolMeshBuffer(context.device, ib);
       return false;
     }
-    std::memcpy(
-        vb_mapping, source.mesh.vertices.data(),
-        vertex_bytes);
-    std::memcpy(
-        ib_mapping, source.mesh.indices.data(),
-        index_bytes);
+    std::memcpy(vb_mapping, source.mesh.vertices.data(), vertex_bytes);
+    std::memcpy(ib_mapping, source.mesh.indices.data(), index_bytes);
     context.device->Unmap(vb);
     context.device->Unmap(ib);
     auto old_mesh = g_r.meshes.find(item.mesh);
     if (old_mesh != g_r.meshes.end()) {
-      PoolMeshBuffer(
-          context.device, old_mesh->second.vb);
-      PoolMeshBuffer(
-          context.device, old_mesh->second.ib);
+      PoolMeshBuffer(context.device, old_mesh->second.vb);
+      PoolMeshBuffer(context.device, old_mesh->second.ib);
       g_r.meshes.erase(old_mesh);
     }
     MeshBuffers buffers;
     buffers.vb = vb;
     buffers.ib = ib;
-    buffers.vb_view = {
-        vb, 0, static_cast<uint32_t>(vertex_bytes), 56};
-    buffers.ib_view = {
-        ib, 0, static_cast<uint32_t>(index_bytes)};
+    buffers.vb_view = {vb, 0, static_cast<uint32_t>(vertex_bytes), 56};
+    buffers.ib_view = {ib, 0, static_cast<uint32_t>(index_bytes)};
     buffers.fingerprint = item.fingerprint;
     buffers.raytracing_verts = source.mesh.vertices;
     buffers.raytracing_indices = source.mesh.indices;
@@ -12749,15 +12190,11 @@ bool InstallRemoteRecipeAppearance(
     return false;
   }
 
-  if (state.identity != 0 &&
-      state.identity != installed.identity) {
-    for (uint64_t old_store_key :
-         state.texture_store_keys) {
-      const auto old_texture =
-          g_r.tex_store.find(old_store_key);
+  if (state.identity != 0 && state.identity != installed.identity) {
+    for (uint64_t old_store_key : state.texture_store_keys) {
+      const auto old_texture = g_r.tex_store.find(old_store_key);
       if (old_texture != g_r.tex_store.end()) {
-        RetireGuestTexture(
-            old_texture->second,
+        RetireGuestTexture(old_texture->second,
             context.device->CurrentSubmission());
         g_r.tex_store.erase(old_texture);
       }
@@ -12778,27 +12215,22 @@ bool InstallRemoteRecipeAppearance(
       if (installed_meshes.contains(old_item.mesh)) {
         continue;
       }
-      const auto old_mesh =
-          g_r.meshes.find(old_item.mesh);
+      const auto old_mesh = g_r.meshes.find(old_item.mesh);
       if (old_mesh != g_r.meshes.end()) {
-        PoolMeshBuffer(
-            context.device, old_mesh->second.vb);
-        PoolMeshBuffer(
-            context.device, old_mesh->second.ib);
+        PoolMeshBuffer(context.device, old_mesh->second.vb);
+        PoolMeshBuffer(context.device, old_mesh->second.ib);
         g_r.meshes.erase(old_mesh);
       }
     }
   }
   BuildRemoteAppearanceRenderCaches(role, installed);
   state = std::move(installed);
-  LogRemoteAppearanceResourceAudit(
-      "synchronous-install", role);
+  LogRemoteAppearanceResourceAudit("synchronous-install", role);
   if (async_prepare) {
     // Leave the table as the final owner so its asset worker, rather than
     // this render thread, releases the large CPU-side decode result.
     prepared.reset();
-    multiplayer_assets::ForgetRecipeAppearanceResolve(
-        role, session);
+    multiplayer_assets::ForgetRecipeAppearanceResolve(role, session);
   }
   const double install_ms =
       std::chrono::duration<double, std::milli>(
@@ -12807,136 +12239,103 @@ bool InstallRemoteRecipeAppearance(
   REXLOG_INFO(
       "multiplayer-appearance-install: role={} session={} "
       "appearance={:016X} upload={:.3f}ms pieces={} textures={}",
-      role, session, appearance.identity, install_ms,
-      state.items.size(), texture_objects.size());
+      role, session, appearance.identity, install_ms, state.items.size(),
+      texture_objects.size());
   REXLOG_INFO(
       "multiplayer: installed recipe appearance role={} "
       "id={:016X} pieces={} textures={} wire_bytes={}",
-      role, appearance.identity, state.items.size(),
-      texture_objects.size(), bytes.size());
+      role, appearance.identity, state.items.size(), texture_objects.size(),
+      bytes.size());
   return true;
 }
 
-bool InstallRemoteAppearance(
-    const NativeGuestOutputRenderContext& context,
-    uint64_t frame_number,
-    uint32_t role,
+bool InstallRemoteAppearance(const NativeGuestOutputRenderContext& context,
+                             uint64_t frame_number, uint32_t role,
     uint32_t session,
     const multiplayer::AppearanceBlob& appearance) {
-  if (appearance.identity == 0 ||
-      appearance.bytes == nullptr ||
+  if (appearance.identity == 0 || appearance.bytes == nullptr ||
       appearance.bytes->empty()) {
     return false;
   }
-  const auto pending =
-      g_pending_remote_recipe_installs.find(role);
+  const auto pending = g_pending_remote_recipe_installs.find(role);
   if (pending != g_pending_remote_recipe_installs.end() &&
       (pending->second.identity != appearance.identity ||
        pending->second.session != session)) {
-    CancelPendingRemoteRecipeInstall(
-        context, role, "appearance reverted or superseded");
+    CancelPendingRemoteRecipeInstall(context, role,
+                                     "appearance reverted or superseded");
   }
-  RemoteAppearanceRenderState& state =
-      g_remote_appearances[role];
-  if (state.identity == appearance.identity &&
-      state.session == session &&
+  RemoteAppearanceRenderState& state = g_remote_appearances[role];
+  if (state.identity == appearance.identity && state.session == session &&
       !state.items.empty()) {
     bool meshes_ready = true;
     for (const DrawItem& item : state.items) {
-      meshes_ready = meshes_ready &&
-                     g_r.meshes.contains(item.mesh);
+      meshes_ready = meshes_ready && g_r.meshes.contains(item.mesh);
     }
     if (meshes_ready) {
       return true;
     }
   }
-  const std::vector<uint8_t>& bytes =
-      *appearance.bytes;
+  const std::vector<uint8_t>& bytes = *appearance.bytes;
   if (bytes.size() >= sizeof(uint32_t)) {
     uint32_t magic = 0;
     std::memcpy(&magic, bytes.data(), sizeof(magic));
     if (magic == 0x31504352u) {
-      return InstallRemoteRecipeAppearance(
-          context, frame_number, role, session, appearance);
+      return InstallRemoteRecipeAppearance(context, frame_number, role, session,
+                                           appearance);
     }
   }
   size_t cursor = 0;
   NetworkAppearanceHeader header;
   if (!ReadAppearancePod(bytes, cursor, header) ||
-      header.magic != 0x31505041u ||
-      header.version != 2 ||
-      header.texture_count > 255 ||
-      header.piece_count == 0 ||
+      header.magic != 0x31505041u || header.version != 2 ||
+      header.texture_count > 255 || header.piece_count == 0 ||
       header.piece_count > 64) {
     return false;
   }
   RemoteAppearanceRenderState installed;
   installed.identity = appearance.identity;
   installed.session = session;
-  std::copy_n(
-      header.root_position, 3,
-      installed.root_position);
-  std::copy_n(
-      header.root_x_axis, 3,
-      installed.root_x_axis);
-  std::copy_n(
-      header.root_z_axis, 3,
-      installed.root_z_axis);
+  std::copy_n(header.root_position, 3, installed.root_position);
+  std::copy_n(header.root_x_axis, 3, installed.root_x_axis);
+  std::copy_n(header.root_z_axis, 3, installed.root_z_axis);
   installed.items.reserve(header.piece_count);
-  installed.texture_store_keys.reserve(
-      header.texture_count);
-  std::vector<uint32_t> texture_objects(
-      header.texture_count, 0);
-  for (size_t texture_index = 0;
-       texture_index < header.texture_count;
+  installed.texture_store_keys.reserve(header.texture_count);
+  std::vector<uint32_t> texture_objects(header.texture_count, 0);
+  for (size_t texture_index = 0; texture_index < header.texture_count;
        ++texture_index) {
     NetworkAppearanceTexture texture;
-    if (!ReadAppearancePod(bytes, cursor, texture) ||
-        texture.mip_count == 0 ||
-        texture.mip_count > 16 ||
-        texture.payload_bytes == 0 ||
+    if (!ReadAppearancePod(bytes, cursor, texture) || texture.mip_count == 0 ||
+        texture.mip_count > 16 || texture.payload_bytes == 0 ||
         texture.payload_bytes > 8u * 1024u * 1024u ||
         cursor + texture.payload_bytes > bytes.size() ||
-        texture.mips[0].width == 0 ||
-        texture.mips[0].height == 0) {
+        texture.mips[0].width == 0 || texture.mips[0].height == 0) {
       return false;
     }
     const uint64_t content_key =
-        appearance.identity ^
-        (0x9E3779B97F4A7C15ull *
-         (texture_index + 1));
+        appearance.identity ^ (0x9E3779B97F4A7C15ull * (texture_index + 1));
     const uint64_t store_key =
-        multiplayer::lifecycle::RemoteAppearanceTextureStoreKey(
-            role, content_key);
-    const uint32_t object_key =
-        0xF0000000u |
-        ((role & 0xFFu) << 16) |
+        multiplayer::lifecycle::RemoteAppearanceTextureStoreKey(role,
+                                                                content_key);
+    const uint32_t object_key = 0xF0000000u | ((role & 0xFFu) << 16) |
         static_cast<uint32_t>(texture_index);
     auto old = g_r.tex_store.find(store_key);
     if (old != g_r.tex_store.end()) {
-      RetireGuestTexture(
-          old->second,
-          context.device->CurrentSubmission());
+      RetireGuestTexture(old->second, context.device->CurrentSubmission());
       g_r.tex_store.erase(old);
     }
     nrhi::BufferDesc buffer_desc;
     buffer_desc.size = texture.payload_bytes;
     buffer_desc.heap = nrhi::HeapKind::kUpload;
-    buffer_desc.bind_class =
-        nrhi::BufferBindClass::kCopySrc;
-    nrhi::Buffer* upload =
-        context.device->CreateBuffer(buffer_desc);
+    buffer_desc.bind_class = nrhi::BufferBindClass::kCopySrc;
+    nrhi::Buffer* upload = context.device->CreateBuffer(buffer_desc);
     nrhi::TextureDesc texture_desc;
     texture_desc.kind = nrhi::TextureKind::k2D;
     texture_desc.width = texture.mips[0].width;
     texture_desc.height = texture.mips[0].height;
     texture_desc.mip_levels = texture.mip_count;
-    texture_desc.format =
-        static_cast<nrhi::Format>(texture.copy_format);
-    texture_desc.initial_state =
-        nrhi::ResourceState::kCopyDest;
-    nrhi::Texture* gpu_texture =
-        context.device->CreateTexture(texture_desc);
+    texture_desc.format = static_cast<nrhi::Format>(texture.copy_format);
+    texture_desc.initial_state = nrhi::ResourceState::kCopyDest;
+    nrhi::Texture* gpu_texture = context.device->CreateTexture(texture_desc);
     if (upload == nullptr || gpu_texture == nullptr) {
       context.device->DestroyDeferred(upload);
       context.device->DestroyDeferred(gpu_texture);
@@ -12948,38 +12347,30 @@ bool InstallRemoteAppearance(
       context.device->DestroyDeferred(gpu_texture);
       return false;
     }
-    std::memcpy(
-        mapping, bytes.data() + cursor,
-        texture.payload_bytes);
+    std::memcpy(mapping, bytes.data() + cursor, texture.payload_bytes);
     context.device->Unmap(upload);
     cursor += texture.payload_bytes;
     for (size_t mip = 0; mip < texture.mip_count; ++mip) {
-      const NetworkAppearanceMip& plan =
-          texture.mips[mip];
-      if (plan.offset >= texture.payload_bytes ||
-          plan.pitch == 0 || plan.width == 0 ||
-          plan.height == 0) {
+      const NetworkAppearanceMip& plan = texture.mips[mip];
+      if (plan.offset >= texture.payload_bytes || plan.pitch == 0 ||
+          plan.width == 0 || plan.height == 0) {
         context.device->DestroyDeferred(upload);
         context.device->DestroyDeferred(gpu_texture);
         return false;
       }
-      context.cmd->CopyBufferToTexture(
-          gpu_texture, static_cast<uint32_t>(mip), 0,
-          upload, plan.offset, plan.pitch,
+      context.cmd->CopyBufferToTexture(gpu_texture, static_cast<uint32_t>(mip),
+                                       0, upload, plan.offset, plan.pitch,
           plan.width, plan.height, 1);
     }
-    context.cmd->Barrier(
-        gpu_texture, nrhi::ResourceState::kCopyDest,
+    context.cmd->Barrier(gpu_texture, nrhi::ResourceState::kCopyDest,
         nrhi::ResourceState::kPixelShaderResource);
     nrhi::TextureViewDesc view_desc;
     view_desc.dimension = nrhi::ViewDimension::k2D;
-    view_desc.format =
-        static_cast<nrhi::Format>(texture.srv_format);
+    view_desc.format = static_cast<nrhi::Format>(texture.srv_format);
     view_desc.mip_levels = texture.mip_count;
     for (size_t component = 0; component < 4; ++component) {
       view_desc.swizzle[component] =
-          static_cast<nrhi::Swizzle>(
-              texture.swizzle[component]);
+          static_cast<nrhi::Swizzle>(texture.swizzle[component]);
     }
     GuestTexture guest;
     guest.texture = gpu_texture;
@@ -12988,16 +12379,13 @@ bool InstallRemoteAppearance(
     // appearance memory for no benefit.
     context.device->DestroyDeferred(upload);
     guest.upload = nullptr;
-    guest.srv = context.device->CreateTextureView(
-        gpu_texture, view_desc);
+    guest.srv = context.device->CreateTextureView(gpu_texture, view_desc);
     guest.srv_format = view_desc.format;
     guest.srv_mips = texture.mip_count;
     guest.valid = guest.srv != nullptr;
-    guest.last_used_frame =
-        std::numeric_limits<uint64_t>::max() / 2;
+    guest.last_used_frame = std::numeric_limits<uint64_t>::max() / 2;
     if (!guest.valid) {
-      RetireGuestTexture(
-          guest, context.device->CurrentSubmission());
+      RetireGuestTexture(guest, context.device->CurrentSubmission());
       return false;
     }
     g_r.tex_store.emplace(store_key, std::move(guest));
@@ -13009,59 +12397,41 @@ bool InstallRemoteAppearance(
     texture_objects[texture_index] = object_key;
   }
 
-  for (size_t piece_index = 0;
-       piece_index < header.piece_count;
+  for (size_t piece_index = 0; piece_index < header.piece_count;
        ++piece_index) {
     NetworkAppearancePiece piece;
-    if (!ReadAppearancePod(bytes, cursor, piece) ||
-        piece.vertex_count == 0 ||
-        piece.vertex_count > 0xFFFFu ||
-        piece.index_count == 0 ||
-        piece.index_count > 4u * 1024u * 1024u ||
-        piece.draw_count == 0 ||
-        piece.draw_count > 256 ||
-        piece.remap_count > 256 ||
+    if (!ReadAppearancePod(bytes, cursor, piece) || piece.vertex_count == 0 ||
+        piece.vertex_count > 0xFFFFu || piece.index_count == 0 ||
+        piece.index_count > 4u * 1024u * 1024u || piece.draw_count == 0 ||
+        piece.draw_count > 256 || piece.remap_count > 256 ||
         piece.bone_count > 256) {
       return false;
     }
-    const size_t draw_bytes =
-        size_t(piece.draw_count) * sizeof(DrawEntry);
-    const size_t remap_bytes =
-        size_t(piece.remap_count) * sizeof(uint16_t);
-    const size_t vertex_bytes =
-        size_t(piece.vertex_count) * 14 * sizeof(float);
-    const size_t index_bytes =
-        size_t(piece.index_count) * sizeof(uint16_t);
-    if (cursor + draw_bytes + remap_bytes +
-            vertex_bytes + index_bytes >
+    const size_t draw_bytes = size_t(piece.draw_count) * sizeof(DrawEntry);
+    const size_t remap_bytes = size_t(piece.remap_count) * sizeof(uint16_t);
+    const size_t vertex_bytes = size_t(piece.vertex_count) * 14 * sizeof(float);
+    const size_t index_bytes = size_t(piece.index_count) * sizeof(uint16_t);
+    if (cursor + draw_bytes + remap_bytes + vertex_bytes + index_bytes >
         bytes.size()) {
       return false;
     }
     DrawItem item{};
-    item.mesh =
-        0xE0000000u |
-        ((role & 0xFFu) << 16) |
+    item.mesh = 0xE0000000u | ((role & 0xFFu) << 16) |
         static_cast<uint32_t>(piece_index);
     item.multiplayer_track_key = piece.track_key;
     item.fingerprint = piece.fingerprint;
-    item.skinned =
-        (piece.flags & kNetworkPieceSkinned) != 0;
-    item.hair =
-        (piece.flags & kNetworkPieceHair) != 0;
-    item.ropa =
-        (piece.flags & kNetworkPieceRopa) != 0;
-    item.char_alpha =
-        (piece.flags & kNetworkPieceCharAlpha) != 0;
-    item.shadow_caster =
-        (piece.flags & kNetworkPieceShadow) != 0;
+    item.skinned = (piece.flags & kNetworkPieceSkinned) != 0;
+    item.hair = (piece.flags & kNetworkPieceHair) != 0;
+    item.ropa = (piece.flags & kNetworkPieceRopa) != 0;
+    item.char_alpha = (piece.flags & kNetworkPieceCharAlpha) != 0;
+    item.shadow_caster = (piece.flags & kNetworkPieceShadow) != 0;
     item.char_family = piece.char_family;
     item.pending = false;
     item.retained = true;
     item.dyn_entity = true;
     item.lw_alpha = -1.0f;
     item.ib_count = piece.index_count;
-    item.bones.resize(
-        size_t(piece.bone_count) * 12);
+    item.bones.resize(size_t(piece.bone_count) * 12);
     std::copy_n(piece.char_rows, 72, item.char_rows);
     std::copy_n(piece.tint, 4, item.tint);
     NormalizeRemoteAppearanceTransientRows(item, role);
@@ -13069,41 +12439,26 @@ bool InstallRemoteAppearance(
     std::copy_n(piece.bbox_min, 3, item.bbox_min);
     std::copy_n(piece.bbox_max, 3, item.bbox_max);
     item.draws.resize(piece.draw_count);
-    std::memcpy(
-        item.draws.data(), bytes.data() + cursor,
-        draw_bytes);
+    std::memcpy(item.draws.data(), bytes.data() + cursor, draw_bytes);
     cursor += draw_bytes;
-    item.multiplayer_palette_to_canonical.resize(
-        piece.remap_count);
-    std::memcpy(
-        item.multiplayer_palette_to_canonical.data(),
+    item.multiplayer_palette_to_canonical.resize(piece.remap_count);
+    std::memcpy(item.multiplayer_palette_to_canonical.data(),
         bytes.data() + cursor, remap_bytes);
     cursor += remap_bytes;
-    const uint8_t* vertex_bytes_source =
-        bytes.data() + cursor;
+    const uint8_t* vertex_bytes_source = bytes.data() + cursor;
     cursor += vertex_bytes;
-    const uint8_t* index_bytes_source =
-        bytes.data() + cursor;
+    const uint8_t* index_bytes_source = bytes.data() + cursor;
     cursor += index_bytes;
-    const auto texture_object =
-        [&texture_objects](uint16_t index) {
-          return index < texture_objects.size()
-                     ? texture_objects[index]
-                     : 0u;
+    const auto texture_object = [&texture_objects](uint16_t index) {
+      return index < texture_objects.size() ? texture_objects[index] : 0u;
         };
-    item.diffuse_tex =
-        texture_object(piece.diffuse_texture);
-    item.water_normal =
-        texture_object(piece.normal_texture);
-    item.hair_alpha_tex =
-        texture_object(piece.alpha_texture);
-    item.spec_tex =
-        texture_object(piece.spec_texture);
+    item.diffuse_tex = texture_object(piece.diffuse_texture);
+    item.water_normal = texture_object(piece.normal_texture);
+    item.hair_alpha_tex = texture_object(piece.alpha_texture);
+    item.spec_tex = texture_object(piece.spec_texture);
 
-    nrhi::Buffer* vb = AcquireMeshUploadBuffer(
-        context.device, vertex_bytes);
-    nrhi::Buffer* ib = AcquireMeshUploadBuffer(
-        context.device, index_bytes);
+    nrhi::Buffer* vb = AcquireMeshUploadBuffer(context.device, vertex_bytes);
+    nrhi::Buffer* ib = AcquireMeshUploadBuffer(context.device, index_bytes);
     if (vb == nullptr || ib == nullptr) {
       PoolMeshBuffer(context.device, vb);
       PoolMeshBuffer(context.device, ib);
@@ -13122,10 +12477,8 @@ bool InstallRemoteAppearance(
       PoolMeshBuffer(context.device, ib);
       return false;
     }
-    std::memcpy(
-        vb_mapping, vertex_bytes_source, vertex_bytes);
-    std::memcpy(
-        ib_mapping, index_bytes_source, index_bytes);
+    std::memcpy(vb_mapping, vertex_bytes_source, vertex_bytes);
+    std::memcpy(ib_mapping, index_bytes_source, index_bytes);
     context.device->Unmap(vb);
     context.device->Unmap(ib);
     auto old_mesh = g_r.meshes.find(item.mesh);
@@ -13137,24 +12490,17 @@ bool InstallRemoteAppearance(
     MeshBuffers buffers;
     buffers.vb = vb;
     buffers.ib = ib;
-    buffers.vb_view = {
-        vb, 0, static_cast<uint32_t>(vertex_bytes), 56};
-    buffers.ib_view = {
-        ib, 0, static_cast<uint32_t>(index_bytes)};
+    buffers.vb_view = {vb, 0, static_cast<uint32_t>(vertex_bytes), 56};
+    buffers.ib_view = {ib, 0, static_cast<uint32_t>(index_bytes)};
     buffers.fingerprint = item.fingerprint;
-    buffers.raytracing_verts.resize(
-        size_t(piece.vertex_count) * 14);
-    std::memcpy(
-        buffers.raytracing_verts.data(),
-        vertex_bytes_source, vertex_bytes);
-    buffers.raytracing_indices.resize(
-        piece.index_count);
-    std::memcpy(
-        buffers.raytracing_indices.data(),
-        index_bytes_source, index_bytes);
+    buffers.raytracing_verts.resize(size_t(piece.vertex_count) * 14);
+    std::memcpy(buffers.raytracing_verts.data(), vertex_bytes_source,
+                vertex_bytes);
+    buffers.raytracing_indices.resize(piece.index_count);
+    std::memcpy(buffers.raytracing_indices.data(), index_bytes_source,
+                index_bytes);
     if (item.ropa) {
-      buffers.ropa_verts =
-          buffers.raytracing_verts;
+      buffers.ropa_verts = buffers.raytracing_verts;
     }
     g_r.meshes.emplace(item.mesh, std::move(buffers));
     installed.items.push_back(std::move(item));
@@ -13162,15 +12508,11 @@ bool InstallRemoteAppearance(
   if (cursor != bytes.size()) {
     return false;
   }
-  if (state.identity != 0 &&
-      state.identity != installed.identity) {
-    for (uint64_t old_store_key :
-         state.texture_store_keys) {
-      const auto old_texture =
-          g_r.tex_store.find(old_store_key);
+  if (state.identity != 0 && state.identity != installed.identity) {
+    for (uint64_t old_store_key : state.texture_store_keys) {
+      const auto old_texture = g_r.tex_store.find(old_store_key);
       if (old_texture != g_r.tex_store.end()) {
-        RetireGuestTexture(
-            old_texture->second,
+        RetireGuestTexture(old_texture->second,
             context.device->CurrentSubmission());
         g_r.tex_store.erase(old_texture);
       }
@@ -13192,33 +12534,27 @@ bool InstallRemoteAppearance(
       if (installed_meshes.contains(old_item.mesh)) {
         continue;
       }
-      const auto old_mesh =
-          g_r.meshes.find(old_item.mesh);
+      const auto old_mesh = g_r.meshes.find(old_item.mesh);
       if (old_mesh != g_r.meshes.end()) {
-        PoolMeshBuffer(
-            context.device, old_mesh->second.vb);
-        PoolMeshBuffer(
-            context.device, old_mesh->second.ib);
+        PoolMeshBuffer(context.device, old_mesh->second.vb);
+        PoolMeshBuffer(context.device, old_mesh->second.ib);
         g_r.meshes.erase(old_mesh);
       }
     }
   }
   BuildRemoteAppearanceRenderCaches(role, installed);
   state = std::move(installed);
-  LogRemoteAppearanceResourceAudit(
-      "legacy-install", role);
+  LogRemoteAppearanceResourceAudit("legacy-install", role);
   REXLOG_INFO(
       "multiplayer: installed appearance role={} id={:016X} "
       "pieces={} textures={}",
-      role, appearance.identity, state.items.size(),
-      texture_objects.size());
+      role, appearance.identity, state.items.size(), texture_objects.size());
   return true;
 }
 
 void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
                     nrhi::Cmd* cmd, const FrameScene& scene,
-                    uint64_t frame_number, bool use_depth,
-                    bool shadow_ready,
+                    uint64_t frame_number, bool use_depth, bool shadow_ready,
                     std::vector<DrawItem>* multiplayer_remote_items) {
   if (multiplayer_remote_items != nullptr) {
     multiplayer_remote_items->clear();
@@ -13237,18 +12573,19 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
   }
   static std::atomic<uint32_t> s_map_transform_log{0};
   if (s_map_transform_log.fetch_add(1, std::memory_order_relaxed) == 0) {
-    REXLOG_INFO("native-scene: sandbox map draw transform origin=({:.3f},{:.3f},{:.3f}) "
+    REXLOG_INFO(
+        "native-scene: sandbox map draw transform "
+        "origin=({:.3f},{:.3f},{:.3f}) "
                 "camera=({:.3f},{:.3f},{:.3f})",
-                origin[0], origin[1], origin[2], scene.cam_pos[0],
-                scene.cam_pos[1], scene.cam_pos[2]);
+        origin[0], origin[1], origin[2], scene.cam_pos[0], scene.cam_pos[1],
+        scene.cam_pos[2]);
   }
   // Render in the same verified board-origin frame used by owned collision.
   // The old camera-relative probe made a huge clipped triangle appear in the
   // sky and visually disconnected the park from its collision geometry.
   float constants[52] = {};
   const auto set_world_translation =
-      [&constants, &scene](float x, float y, float z,
-                           float scale = 1.0f) {
+      [&constants, &scene](float x, float y, float z, float scale = 1.0f) {
         std::fill(constants, constants + 32, 0.0f);
         constants[0] = scale;
         constants[5] = scale;
@@ -13261,15 +12598,13 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
           for (int c = 0; c < 4; ++c) {
             float sum = 0.0f;
             for (int k = 0; k < 4; ++k) {
-              sum += constants[r * 4 + k] *
-                     scene.view_proj[k * 4 + c];
+              sum += constants[r * 4 + k] * scene.view_proj[k * 4 + c];
             }
             constants[16 + r * 4 + c] = sum;
           }
         }
       };
-  const auto set_world_basis =
-      [&constants, &scene](
+  const auto set_world_basis = [&constants, &scene](
           const skate::world::Vec3& x_axis,
           const skate::world::Vec3& y_axis,
           const skate::world::Vec3& z_axis,
@@ -13292,8 +12627,8 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
           for (int column = 0; column < 4; ++column) {
             float sum = 0.0f;
             for (int inner = 0; inner < 4; ++inner) {
-              sum += constants[row * 4 + inner] *
-                     scene.view_proj[inner * 4 + column];
+          sum +=
+              constants[row * 4 + inner] * scene.view_proj[inner * 4 + column];
             }
             constants[16 + row * 4 + column] = sum;
           }
@@ -13319,8 +12654,7 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
   constants[44] = celestial.light_color.x;
   constants[45] = celestial.light_color.y;
   constants[46] = celestial.light_color.z;
-  constants[47] =
-      dynamic_lighting ? celestial.light_intensity : 0.0f;
+  constants[47] = dynamic_lighting ? celestial.light_intensity : 0.0f;
 
   cmd->SetBindingLayout(g_r.layout);
   cmd->SetPipeline(use_depth ? g_r.pso : g_r.pso_nodepth);
@@ -13330,16 +12664,16 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
   cmd->SetTexture(2, g_r.white.srv);
   cmd->SetTexture(4, g_r.white.srv);
   cmd->SetTexture(5, g_r.white.srv);
-  cmd->SetTexturePair(
-      7, g_r.white_cube.srv,
+  cmd->SetTexturePair(7, g_r.white_cube.srv,
       shadow_ready ? g_r.shadow_srv_final : g_r.white.srv);
   // Keep both static sun maps on t10/t11 while the owned-map renderer
   // changes t8/t9 material resources.
   nrhi::TextureView* t8_default[6] = {
-      g_r.white.srv, g_r.white.srv,
-      g_r.owned_nsm_active ? g_r.owned_static_sun_srv[0]
-                           : (g_r.static_sun_valid ? g_r.static_sun_srv
-                                                   : g_r.white.srv),
+      g_r.white.srv,
+      g_r.white.srv,
+      g_r.owned_nsm_active
+          ? g_r.owned_static_sun_srv[0]
+          : (g_r.static_sun_valid ? g_r.static_sun_srv : g_r.white.srv),
       g_r.owned_nsm_active ? g_r.owned_static_sun_srv[1] : g_r.white.srv,
       g_r.owned_nsm_active ? g_r.owned_static_sun_srv[2] : g_r.white.srv,
       g_r.white.srv};
@@ -13351,12 +12685,12 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
   constexpr float kDetailRenderDistance = 768.0f;
   const float local_camera_x = scene.cam_pos[0] - origin[0];
   const float local_camera_z = scene.cam_pos[2] - origin[2];
-  const int32_t camera_cell_x = static_cast<int32_t>(
-      std::floor(local_camera_x / world.chunk_size));
-  const int32_t camera_cell_z = static_cast<int32_t>(
-      std::floor(local_camera_z / world.chunk_size));
-  const int32_t cell_radius = static_cast<int32_t>(
-      std::ceil(kDetailRenderDistance / world.chunk_size));
+  const int32_t camera_cell_x =
+      static_cast<int32_t>(std::floor(local_camera_x / world.chunk_size));
+  const int32_t camera_cell_z =
+      static_cast<int32_t>(std::floor(local_camera_z / world.chunk_size));
+  const int32_t cell_radius =
+      static_cast<int32_t>(std::ceil(kDetailRenderDistance / world.chunk_size));
   uint32_t candidate_chunks = 0;
   uint32_t visible_chunks = 0;
   uint32_t occluded_chunks = 0;
@@ -13367,8 +12701,7 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
   if (owned_occlusion_active) {
     float camera_delta_squared = 0.0f;
     for (int axis = 0; axis < 3; ++axis) {
-      const float delta =
-          scene.cam_pos[axis] - g_r.occl_grid_cam[axis];
+      const float delta = scene.cam_pos[axis] - g_r.occl_grid_cam[axis];
       camera_delta_squared += delta * delta;
     }
     owned_occlusion_active = camera_delta_squared < 1.0f;
@@ -13379,14 +12712,11 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
     ++candidate_chunks;
     float corners[8][3];
     for (int corner = 0; corner < 8; ++corner) {
-      corners[corner][0] =
-          origin[0] + ((corner & 1) ? chunk.bounds_max[0]
+      corners[corner][0] = origin[0] + ((corner & 1) ? chunk.bounds_max[0]
                                     : chunk.bounds_min[0]);
-      corners[corner][1] =
-          origin[1] + ((corner & 2) ? chunk.bounds_max[1]
+      corners[corner][1] = origin[1] + ((corner & 2) ? chunk.bounds_max[1]
                                     : chunk.bounds_min[1]);
-      corners[corner][2] =
-          origin[2] + ((corner & 4) ? chunk.bounds_max[2]
+      corners[corner][2] = origin[2] + ((corner & 4) ? chunk.bounds_max[2]
                                     : chunk.bounds_min[2]);
     }
     if (CornersOutsideFrustum(corners, scene.view_proj, 1.05f)) {
@@ -13416,8 +12746,7 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
     if (!EnsureSandboxMapChunk(context.device, chunk_index)) {
       return;
     }
-    const auto mesh =
-        g_r.meshes.find(SandboxMapMeshKey(chunk_index));
+    const auto mesh = g_r.meshes.find(SandboxMapMeshKey(chunk_index));
     if (mesh == g_r.meshes.end()) {
       return;
     }
@@ -13425,8 +12754,8 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
     cmd->SetVertexBuffer(
         mesh->second.vb_view.buffer, mesh->second.vb_view.offset,
         mesh->second.vb_view.size_bytes, mesh->second.vb_view.stride);
-    cmd->SetIndexBuffer(
-        mesh->second.ib_view.buffer, mesh->second.ib_view.offset,
+    cmd->SetIndexBuffer(mesh->second.ib_view.buffer,
+                        mesh->second.ib_view.offset,
         mesh->second.ib_view.size_bytes);
     // Material colours remain authored beside collision properties, while
     // spatial submission is now independent per visible chunk.
@@ -13439,77 +12768,58 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
       constants[44] = celestial.light_color.x;
       constants[45] = celestial.light_color.y;
       constants[46] = celestial.light_color.z;
-      constants[47] =
-          dynamic_lighting ? celestial.light_intensity : 0.0f;
-      const bool dynamic_object_family =
-          draw.retail_shader_family == 21 ||
+      constants[47] = dynamic_lighting ? celestial.light_intensity : 0.0f;
+      const bool dynamic_object_family = draw.retail_shader_family == 21 ||
           draw.retail_shader_family == 22 ||
           draw.retail_shader_family == 23;
       const bool retail_exact =
           draw.retail_shader_family != 0 &&
-          (dynamic_object_family ? scene.dynobj_valid
-                                 : scene.shadow_valid);
+          (dynamic_object_family ? scene.dynobj_valid : scene.shadow_valid);
       const bool imported =
           draw.albedo_texture != 0 || draw.indirect_lightmap != 0 ||
           draw.normal_texture != 0 || draw.orm_texture != 0 ||
-          draw.emissive_texture != 0 ||
-          draw.secondary_albedo_texture != 0 ||
-          draw.blend_mask_texture != 0 ||
-          draw.retail_chromaticity_texture != 0;
+          draw.emissive_texture != 0 || draw.secondary_albedo_texture != 0 ||
+          draw.blend_mask_texture != 0 || draw.retail_chromaticity_texture != 0;
       const bool alpha_blend =
-          draw.alpha_mode ==
-              skate::world::SurfaceMaterial::AlphaMode::Blend ||
+          draw.alpha_mode == skate::world::SurfaceMaterial::AlphaMode::Blend ||
           (draw.retail_render_flags & 2u) != 0 ||
           draw.retail_shader_family == 13;
       nrhi::Pipeline* owned_pipeline =
-          use_depth && draw.cull_backfaces &&
-                  g_r.pso_cullback != nullptr
+          use_depth && draw.cull_backfaces && g_r.pso_cullback != nullptr
               ? g_r.pso_cullback
               : (use_depth ? g_r.pso : g_r.pso_nodepth);
       if (alpha_blend && g_r.pso_transparent != nullptr) {
-        owned_pipeline =
-            use_depth && draw.cull_backfaces &&
+        owned_pipeline = use_depth && draw.cull_backfaces &&
                     g_r.pso_transparent_cullback != nullptr
                 ? g_r.pso_transparent_cullback
                 : g_r.pso_transparent;
       }
       cmd->SetPipeline(owned_pipeline);
+      cmd->SetTexture(1, ResolveOwnedMapTexture(context, draw.albedo_texture));
+      cmd->SetTexture(2, ResolveOwnedMapTexture(context, draw.indirect_lightmap,
+                                                OwnedTextureRole::Data));
       cmd->SetTexture(
-          1, ResolveOwnedMapTexture(context, draw.albedo_texture));
-      cmd->SetTexture(
-          2, ResolveOwnedMapTexture(
-                 context, draw.indirect_lightmap, OwnedTextureRole::Data));
-      cmd->SetTexture(
-          4, ResolveOwnedMapTexture(
-                 context, draw.secondary_albedo_texture));
+          4, ResolveOwnedMapTexture(context, draw.secondary_albedo_texture));
       cmd->SetTexturePair(
-          5,
-          ResolveOwnedMapTexture(context, draw.emissive_texture),
-          ResolveOwnedMapTexture(
-              context, draw.normal_texture, OwnedTextureRole::Normal));
+          5, ResolveOwnedMapTexture(context, draw.emissive_texture),
+          ResolveOwnedMapTexture(context, draw.normal_texture,
+                                 OwnedTextureRole::Normal));
       nrhi::TextureView* owned_material_maps[6] = {
           retail_exact
-              ? ResolveOwnedMapTexture(
-                    context, draw.retail_detail_texture,
+              ? ResolveOwnedMapTexture(context, draw.retail_detail_texture,
                     OwnedTextureRole::Normal)
               : g_r.white.srv,
-          retail_exact &&
-                  ((draw.retail_shader_family >= 3 &&
+          retail_exact && ((draw.retail_shader_family >= 3 &&
                     draw.retail_shader_family <= 4) ||
                    dynamic_object_family)
-              ? ResolveOwnedMapTexture(
-                    context, draw.retail_specular_texture,
+              ? ResolveOwnedMapTexture(context, draw.retail_specular_texture,
                     OwnedTextureRole::Data)
-              : ResolveOwnedMapTexture(
-                    context, draw.orm_texture, OwnedTextureRole::Data),
-          g_r.owned_nsm_active ? g_r.owned_static_sun_srv[0]
-                               : g_r.white.srv,
-          g_r.owned_nsm_active ? g_r.owned_static_sun_srv[1]
-                               : g_r.white.srv,
-          g_r.owned_nsm_active ? g_r.owned_static_sun_srv[2]
-                               : g_r.white.srv,
-          ResolveOwnedMapTexture(
-              context,
+              : ResolveOwnedMapTexture(context, draw.orm_texture,
+                                       OwnedTextureRole::Data),
+          g_r.owned_nsm_active ? g_r.owned_static_sun_srv[0] : g_r.white.srv,
+          g_r.owned_nsm_active ? g_r.owned_static_sun_srv[1] : g_r.white.srv,
+          g_r.owned_nsm_active ? g_r.owned_static_sun_srv[2] : g_r.white.srv,
+          ResolveOwnedMapTexture(context,
               retail_exact ? draw.retail_chromaticity_texture
                            : draw.blend_mask_texture,
               OwnedTextureRole::Data)};
@@ -13517,14 +12827,11 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
       if (retail_exact) {
         nrhi::TextureView* macro_texture = ResolveOwnedMapTexture(
             context,
-            draw.retail_shader_family == 30
-                ? draw.normal_texture
+            draw.retail_shader_family == 30 ? draw.normal_texture
                 : draw.retail_macro_texture,
-            draw.retail_shader_family == 30
-                ? OwnedTextureRole::Normal
+            draw.retail_shader_family == 30 ? OwnedTextureRole::Normal
                 : OwnedTextureRole::Color);
-        const bool decal_family =
-            draw.retail_shader_family == 3 ||
+        const bool decal_family = draw.retail_shader_family == 3 ||
             draw.retail_shader_family == 4 ||
             draw.retail_shader_family == 23;
         const skate::world::TextureId mask_id =
@@ -13533,12 +12840,10 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
         cmd->SetTexture(4, macro_texture);
         cmd->SetTexturePair(
             5,
-            ResolveOwnedMapTexture(
-                context, mask_id,
+            ResolveOwnedMapTexture(context, mask_id,
                 decal_family ? OwnedTextureRole::Decal
                              : OwnedTextureRole::Data),
-            ResolveOwnedMapTexture(
-                context, draw.normal_texture,
+            ResolveOwnedMapTexture(context, draw.normal_texture,
                 OwnedTextureRole::Normal));
         cmd->SetTexturePair(
             7, g_r.white_cube.srv,
@@ -13547,90 +12852,65 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
       constants[32] = draw.color[0];
       constants[33] = draw.color[1];
       constants[34] = draw.color[2];
-      std::uint32_t blender_compatibility =
-          static_cast<std::uint32_t>(std::lround(
-              std::clamp(draw.alpha_cutoff, 0.0f, 1.0f) * 255.0f));
+      std::uint32_t blender_compatibility = static_cast<std::uint32_t>(
+          std::lround(std::clamp(draw.alpha_cutoff, 0.0f, 1.0f) * 255.0f));
       blender_compatibility |=
-          static_cast<std::uint32_t>(std::lround(
-              std::clamp(draw.blend_factor, 0.0f, 1.0f) * 255.0f))
+          static_cast<std::uint32_t>(
+              std::lround(std::clamp(draw.blend_factor, 0.0f, 1.0f) * 255.0f))
           << 8u;
-      blender_compatibility |=
-          (draw.blend_mask_channel & 7u) << 16u;
-      blender_compatibility |=
-          (draw.albedo_address_mode & 3u) << 19u;
-      blender_compatibility |=
-          (draw.secondary_address_mode & 3u) << 21u;
-      blender_compatibility |=
-          (draw.blend_mask_address_mode & 3u) << 23u;
+      blender_compatibility |= (draw.blend_mask_channel & 7u) << 16u;
+      blender_compatibility |= (draw.albedo_address_mode & 3u) << 19u;
+      blender_compatibility |= (draw.secondary_address_mode & 3u) << 21u;
+      blender_compatibility |= (draw.blend_mask_address_mode & 3u) << 23u;
       constants[35] =
           imported ? std::bit_cast<float>(blender_compatibility) : 0.0f;
       std::uint32_t owned_flags = 1u;
-      owned_flags |=
-          static_cast<std::uint32_t>(draw.alpha_mode) << 1u;
+      owned_flags |= static_cast<std::uint32_t>(draw.alpha_mode) << 1u;
       owned_flags |= draw.normal_texture != 0 ? 8u : 0u;
       owned_flags |= draw.orm_texture != 0 ? 16u : 0u;
       owned_flags |= draw.emissive_texture != 0 ? 32u : 0u;
       owned_flags |= draw.indirect_lightmap != 0 ? 64u : 0u;
-      owned_flags |=
-          draw.secondary_albedo_texture != 0 ? (1u << 22u) : 0u;
-      owned_flags |=
-          draw.blend_mask_texture != 0 ? (1u << 23u) : 0u;
-      const bool has_skate2_lightmap =
-          draw.retail_chromaticity_texture != 0 &&
+      owned_flags |= draw.secondary_albedo_texture != 0 ? (1u << 22u) : 0u;
+      owned_flags |= draw.blend_mask_texture != 0 ? (1u << 23u) : 0u;
+      const bool has_skate2_lightmap = draw.retail_chromaticity_texture != 0 &&
           draw.skate2_lightmap_component >= 0.0f &&
           draw.skate2_lightmap_component < 3.0f;
       if (has_skate2_lightmap) {
         owned_flags |=
-            (static_cast<std::uint32_t>(
-                 draw.skate2_lightmap_component) +
-             1u)
+            (static_cast<std::uint32_t>(draw.skate2_lightmap_component) + 1u)
             << 8u;
       }
-      owned_flags |=
-          (draw.presentation_depth_layer & 3u) << 12u;
-      owned_flags |=
-          (draw.presentation_depth_order & 255u) << 14u;
+      owned_flags |= (draw.presentation_depth_layer & 3u) << 12u;
+      owned_flags |= (draw.presentation_depth_order & 255u) << 14u;
       constants[48] =
           imported ? -static_cast<float>(owned_flags) : draw.material[0];
       constants[49] =
           imported ? draw.baked_indirect_strength : draw.material[1];
       constants[50] = draw.material[2];
-      constants[51] =
-          imported
+      constants[51] = imported
               ? (draw.material[2] < 0.0f ? -draw.material[2] : 0.0f)
               : draw.material[3];
       if (retail_exact) {
         const std::uint32_t family = draw.retail_shader_family;
-        const bool decal_family =
-            family == 3 || family == 4 || family == 23;
+        const bool decal_family = family == 3 || family == 4 || family == 23;
         const bool has_macro = draw.retail_macro_texture != 0;
         const bool has_masks = draw.retail_specular_texture != 0;
         const bool has_normal = draw.normal_texture != 0;
         const bool has_detail =
-            draw.retail_detail_texture != 0 &&
-            draw.retail_detail_scale > 0.0f;
+            draw.retail_detail_texture != 0 && draw.retail_detail_scale > 0.0f;
         std::uint32_t v2_flags = 0;
-        if ((family >= 1 && family <= 4) ||
-            dynamic_object_family) {
+        if ((family >= 1 && family <= 4) || dynamic_object_family) {
           v2_flags |= has_normal ? 1u : 0u;
           v2_flags |=
-              has_detail && family != 2 &&
-                      draw.retail_detail_scale > 0.0f
-                  ? 2u
+              has_detail && family != 2 && draw.retail_detail_scale > 0.0f ? 2u
                   : 0u;
           v2_flags |=
-              (decal_family || dynamic_object_family) &&
-                      has_masks
-                  ? 4u
-                  : 0u;
+              (decal_family || dynamic_object_family) && has_masks ? 4u : 0u;
         }
         constants[39] = -static_cast<float>(family);
-        constants[40] =
-            draw.indirect_lightmap != 0 ? 1.0f : 0.0f;
+        constants[40] = draw.indirect_lightmap != 0 ? 1.0f : 0.0f;
         constants[41] =
-            has_skate2_lightmap
-                ? draw.skate2_lightmap_component
-                : -1.0f;
+            has_skate2_lightmap ? draw.skate2_lightmap_component : -1.0f;
         // Exact retail materials always retain their baked lightmaps. This
         // separately controls the live native sun-shadow layer so the World
         // menu's Dynamic Lighting switch has a visible, honest effect.
@@ -13643,8 +12923,7 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
             decal_family && draw.retail_decal_texture != 0
                 ? (family == 4 ? 2.0f : 1.0f)
                 : (has_masks
-                       ? ((has_normal && family >= 5 && family <= 6)
-                              ? 4.0f
+                       ? ((has_normal && family >= 5 && family <= 6) ? 4.0f
                               : 3.0f)
                        : 0.0f);
         constants[48] = 0.0f;
@@ -13652,23 +12931,18 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
             (family >= 5 && family <= 6) || family == 13
                 ? std::log2(std::max(
                       1.0f,
-                      static_cast<float>(
-                          context.guest_output_height) /
-                          640.0f))
+                      static_cast<float>(context.guest_output_height) / 640.0f))
                 : 0.0f;
         constants[50] = static_cast<float>(v2_flags);
         constants[51] = draw.retail_detail_scale;
         if (family == 14) {
           const float animation_time =
               scene.scroll_valid ? scene.scroll_rows[0] : 0.0f;
-          const float scroll_u =
-              animation_time * draw.retail_scroll_u;
-          const float scroll_v =
-              animation_time * draw.retail_scroll_v;
+          const float scroll_u = animation_time * draw.retail_scroll_u;
+          const float scroll_v = animation_time * draw.retail_scroll_v;
           constants[48] = scroll_u - std::floor(scroll_u);
           constants[49] = scroll_v - std::floor(scroll_v);
-          constants[50] =
-              scene.scroll_valid ? scene.scroll_rows[1] : 1.0f;
+          constants[50] = scene.scroll_valid ? scene.scroll_rows[1] : 1.0f;
           constants[51] = 0.0f;
         }
       }
@@ -13688,8 +12962,8 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
           std::pair<int32_t, int32_t>{cell_x, cell_z},
           [](const mechanics_sandbox::map::VisualCellRange& left,
              const std::pair<int32_t, int32_t>& right) {
-            return std::pair<int32_t, int32_t>{
-                       left.cell_x, left.cell_z} < right;
+            return std::pair<int32_t, int32_t>{left.cell_x, left.cell_z} <
+                   right;
           });
       if (cell == world.cells.end() || cell->cell_x != cell_x ||
           cell->cell_z != cell_z) {
@@ -13708,11 +12982,10 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
   static auto owned_physics_clock = std::chrono::steady_clock::now();
   const auto owned_physics_now = std::chrono::steady_clock::now();
   const double owned_physics_frame_seconds =
-      std::chrono::duration<double>(
-          owned_physics_now - owned_physics_clock).count();
+      std::chrono::duration<double>(owned_physics_now - owned_physics_clock)
+          .count();
   owned_physics_clock = owned_physics_now;
-  mechanics_sandbox::map::AdvanceOwnedPhysics(
-      owned_physics_frame_seconds);
+  mechanics_sandbox::map::AdvanceOwnedPhysics(owned_physics_frame_seconds);
   const skate::world::MapDefinition& definition =
       mechanics_sandbox::map::ActiveDefinition();
   uint32_t editor_pose_ready = 0;
@@ -13720,24 +12993,26 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
   uint32_t editor_visible_objects = 0;
   uint32_t editor_resident_objects = 0;
   uint32_t editor_object_draws = 0;
+  std::size_t editor_visual_mesh_offset = 0;
   for (std::size_t object_index = 0;
-       object_index < definition.editable_objects.size();
-       ++object_index) {
+       object_index < definition.editable_objects.size(); ++object_index) {
+    const auto& visuals =
+        mechanics_sandbox::map::ActiveEditableObjectVisualMeshes(object_index);
+    const std::size_t object_visual_mesh_offset = editor_visual_mesh_offset;
+    editor_visual_mesh_offset += visuals.size();
     float translation[3] = {};
     float basis[9] = {};
     const skate::world::MapObject& object =
         definition.editable_objects[object_index];
-    const bool has_collision =
-        !object.collision_triangles.empty();
+    const bool has_collision = !object.collision_triangles.empty();
     const bool previewing_selected_drag =
         map_editor::ActiveGizmoHandle() != 0 &&
         map_editor::IsSelected(object_index);
     skate::world::PhysicsObjectPose physics_pose;
     const bool physics_pose_ready =
-        object.physics.type !=
-            skate::world::ObjectPhysicsType::Disabled &&
-        mechanics_sandbox::map::ActivePhysicsObjectPose(
-            object_index, physics_pose);
+        object.physics.type != skate::world::ObjectPhysicsType::Disabled &&
+        mechanics_sandbox::map::ActivePhysicsObjectPose(object_index,
+                                                        physics_pose);
     if (physics_pose_ready) {
       translation[0] = physics_pose.position.x;
       translation[1] = physics_pose.position.y;
@@ -13759,31 +13034,28 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
       // chunks and the object pass, leaving visible holes in the map.
       bool pose_ready = false;
       if (previewing_selected_drag) {
-        pose_ready = map_editor::ObjectTransform(
-            object_index, translation, basis, nullptr);
+        pose_ready = map_editor::ObjectTransform(object_index, translation,
+                                                 basis, nullptr);
       } else {
         pose_ready = native_collision::EditableObjectPose(
             object_index, translation, basis, nullptr);
         if (!pose_ready) {
-          pose_ready = map_editor::ObjectTransform(
-              object_index, translation, basis, nullptr);
+          pose_ready = map_editor::ObjectTransform(object_index, translation,
+                                                   basis, nullptr);
           editor_pose_fallbacks += pose_ready ? 1u : 0u;
         }
       }
       if (!pose_ready) {
         continue;
       }
-    } else if (!map_editor::ObjectTransform(
-                   object_index, translation, basis, nullptr)) {
+    } else if (!map_editor::ObjectTransform(object_index, translation, basis,
+                                            nullptr)) {
       continue;
     }
     ++editor_pose_ready;
-    const skate::world::Vec3 x_axis{
-        basis[0], basis[1], basis[2]};
-    const skate::world::Vec3 y_axis{
-        basis[3], basis[4], basis[5]};
-    const skate::world::Vec3 z_axis{
-        basis[6], basis[7], basis[8]};
+    const skate::world::Vec3 x_axis{basis[0], basis[1], basis[2]};
+    const skate::world::Vec3 y_axis{basis[3], basis[4], basis[5]};
+    const skate::world::Vec3 z_axis{basis[6], basis[7], basis[8]};
     const float world_position[3] = {
         origin[0] + translation[0],
         origin[1] + translation[1],
@@ -13792,16 +13064,12 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
     float corners[8][3];
     for (int corner = 0; corner < 8; ++corner) {
       const skate::world::Vec3 local{
-          (corner & 1) ? object.local_bounds_max.x
-                       : object.local_bounds_min.x,
-          (corner & 2) ? object.local_bounds_max.y
-                       : object.local_bounds_min.y,
-          (corner & 4) ? object.local_bounds_max.z
-                       : object.local_bounds_min.z,
+          (corner & 1) ? object.local_bounds_max.x : object.local_bounds_min.x,
+          (corner & 2) ? object.local_bounds_max.y : object.local_bounds_min.y,
+          (corner & 4) ? object.local_bounds_max.z : object.local_bounds_min.z,
       };
       const skate::world::Vec3 transformed =
-          skate::world::Vec3{
-              world_position[0], world_position[1],
+          skate::world::Vec3{world_position[0], world_position[1],
               world_position[2]} +
           x_axis * local.x + y_axis * local.y + z_axis * local.z;
       corners[corner][0] = transformed.x;
@@ -13812,19 +13080,26 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
       continue;
     }
     ++editor_visible_objects;
-    if (!EnsureSandboxEditorObjectMesh(context.device, object_index)) {
+    bool object_resident = false;
+    for (std::size_t part_index = 0; part_index < visuals.size();
+         ++part_index) {
+      const auto& visual = visuals[part_index];
+      const std::size_t visual_mesh_index =
+          object_visual_mesh_offset + part_index;
+      if (!EnsureSandboxEditorObjectMesh(context.device, visual_mesh_index,
+                                         visual)) {
       continue;
     }
-    const auto mesh = g_r.meshes.find(
-        kSandboxEditorObjectMeshBase +
-        static_cast<std::uint32_t>(object_index));
+      const auto mesh =
+          g_r.meshes.find(kSandboxEditorObjectMeshBase +
+                          static_cast<std::uint32_t>(visual_mesh_index));
     if (mesh == g_r.meshes.end()) {
       continue;
     }
+      if (!object_resident) {
     ++editor_resident_objects;
-    const auto& visual =
-        mechanics_sandbox::map::ActiveEditableObjectVisualMesh(
-            object_index);
+        object_resident = true;
+      }
     set_world_basis(
         x_axis, y_axis, z_axis,
         {world_position[0], world_position[1], world_position[2]});
@@ -13833,11 +13108,10 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
     cmd->SetVertexBuffer(
         mesh->second.vb_view.buffer, mesh->second.vb_view.offset,
         mesh->second.vb_view.size_bytes, mesh->second.vb_view.stride);
-    cmd->SetIndexBuffer(
-        mesh->second.ib_view.buffer, mesh->second.ib_view.offset,
+      cmd->SetIndexBuffer(mesh->second.ib_view.buffer,
+                          mesh->second.ib_view.offset,
         mesh->second.ib_view.size_bytes);
-    for (const mechanics_sandbox::map::VisualDraw& draw :
-         visual.draws) {
+      for (const mechanics_sandbox::map::VisualDraw& draw : visual.draws) {
       constants[39] = -41.25f;
       constants[40] = celestial.light_direction_to_light.x;
       constants[41] = celestial.light_direction_to_light.y;
@@ -13846,89 +13120,68 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
       constants[44] = celestial.light_color.x;
       constants[45] = celestial.light_color.y;
       constants[46] = celestial.light_color.z;
-      constants[47] =
-          dynamic_lighting ? celestial.light_intensity : 0.0f;
-      const bool dynamic_object_family =
-          draw.retail_shader_family == 21 ||
+        constants[47] = dynamic_lighting ? celestial.light_intensity : 0.0f;
+        const bool dynamic_object_family = draw.retail_shader_family == 21 ||
           draw.retail_shader_family == 22 ||
           draw.retail_shader_family == 23;
       const bool retail_exact =
           draw.retail_shader_family != 0 &&
-          (dynamic_object_family ? scene.dynobj_valid
-                                 : scene.shadow_valid);
+            (dynamic_object_family ? scene.dynobj_valid : scene.shadow_valid);
       const bool imported =
           draw.albedo_texture != 0 || draw.indirect_lightmap != 0 ||
           draw.normal_texture != 0 || draw.orm_texture != 0 ||
-          draw.emissive_texture != 0 ||
-          draw.retail_chromaticity_texture != 0;
+            draw.emissive_texture != 0 || draw.retail_chromaticity_texture != 0;
       const bool alpha_blend =
           draw.alpha_mode ==
               skate::world::SurfaceMaterial::AlphaMode::Blend ||
           (draw.retail_render_flags & 2u) != 0 ||
           draw.retail_shader_family == 13;
-      cmd->SetPipeline(
-          alpha_blend && g_r.pso_transparent != nullptr
+        cmd->SetPipeline(alpha_blend && g_r.pso_transparent != nullptr
               ? g_r.pso_transparent
               : (use_depth ? g_r.pso : g_r.pso_nodepth));
-      cmd->SetTexture(
-          1, ResolveOwnedMapTexture(context, draw.albedo_texture));
-      cmd->SetTexture(
-          2, ResolveOwnedMapTexture(
-                 context, draw.indirect_lightmap,
+        cmd->SetTexture(1,
+                        ResolveOwnedMapTexture(context, draw.albedo_texture));
+        cmd->SetTexture(2,
+                        ResolveOwnedMapTexture(context, draw.indirect_lightmap,
                  OwnedTextureRole::Data));
       cmd->SetTexturePair(
-          5,
-          ResolveOwnedMapTexture(context, draw.emissive_texture),
-          ResolveOwnedMapTexture(
-              context, draw.normal_texture,
+            5, ResolveOwnedMapTexture(context, draw.emissive_texture),
+            ResolveOwnedMapTexture(context, draw.normal_texture,
               OwnedTextureRole::Normal));
       nrhi::TextureView* object_material_maps[6] = {
           retail_exact
-              ? ResolveOwnedMapTexture(
-                    context, draw.retail_detail_texture,
+                ? ResolveOwnedMapTexture(context, draw.retail_detail_texture,
                     OwnedTextureRole::Normal)
               : g_r.white.srv,
-          retail_exact &&
-                  ((draw.retail_shader_family >= 3 &&
+            retail_exact && ((draw.retail_shader_family >= 3 &&
                     draw.retail_shader_family <= 4) ||
                    dynamic_object_family)
-              ? ResolveOwnedMapTexture(
-                    context, draw.retail_specular_texture,
+                ? ResolveOwnedMapTexture(context, draw.retail_specular_texture,
                     OwnedTextureRole::Data)
-              : ResolveOwnedMapTexture(
-                    context, draw.orm_texture,
+                : ResolveOwnedMapTexture(context, draw.orm_texture,
                     OwnedTextureRole::Data),
-          g_r.owned_nsm_active ? g_r.owned_static_sun_srv[0]
-                               : g_r.white.srv,
-          g_r.owned_nsm_active ? g_r.owned_static_sun_srv[1]
-                               : g_r.white.srv,
-          g_r.owned_nsm_active ? g_r.owned_static_sun_srv[2]
-                               : g_r.white.srv,
-          ResolveOwnedMapTexture(
-              context, draw.retail_chromaticity_texture,
+            g_r.owned_nsm_active ? g_r.owned_static_sun_srv[0] : g_r.white.srv,
+            g_r.owned_nsm_active ? g_r.owned_static_sun_srv[1] : g_r.white.srv,
+            g_r.owned_nsm_active ? g_r.owned_static_sun_srv[2] : g_r.white.srv,
+            ResolveOwnedMapTexture(context, draw.retail_chromaticity_texture,
               OwnedTextureRole::Data)};
       cmd->SetTextures(8, object_material_maps, 6);
       if (retail_exact) {
-        const bool decal_family =
-            draw.retail_shader_family == 3 ||
+          const bool decal_family = draw.retail_shader_family == 3 ||
             draw.retail_shader_family == 4 ||
             draw.retail_shader_family == 23;
         const skate::world::TextureId mask_id =
             decal_family ? draw.retail_decal_texture
                          : draw.retail_specular_texture;
         cmd->SetTexture(
-            4,
-            ResolveOwnedMapTexture(
-                context, draw.retail_macro_texture,
+              4, ResolveOwnedMapTexture(context, draw.retail_macro_texture,
                 OwnedTextureRole::Color));
         cmd->SetTexturePair(
             5,
-            ResolveOwnedMapTexture(
-                context, mask_id,
+              ResolveOwnedMapTexture(context, mask_id,
                 decal_family ? OwnedTextureRole::Decal
                              : OwnedTextureRole::Data),
-            ResolveOwnedMapTexture(
-                context, draw.normal_texture,
+              ResolveOwnedMapTexture(context, draw.normal_texture,
                 OwnedTextureRole::Normal));
         cmd->SetTexturePair(
             7, g_r.white_cube.srv,
@@ -13939,8 +13192,7 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
       constants[34] = draw.color[2];
       constants[35] = imported ? -draw.alpha_cutoff : 0.0f;
       std::uint32_t owned_flags = 1u;
-      owned_flags |=
-          static_cast<std::uint32_t>(draw.alpha_mode) << 1u;
+        owned_flags |= static_cast<std::uint32_t>(draw.alpha_mode) << 1u;
       owned_flags |= draw.normal_texture != 0 ? 8u : 0u;
       owned_flags |= draw.orm_texture != 0 ? 16u : 0u;
       owned_flags |= draw.emissive_texture != 0 ? 32u : 0u;
@@ -13951,62 +13203,44 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
           draw.skate2_lightmap_component < 3.0f;
       if (has_skate2_lightmap) {
         owned_flags |=
-            (static_cast<std::uint32_t>(
-                 draw.skate2_lightmap_component) +
-             1u)
+              (static_cast<std::uint32_t>(draw.skate2_lightmap_component) + 1u)
             << 8u;
       }
-      owned_flags |=
-          (draw.presentation_depth_layer & 3u) << 12u;
-      owned_flags |=
-          (draw.presentation_depth_order & 255u) << 14u;
+        owned_flags |= (draw.presentation_depth_layer & 3u) << 12u;
+        owned_flags |= (draw.presentation_depth_order & 255u) << 14u;
       constants[48] =
-          imported ? -static_cast<float>(owned_flags)
-                   : draw.material[0];
+            imported ? -static_cast<float>(owned_flags) : draw.material[0];
       constants[49] =
-          imported ? draw.baked_indirect_strength
-                   : draw.material[1];
+            imported ? draw.baked_indirect_strength : draw.material[1];
       constants[50] = draw.material[2];
       constants[51] =
-          imported
-              ? (draw.material[2] < 0.0f ? -draw.material[2] : 0.0f)
+            imported ? (draw.material[2] < 0.0f ? -draw.material[2] : 0.0f)
               : draw.material[3];
       if (retail_exact) {
         const std::uint32_t family = draw.retail_shader_family;
-        const bool decal_family =
-            family == 3 || family == 4 || family == 23;
+          const bool decal_family = family == 3 || family == 4 || family == 23;
         const bool has_macro = draw.retail_macro_texture != 0;
         const bool has_masks = draw.retail_specular_texture != 0;
         const bool has_normal = draw.normal_texture != 0;
-        const bool has_detail =
-            draw.retail_detail_texture != 0 &&
+          const bool has_detail = draw.retail_detail_texture != 0 &&
             draw.retail_detail_scale > 0.0f;
         std::uint32_t v2_flags = 0;
-        if ((family >= 1 && family <= 4) ||
-            dynamic_object_family) {
+          if ((family >= 1 && family <= 4) || dynamic_object_family) {
           v2_flags |= has_normal ? 1u : 0u;
+            v2_flags |= has_detail && family != 2 ? 2u : 0u;
           v2_flags |=
-              has_detail && family != 2 ? 2u : 0u;
-          v2_flags |=
-              (decal_family || dynamic_object_family) &&
-                      has_masks
-                  ? 4u
-                  : 0u;
+                (decal_family || dynamic_object_family) && has_masks ? 4u : 0u;
         }
         constants[39] = -static_cast<float>(family);
-        constants[40] =
-            draw.indirect_lightmap != 0 ? 1.0f : 0.0f;
+          constants[40] = draw.indirect_lightmap != 0 ? 1.0f : 0.0f;
         constants[41] =
-            has_skate2_lightmap
-                ? draw.skate2_lightmap_component
-                : -1.0f;
+              has_skate2_lightmap ? draw.skate2_lightmap_component : -1.0f;
         constants[42] = dynamic_lighting ? 1.0f : 0.0f;
         constants[43] = 0.0f;
         constants[44] = draw.retail_macro_scale;
         constants[45] = draw.retail_macro_opacity;
         constants[46] = has_macro ? 1.0f : 0.0f;
-        constants[47] =
-            decal_family && draw.retail_decal_texture != 0
+          constants[47] = decal_family && draw.retail_decal_texture != 0
                 ? (family == 4 ? 2.0f : 1.0f)
                 : (has_masks ? 3.0f : 0.0f);
         constants[48] = 0.0f;
@@ -14020,15 +13254,13 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
       ++editor_object_draws;
     }
 
-    if (map_editor::Active() &&
-        map_editor::IsSelected(object_index)) {
+      if (map_editor::Active() && map_editor::IsSelected(object_index)) {
       // Inverted-hull outline: draw only the expanded mesh's back faces.
       // Its interior stays hidden by the selected object's depth, leaving a
       // restrained cyan contour instead of tinting or glowing every pixel.
       if (use_depth && g_r.pso_cullback != nullptr) {
         set_world_basis(
-            x_axis * 1.006f, y_axis * 1.006f,
-            z_axis * 1.006f,
+              x_axis * 1.006f, y_axis * 1.006f, z_axis * 1.006f,
             {world_position[0], world_position[1], world_position[2]});
         cmd->SetPipeline(g_r.pso_cullback);
         cmd->SetTexture(1, g_r.white.srv);
@@ -14045,14 +13277,14 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
         constants[50] = 0.0f;
         constants[51] = 0.0f;
         cmd->SetRootConstants(0, 52, constants, 0);
-        for (const mechanics_sandbox::map::VisualDraw& draw :
-             visual.draws) {
+          for (const mechanics_sandbox::map::VisualDraw& draw : visual.draws) {
           cmd->DrawIndexed(draw.index_count, draw.first_index, 0);
           ++draw_calls;
           ++editor_object_draws;
         }
       }
     }
+  }
   }
 
   if (map_editor::Active()) {
@@ -14063,12 +13295,12 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
       float basis[9] = {};
       const bool pose_ready =
           map_editor::ActiveGizmoHandle() != 0
-              ? map_editor::ObjectTransform(
-                    selected, translation, basis, nullptr)
-              : native_collision::EditableObjectPose(
-                    selected, translation, basis, nullptr) ||
-                    map_editor::ObjectTransform(
-                        selected, translation, basis, nullptr);
+              ? map_editor::ObjectTransform(selected, translation, basis,
+                                            nullptr)
+              : native_collision::EditableObjectPose(selected, translation,
+                                                     basis, nullptr) ||
+                    map_editor::ObjectTransform(selected, translation, basis,
+                                                nullptr);
       const auto mesh = g_r.meshes.find(kSandboxEditorGizmoMesh);
       if (pose_ready && mesh != g_r.meshes.end()) {
         const skate::world::Vec3 pivot{
@@ -14076,21 +13308,18 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
             origin[1] + translation[1],
             origin[2] + translation[2],
         };
-        const skate::world::Vec3 camera{
-            scene.cam_pos[0], scene.cam_pos[1], scene.cam_pos[2]};
+        const skate::world::Vec3 camera{scene.cam_pos[0], scene.cam_pos[1],
+                                        scene.cam_pos[2]};
         const float scale = std::clamp(
-            skate::world::Length(pivot - camera) * 0.12f,
-            0.3f, 8.0f);
-        set_world_translation(
-            pivot.x, pivot.y, pivot.z, scale);
+            skate::world::Length(pivot - camera) * 0.12f, 0.3f, 8.0f);
+        set_world_translation(pivot.x, pivot.y, pivot.z, scale);
         constants[39] = -41.25f;
         mesh->second.last_used_frame = frame_number;
         cmd->SetVertexBuffer(
             mesh->second.vb_view.buffer, mesh->second.vb_view.offset,
-            mesh->second.vb_view.size_bytes,
-            mesh->second.vb_view.stride);
-        cmd->SetIndexBuffer(
-            mesh->second.ib_view.buffer, mesh->second.ib_view.offset,
+            mesh->second.vb_view.size_bytes, mesh->second.vb_view.stride);
+        cmd->SetIndexBuffer(mesh->second.ib_view.buffer,
+                            mesh->second.ib_view.offset,
             mesh->second.ib_view.size_bytes);
         cmd->SetPipeline(g_r.pso_nodepth);
         cmd->SetTexture(1, g_r.white.srv);
@@ -14108,8 +13337,7 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
           constants[50] = draw.material[2];
           constants[51] = draw.material[3];
           cmd->SetRootConstants(0, 52, constants, 0);
-          cmd->DrawIndexed(
-              draw.index_count, draw.first_index, 0);
+          cmd->DrawIndexed(draw.index_count, draw.first_index, 0);
           ++draw_calls;
         }
       }
@@ -14126,29 +13354,24 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
   const float water_frame_seconds =
       std::chrono::duration<float>(water_now - water_clock).count();
   water_clock = water_now;
-  if (mechanics_sandbox::map::AdvanceWaterSimulation(
-          water_frame_seconds)) {
+  if (mechanics_sandbox::map::AdvanceWaterSimulation(water_frame_seconds)) {
     const mechanics_sandbox::map::VisualMesh& water =
         mechanics_sandbox::map::ActiveWaterVisualMesh();
-    if (UpdateSandboxDynamicVisualMesh(
-            context.device, kSandboxWaterMesh, water,
+    if (UpdateSandboxDynamicVisualMesh(context.device, kSandboxWaterMesh, water,
             "simulated water")) {
       const auto water_mesh = g_r.meshes.find(kSandboxWaterMesh);
       if (water_mesh != g_r.meshes.end()) {
         set_world_translation(origin[0], origin[1], origin[2]);
         constants[39] = -43.0f;
         water_mesh->second.last_used_frame = frame_number;
-        cmd->SetVertexBuffer(
-            water_mesh->second.vb_view.buffer,
+        cmd->SetVertexBuffer(water_mesh->second.vb_view.buffer,
             water_mesh->second.vb_view.offset,
             water_mesh->second.vb_view.size_bytes,
             water_mesh->second.vb_view.stride);
-        cmd->SetIndexBuffer(
-            water_mesh->second.ib_view.buffer,
+        cmd->SetIndexBuffer(water_mesh->second.ib_view.buffer,
             water_mesh->second.ib_view.offset,
             water_mesh->second.ib_view.size_bytes);
-        for (const mechanics_sandbox::map::VisualDraw& draw :
-             water.draws) {
+        for (const mechanics_sandbox::map::VisualDraw& draw : water.draws) {
           constants[32] = draw.color[0];
           constants[33] = draw.color[1];
           constants[34] = draw.color[2];
@@ -14158,8 +13381,7 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
           constants[50] = 0.0f;
           constants[51] = 0.0f;
           cmd->SetRootConstants(0, 52, constants, 0);
-          cmd->DrawIndexed(
-              draw.index_count, draw.first_index, 0);
+          cmd->DrawIndexed(draw.index_count, draw.first_index, 0);
           ++draw_calls;
         }
       }
@@ -14168,31 +13390,24 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
     float pusher_position[3] = {};
     const mechanics_sandbox::map::VisualMesh& pusher =
         mechanics_sandbox::map::ActiveWaterPusherVisualMesh();
-    if (mechanics_sandbox::map::ActiveWaterPusherPose(
-            pusher_position) &&
-        EnsureSandboxVisualMesh(
-            context.device, kSandboxWaterPusherMesh, pusher,
+    if (mechanics_sandbox::map::ActiveWaterPusherPose(pusher_position) &&
+        EnsureSandboxVisualMesh(context.device, kSandboxWaterPusherMesh, pusher,
             "water pusher")) {
-      const auto pusher_mesh =
-          g_r.meshes.find(kSandboxWaterPusherMesh);
+      const auto pusher_mesh = g_r.meshes.find(kSandboxWaterPusherMesh);
       if (pusher_mesh != g_r.meshes.end()) {
-        set_world_translation(
-            origin[0] + pusher_position[0],
+        set_world_translation(origin[0] + pusher_position[0],
             origin[1] + pusher_position[1],
             origin[2] + pusher_position[2]);
         constants[39] = -41.25f;
         pusher_mesh->second.last_used_frame = frame_number;
-        cmd->SetVertexBuffer(
-            pusher_mesh->second.vb_view.buffer,
+        cmd->SetVertexBuffer(pusher_mesh->second.vb_view.buffer,
             pusher_mesh->second.vb_view.offset,
             pusher_mesh->second.vb_view.size_bytes,
             pusher_mesh->second.vb_view.stride);
-        cmd->SetIndexBuffer(
-            pusher_mesh->second.ib_view.buffer,
+        cmd->SetIndexBuffer(pusher_mesh->second.ib_view.buffer,
             pusher_mesh->second.ib_view.offset,
             pusher_mesh->second.ib_view.size_bytes);
-        for (const mechanics_sandbox::map::VisualDraw& draw :
-             pusher.draws) {
+        for (const mechanics_sandbox::map::VisualDraw& draw : pusher.draws) {
           constants[32] = draw.color[0];
           constants[33] = draw.color[1];
           constants[34] = draw.color[2];
@@ -14202,8 +13417,7 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
           constants[50] = draw.material[2];
           constants[51] = draw.material[3];
           cmd->SetRootConstants(0, 52, constants, 0);
-          cmd->DrawIndexed(
-              draw.index_count, draw.first_index, 0);
+          cmd->DrawIndexed(draw.index_count, draw.first_index, 0);
           ++draw_calls;
         }
       }
@@ -14216,12 +13430,11 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
   // collision buffers. They are separate GPU meshes so their vertices never
   // need to be rebuilt or uploaded as they move.
   for (std::size_t object_index = 0;
-       object_index < definition.kinematic_boxes.size();
-       ++object_index) {
+       object_index < definition.kinematic_boxes.size(); ++object_index) {
     float position[3] = {};
     float velocity[3] = {};
-    if (!native_collision::KinematicObjectPose(
-            object_index, position, velocity)) {
+    if (!native_collision::KinematicObjectPose(object_index, position,
+                                               velocity)) {
       continue;
     }
     const skate::world::KinematicBox& object =
@@ -14235,24 +13448,19 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
     for (int corner = 0; corner < 8; ++corner) {
       corners[corner][0] =
           world_position[0] +
-          ((corner & 1) ? object.local_max.x
-                        : object.local_min.x);
+          ((corner & 1) ? object.local_max.x : object.local_min.x);
       corners[corner][1] =
           world_position[1] +
-          ((corner & 2) ? object.local_max.y
-                        : object.local_min.y);
+          ((corner & 2) ? object.local_max.y : object.local_min.y);
       corners[corner][2] =
           world_position[2] +
-          ((corner & 4) ? object.local_max.z
-                        : object.local_min.z);
+          ((corner & 4) ? object.local_max.z : object.local_min.z);
     }
     if (CornersOutsideFrustum(corners, scene.view_proj, 1.05f) ||
-        !EnsureSandboxKinematicMesh(
-            context.device, object_index)) {
+        !EnsureSandboxKinematicMesh(context.device, object_index)) {
       continue;
     }
-    const auto mesh = g_r.meshes.find(
-        kSandboxKinematicMeshBase +
+    const auto mesh = g_r.meshes.find(kSandboxKinematicMeshBase +
         static_cast<uint32_t>(object_index));
     if (mesh == g_r.meshes.end()) {
       continue;
@@ -14268,12 +13476,12 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
     cmd->SetVertexBuffer(
         mesh->second.vb_view.buffer, mesh->second.vb_view.offset,
         mesh->second.vb_view.size_bytes, mesh->second.vb_view.stride);
-    cmd->SetIndexBuffer(
-        mesh->second.ib_view.buffer, mesh->second.ib_view.offset,
+    cmd->SetIndexBuffer(mesh->second.ib_view.buffer,
+                        mesh->second.ib_view.offset,
         mesh->second.ib_view.size_bytes);
     for (const mechanics_sandbox::map::VisualDraw& draw :
-         mechanics_sandbox::map::ActiveKinematicVisualMesh(
-             object_index).draws) {
+         mechanics_sandbox::map::ActiveKinematicVisualMesh(object_index)
+             .draws) {
       constants[32] = draw.color[0];
       constants[33] = draw.color[1];
       constants[34] = draw.color[2];
@@ -14292,29 +13500,27 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
   // Blender-authored doors are separate rigid leaves. The same hinge angle
   // published after native collision is used here, so the textured door and
   // its collision volume cannot follow different timelines.
-  const auto rotate_about_axis = [](
-      skate::world::Vec3 value, skate::world::Vec3 axis, float angle) {
+  const auto rotate_about_axis = [](skate::world::Vec3 value,
+                                    skate::world::Vec3 axis, float angle) {
     const float cosine = std::cos(angle);
     const float sine = std::sin(angle);
-    return value * cosine +
-           skate::world::Cross(axis, value) * sine +
+    return value * cosine + skate::world::Cross(axis, value) * sine +
            axis * (skate::world::Dot(axis, value) * (1.0f - cosine));
   };
-  for (std::size_t door_index = 0;
-       door_index < definition.hinged_doors.size(); ++door_index) {
+  for (std::size_t door_index = 0; door_index < definition.hinged_doors.size();
+       ++door_index) {
     float angle = 0.0f;
     float angular_velocity = 0.0f;
-    if (!native_collision::HingedDoorPose(
-            door_index, &angle, &angular_velocity)) {
+    if (!native_collision::HingedDoorPose(door_index, &angle,
+                                          &angular_velocity)) {
       continue;
     }
     (void)angular_velocity;
-    const skate::world::HingedDoor& door =
-        definition.hinged_doors[door_index];
-    const skate::world::Vec3 x_axis = rotate_about_axis(
-        door.closed_width_axis, door.hinge_axis, angle);
-    const skate::world::Vec3 z_axis = rotate_about_axis(
-        door.closed_depth_axis, door.hinge_axis, angle);
+    const skate::world::HingedDoor& door = definition.hinged_doors[door_index];
+    const skate::world::Vec3 x_axis =
+        rotate_about_axis(door.closed_width_axis, door.hinge_axis, angle);
+    const skate::world::Vec3 z_axis =
+        rotate_about_axis(door.closed_depth_axis, door.hinge_axis, angle);
     const skate::world::Vec3 translation{
         origin[0] + door.hinge_position.x,
         origin[1] + door.hinge_position.y,
@@ -14322,15 +13528,12 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
     };
     float corners[8][3];
     for (int corner = 0; corner < 8; ++corner) {
-      const float local_x =
-          (corner & 1) ? door.local_max.x : door.local_min.x;
-      const float local_y =
-          (corner & 2) ? door.local_max.y : door.local_min.y;
-      const float local_z =
-          (corner & 4) ? door.local_max.z : door.local_min.z;
-      const skate::world::Vec3 point =
-          translation + x_axis * local_x +
-          door.hinge_axis * local_y + z_axis * local_z;
+      const float local_x = (corner & 1) ? door.local_max.x : door.local_min.x;
+      const float local_y = (corner & 2) ? door.local_max.y : door.local_min.y;
+      const float local_z = (corner & 4) ? door.local_max.z : door.local_min.z;
+      const skate::world::Vec3 point = translation + x_axis * local_x +
+                                       door.hinge_axis * local_y +
+                                       z_axis * local_z;
       corners[corner][0] = point.x;
       corners[corner][1] = point.y;
       corners[corner][2] = point.z;
@@ -14339,135 +13542,99 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
         !EnsureSandboxHingedDoorMesh(context.device, door_index)) {
       continue;
     }
-    const auto mesh = g_r.meshes.find(
-        kSandboxHingedDoorMeshBase +
+    const auto mesh = g_r.meshes.find(kSandboxHingedDoorMeshBase +
         static_cast<std::uint32_t>(door_index));
     if (mesh == g_r.meshes.end()) {
       continue;
     }
-    set_world_basis(
-        x_axis, door.hinge_axis, z_axis, translation);
+    set_world_basis(x_axis, door.hinge_axis, z_axis, translation);
     constants[39] = -41.0f;
     mesh->second.last_used_frame = frame_number;
     cmd->SetVertexBuffer(
         mesh->second.vb_view.buffer, mesh->second.vb_view.offset,
         mesh->second.vb_view.size_bytes, mesh->second.vb_view.stride);
-    cmd->SetIndexBuffer(
-        mesh->second.ib_view.buffer, mesh->second.ib_view.offset,
+    cmd->SetIndexBuffer(mesh->second.ib_view.buffer,
+                        mesh->second.ib_view.offset,
         mesh->second.ib_view.size_bytes);
     for (const mechanics_sandbox::map::VisualDraw& draw :
-         mechanics_sandbox::map::ActiveHingedDoorVisualMesh(
-             door_index).draws) {
+         mechanics_sandbox::map::ActiveHingedDoorVisualMesh(door_index).draws) {
       const bool imported =
           draw.albedo_texture != 0 || draw.indirect_lightmap != 0 ||
           draw.normal_texture != 0 || draw.orm_texture != 0 ||
-          draw.emissive_texture != 0 ||
-          draw.secondary_albedo_texture != 0 ||
-          draw.blend_mask_texture != 0 ||
-          draw.retail_chromaticity_texture != 0;
+          draw.emissive_texture != 0 || draw.secondary_albedo_texture != 0 ||
+          draw.blend_mask_texture != 0 || draw.retail_chromaticity_texture != 0;
       const bool alpha_blend =
-          draw.alpha_mode ==
-          skate::world::SurfaceMaterial::AlphaMode::Blend;
+          draw.alpha_mode == skate::world::SurfaceMaterial::AlphaMode::Blend;
       nrhi::Pipeline* door_pipeline =
-          use_depth && draw.cull_backfaces &&
-                  g_r.pso_cullback != nullptr
+          use_depth && draw.cull_backfaces && g_r.pso_cullback != nullptr
               ? g_r.pso_cullback
               : (use_depth ? g_r.pso : g_r.pso_nodepth);
       if (alpha_blend && g_r.pso_transparent != nullptr) {
-        door_pipeline =
-            use_depth && draw.cull_backfaces &&
+        door_pipeline = use_depth && draw.cull_backfaces &&
                     g_r.pso_transparent_cullback != nullptr
                 ? g_r.pso_transparent_cullback
                 : g_r.pso_transparent;
       }
       cmd->SetPipeline(door_pipeline);
-      cmd->SetTexture(
-          1, ResolveOwnedMapTexture(context, draw.albedo_texture));
-      cmd->SetTexture(
-          2, ResolveOwnedMapTexture(
-                 context, draw.indirect_lightmap,
+      cmd->SetTexture(1, ResolveOwnedMapTexture(context, draw.albedo_texture));
+      cmd->SetTexture(2, ResolveOwnedMapTexture(context, draw.indirect_lightmap,
                  OwnedTextureRole::Data));
       cmd->SetTexture(
-          4, ResolveOwnedMapTexture(
-                 context, draw.secondary_albedo_texture));
+          4, ResolveOwnedMapTexture(context, draw.secondary_albedo_texture));
       cmd->SetTexturePair(
-          5,
-          ResolveOwnedMapTexture(context, draw.emissive_texture),
-          ResolveOwnedMapTexture(
-              context, draw.normal_texture,
+          5, ResolveOwnedMapTexture(context, draw.emissive_texture),
+          ResolveOwnedMapTexture(context, draw.normal_texture,
               OwnedTextureRole::Normal));
       nrhi::TextureView* door_material_maps[6] = {
           g_r.white.srv,
-          ResolveOwnedMapTexture(
-              context, draw.orm_texture, OwnedTextureRole::Data),
-          g_r.owned_nsm_active ? g_r.owned_static_sun_srv[0]
-                               : g_r.white.srv,
-          g_r.owned_nsm_active ? g_r.owned_static_sun_srv[1]
-                               : g_r.white.srv,
-          g_r.owned_nsm_active ? g_r.owned_static_sun_srv[2]
-                               : g_r.white.srv,
-          ResolveOwnedMapTexture(
-              context, draw.blend_mask_texture,
+          ResolveOwnedMapTexture(context, draw.orm_texture,
+                                 OwnedTextureRole::Data),
+          g_r.owned_nsm_active ? g_r.owned_static_sun_srv[0] : g_r.white.srv,
+          g_r.owned_nsm_active ? g_r.owned_static_sun_srv[1] : g_r.white.srv,
+          g_r.owned_nsm_active ? g_r.owned_static_sun_srv[2] : g_r.white.srv,
+          ResolveOwnedMapTexture(context, draw.blend_mask_texture,
               OwnedTextureRole::Data)};
       cmd->SetTextures(8, door_material_maps, 6);
       constants[32] = draw.color[0];
       constants[33] = draw.color[1];
       constants[34] = draw.color[2];
-      std::uint32_t blender_compatibility =
-          static_cast<std::uint32_t>(std::lround(
-              std::clamp(draw.alpha_cutoff, 0.0f, 1.0f) * 255.0f));
+      std::uint32_t blender_compatibility = static_cast<std::uint32_t>(
+          std::lround(std::clamp(draw.alpha_cutoff, 0.0f, 1.0f) * 255.0f));
       blender_compatibility |=
-          static_cast<std::uint32_t>(std::lround(
-              std::clamp(draw.blend_factor, 0.0f, 1.0f) * 255.0f))
+          static_cast<std::uint32_t>(
+              std::lround(std::clamp(draw.blend_factor, 0.0f, 1.0f) * 255.0f))
           << 8u;
-      blender_compatibility |=
-          (draw.blend_mask_channel & 7u) << 16u;
-      blender_compatibility |=
-          (draw.albedo_address_mode & 3u) << 19u;
-      blender_compatibility |=
-          (draw.secondary_address_mode & 3u) << 21u;
-      blender_compatibility |=
-          (draw.blend_mask_address_mode & 3u) << 23u;
+      blender_compatibility |= (draw.blend_mask_channel & 7u) << 16u;
+      blender_compatibility |= (draw.albedo_address_mode & 3u) << 19u;
+      blender_compatibility |= (draw.secondary_address_mode & 3u) << 21u;
+      blender_compatibility |= (draw.blend_mask_address_mode & 3u) << 23u;
       constants[35] =
           imported ? std::bit_cast<float>(blender_compatibility) : 0.0f;
       std::uint32_t owned_flags = 1u;
-      owned_flags |=
-          static_cast<std::uint32_t>(draw.alpha_mode) << 1u;
+      owned_flags |= static_cast<std::uint32_t>(draw.alpha_mode) << 1u;
       owned_flags |= draw.normal_texture != 0 ? 8u : 0u;
       owned_flags |= draw.orm_texture != 0 ? 16u : 0u;
       owned_flags |= draw.emissive_texture != 0 ? 32u : 0u;
       owned_flags |= draw.indirect_lightmap != 0 ? 64u : 0u;
-      owned_flags |=
-          draw.secondary_albedo_texture != 0 ? (1u << 22u) : 0u;
-      owned_flags |=
-          draw.blend_mask_texture != 0 ? (1u << 23u) : 0u;
-      const bool has_skate2_lightmap =
-          draw.retail_chromaticity_texture != 0 &&
+      owned_flags |= draw.secondary_albedo_texture != 0 ? (1u << 22u) : 0u;
+      owned_flags |= draw.blend_mask_texture != 0 ? (1u << 23u) : 0u;
+      const bool has_skate2_lightmap = draw.retail_chromaticity_texture != 0 &&
           draw.skate2_lightmap_component >= 0.0f &&
           draw.skate2_lightmap_component < 3.0f;
       if (has_skate2_lightmap) {
         owned_flags |=
-            (static_cast<std::uint32_t>(
-                 draw.skate2_lightmap_component) +
-             1u)
+            (static_cast<std::uint32_t>(draw.skate2_lightmap_component) + 1u)
             << 8u;
       }
-      owned_flags |=
-          (draw.presentation_depth_layer & 3u) << 12u;
-      owned_flags |=
-          (draw.presentation_depth_order & 255u) << 14u;
+      owned_flags |= (draw.presentation_depth_layer & 3u) << 12u;
+      owned_flags |= (draw.presentation_depth_order & 255u) << 14u;
       constants[48] =
-          imported ? -static_cast<float>(owned_flags)
-                   : draw.material[0];
+          imported ? -static_cast<float>(owned_flags) : draw.material[0];
       constants[49] =
-          imported ? draw.baked_indirect_strength
-                   : draw.material[1];
+          imported ? draw.baked_indirect_strength : draw.material[1];
       constants[50] = draw.material[2];
-      constants[51] =
-          imported
-              ? (draw.material[2] < 0.0f
-                     ? -draw.material[2]
-                     : 0.0f)
+      constants[51] = imported
+                          ? (draw.material[2] < 0.0f ? -draw.material[2] : 0.0f)
               : draw.material[3];
       cmd->SetRootConstants(0, 52, constants, 0);
       cmd->DrawIndexed(draw.index_count, draw.first_index, 0);
@@ -14500,22 +13667,17 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
   float local_capture_maximum_exact_distance = 0.0f;
   trick_pipeline::LiveSpatialSnapshot local_spatial;
   const bool have_local_spatial =
-      trick_pipeline::CurrentLiveSpatialSnapshot(
-          local_spatial);
+      trick_pipeline::CurrentLiveSpatialSnapshot(local_spatial);
   const bool local_skater_offboard =
-      have_local_spatial &&
-      local_spatial.board_state_flags != 0xFFFFFFFFu &&
+      have_local_spatial && local_spatial.board_state_flags != 0xFFFFFFFFu &&
       (local_spatial.board_state_flags & 0x7u) != 0;
   const bool have_local_board_position =
-      trick_pipeline::CurrentLocalBoardPosition(
-          local_board_position);
+      trick_pipeline::CurrentLocalBoardPosition(local_board_position);
   if (have_local_board_position) {
-    std::memcpy(
-        local_animation.root_position, local_board_position,
+    std::memcpy(local_animation.root_position, local_board_position,
         sizeof(local_animation.root_position));
     for (const DrawItem& item : scene.items) {
-      if (!item.dyn_entity || item.pending || item.retained ||
-          item.ctx == 0) {
+      if (!item.dyn_entity || item.pending || item.retained || item.ctx == 0) {
         continue;
       }
       native_entity::CtxInfo identity;
@@ -14532,12 +13694,9 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
       }
       ++local_capture_skater_items;
       const bool exact_local_presentation =
-          local_presentation != 0 &&
-          identity.entity == local_presentation;
-      local_capture_exact_items +=
-          exact_local_presentation ? 1u : 0u;
-      float anchor[3] = {
-          item.world[12], item.world[13], item.world[14]};
+          local_presentation != 0 && identity.entity == local_presentation;
+      local_capture_exact_items += exact_local_presentation ? 1u : 0u;
+      float anchor[3] = {item.world[12], item.world[13], item.world[14]};
       if (item.bones.size() >= 12) {
         anchor[0] = item.bones[3];
         anchor[1] = item.bones[7];
@@ -14547,44 +13706,35 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
       const float dy = anchor[1] - local_board_position[1];
       const float dz = anchor[2] - local_board_position[2];
       const bool finite_distance =
-          std::isfinite(dx) && std::isfinite(dy) &&
-          std::isfinite(dz);
+          std::isfinite(dx) && std::isfinite(dy) && std::isfinite(dz);
       const float distance_squared =
-          finite_distance
-              ? dx * dx + dy * dy + dz * dz
+          finite_distance ? dx * dx + dy * dy + dz * dz
               : std::numeric_limits<float>::infinity();
       bool detached_board_piece = false;
       if (local_skater_offboard && finite_distance &&
           distance_squared >
-              multiplayer::capture::
-                  kFallbackBoardRadiusSquared &&
+              multiplayer::capture::kFallbackBoardRadiusSquared &&
           item.skinned) {
         native_palette::CanonicalRigSample board_rig;
         detached_board_piece =
-            native_palette::LookupCanonicalRig(
-                item.ctx, item.mesh, board_rig) &&
-            std::any_of(
-                board_rig.palette_to_canonical.begin(),
+            native_palette::LookupCanonicalRig(item.ctx, item.mesh,
+                                               board_rig) &&
+            std::any_of(board_rig.palette_to_canonical.begin(),
                 board_rig.palette_to_canonical.end(),
                 [](std::size_t canonical_bone) {
-                  return canonical_bone >= 25 &&
-                         canonical_bone <= 31;
+                          return canonical_bone >= 25 && canonical_bone <= 31;
                 });
       }
       if (exact_local_presentation && finite_distance &&
           distance_squared >
-              multiplayer::capture::
-                  kFallbackBoardRadiusSquared) {
+              multiplayer::capture::kFallbackBoardRadiusSquared) {
         ++local_capture_far_exact_items;
-        local_capture_maximum_exact_distance =
-            std::max(
-                local_capture_maximum_exact_distance,
-                std::sqrt(distance_squared));
+        local_capture_maximum_exact_distance = std::max(
+            local_capture_maximum_exact_distance, std::sqrt(distance_squared));
       }
       if (!multiplayer::capture::LocalPresentationPieceOwned(
-              local_presentation, identity.entity,
-              finite_distance, distance_squared,
-              detached_board_piece)) {
+              local_presentation, identity.entity, finite_distance,
+              distance_squared, detached_board_piece)) {
         ++local_capture_rejected_items;
         continue;
       }
@@ -14600,45 +13750,33 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
         }
       }
       local_player_items.push_back(&item);
-      if (!item.skinned || item.bones.empty() ||
-          item.bones.size() % 12 != 0) {
+      if (!item.skinned || item.bones.empty() || item.bones.size() % 12 != 0) {
         continue;
       }
       native_palette::CanonicalRigSample rig;
-      if (!native_palette::LookupCanonicalRig(
-              item.ctx, item.mesh, rig) ||
-          rig.canonical_rows.empty() ||
-          rig.canonical_rows.size() % 12 != 0 ||
+      if (!native_palette::LookupCanonicalRig(item.ctx, item.mesh, rig) ||
+          rig.canonical_rows.empty() || rig.canonical_rows.size() % 12 != 0 ||
           rig.palette_to_canonical.empty()) {
         continue;
       }
       if (!local_animation.presentation_root_valid) {
         const std::size_t palette_bones =
-            std::min(
-                item.bones.size() / 12,
-                rig.palette_to_canonical.size());
-        for (std::size_t palette_bone = 0;
-             palette_bone < palette_bones; ++palette_bone) {
+            std::min(item.bones.size() / 12, rig.palette_to_canonical.size());
+        for (std::size_t palette_bone = 0; palette_bone < palette_bones;
+             ++palette_bone) {
           if (rig.palette_to_canonical[palette_bone] != 0) {
             continue;
           }
-          const float* root =
-              item.bones.data() + palette_bone * 12;
-          float x_axis[3] = {
-              root[0], root[4], root[8]};
-          float z_axis[3] = {
-              root[2], root[6], root[10]};
+          const float* root = item.bones.data() + palette_bone * 12;
+          float x_axis[3] = {root[0], root[4], root[8]};
+          float z_axis[3] = {root[2], root[6], root[10]};
           const auto normalize_axis = [](float axis[3]) {
             const float length_squared =
-                axis[0] * axis[0] +
-                axis[1] * axis[1] +
-                axis[2] * axis[2];
-            if (!std::isfinite(length_squared) ||
-                length_squared < 1.0e-8f) {
+                axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2];
+            if (!std::isfinite(length_squared) || length_squared < 1.0e-8f) {
               return false;
             }
-            const float inverse_length =
-                1.0f / std::sqrt(length_squared);
+            const float inverse_length = 1.0f / std::sqrt(length_squared);
             axis[0] *= inverse_length;
             axis[1] *= inverse_length;
             axis[2] *= inverse_length;
@@ -14647,45 +13785,30 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
           if (!normalize_axis(x_axis)) {
             continue;
           }
-          const float projection =
-              z_axis[0] * x_axis[0] +
+          const float projection = z_axis[0] * x_axis[0] +
               z_axis[1] * x_axis[1] +
               z_axis[2] * x_axis[2];
-          for (std::size_t component = 0;
-               component < 3; ++component) {
-            z_axis[component] -=
-                x_axis[component] * projection;
+          for (std::size_t component = 0; component < 3; ++component) {
+            z_axis[component] -= x_axis[component] * projection;
           }
-          const float root_position[3] = {
-              root[3], root[7], root[11]};
-          const float dx =
-              root_position[0] - local_board_position[0];
-          const float dy =
-              root_position[1] - local_board_position[1];
-          const float dz =
-              root_position[2] - local_board_position[2];
-          if (!normalize_axis(z_axis) ||
-              !std::isfinite(dx) || !std::isfinite(dy) ||
-              !std::isfinite(dz) ||
+          const float root_position[3] = {root[3], root[7], root[11]};
+          const float dx = root_position[0] - local_board_position[0];
+          const float dy = root_position[1] - local_board_position[1];
+          const float dz = root_position[2] - local_board_position[2];
+          if (!normalize_axis(z_axis) || !std::isfinite(dx) ||
+              !std::isfinite(dy) || !std::isfinite(dz) ||
               dx * dx + dy * dy + dz * dz > 16.0f) {
             continue;
           }
-          std::copy_n(
-              root_position, 3,
+          std::copy_n(root_position, 3,
               local_animation.presentation_root_position);
           // Bone rows and their translation reference must describe the
           // same immutable scene sample. Using the independently sampled
           // physics-board position here makes the whole skeleton jump by
           // the capture-time difference on each animation update.
-          std::copy_n(
-              root_position, 3,
-              local_animation.root_position);
-          std::copy_n(
-              x_axis, 3,
-              local_animation.presentation_root_x_axis);
-          std::copy_n(
-              z_axis, 3,
-              local_animation.presentation_root_z_axis);
+          std::copy_n(root_position, 3, local_animation.root_position);
+          std::copy_n(x_axis, 3, local_animation.presentation_root_x_axis);
+          std::copy_n(z_axis, 3, local_animation.presentation_root_z_axis);
           local_animation.root_bone = 0;
           local_animation.presentation_root_valid = true;
           break;
@@ -14698,41 +13821,31 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
       // storage; choosing the lower-error interpretation here is a layout
       // conversion, not a positional correction.
       const bool rig_has_canonical_root =
-          std::find(
-              rig.palette_to_canonical.begin(),
+          std::find(rig.palette_to_canonical.begin(),
               rig.palette_to_canonical.end(),
-              std::size_t{0}) !=
-          rig.palette_to_canonical.end();
+                    std::size_t{0}) != rig.palette_to_canonical.end();
       if (local_animation.tracks.empty() ||
-          (!local_animation_root_anchored &&
-           rig_has_canonical_root)) {
-        const auto layout_error =
-            [&item, &rig](const std::vector<float>& rows) {
+          (!local_animation_root_anchored && rig_has_canonical_root)) {
+        const auto layout_error = [&item,
+                                   &rig](const std::vector<float>& rows) {
               if (rows.empty() || rows.size() % 12 != 0) {
                 return std::numeric_limits<double>::infinity();
               }
-              const std::size_t canonical_bones =
-                  rows.size() / 12;
+          const std::size_t canonical_bones = rows.size() / 12;
               const std::size_t palette_bones =
-                  std::min(
-                      item.bones.size() / 12,
-                      rig.palette_to_canonical.size());
+              std::min(item.bones.size() / 12, rig.palette_to_canonical.size());
               double error = 0.0;
               std::size_t compared = 0;
-              for (std::size_t palette_bone = 0;
-                   palette_bone < palette_bones;
+          for (std::size_t palette_bone = 0; palette_bone < palette_bones;
                    ++palette_bone) {
                 const std::size_t canonical_bone =
                     rig.palette_to_canonical[palette_bone];
                 if (canonical_bone >= canonical_bones) {
                   continue;
                 }
-                const float* candidate =
-                    rows.data() + canonical_bone * 12;
-                const float* rendered =
-                    item.bones.data() + palette_bone * 12;
-                for (std::size_t component = 0;
-                     component < 12; ++component) {
+            const float* candidate = rows.data() + canonical_bone * 12;
+            const float* rendered = item.bones.data() + palette_bone * 12;
+            for (std::size_t component = 0; component < 12; ++component) {
                   if (!std::isfinite(candidate[component]) ||
                       !std::isfinite(rendered[component])) {
                     return std::numeric_limits<double>::infinity();
@@ -14744,35 +13857,26 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
                   ++compared;
                 }
               }
-              return compared == 0
-                         ? std::numeric_limits<double>::infinity()
+          return compared == 0 ? std::numeric_limits<double>::infinity()
                          : error / double(compared);
             };
-        const double row_vector_error =
-            layout_error(rig.canonical_rows);
+        const double row_vector_error = layout_error(rig.canonical_rows);
         const double column_vector_error =
-            layout_error(
-                rig.canonical_rows_column_vector);
+            layout_error(rig.canonical_rows_column_vector);
         const bool use_column_vector = false;
         std::vector<float> canonical_world;
-        std::size_t transform_anchor =
-            std::numeric_limits<std::size_t>::max();
+        std::size_t transform_anchor = std::numeric_limits<std::size_t>::max();
         const auto transform_to_world =
             [&item, &rig, &transform_anchor](
                 const std::vector<float>& local_rows,
                 std::vector<float>& world_rows) {
-              const std::size_t canonical_bones =
-                  local_rows.size() / 12;
-              const std::size_t palette_bones =
-                  std::min(
-                      item.bones.size() / 12,
-                      rig.palette_to_canonical.size());
+              const std::size_t canonical_bones = local_rows.size() / 12;
+              const std::size_t palette_bones = std::min(
+                  item.bones.size() / 12, rig.palette_to_canonical.size());
               float local_to_world[12] = {};
               bool valid = false;
-              for (std::size_t pass = 0;
-                   pass < 2 && !valid; ++pass) {
-                for (std::size_t palette_bone = 0;
-                     palette_bone < palette_bones;
+              for (std::size_t pass = 0; pass < 2 && !valid; ++pass) {
+                for (std::size_t palette_bone = 0; palette_bone < palette_bones;
                      ++palette_bone) {
                   const std::size_t canonical_bone =
                       rig.palette_to_canonical[palette_bone];
@@ -14782,59 +13886,38 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
                       canonical_bone >= canonical_bones) {
                     continue;
                   }
-                  const float* local =
-                      local_rows.data() + canonical_bone * 12;
+                  const float* local = local_rows.data() + canonical_bone * 12;
                   const float determinant =
-                      local[0] *
-                              (local[5] * local[10] -
-                               local[6] * local[9]) -
-                      local[1] *
-                              (local[4] * local[10] -
-                               local[6] * local[8]) +
-                      local[2] *
-                              (local[4] * local[9] -
-                               local[5] * local[8]);
+                      local[0] * (local[5] * local[10] - local[6] * local[9]) -
+                      local[1] * (local[4] * local[10] - local[6] * local[8]) +
+                      local[2] * (local[4] * local[9] - local[5] * local[8]);
                   if (!std::isfinite(determinant) ||
                       std::fabs(determinant) < 1.0e-8f) {
                     continue;
                   }
                   const float d = 1.0f / determinant;
                   const float inverse[9] = {
-                      (local[5] * local[10] -
-                       local[6] * local[9]) * d,
-                      (local[2] * local[9] -
-                       local[1] * local[10]) * d,
-                      (local[1] * local[6] -
-                       local[2] * local[5]) * d,
-                      (local[6] * local[8] -
-                       local[4] * local[10]) * d,
-                      (local[0] * local[10] -
-                       local[2] * local[8]) * d,
-                      (local[2] * local[4] -
-                       local[0] * local[6]) * d,
-                      (local[4] * local[9] -
-                       local[5] * local[8]) * d,
-                      (local[1] * local[8] -
-                       local[0] * local[9]) * d,
-                      (local[0] * local[5] -
-                       local[1] * local[4]) * d};
-                  const float* rendered =
-                      item.bones.data() + palette_bone * 12;
+                      (local[5] * local[10] - local[6] * local[9]) * d,
+                      (local[2] * local[9] - local[1] * local[10]) * d,
+                      (local[1] * local[6] - local[2] * local[5]) * d,
+                      (local[6] * local[8] - local[4] * local[10]) * d,
+                      (local[0] * local[10] - local[2] * local[8]) * d,
+                      (local[2] * local[4] - local[0] * local[6]) * d,
+                      (local[4] * local[9] - local[5] * local[8]) * d,
+                      (local[1] * local[8] - local[0] * local[9]) * d,
+                      (local[0] * local[5] - local[1] * local[4]) * d};
+                  const float* rendered = item.bones.data() + palette_bone * 12;
                   for (std::size_t row = 0; row < 3; ++row) {
-                    for (std::size_t column = 0;
-                         column < 3; ++column) {
+                    for (std::size_t column = 0; column < 3; ++column) {
                       local_to_world[row * 4 + column] = 0.0f;
-                      for (std::size_t inner = 0;
-                           inner < 3; ++inner) {
+                      for (std::size_t inner = 0; inner < 3; ++inner) {
                         local_to_world[row * 4 + column] +=
                             rendered[row * 4 + inner] *
                             inverse[inner * 3 + column];
                       }
                     }
-                    local_to_world[row * 4 + 3] =
-                        rendered[row * 4 + 3];
-                    for (std::size_t inner = 0;
-                         inner < 3; ++inner) {
+                    local_to_world[row * 4 + 3] = rendered[row * 4 + 3];
+                    for (std::size_t inner = 0; inner < 3; ++inner) {
                       local_to_world[row * 4 + 3] -=
                           local_to_world[row * 4 + inner] *
                           local[inner * 4 + 3];
@@ -14849,128 +13932,91 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
                 return false;
               }
               world_rows.resize(local_rows.size());
-              for (std::size_t bone = 0;
-                   bone < canonical_bones; ++bone) {
-                const float* local =
-                    local_rows.data() + bone * 12;
-                float* world =
-                    world_rows.data() + bone * 12;
+              for (std::size_t bone = 0; bone < canonical_bones; ++bone) {
+                const float* local = local_rows.data() + bone * 12;
+                float* world = world_rows.data() + bone * 12;
                 for (std::size_t row = 0; row < 3; ++row) {
-                  for (std::size_t column = 0;
-                       column < 3; ++column) {
+                  for (std::size_t column = 0; column < 3; ++column) {
                     world[row * 4 + column] = 0.0f;
-                    for (std::size_t inner = 0;
-                         inner < 3; ++inner) {
+                    for (std::size_t inner = 0; inner < 3; ++inner) {
                       world[row * 4 + column] +=
                           local_to_world[row * 4 + inner] *
                           local[inner * 4 + column];
                     }
                   }
-                  world[row * 4 + 3] =
-                      local_to_world[row * 4 + 3];
-                  for (std::size_t inner = 0;
-                       inner < 3; ++inner) {
+                  world[row * 4 + 3] = local_to_world[row * 4 + 3];
+                  for (std::size_t inner = 0; inner < 3; ++inner) {
                     world[row * 4 + 3] +=
-                        local_to_world[row * 4 + inner] *
-                        local[inner * 4 + 3];
+                        local_to_world[row * 4 + inner] * local[inner * 4 + 3];
                   }
                 }
               }
               return true;
             };
-        if (!transform_to_world(
-                rig.canonical_rows, canonical_world)) {
+        if (!transform_to_world(rig.canonical_rows, canonical_world)) {
           continue;
         }
         if (!local_animation.presentation_root_valid &&
-            transform_anchor !=
-                std::numeric_limits<std::size_t>::max()) {
-          const auto anchor_it = std::find(
-              rig.palette_to_canonical.begin(),
-              rig.palette_to_canonical.end(),
-              transform_anchor);
-          const std::size_t palette_anchor =
-              static_cast<std::size_t>(
-                  anchor_it -
-                  rig.palette_to_canonical.begin());
+            transform_anchor != std::numeric_limits<std::size_t>::max()) {
+          const auto anchor_it =
+              std::find(rig.palette_to_canonical.begin(),
+                        rig.palette_to_canonical.end(), transform_anchor);
+          const std::size_t palette_anchor = static_cast<std::size_t>(
+              anchor_it - rig.palette_to_canonical.begin());
           if (anchor_it != rig.palette_to_canonical.end() &&
               (palette_anchor + 1) * 12 <= item.bones.size()) {
-            const float* root =
-                item.bones.data() + palette_anchor * 12;
-            float x_axis[3] = {
-                root[0], root[4], root[8]};
-            float z_axis[3] = {
-                root[2], root[6], root[10]};
+            const float* root = item.bones.data() + palette_anchor * 12;
+            float x_axis[3] = {root[0], root[4], root[8]};
+            float z_axis[3] = {root[2], root[6], root[10]};
             const auto normalize_axis = [](float axis[3]) {
               const float length_squared =
-                  axis[0] * axis[0] +
-                  axis[1] * axis[1] +
-                  axis[2] * axis[2];
-              if (!std::isfinite(length_squared) ||
-                  length_squared < 1.0e-8f) {
+                  axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2];
+              if (!std::isfinite(length_squared) || length_squared < 1.0e-8f) {
                 return false;
               }
-              const float inverse_length =
-                  1.0f / std::sqrt(length_squared);
+              const float inverse_length = 1.0f / std::sqrt(length_squared);
               axis[0] *= inverse_length;
               axis[1] *= inverse_length;
               axis[2] *= inverse_length;
               return true;
             };
             if (normalize_axis(x_axis)) {
-              const float projection =
-                  z_axis[0] * x_axis[0] +
+              const float projection = z_axis[0] * x_axis[0] +
                   z_axis[1] * x_axis[1] +
                   z_axis[2] * x_axis[2];
-              for (std::size_t component = 0;
-                   component < 3; ++component) {
-                z_axis[component] -=
-                    x_axis[component] * projection;
+              for (std::size_t component = 0; component < 3; ++component) {
+                z_axis[component] -= x_axis[component] * projection;
               }
-              const float root_position[3] = {
-                  root[3], root[7], root[11]};
-              if (normalize_axis(z_axis) &&
-                  std::isfinite(root_position[0]) &&
+              const float root_position[3] = {root[3], root[7], root[11]};
+              if (normalize_axis(z_axis) && std::isfinite(root_position[0]) &&
                   std::isfinite(root_position[1]) &&
                   std::isfinite(root_position[2])) {
-                std::copy_n(
-                    root_position, 3,
-                    local_animation
-                        .presentation_root_position);
-                std::copy_n(
-                    root_position, 3,
-                    local_animation.root_position);
-                std::copy_n(
-                    x_axis, 3,
-                    local_animation
-                        .presentation_root_x_axis);
-                std::copy_n(
-                    z_axis, 3,
-                    local_animation
-                        .presentation_root_z_axis);
+                std::copy_n(root_position, 3,
+                            local_animation.presentation_root_position);
+                std::copy_n(root_position, 3, local_animation.root_position);
+                std::copy_n(x_axis, 3,
+                            local_animation.presentation_root_x_axis);
+                std::copy_n(z_axis, 3,
+                            local_animation.presentation_root_z_axis);
                 local_animation.root_bone =
-                    static_cast<std::uint16_t>(
-                        transform_anchor);
+                    static_cast<std::uint16_t>(transform_anchor);
                 local_animation.presentation_root_valid = true;
               }
             }
           }
         }
-        static std::atomic<std::uint32_t>
-            s_canonical_layout_logs{0};
-        if (s_canonical_layout_logs.fetch_add(
-                1, std::memory_order_relaxed) < 4) {
+        static std::atomic<std::uint32_t> s_canonical_layout_logs{0};
+        if (s_canonical_layout_logs.fetch_add(1, std::memory_order_relaxed) <
+            4) {
           REXLOG_INFO(
               "multiplayer: canonical Matrix44 layout={} "
               "row_error={:.6f} column_error={:.6f} "
               "mesh={:08X} anchor={} "
               "item_world=({:.6f},{:.6f},{:.6f}) "
               "animation_root=({:.6f},{:.6f},{:.6f})",
-              use_column_vector ? "column-vector"
-                                : "row-vector",
-              row_vector_error, column_vector_error,
-              item.mesh, transform_anchor,
-              item.world[12], item.world[13], item.world[14],
+              use_column_vector ? "column-vector" : "row-vector",
+              row_vector_error, column_vector_error, item.mesh,
+              transform_anchor, item.world[12], item.world[13], item.world[14],
               local_animation.root_position[0],
               local_animation.root_position[1],
               local_animation.root_position[2]);
@@ -14979,15 +14025,13 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
         local_animation.tracks.push_back(
             {multiplayer::kCanonicalSkeletonTrackKey,
              std::move(canonical_world)});
-        local_animation_root_anchored =
-            rig_has_canonical_root;
+        local_animation_root_anchored = rig_has_canonical_root;
       }
     }
   }
 
   {
-    const bool have_local_animation =
-        !local_animation.tracks.empty();
+    const bool have_local_animation = !local_animation.tracks.empty();
     static int s_previous_capture_state = -1;
     static bool s_far_exact_episode = false;
     const int capture_state = have_local_animation ? 1 : 0;
@@ -14997,19 +14041,15 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
           "board={} scene_items={} skater_items={} exact_items={} "
           "accepted_items={} rejected_items={} far_exact_items={} "
           "max_exact_distance={:.3f} tracks={}",
-          have_local_animation ? "ready" : "missing",
-          local_presentation,
-          have_local_board_position ? 1 : 0,
-          scene.items.size(), local_capture_skater_items,
-          local_capture_exact_items, local_player_items.size(),
-          local_capture_rejected_items,
-          local_capture_far_exact_items,
-          local_capture_maximum_exact_distance,
+          have_local_animation ? "ready" : "missing", local_presentation,
+          have_local_board_position ? 1 : 0, scene.items.size(),
+          local_capture_skater_items, local_capture_exact_items,
+          local_player_items.size(), local_capture_rejected_items,
+          local_capture_far_exact_items, local_capture_maximum_exact_distance,
           local_animation.tracks.size());
       s_previous_capture_state = capture_state;
     }
-    const bool far_exact_episode =
-        local_capture_far_exact_items != 0;
+    const bool far_exact_episode = local_capture_far_exact_items != 0;
     if (far_exact_episode && !s_far_exact_episode) {
       REXLOG_INFO(
           "multiplayer-local-capture: exact entity accepted beyond "
@@ -15030,53 +14070,40 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
   if (!local_animation.tracks.empty() &&
       local_animation.tracks.front().mesh_key ==
           multiplayer::kCanonicalSkeletonTrackKey) {
-    std::vector<float>& canonical =
-        local_animation.tracks.front().bone_rows;
-    const std::size_t canonical_bones =
-        canonical.size() / 12;
+    std::vector<float>& canonical = local_animation.tracks.front().bone_rows;
+    const std::size_t canonical_bones = canonical.size() / 12;
     for (const DrawItem* item : local_player_items) {
-      if (item == nullptr || !item->skinned ||
-          item->bones.empty() ||
+      if (item == nullptr || !item->skinned || item->bones.empty() ||
           item->bones.size() % 12 != 0) {
         continue;
       }
       native_palette::CanonicalRigSample rig;
-      if (!native_palette::LookupCanonicalRig(
-              item->ctx, item->mesh, rig) ||
+      if (!native_palette::LookupCanonicalRig(item->ctx, item->mesh, rig) ||
           rig.palette_to_canonical.empty()) {
         continue;
       }
       const std::size_t palette_bones =
-          std::min(
-              item->bones.size() / 12,
-              rig.palette_to_canonical.size());
-      for (std::size_t palette_bone = 0;
-           palette_bone < palette_bones; ++palette_bone) {
+          std::min(item->bones.size() / 12, rig.palette_to_canonical.size());
+      for (std::size_t palette_bone = 0; palette_bone < palette_bones;
+           ++palette_bone) {
         const std::size_t canonical_bone =
             rig.palette_to_canonical[palette_bone];
         if (canonical_bone >= canonical_bones) {
           continue;
         }
-        const float* source =
-            item->bones.data() + palette_bone * 12;
+        const float* source = item->bones.data() + palette_bone * 12;
         float basis_energy = 0.0f;
         bool finite = true;
-        for (std::size_t component = 0;
-             component < 12; ++component) {
-          finite =
-              finite && std::isfinite(source[component]);
-          if (component != 3 && component != 7 &&
-              component != 11) {
-            basis_energy +=
-                source[component] * source[component];
+        for (std::size_t component = 0; component < 12; ++component) {
+          finite = finite && std::isfinite(source[component]);
+          if (component != 3 && component != 7 && component != 11) {
+            basis_energy += source[component] * source[component];
           }
         }
         if (!finite || basis_energy <= 0.01f) {
           continue;
         }
-        std::copy_n(
-            source, 12,
-            canonical.begin() + canonical_bone * 12);
+        std::copy_n(source, 12, canonical.begin() + canonical_bone * 12);
       }
     }
   }
@@ -15086,35 +14113,23 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
   // take precedence on the receiver.
   if (!local_animation.tracks.empty()) {
     for (const DrawItem* item : local_player_items) {
-      if (item == nullptr || !item->skinned ||
-          item->bones.empty() ||
+      if (item == nullptr || !item->skinned || item->bones.empty() ||
           item->bones.size() % 12 != 0) {
         continue;
       }
       std::size_t weighted_rows = 0;
       {
-        std::lock_guard<std::mutex> lock(
-            g_skin_probe_mutex);
+        std::lock_guard<std::mutex> lock(g_skin_probe_mutex);
         const auto probe = g_skin_probe.find(item->mesh);
         if (probe != g_skin_probe.end()) {
-          for (const SkinProbeSample& sample :
-               probe->second.s) {
-            for (std::size_t influence = 0;
-                 influence < 4; ++influence) {
-              const std::uint8_t weight =
-                  static_cast<std::uint8_t>(
-                      (sample.bw >>
-                       (influence * 8)) &
-                      0xFFu);
-              const std::uint8_t bone =
-                  static_cast<std::uint8_t>(
-                      (sample.bi >>
-                       (influence * 8)) &
-                      0xFFu);
+          for (const SkinProbeSample& sample : probe->second.s) {
+            for (std::size_t influence = 0; influence < 4; ++influence) {
+              const std::uint8_t weight = static_cast<std::uint8_t>(
+                  (sample.bw >> (influence * 8)) & 0xFFu);
+              const std::uint8_t bone = static_cast<std::uint8_t>(
+                  (sample.bi >> (influence * 8)) & 0xFFu);
               if (weight != 0) {
-                weighted_rows = std::max(
-                    weighted_rows,
-                    std::size_t(bone) + 1);
+                weighted_rows = std::max(weighted_rows, std::size_t(bone) + 1);
               }
             }
           }
@@ -15123,8 +14138,7 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
       if (weighted_rows == 0) {
         continue;
       }
-      weighted_rows = std::min(
-          weighted_rows, item->bones.size() / 12);
+      weighted_rows = std::min(weighted_rows, item->bones.size() / 12);
       // Capture every live final palette as an exact track. The canonical
       // hierarchy remains in the packet for bind-skinned ROPA and fallback,
       // but a sender-owned appearance piece should consume the exact matrix
@@ -15134,16 +14148,13 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
       // walking skater.
       multiplayer::AnimationTrack exact_track;
       exact_track.mesh_key = item->mesh;
-      exact_track.bone_rows.assign(
-          item->bones.begin(),
-          item->bones.begin() +
-              weighted_rows * 12);
-      local_animation.tracks.push_back(
-          std::move(exact_track));
+      exact_track.bone_rows.assign(item->bones.begin(),
+                                   item->bones.begin() + weighted_rows * 12);
+      local_animation.tracks.push_back(std::move(exact_track));
     }
   }
-  RecordLocalVisibleMotion(
-      local_player_items, scene, context.guest_output_width,
+  RecordLocalVisibleMotion(local_player_items, scene,
+                           context.guest_output_width,
       context.guest_output_height);
   RecordLocalCaptureCadence(local_animation);
 
@@ -15153,8 +14164,7 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
   // wrong destination row without altering their presentation.
   {
     static bool s_logged_multiplayer_rig_audit = false;
-    if (!s_logged_multiplayer_rig_audit &&
-        !local_animation.tracks.empty() &&
+    if (!s_logged_multiplayer_rig_audit && !local_animation.tracks.empty() &&
         local_animation.tracks.front().mesh_key ==
             multiplayer::kCanonicalSkeletonTrackKey) {
       s_logged_multiplayer_rig_audit = true;
@@ -15165,28 +14175,19 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
         native_palette::CanonicalRigSample rig;
         const bool have_rig =
             item != nullptr &&
-            native_palette::LookupCanonicalRig(
-                item->ctx, item->mesh, rig) &&
+            native_palette::LookupCanonicalRig(item->ctx, item->mesh, rig) &&
             !rig.palette_to_canonical.empty();
         std::array<bool, 256> weighted{};
         {
           std::lock_guard<std::mutex> lock(g_skin_probe_mutex);
           const auto probe = g_skin_probe.find(item->mesh);
           if (probe != g_skin_probe.end()) {
-            for (const SkinProbeSample& sample :
-                 probe->second.s) {
-              for (std::size_t influence = 0;
-                   influence < 4; ++influence) {
-                const std::uint8_t weight =
-                    static_cast<std::uint8_t>(
-                        (sample.bw >>
-                         (influence * 8)) &
-                        0xFFu);
-                const std::uint8_t bone =
-                    static_cast<std::uint8_t>(
-                        (sample.bi >>
-                         (influence * 8)) &
-                        0xFFu);
+            for (const SkinProbeSample& sample : probe->second.s) {
+              for (std::size_t influence = 0; influence < 4; ++influence) {
+                const std::uint8_t weight = static_cast<std::uint8_t>(
+                    (sample.bw >> (influence * 8)) & 0xFFu);
+                const std::uint8_t bone = static_cast<std::uint8_t>(
+                    (sample.bi >> (influence * 8)) & 0xFFu);
                 if (weight != 0) {
                   weighted[bone] = true;
                 }
@@ -15201,95 +14202,73 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
         double translation_error_squared = 0.0;
         double maximum_translation_error = 0.0;
         std::string weighted_mapping;
-        for (std::size_t bone = 0;
-             bone < weighted.size(); ++bone) {
+        for (std::size_t bone = 0; bone < weighted.size(); ++bone) {
           if (!weighted[bone]) {
             continue;
           }
           ++weighted_count;
-          minimum_weighted =
-              std::min(minimum_weighted, bone);
-          maximum_weighted =
-              std::max(maximum_weighted, bone);
+          minimum_weighted = std::min(minimum_weighted, bone);
+          maximum_weighted = std::max(maximum_weighted, bone);
           if (!weighted_mapping.empty()) {
             weighted_mapping += ",";
           }
           weighted_mapping += std::to_string(bone);
           weighted_mapping += "->";
-          if (!have_rig ||
-              bone >= rig.palette_to_canonical.size() ||
+          if (!have_rig || bone >= rig.palette_to_canonical.size() ||
               bone >= item->bones.size() / 12) {
             weighted_mapping += "x";
             continue;
           }
-          const std::size_t canonical_bone =
-              rig.palette_to_canonical[bone];
-          weighted_mapping +=
-              std::to_string(canonical_bone);
+          const std::size_t canonical_bone = rig.palette_to_canonical[bone];
+          weighted_mapping += std::to_string(canonical_bone);
           if (canonical_bone >= canonical_bones) {
             continue;
           }
           ++mapped_weighted;
-          const float* expected =
-              item->bones.data() + bone * 12;
-          const float* reconstructed =
-              canonical.data() + canonical_bone * 12;
-          const double dx =
-              double(reconstructed[3]) - expected[3];
-          const double dy =
-              double(reconstructed[7]) - expected[7];
-          const double dz =
-              double(reconstructed[11]) - expected[11];
-          const double error =
-              std::sqrt(dx * dx + dy * dy + dz * dz);
+          const float* expected = item->bones.data() + bone * 12;
+          const float* reconstructed = canonical.data() + canonical_bone * 12;
+          const double dx = double(reconstructed[3]) - expected[3];
+          const double dy = double(reconstructed[7]) - expected[7];
+          const double dz = double(reconstructed[11]) - expected[11];
+          const double error = std::sqrt(dx * dx + dy * dy + dz * dz);
           translation_error_squared += error * error;
           maximum_translation_error =
               std::max(maximum_translation_error, error);
         }
         const double translation_rms =
-            mapped_weighted == 0
-                ? -1.0
-                : std::sqrt(
-                      translation_error_squared /
+            mapped_weighted == 0 ? -1.0
+                                 : std::sqrt(translation_error_squared /
                       double(mapped_weighted));
         REXLOG_INFO(
             "multiplayer-rig-audit: mesh={:08X} fam={} shadow={} "
             "palette={} remap={} weighted={} range={}-{} mapped={} "
             "translation_rms={:.4f} max={:.4f} map=[{}]",
-            item->mesh, item->char_family,
-            item->shadow_caster ? 1 : 0,
+            item->mesh, item->char_family, item->shadow_caster ? 1 : 0,
             item->bones.size() / 12,
-            have_rig ? rig.palette_to_canonical.size() : 0,
-            weighted_count,
+            have_rig ? rig.palette_to_canonical.size() : 0, weighted_count,
             weighted_count == 0 ? 0 : minimum_weighted,
-            weighted_count == 0 ? 0 : maximum_weighted,
-            mapped_weighted, translation_rms,
-            maximum_translation_error, weighted_mapping);
+            weighted_count == 0 ? 0 : maximum_weighted, mapped_weighted,
+            translation_rms, maximum_translation_error, weighted_mapping);
       }
     }
   }
 
   const auto local_appearance_t0 = PerfClock::now();
-  g_pw_mp_local_pose.Add(uint64_t(
-      std::chrono::duration_cast<std::chrono::nanoseconds>(
+  g_pw_mp_local_pose.Add(
+      uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
           local_appearance_t0 - multiplayer_perf_t0)
           .count()));
   const multiplayer::AppearanceBlob local_appearance =
-      BuildLocalAppearanceBlob(
-          context, local_player_items, local_animation);
-  g_pw_mp_local_appearance.Add(
-      PerfNsSince(local_appearance_t0));
+      BuildLocalAppearanceBlob(context, local_player_items, local_animation);
+  g_pw_mp_local_appearance.Add(PerfNsSince(local_appearance_t0));
   multiplayer::RemotePresentationFrame remote_presentation;
   const auto multiplayer_tick_t0 = PerfClock::now();
-  const bool have_remote_players =
-      multiplayer::TickLocalVisuals(
+  const bool have_remote_players = multiplayer::TickLocalVisuals(
           mechanics_sandbox::map::ActiveMapName(), origin,
-          local_animation.tracks.empty() &&
-                  !local_animation.presentation_root_valid
+      local_animation.tracks.empty() && !local_animation.presentation_root_valid
               ? nullptr
               : &local_animation,
-          local_appearance.identity != 0 &&
-                  local_appearance.bytes != nullptr
+      local_appearance.identity != 0 && local_appearance.bytes != nullptr
               ? &local_appearance
               : nullptr,
           remote_presentation);
@@ -15301,15 +14280,13 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
        remote_presentation.retirements) {
     ReleaseRetiredRemoteAppearance(context, retirement);
   }
-  if (have_remote_players &&
-      remote_presentation.players != nullptr) {
+  if (have_remote_players && remote_presentation.players != nullptr) {
   for (const multiplayer::RemotePlayer& remote_player :
        *remote_presentation.players) {
     const multiplayer::RemotePose& remote_pose = remote_player.pose;
     const multiplayer::AnimationPose& remote_animation =
         remote_player.animation;
-    RecordRemoteRenderMotion(
-        remote_player.role, remote_player.session,
+      RecordRemoteRenderMotion(remote_player.role, remote_player.session,
         remote_animation);
     const std::size_t remote_item_start =
         multiplayer_remote_items == nullptr
@@ -15321,84 +14298,66 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
     // expose a partial local piece set and duplicate malformed body parts.
     // Use the simple proxy until the sender-owned appearance is complete.
     const std::vector<DrawItem>* appearance_items = nullptr;
-    RemoteAppearanceRenderState*
-        remote_appearance_state = nullptr;
+      RemoteAppearanceRenderState* remote_appearance_state = nullptr;
     const auto multiplayer_install_t0 = PerfClock::now();
-    ObserveRemoteAppearanceSession(
-        context, remote_player.role, remote_player.session);
-    const bool appearance_installed =
-        InstallRemoteAppearance(
-            context, frame_number, remote_player.role,
-            remote_player.session,
+      ObserveRemoteAppearanceSession(context, remote_player.role,
+                                     remote_player.session);
+      const bool appearance_installed = InstallRemoteAppearance(
+          context, frame_number, remote_player.role, remote_player.session,
             remote_player.appearance);
-    multiplayer_install_ns +=
-        PerfNsSince(multiplayer_install_t0);
+      multiplayer_install_ns += PerfNsSince(multiplayer_install_t0);
     if (appearance_installed) {
-      const auto installed =
-          g_remote_appearances.find(remote_player.role);
+        const auto installed = g_remote_appearances.find(remote_player.role);
       if (installed != g_remote_appearances.end() &&
           !installed->second.items.empty()) {
         if (!installed->second.installation_reported ||
             installed->second.installation_reported_session !=
                 remote_player.session) {
           multiplayer::ReportRemoteAppearanceInstalled(
-              remote_player.role,
-              remote_player.session,
+                remote_player.role, remote_player.session,
               remote_player.appearance.identity);
           installed->second.installation_reported_session =
               remote_player.session;
           installed->second.installation_reported = true;
         }
-        remote_appearance_state =
-            &installed->second;
+          remote_appearance_state = &installed->second;
         appearance_items = &installed->second.items;
       }
     }
-    if (multiplayer_remote_items != nullptr &&
-        appearance_items != nullptr &&
+      if (multiplayer_remote_items != nullptr && appearance_items != nullptr &&
         !appearance_items->empty()) {
       trick_pipeline::LiveSpatialSnapshot local_spatial;
       const bool have_presentation_root =
           local_animation.presentation_root_valid;
       const bool have_local_root =
           have_presentation_root ||
-          trick_pipeline::CurrentLiveSpatialSnapshot(
-              local_spatial);
+            trick_pipeline::CurrentLiveSpatialSnapshot(local_spatial);
       if (have_local_root) {
         float local_board[16] = {};
         float remote_board[16] = {};
-        const auto load_axis =
-            [&local_spatial](std::size_t axis, std::size_t component) {
+          const auto load_axis = [&local_spatial](std::size_t axis,
+                                                  std::size_t component) {
               return std::bit_cast<float>(
-                  axis == 0
-                      ? local_spatial.x_axis_bits[component]
+                axis == 0 ? local_spatial.x_axis_bits[component]
                       : local_spatial.z_axis_bits[component]);
             };
-        float local_x[3] = {
-            have_presentation_root
-                ? local_animation
-                      .presentation_root_x_axis[0]
+          float local_x[3] = {have_presentation_root
+                                  ? local_animation.presentation_root_x_axis[0]
                 : load_axis(0, 0),
             have_presentation_root
-                ? local_animation
-                      .presentation_root_x_axis[1]
+                                  ? local_animation.presentation_root_x_axis[1]
                 : load_axis(0, 1),
             have_presentation_root
-                ? local_animation
-                      .presentation_root_x_axis[2]
+                                  ? local_animation.presentation_root_x_axis[2]
                 : load_axis(0, 2)};
-        float local_z[3] = {
-            have_presentation_root
-                ? local_animation
-                      .presentation_root_z_axis[0]
+          float local_z[3] = {have_presentation_root
+                                  ? local_animation.presentation_root_z_axis[0]
                 : load_axis(1, 0),
             have_presentation_root
-                ? local_animation
-                      .presentation_root_z_axis[1]
+                                  ? local_animation.presentation_root_z_axis[1]
                 : load_axis(1, 1),
             have_presentation_root
-                ? local_animation
-                      .presentation_root_z_axis[2]
+                                  ? local_animation.presentation_root_z_axis[2]
                 : load_axis(1, 2)};
         float local_y[3] = {
             local_z[1] * local_x[2] - local_z[2] * local_x[1],
@@ -15406,27 +14365,20 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
             local_z[0] * local_x[1] - local_z[1] * local_x[0]};
         const float local_position[3] = {
             have_presentation_root
-                ? local_animation
-                      .presentation_root_position[0]
-                : std::bit_cast<float>(
-                      local_spatial.position_bits[0]),
+                  ? local_animation.presentation_root_position[0]
+                  : std::bit_cast<float>(local_spatial.position_bits[0]),
             have_presentation_root
-                ? local_animation
-                      .presentation_root_position[1]
-                : std::bit_cast<float>(
-                      local_spatial.position_bits[1]),
+                  ? local_animation.presentation_root_position[1]
+                  : std::bit_cast<float>(local_spatial.position_bits[1]),
             have_presentation_root
-                ? local_animation
-                      .presentation_root_position[2]
-                : std::bit_cast<float>(
-                      local_spatial.position_bits[2])};
+                  ? local_animation.presentation_root_position[2]
+                  : std::bit_cast<float>(local_spatial.position_bits[2])};
         const float remote_position[3] = {
             origin[0] + remote_pose.position[0],
             origin[1] + remote_pose.position[1],
             origin[2] + remote_pose.position[2]};
         const float* local_axes[3] = {local_x, local_y, local_z};
-        const float* remote_axes[3] = {
-            remote_pose.x_axis, remote_pose.y_axis,
+          const float* remote_axes[3] = {remote_pose.x_axis, remote_pose.y_axis,
             remote_pose.z_axis};
         float bone_space_rotation[3][3] = {};
         float bone_space_translation[3] = {};
@@ -15434,23 +14386,19 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
           for (std::size_t column = 0; column < 3; ++column) {
             for (std::size_t axis = 0; axis < 3; ++axis) {
               bone_space_rotation[row][column] +=
-                  remote_axes[axis][row] *
-                  local_axes[axis][column];
+                    remote_axes[axis][row] * local_axes[axis][column];
             }
           }
           bone_space_translation[row] = remote_position[row];
           for (std::size_t column = 0; column < 3; ++column) {
             bone_space_translation[row] -=
-                bone_space_rotation[row][column] *
-                local_position[column];
+                  bone_space_rotation[row][column] * local_position[column];
           }
         }
         for (std::size_t row = 0; row < 3; ++row) {
           for (std::size_t column = 0; column < 3; ++column) {
-            local_board[row * 4 + column] =
-                local_axes[row][column];
-            remote_board[row * 4 + column] =
-                remote_axes[row][column];
+              local_board[row * 4 + column] = local_axes[row][column];
+              remote_board[row * 4 + column] = remote_axes[row][column];
           }
         }
         local_board[12] = local_position[0];
@@ -15466,8 +14414,7 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
         inverse_local[15] = 1.0f;
         for (std::size_t row = 0; row < 3; ++row) {
           for (std::size_t column = 0; column < 3; ++column) {
-            inverse_local[row * 4 + column] =
-                local_board[column * 4 + row];
+              inverse_local[row * 4 + column] = local_board[column * 4 + row];
           }
         }
         for (std::size_t column = 0; column < 3; ++column) {
@@ -15476,16 +14423,14 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
                 local_position[1] * inverse_local[4 + column] +
                 local_position[2] * inverse_local[8 + column]);
         }
-        const auto multiply4 = [](const float left[16],
-                                  const float right[16],
+          const auto multiply4 = [](const float left[16], const float right[16],
                                   float out[16]) {
           float result[16] = {};
           for (std::size_t row = 0; row < 4; ++row) {
             for (std::size_t column = 0; column < 4; ++column) {
               for (std::size_t inner = 0; inner < 4; ++inner) {
                 result[row * 4 + column] +=
-                    left[row * 4 + inner] *
-                    right[inner * 4 + column];
+                      left[row * 4 + inner] * right[inner * 4 + column];
               }
             }
           }
@@ -15494,88 +14439,63 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
         float local_to_remote[16] = {};
         multiply4(inverse_local, remote_board, local_to_remote);
         float rigid_to_remote[16] = {};
-        std::memcpy(
-            rigid_to_remote, local_to_remote,
+          std::memcpy(rigid_to_remote, local_to_remote,
             sizeof(rigid_to_remote));
         bool streamed_rigid_transform_valid =
             remote_appearance_state == nullptr;
         if (remote_appearance_state != nullptr) {
-          float source_x[3] = {
-              remote_appearance_state->root_x_axis[0],
+            float source_x[3] = {remote_appearance_state->root_x_axis[0],
               remote_appearance_state->root_x_axis[1],
               remote_appearance_state->root_x_axis[2]};
-          float source_z[3] = {
-              remote_appearance_state->root_z_axis[0],
+            float source_z[3] = {remote_appearance_state->root_z_axis[0],
               remote_appearance_state->root_z_axis[1],
               remote_appearance_state->root_z_axis[2]};
-          const auto normalize_source_axis =
-              [](float axis[3]) {
+            const auto normalize_source_axis = [](float axis[3]) {
                 const float length_squared =
-                    axis[0] * axis[0] +
-                    axis[1] * axis[1] +
-                    axis[2] * axis[2];
-                if (!std::isfinite(length_squared) ||
-                    length_squared < 1.0e-8f) {
+                  axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2];
+              if (!std::isfinite(length_squared) || length_squared < 1.0e-8f) {
                   return false;
                 }
-                const float inverse_length =
-                    1.0f / std::sqrt(length_squared);
+              const float inverse_length = 1.0f / std::sqrt(length_squared);
                 axis[0] *= inverse_length;
                 axis[1] *= inverse_length;
                 axis[2] *= inverse_length;
                 return true;
               };
-          const bool source_x_valid =
-              normalize_source_axis(source_x);
+            const bool source_x_valid = normalize_source_axis(source_x);
           if (source_x_valid) {
-            const float projection =
-                source_z[0] * source_x[0] +
+              const float projection = source_z[0] * source_x[0] +
                 source_z[1] * source_x[1] +
                 source_z[2] * source_x[2];
-            for (std::size_t component = 0;
-                 component < 3; ++component) {
-              source_z[component] -=
-                  source_x[component] * projection;
+              for (std::size_t component = 0; component < 3; ++component) {
+                source_z[component] -= source_x[component] * projection;
             }
           }
           const float* source_position =
               remote_appearance_state->root_position;
-          if (source_x_valid &&
-              normalize_source_axis(source_z) &&
+            if (source_x_valid && normalize_source_axis(source_z) &&
               std::isfinite(source_position[0]) &&
               std::isfinite(source_position[1]) &&
               std::isfinite(source_position[2])) {
             const float source_y[3] = {
-                source_z[1] * source_x[2] -
-                    source_z[2] * source_x[1],
-                source_z[2] * source_x[0] -
-                    source_z[0] * source_x[2],
-                source_z[0] * source_x[1] -
-                    source_z[1] * source_x[0]};
-            const float* source_axes[3] = {
-                source_x, source_y, source_z};
+                  source_z[1] * source_x[2] - source_z[2] * source_x[1],
+                  source_z[2] * source_x[0] - source_z[0] * source_x[2],
+                  source_z[0] * source_x[1] - source_z[1] * source_x[0]};
+              const float* source_axes[3] = {source_x, source_y, source_z};
             float inverse_source[16] = {};
             inverse_source[15] = 1.0f;
             for (std::size_t row = 0; row < 3; ++row) {
-              for (std::size_t column = 0;
-                   column < 3; ++column) {
-                inverse_source[row * 4 + column] =
-                    source_axes[column][row];
+                for (std::size_t column = 0; column < 3; ++column) {
+                  inverse_source[row * 4 + column] = source_axes[column][row];
               }
             }
-            for (std::size_t column = 0;
-                 column < 3; ++column) {
+              for (std::size_t column = 0; column < 3; ++column) {
               inverse_source[12 + column] =
-                  -(source_position[0] *
-                        inverse_source[column] +
-                    source_position[1] *
-                        inverse_source[4 + column] +
-                    source_position[2] *
-                        inverse_source[8 + column]);
-            }
-            multiply4(
-                inverse_source, remote_board,
-                rigid_to_remote);
+                    -(source_position[0] * inverse_source[column] +
+                      source_position[1] * inverse_source[4 + column] +
+                      source_position[2] * inverse_source[8 + column]);
+              }
+              multiply4(inverse_source, remote_board, rigid_to_remote);
             streamed_rigid_transform_valid = true;
           }
         }
@@ -15585,8 +14505,7 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
             multiplayer::render_cache::FindAnimationTrack(
                 remote_animation.tracks,
                 multiplayer::kCanonicalSkeletonTrackKey,
-                remote_appearance_state
-                    ->canonical_track_index,
+                  remote_appearance_state->canonical_track_index,
                 &canonical_track_cache_hit);
         // Animation-track rows are already interpolated model-to-world
         // skinning affines in the receiver's map space. Do not align them
@@ -15596,8 +14515,7 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
         // The pose root remains authoritative for the simple proxy and
         // non-skinned fallback pieces only.
 
-        multiplayer_remote_items->reserve(
-            multiplayer_remote_items->size() +
+          multiplayer_remote_items->reserve(multiplayer_remote_items->size() +
             appearance_items->size());
         std::size_t remapped_skinned_items = 0;
         std::size_t network_animated_bones = 0;
@@ -15606,14 +14524,11 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
         std::size_t network_invalid_bones = 0;
         std::size_t network_unresolved_active_bones = 0;
         std::size_t skipped_skinned_items = 0;
-        std::size_t cached_track_hits =
-            canonical_track_cache_hit ? 1 : 0;
-        std::size_t track_scans =
-            canonical_track_cache_hit ? 0 : 1;
+          std::size_t cached_track_hits = canonical_track_cache_hit ? 1 : 0;
+          std::size_t track_scans = canonical_track_cache_hit ? 0 : 1;
         std::size_t runtime_weighted_scans = 0;
         std::size_t runtime_rig_retries = 0;
-        std::uint64_t applied_palette_hash =
-            1469598103934665603ull;
+          std::uint64_t applied_palette_hash = 1469598103934665603ull;
         std::size_t applied_palette_bones = 0;
         uint32_t visible_motion_mesh = 0;
         std::size_t visible_motion_vertex_count = 0;
@@ -15625,11 +14540,9 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
               (*appearance_items)[appearance_piece_index];
           RemoteAppearancePieceRenderCache* piece_cache =
               appearance_piece_index <
-                      remote_appearance_state
-                          ->piece_caches.size()
+                        remote_appearance_state->piece_caches.size()
                   ? &remote_appearance_state
-                         ->piece_caches[
-                             appearance_piece_index]
+                           ->piece_caches[appearance_piece_index]
                   : nullptr;
           DrawItem clone = source;
           clone.selected = false;
@@ -15640,48 +14553,35 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
           bool unresolved_active_row = false;
           bool skateboard_piece = false;
           if (clone.skinned && !clone.bones.empty()) {
-            const std::size_t palette_bones =
-                clone.bones.size() / 12;
-            AppearanceWeightedRows
-                fallback_weighted_rows;
+              const std::size_t palette_bones = clone.bones.size() / 12;
+              AppearanceWeightedRows fallback_weighted_rows;
             if (piece_cache == nullptr) {
-              const auto installed_mesh =
-                  g_r.meshes.find(clone.mesh);
+                const auto installed_mesh = g_r.meshes.find(clone.mesh);
               if (installed_mesh != g_r.meshes.end()) {
                 fallback_weighted_rows =
-                    multiplayer::render_cache::
-                        FindWeightedPaletteRows(
-                            installed_mesh->second
-                                .raytracing_verts,
+                      multiplayer::render_cache::FindWeightedPaletteRows(
+                          installed_mesh->second.raytracing_verts,
                             palette_bones);
                 ++runtime_weighted_scans;
               }
             }
             const AppearanceWeightedRows& weighted_rows =
-                piece_cache != nullptr
-                    ? piece_cache->weighted_rows
+                  piece_cache != nullptr ? piece_cache->weighted_rows
                     : fallback_weighted_rows;
             const uint32_t track_key =
-                piece_cache != nullptr
-                    ? piece_cache->track_key
+                  piece_cache != nullptr ? piece_cache->track_key
                     : (clone.multiplayer_track_key != 0
                            ? clone.multiplayer_track_key
                            : clone.mesh);
             bool exact_track_cache_hit = false;
             std::size_t uncached_track_index =
-                multiplayer::render_cache::
-                    kInvalidAnimationTrackIndex;
+                  multiplayer::render_cache::kInvalidAnimationTrackIndex;
             std::size_t& exact_track_index =
-                piece_cache != nullptr
-                    ? piece_cache->exact_track_index
+                  piece_cache != nullptr ? piece_cache->exact_track_index
                     : uncached_track_index;
-            const multiplayer::AnimationTrack*
-                exact_track =
-                    multiplayer::render_cache::
-                        FindAnimationTrack(
-                            remote_animation.tracks,
-                            track_key,
-                            exact_track_index,
+              const multiplayer::AnimationTrack* exact_track =
+                  multiplayer::render_cache::FindAnimationTrack(
+                      remote_animation.tracks, track_key, exact_track_index,
                             &exact_track_cache_hit);
             if (exact_track_cache_hit) {
               ++cached_track_hits;
@@ -15691,35 +14591,23 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
             std::vector<uint16_t> fallback_remap;
             if (piece_cache == nullptr) {
               fallback_remap.assign(
-                  clone
-                      .multiplayer_palette_to_canonical
-                      .begin(),
-                  clone
-                      .multiplayer_palette_to_canonical
-                      .end());
+                    clone.multiplayer_palette_to_canonical.begin(),
+                    clone.multiplayer_palette_to_canonical.end());
               if (fallback_remap.empty()) {
                 native_palette::CanonicalRigSample rig;
-                if (native_palette::LookupCanonicalRig(
-                        clone.ctx, clone.mesh, rig)) {
-                  fallback_remap =
-                      std::move(
-                          rig.palette_to_canonical);
+                  if (native_palette::LookupCanonicalRig(clone.ctx, clone.mesh,
+                                                         rig)) {
+                    fallback_remap = std::move(rig.palette_to_canonical);
                 }
               }
-            } else if (
-                !piece_cache->rig_lookup_complete) {
+              } else if (!piece_cache->rig_lookup_complete) {
               ++runtime_rig_retries;
-              ResolveRemoteAppearanceRigCache(
-                  clone, *piece_cache);
+                ResolveRemoteAppearanceRigCache(clone, *piece_cache);
             }
-            const std::vector<uint16_t>&
-                palette_to_canonical =
-                    piece_cache != nullptr
-                        ? piece_cache
-                              ->palette_to_canonical
+              const std::vector<uint16_t>& palette_to_canonical =
+                  piece_cache != nullptr ? piece_cache->palette_to_canonical
                         : fallback_remap;
-            const bool have_rig =
-                !palette_to_canonical.empty();
+              const bool have_rig = !palette_to_canonical.empty();
             const std::size_t canonical_bones =
                 canonical_track == nullptr
                     ? 0
@@ -15727,9 +14615,7 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
             skateboard_piece =
                 piece_cache != nullptr
                     ? piece_cache->skateboard_piece
-                    : have_rig &&
-                          std::any_of(
-                              palette_to_canonical.begin(),
+                      : have_rig && std::any_of(palette_to_canonical.begin(),
                               palette_to_canonical.end(),
                               [](std::size_t canonical_bone) {
                                 return canonical_bone >= 25 &&
@@ -15741,20 +14627,16 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
                       ? clone.multiplayer_track_key
                       : clone.mesh;
               const std::uint64_t route_key =
-                  (std::uint64_t(remote_player.role) << 32) |
-                  track_key;
+                    (std::uint64_t(remote_player.role) << 32) | track_key;
               static std::mutex s_route_log_mutex;
-              static std::unordered_set<std::uint64_t>
-                  s_route_logs;
-              std::lock_guard<std::mutex> route_lock(
-                  s_route_log_mutex);
+                static std::unordered_set<std::uint64_t> s_route_logs;
+                std::lock_guard<std::mutex> route_lock(s_route_log_mutex);
               if (s_route_logs.insert(route_key).second) {
                 const std::size_t mapped_canonical =
                     palette_to_canonical.empty()
                         ? std::numeric_limits<std::size_t>::max()
                         : palette_to_canonical.front();
-                const float* exact_root =
-                    exact_track != nullptr
+                  const float* exact_root = exact_track != nullptr
                         ? exact_track->bone_rows.data()
                         : nullptr;
                 const float* canonical_root =
@@ -15773,12 +14655,10 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
                     "canonical_t=({:.3f},{:.3f},{:.3f}) "
                     "anim_root=({:.3f},{:.3f},{:.3f})",
                     remote_player.role,
-                    skateboard_piece
-                        ? "board"
+                      skateboard_piece ? "board"
                         : (clone.hair ? "hair" : "ropa"),
-                    clone.mesh, track_key, palette_bones,
-                    weighted_rows.count, mapped_canonical,
-                    clone.hair_alpha_tex,
+                      clone.mesh, track_key, palette_bones, weighted_rows.count,
+                      mapped_canonical, clone.hair_alpha_tex,
                     clone.char_rows[13 * 4 + 3],
                     clone.char_rows[14 * 4 + 1] > 0.0f ? 1 : 0,
                     exact_track == nullptr
@@ -15787,15 +14667,9 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
                     exact_root == nullptr ? 0.0f : exact_root[3],
                     exact_root == nullptr ? 0.0f : exact_root[7],
                     exact_root == nullptr ? 0.0f : exact_root[11],
-                    canonical_root == nullptr
-                        ? 0.0f
-                        : canonical_root[3],
-                    canonical_root == nullptr
-                        ? 0.0f
-                        : canonical_root[7],
-                    canonical_root == nullptr
-                        ? 0.0f
-                        : canonical_root[11],
+                      canonical_root == nullptr ? 0.0f : canonical_root[3],
+                      canonical_root == nullptr ? 0.0f : canonical_root[7],
+                      canonical_root == nullptr ? 0.0f : canonical_root[11],
                     remote_animation.root_position[0],
                     remote_animation.root_position[1],
                     remote_animation.root_position[2]);
@@ -15803,46 +14677,35 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
             }
             remapped = palette_bones != 0;
             palette_bone_count += palette_bones;
-            for (std::size_t palette_bone = 0;
-                 palette_bone < palette_bones; ++palette_bone) {
+              for (std::size_t palette_bone = 0; palette_bone < palette_bones;
+                   ++palette_bone) {
               float source_bone[12] = {};
-              std::copy_n(
-                  clone.bones.begin() + palette_bone * 12,
-                  12, source_bone);
+                std::copy_n(clone.bones.begin() + palette_bone * 12, 12,
+                            source_bone);
               bool used_network_animation = false;
               const float* network_bone = nullptr;
               if (exact_track != nullptr &&
-                  palette_bone <
-                      exact_track->bone_rows.size() / 12) {
+                    palette_bone < exact_track->bone_rows.size() / 12) {
                 network_bone =
-                    exact_track->bone_rows.data() +
-                    palette_bone * 12;
-              } else if (
-                  canonical_track != nullptr && have_rig &&
-                  palette_bone <
-                      palette_to_canonical.size()) {
+                      exact_track->bone_rows.data() + palette_bone * 12;
+                } else if (canonical_track != nullptr && have_rig &&
+                           palette_bone < palette_to_canonical.size()) {
                 const std::size_t canonical_bone =
                     palette_to_canonical[palette_bone];
                 if (canonical_bone < canonical_bones) {
                   network_bone =
-                      canonical_track->bone_rows.data() +
-                      canonical_bone * 12;
+                        canonical_track->bone_rows.data() + canonical_bone * 12;
                 }
               }
               if (network_bone != nullptr) {
                   ++network_candidate_bones;
                   float basis_energy = 0.0f;
                   bool finite = true;
-                  for (std::size_t component = 0;
-                       component < 12; ++component) {
-                    finite =
-                        finite && std::isfinite(
-                                      network_bone[component]);
-                    if (component != 3 && component != 7 &&
-                        component != 11) {
+                  for (std::size_t component = 0; component < 12; ++component) {
+                    finite = finite && std::isfinite(network_bone[component]);
+                    if (component != 3 && component != 7 && component != 11) {
                       basis_energy +=
-                          network_bone[component] *
-                          network_bone[component];
+                          network_bone[component] * network_bone[component];
                     }
                   }
                   if (!finite || basis_energy <= 0.01f) {
@@ -15852,10 +14715,8 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
                       ++network_unresolved_active_bones;
                     }
                   } else {
-                    std::copy_n(
-                        network_bone, 12,
-                        clone.bones.begin() +
-                            palette_bone * 12);
+                    std::copy_n(network_bone, 12,
+                                clone.bones.begin() + palette_bone * 12);
                     used_network_animation = true;
                     ++network_animated_bones;
                   }
@@ -15869,30 +14730,20 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
                 continue;
               }
               for (std::size_t row = 0; row < 3; ++row) {
-                for (std::size_t column = 0;
-                     column < 3; ++column) {
+                  for (std::size_t column = 0; column < 3; ++column) {
                   float value = 0.0f;
-                  for (std::size_t inner = 0;
-                       inner < 3; ++inner) {
-                    value +=
-                        bone_space_rotation[row][inner] *
+                    for (std::size_t inner = 0; inner < 3; ++inner) {
+                      value += bone_space_rotation[row][inner] *
                         source_bone[inner * 4 + column];
                   }
-                  clone.bones[
-                      palette_bone * 12 + row * 4 + column] =
-                      value;
+                    clone.bones[palette_bone * 12 + row * 4 + column] = value;
                 }
-                float translation =
-                    bone_space_translation[row];
-                for (std::size_t inner = 0;
-                     inner < 3; ++inner) {
-                  translation +=
-                      bone_space_rotation[row][inner] *
+                  float translation = bone_space_translation[row];
+                  for (std::size_t inner = 0; inner < 3; ++inner) {
+                    translation += bone_space_rotation[row][inner] *
                       source_bone[inner * 4 + 3];
                 }
-                clone.bones[
-                    palette_bone * 12 + row * 4 + 3] =
-                    translation;
+                  clone.bones[palette_bone * 12 + row * 4 + 3] = translation;
               }
             }
             // A skinned draw is atomic: every palette row referenced by its
@@ -15915,23 +14766,17 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
               continue;
             }
             float transformed[16] = {};
-            multiply4(
-                clone.world, rigid_to_remote,
-                transformed);
-            std::memcpy(
-                clone.world, transformed, sizeof(clone.world));
+              multiply4(clone.world, rigid_to_remote, transformed);
+              std::memcpy(clone.world, transformed, sizeof(clone.world));
           }
           if (clone.skinned && !clone.bones.empty()) {
             applied_palette_hash = AppearanceHashBytes(
-                applied_palette_hash, &clone.mesh,
-                sizeof(clone.mesh));
-            const std::size_t bone_count =
-                clone.bones.size() / 12;
+                  applied_palette_hash, &clone.mesh, sizeof(clone.mesh));
+              const std::size_t bone_count = clone.bones.size() / 12;
             applied_palette_hash = AppearanceHashBytes(
-                applied_palette_hash, &bone_count,
-                sizeof(bone_count));
-            applied_palette_hash = AppearanceHashBytes(
-                applied_palette_hash, clone.bones.data(),
+                  applied_palette_hash, &bone_count, sizeof(bone_count));
+              applied_palette_hash =
+                  AppearanceHashBytes(applied_palette_hash, clone.bones.data(),
                 clone.bones.size() * sizeof(float));
             applied_palette_bones += bone_count;
           }
@@ -15939,29 +14784,23 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
               !skateboard_piece) {
             std::size_t candidate_vertex_count = 0;
             float candidate_position[3] = {};
-            if (SampleSkinnedVisiblePoint(
-                    clone, candidate_position,
+              if (SampleSkinnedVisiblePoint(clone, candidate_position,
                     &candidate_vertex_count) &&
-                candidate_vertex_count >
-                    visible_motion_vertex_count) {
+                  candidate_vertex_count > visible_motion_vertex_count) {
               visible_motion_mesh = clone.mesh;
-              visible_motion_vertex_count =
-                  candidate_vertex_count;
-              std::copy_n(
-                  candidate_position, 3,
-                  visible_motion_position);
+                visible_motion_vertex_count = candidate_vertex_count;
+                std::copy_n(candidate_position, 3, visible_motion_position);
             }
           }
           multiplayer_remote_items->push_back(std::move(clone));
         }
         RecordRemoteVisibleMotion(
-            remote_player.role, remote_player.session,
-            visible_motion_mesh, visible_motion_position, scene,
-            context.guest_output_width,
+              remote_player.role, remote_player.session, visible_motion_mesh,
+              visible_motion_position, scene, context.guest_output_width,
             context.guest_output_height);
-        RecordRemoteAppliedPalette(
-            remote_player.role, remote_player.session,
-            remote_animation.sequence, applied_palette_hash,
+          RecordRemoteAppliedPalette(remote_player.role, remote_player.session,
+                                     remote_animation.sequence,
+                                     applied_palette_hash,
             applied_palette_bones);
         static std::atomic<std::uint32_t> s_replication_logs{0};
         const std::uint32_t log_index =
@@ -15971,10 +14810,8 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
               "multiplayer: skater pieces local={} remote_tracks={} "
               "network_bones={} remapped_skinned={} skipped_skinned={} "
               "published={}",
-              appearance_items->size(),
-              remote_animation.tracks.size(),
-              network_animated_bones,
-              remapped_skinned_items,
+                appearance_items->size(), remote_animation.tracks.size(),
+                network_animated_bones, remapped_skinned_items,
               skipped_skinned_items,
               multiplayer_remote_items->size() - remote_item_start);
         }
@@ -15990,15 +14827,12 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
           std::uint64_t track_scans = 0;
           std::uint64_t runtime_weighted_scans = 0;
           std::uint64_t runtime_rig_retries = 0;
-          std::size_t minimum_used =
-              std::numeric_limits<std::size_t>::max();
+            std::size_t minimum_used = std::numeric_limits<std::size_t>::max();
           std::size_t maximum_used = 0;
         };
         static BoneGateTelemetry s_bone_gate;
-        const auto bone_gate_now =
-            std::chrono::steady_clock::now();
-        if (s_bone_gate.last_log ==
-            std::chrono::steady_clock::time_point{}) {
+          const auto bone_gate_now = std::chrono::steady_clock::now();
+          if (s_bone_gate.last_log == std::chrono::steady_clock::time_point{}) {
           s_bone_gate.last_log = bone_gate_now;
         }
         ++s_bone_gate.frames;
@@ -16006,58 +14840,36 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
         s_bone_gate.candidates += network_candidate_bones;
         s_bone_gate.used += network_animated_bones;
         s_bone_gate.invalid += network_invalid_bones;
-        s_bone_gate.unresolved_active +=
-            network_unresolved_active_bones;
-        s_bone_gate.cached_track_hits +=
-            cached_track_hits;
+          s_bone_gate.unresolved_active += network_unresolved_active_bones;
+          s_bone_gate.cached_track_hits += cached_track_hits;
         s_bone_gate.track_scans += track_scans;
-        s_bone_gate.runtime_weighted_scans +=
-            runtime_weighted_scans;
-        s_bone_gate.runtime_rig_retries +=
-            runtime_rig_retries;
+          s_bone_gate.runtime_weighted_scans += runtime_weighted_scans;
+          s_bone_gate.runtime_rig_retries += runtime_rig_retries;
         s_bone_gate.minimum_used =
-            std::min(
-                s_bone_gate.minimum_used,
-                network_animated_bones);
+              std::min(s_bone_gate.minimum_used, network_animated_bones);
         s_bone_gate.maximum_used =
-            std::max(
-                s_bone_gate.maximum_used,
-                network_animated_bones);
-        if (bone_gate_now - s_bone_gate.last_log >=
-            std::chrono::seconds(5)) {
-          const double divisor =
-              static_cast<double>(
-                  std::max<std::uint64_t>(
-                      s_bone_gate.frames, 1));
+              std::max(s_bone_gate.maximum_used, network_animated_bones);
+          if (bone_gate_now - s_bone_gate.last_log >= std::chrono::seconds(5)) {
+            const double divisor = static_cast<double>(
+                std::max<std::uint64_t>(s_bone_gate.frames, 1));
           REXLOG_INFO(
               "multiplayer-bone-gate: frames={} palette={:.1f} "
               "candidates={:.1f} used={:.1f} used_range={}-{} "
               "invalid={:.1f} unresolved_active={:.1f}",
               s_bone_gate.frames,
-              static_cast<double>(s_bone_gate.palette) /
-                  divisor,
-              static_cast<double>(s_bone_gate.candidates) /
-                  divisor,
-              static_cast<double>(s_bone_gate.used) /
-                  divisor,
-              s_bone_gate.minimum_used,
-              s_bone_gate.maximum_used,
-              static_cast<double>(s_bone_gate.invalid) /
-                  divisor,
-              static_cast<double>(
-                  s_bone_gate.unresolved_active) /
-                  divisor);
+                static_cast<double>(s_bone_gate.palette) / divisor,
+                static_cast<double>(s_bone_gate.candidates) / divisor,
+                static_cast<double>(s_bone_gate.used) / divisor,
+                s_bone_gate.minimum_used, s_bone_gate.maximum_used,
+                static_cast<double>(s_bone_gate.invalid) / divisor,
+                static_cast<double>(s_bone_gate.unresolved_active) / divisor);
           REXLOG_INFO(
               "multiplayer-render-cache: frames={} "
               "track_hits={:.1f} track_scans={:.1f} "
               "weighted_fallbacks={} rig_retries={}",
               s_bone_gate.frames,
-              static_cast<double>(
-                  s_bone_gate.cached_track_hits) /
-                  divisor,
-              static_cast<double>(
-                  s_bone_gate.track_scans) /
-                  divisor,
+                static_cast<double>(s_bone_gate.cached_track_hits) / divisor,
+                static_cast<double>(s_bone_gate.track_scans) / divisor,
               s_bone_gate.runtime_weighted_scans,
               s_bone_gate.runtime_rig_retries);
           s_bone_gate = {};
@@ -16093,30 +14905,27 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
         EnsureSandboxRemoteSkaterMesh(context.device)) {
     const auto remote_mesh = g_r.meshes.find(kSandboxRemoteSkaterMesh);
     if (remote_mesh != g_r.meshes.end()) {
-      const skate::world::Vec3 remote_x{
-          remote_pose.x_axis[0], remote_pose.x_axis[1],
+          const skate::world::Vec3 remote_x{remote_pose.x_axis[0],
+                                            remote_pose.x_axis[1],
           remote_pose.x_axis[2]};
-      const skate::world::Vec3 remote_y{
-          remote_pose.y_axis[0], remote_pose.y_axis[1],
+          const skate::world::Vec3 remote_y{remote_pose.y_axis[0],
+                                            remote_pose.y_axis[1],
           remote_pose.y_axis[2]};
-      const skate::world::Vec3 remote_z{
-          remote_pose.z_axis[0], remote_pose.z_axis[1],
+          const skate::world::Vec3 remote_z{remote_pose.z_axis[0],
+                                            remote_pose.z_axis[1],
           remote_pose.z_axis[2]};
       const skate::world::Vec3 remote_position{
           origin[0] + remote_pose.position[0],
           origin[1] + remote_pose.position[1],
           origin[2] + remote_pose.position[2]};
-      set_world_basis(
-          remote_x, remote_y, remote_z, remote_position);
+          set_world_basis(remote_x, remote_y, remote_z, remote_position);
       constants[39] = -41.25f;
       remote_mesh->second.last_used_frame = frame_number;
-      cmd->SetVertexBuffer(
-          remote_mesh->second.vb_view.buffer,
+          cmd->SetVertexBuffer(remote_mesh->second.vb_view.buffer,
           remote_mesh->second.vb_view.offset,
           remote_mesh->second.vb_view.size_bytes,
           remote_mesh->second.vb_view.stride);
-      cmd->SetIndexBuffer(
-          remote_mesh->second.ib_view.buffer,
+          cmd->SetIndexBuffer(remote_mesh->second.ib_view.buffer,
           remote_mesh->second.ib_view.offset,
           remote_mesh->second.ib_view.size_bytes);
       for (const mechanics_sandbox::map::VisualDraw& draw :
@@ -16140,8 +14949,7 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
   }
   }
   g_pw_mp_install.Add(multiplayer_install_ns);
-  g_pw_mp_remote.Add(
-      PerfNsSince(multiplayer_remote_t0));
+  g_pw_mp_remote.Add(PerfNsSince(multiplayer_remote_t0));
   g_pw_mp_total.Add(PerfNsSince(multiplayer_perf_t0));
 
   // The same cached authored poses are consumed later by the DXR dynamic
@@ -16149,36 +14957,30 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
   // their illumination visibly inseparable.
   if (mechanics_sandbox::map::ActiveMovingLightCount() != 0 &&
       EnsureSandboxMovingLightMesh(context.device)) {
-    const auto light_mesh =
-        g_r.meshes.find(kSandboxMovingLightMesh);
+    const auto light_mesh = g_r.meshes.find(kSandboxMovingLightMesh);
     if (light_mesh != g_r.meshes.end()) {
       light_mesh->second.last_used_frame = frame_number;
-      cmd->SetVertexBuffer(
-          light_mesh->second.vb_view.buffer,
+      cmd->SetVertexBuffer(light_mesh->second.vb_view.buffer,
           light_mesh->second.vb_view.offset,
           light_mesh->second.vb_view.size_bytes,
           light_mesh->second.vb_view.stride);
-      cmd->SetIndexBuffer(
-          light_mesh->second.ib_view.buffer,
+      cmd->SetIndexBuffer(light_mesh->second.ib_view.buffer,
           light_mesh->second.ib_view.offset,
           light_mesh->second.ib_view.size_bytes);
       for (std::size_t light_index = 0;
-           light_index <
-               mechanics_sandbox::map::ActiveMovingLightCount();
+           light_index < mechanics_sandbox::map::ActiveMovingLightCount();
            ++light_index) {
         mechanics_sandbox::map::MovingLightSnapshot light;
-        if (!mechanics_sandbox::map::ActiveMovingLightSnapshot(
-                light_index, light)) {
+        if (!mechanics_sandbox::map::ActiveMovingLightSnapshot(light_index,
+                                                               light)) {
           continue;
         }
         if (!light.visible_source) {
           continue;
         }
         set_world_translation(
-            origin[0] + light.position[0],
-            origin[1] + light.position[1],
-            origin[2] + light.position[2],
-            light.source_radius);
+            origin[0] + light.position[0], origin[1] + light.position[1],
+            origin[2] + light.position[2], light.source_radius);
         constants[32] = 1.0f;
         constants[33] = 1.0f;
         constants[34] = 1.0f;
@@ -16195,8 +14997,8 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
         cmd->SetRootConstants(0, 52, constants, 0);
         cmd->DrawIndexed(
             static_cast<uint32_t>(
-                mechanics_sandbox::map::
-                    ActiveMovingLightVisualMesh().indices.size()),
+                mechanics_sandbox::map::ActiveMovingLightVisualMesh()
+                    .indices.size()),
             0, 0);
         ++draw_calls;
       }
@@ -16216,8 +15018,8 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
     mechanics_sandbox::map::UpdateRainVisualMesh(local_camera);
     const mechanics_sandbox::map::VisualMesh& rain =
         mechanics_sandbox::map::ActiveRainVisualMesh();
-    if (UpdateSandboxDynamicVisualMesh(
-            context.device, kSandboxRainMesh, rain, "storm rain")) {
+    if (UpdateSandboxDynamicVisualMesh(context.device, kSandboxRainMesh, rain,
+                                       "storm rain")) {
       const auto mesh = g_r.meshes.find(kSandboxRainMesh);
       if (mesh != g_r.meshes.end()) {
         set_world_translation(origin[0], origin[1], origin[2]);
@@ -16233,14 +15035,12 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
         cmd->SetPipeline(g_r.pso_transparent);
         cmd->SetVertexBuffer(
             mesh->second.vb_view.buffer, mesh->second.vb_view.offset,
-            mesh->second.vb_view.size_bytes,
-            mesh->second.vb_view.stride);
-        cmd->SetIndexBuffer(
-            mesh->second.ib_view.buffer, mesh->second.ib_view.offset,
+            mesh->second.vb_view.size_bytes, mesh->second.vb_view.stride);
+        cmd->SetIndexBuffer(mesh->second.ib_view.buffer,
+                            mesh->second.ib_view.offset,
             mesh->second.ib_view.size_bytes);
         cmd->SetRootConstants(0, 52, constants, 0);
-        cmd->DrawIndexed(
-            static_cast<std::uint32_t>(rain.indices.size()), 0, 0);
+        cmd->DrawIndexed(static_cast<std::uint32_t>(rain.indices.size()), 0, 0);
         ++draw_calls;
       }
     }
@@ -16267,14 +15067,12 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
       cmd->SetPipeline(g_r.pso_transparent);
       cmd->SetVertexBuffer(
           mesh->second.vb_view.buffer, mesh->second.vb_view.offset,
-          mesh->second.vb_view.size_bytes,
-          mesh->second.vb_view.stride);
-      cmd->SetIndexBuffer(
-          mesh->second.ib_view.buffer, mesh->second.ib_view.offset,
+          mesh->second.vb_view.size_bytes, mesh->second.vb_view.stride);
+      cmd->SetIndexBuffer(mesh->second.ib_view.buffer,
+                          mesh->second.ib_view.offset,
           mesh->second.ib_view.size_bytes);
       cmd->SetRootConstants(0, 52, constants, 0);
-      cmd->DrawIndexed(
-          static_cast<std::uint32_t>(
+      cmd->DrawIndexed(static_cast<std::uint32_t>(
               mechanics_sandbox::map::ActiveLightningVisualMesh()
                   .indices.size()),
           0, 0);
@@ -16285,8 +15083,8 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
   constants[39] = -41.0f;
 
   uint32_t resident_chunks = 0;
-  for (std::size_t chunk_index = 0;
-       chunk_index < world.chunks.size(); ++chunk_index) {
+  for (std::size_t chunk_index = 0; chunk_index < world.chunks.size();
+       ++chunk_index) {
     resident_chunks +=
         g_r.meshes.contains(SandboxMapMeshKey(chunk_index)) ? 1u : 0u;
   }
@@ -16340,8 +15138,7 @@ void DrawSandboxSky(const NativeGuestOutputRenderContext& context,
     for (int column = 0; column < 4; ++column) {
       float sum = 0.0f;
       for (int index = 0; index < 4; ++index) {
-        sum += constants[row * 4 + index] *
-               scene.view_proj[index * 4 + column];
+        sum += constants[row * 4 + index] * scene.view_proj[index * 4 + column];
       }
       constants[16 + row * 4 + column] = sum;
     }
@@ -16392,9 +15189,7 @@ void DrawSandboxSky(const NativeGuestOutputRenderContext& context,
   cmd->SetPipeline(g_r.pso_nodepth);
   cmd->SetRootConstants(0, 52, constants, 0);
   cmd->SetBufferSrv(3, g_r.bone_ring, 0);
-  cmd->SetTexture(
-      1, textured.enabled
-             ? ResolveOwnedMapTexture(
+  cmd->SetTexture(1, textured.enabled ? ResolveOwnedMapTexture(
                    context, textured.gradient_texture,
                    OwnedTextureRole::Color)
              : g_r.white.srv);
@@ -16402,27 +15197,26 @@ void DrawSandboxSky(const NativeGuestOutputRenderContext& context,
   cmd->SetTexture(4, g_r.white.srv);
   cmd->SetTexturePair(
       5,
-      textured.enabled
-          ? ResolveOwnedMapTexture(
-                context, textured.sun_texture,
+      textured.enabled ? ResolveOwnedMapTexture(context, textured.sun_texture,
                 OwnedTextureRole::Data)
           : g_r.white.srv,
       g_r.white.srv);
   cmd->SetTexturePair(7, g_r.white_cube.srv, g_r.white.srv);
   nrhi::TextureView* defaults[6] = {
       textured.enabled
-          ? ResolveOwnedMapTexture(
-                context, textured.detail_texture,
+          ? ResolveOwnedMapTexture(context, textured.detail_texture,
                 OwnedTextureRole::Color)
           : g_r.white.srv,
-      g_r.white.srv, g_r.white.srv, g_r.white.srv,
-      g_r.white.srv, g_r.white.srv};
+      g_r.white.srv,
+      g_r.white.srv,
+      g_r.white.srv,
+      g_r.white.srv,
+      g_r.white.srv};
   cmd->SetTextures(8, defaults, 6);
-  cmd->SetVertexBuffer(
-      mesh->second.vb_view.buffer, mesh->second.vb_view.offset,
-      mesh->second.vb_view.size_bytes, mesh->second.vb_view.stride);
-  cmd->SetIndexBuffer(
-      mesh->second.ib_view.buffer, mesh->second.ib_view.offset,
+  cmd->SetVertexBuffer(mesh->second.vb_view.buffer, mesh->second.vb_view.offset,
+                       mesh->second.vb_view.size_bytes,
+                       mesh->second.vb_view.stride);
+  cmd->SetIndexBuffer(mesh->second.ib_view.buffer, mesh->second.ib_view.offset,
       mesh->second.ib_view.size_bytes);
   cmd->SetPrimitiveTopology(nrhi::PrimitiveTopology::kTriangleList);
   uint32_t draw_calls = 0;
@@ -16435,7 +15229,8 @@ void DrawSandboxSky(const NativeGuestOutputRenderContext& context,
   mechanics_sandbox::RecordSkyDraw(draw_calls);
 }
 
-bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_data*/) {
+bool RenderScene(const NativeGuestOutputRenderContext& context,
+                 void* /*user_data*/) {
   if (!SceneEnabled() ||
       (context.backend != NativeGuestOutputBackend::kD3D12 &&
        context.backend != NativeGuestOutputBackend::kVulkan)) {
@@ -16494,8 +15289,8 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
 
   const auto render_t0 = PerfClock::now();
   const auto perf_ns_since = [](PerfClock::time_point t0) {
-    return uint64_t(
-        std::chrono::duration_cast<std::chrono::nanoseconds>(PerfClock::now() - t0)
+    return uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        PerfClock::now() - t0)
             .count());
   };
 
@@ -16522,7 +15317,8 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
     const bool fresh =
         g_scene && g_scene->generation >= g_warmup_fresh_generation;
     const bool ready =
-        fresh && (g_scene->items.size() >=
+        fresh &&
+        (g_scene->items.size() >=
                       size_t(REXCVAR_GET(skate3_native_render_scene_warmup_min_items)) ||
                   (!g_scene->items.empty() && CasEditorActive(base)));
     loading_native = !ready;
@@ -16612,21 +15408,17 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
   // frames per second while several submissions remain in flight, so an
   // eight-frame ring used to overwrite palettes before queued character
   // draws consumed them.
-  const uint64_t frame_number = g_frames_rendered.load(std::memory_order_relaxed);
-  const uint64_t current_submission =
-      context.device->CurrentSubmission();
-  const uint64_t completed_submission =
-      context.device->CompletedSubmission();
+  const uint64_t frame_number =
+      g_frames_rendered.load(std::memory_order_relaxed);
+  const uint64_t current_submission = context.device->CurrentSubmission();
+  const uint64_t completed_submission = context.device->CompletedSubmission();
   uint32_t upload_region_index =
       g_r.next_upload_region % RendererState::kBoneRegions;
   bool found_upload_region = false;
-  for (uint32_t scan = 0;
-       scan < RendererState::kBoneRegions; ++scan) {
+  for (uint32_t scan = 0; scan < RendererState::kBoneRegions; ++scan) {
     const uint32_t candidate =
-        (g_r.next_upload_region + scan) %
-        RendererState::kBoneRegions;
-    const uint64_t owner =
-        g_r.upload_region_submissions[candidate];
+        (g_r.next_upload_region + scan) % RendererState::kBoneRegions;
+    const uint64_t owner = g_r.upload_region_submissions[candidate];
     if (owner == 0 || owner <= completed_submission) {
       upload_region_index = candidate;
       found_upload_region = true;
@@ -16637,14 +15429,11 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
     // A 32-deep upload ring should stay ahead of the command processor's
     // bounded in-flight queue. Preserve rendering if that invariant is
     // violated, but make the unsafe reuse explicit in telemetry.
-    uint64_t oldest_submission =
-        std::numeric_limits<uint64_t>::max();
-    for (uint32_t candidate = 0;
-         candidate < RendererState::kBoneRegions; ++candidate) {
-      if (g_r.upload_region_submissions[candidate] <
-          oldest_submission) {
-        oldest_submission =
-            g_r.upload_region_submissions[candidate];
+    uint64_t oldest_submission = std::numeric_limits<uint64_t>::max();
+    for (uint32_t candidate = 0; candidate < RendererState::kBoneRegions;
+         ++candidate) {
+      if (g_r.upload_region_submissions[candidate] < oldest_submission) {
+        oldest_submission = g_r.upload_region_submissions[candidate];
         upload_region_index = candidate;
       }
     }
@@ -16653,11 +15442,9 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
   g_r.upload_region_submissions[upload_region_index] =
       std::max<uint64_t>(current_submission, 1);
   g_r.next_upload_region =
-      (upload_region_index + 1) %
-      RendererState::kBoneRegions;
+      (upload_region_index + 1) % RendererState::kBoneRegions;
   const uint32_t bone_region =
-      upload_region_index *
-      RendererState::kBoneRegionSize;
+      upload_region_index * RendererState::kBoneRegionSize;
   g_r.bone_ring_offset = 0;
   g_r.ropa_ring_offset = 0;
   {
@@ -16670,25 +15457,19 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
     static UploadRingTelemetry telemetry;
     const auto upload_now = std::chrono::steady_clock::now();
     uint32_t busy_regions = 0;
-    for (const uint64_t owner :
-         g_r.upload_region_submissions) {
-      busy_regions +=
-          owner != 0 && owner > completed_submission ? 1u : 0u;
+    for (const uint64_t owner : g_r.upload_region_submissions) {
+      busy_regions += owner != 0 && owner > completed_submission ? 1u : 0u;
     }
     telemetry.maximum_busy_regions =
         std::max(telemetry.maximum_busy_regions, busy_regions);
     telemetry.maximum_submission_lag =
-        std::max(
-            telemetry.maximum_submission_lag,
+        std::max(telemetry.maximum_submission_lag,
             current_submission >= completed_submission
                 ? current_submission - completed_submission
                 : uint64_t{0});
-    if (telemetry.last_log ==
-        std::chrono::steady_clock::time_point{}) {
+    if (telemetry.last_log == std::chrono::steady_clock::time_point{}) {
       telemetry.last_log = upload_now;
-    } else if (
-        upload_now - telemetry.last_log >=
-        std::chrono::seconds(5)) {
+    } else if (upload_now - telemetry.last_log >= std::chrono::seconds(5)) {
       REXLOG_INFO(
           "multiplayer-gpu-upload-ring: regions={} busy={}/{} "
           "submission_lag={}/{} unsafe_reuse={} total={}",
@@ -16698,14 +15479,12 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
               ? current_submission - completed_submission
               : uint64_t{0},
           telemetry.maximum_submission_lag,
-          g_r.upload_region_unsafe_reuses -
-              telemetry.previous_unsafe_reuses,
+          g_r.upload_region_unsafe_reuses - telemetry.previous_unsafe_reuses,
           g_r.upload_region_unsafe_reuses);
       telemetry.last_log = upload_now;
       telemetry.maximum_submission_lag = 0;
       telemetry.maximum_busy_regions = 0;
-      telemetry.previous_unsafe_reuses =
-          g_r.upload_region_unsafe_reuses;
+      telemetry.previous_unsafe_reuses = g_r.upload_region_unsafe_reuses;
     }
   }
 
@@ -16742,7 +15521,8 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
   // prewarm missed (dynamic entities, late textures), and the draw path's
   // miss budgets are clamped while settling so leftovers render white/skip
   // for a frame instead of freezing the takeover frame.
-  const int32_t warmup_ms = REXCVAR_GET(skate3_native_render_scene_warmup_budget_ms);
+  const int32_t warmup_ms =
+      REXCVAR_GET(skate3_native_render_scene_warmup_budget_ms);
   bool settling = false;
   // The takeover gates judge REAL scenes only; a native loading frame
   // renders its empty scene deliberately (the gates re-run as usual once
@@ -16777,7 +15557,8 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
           queued = g_prewarm_queue.size();
         }
         REXLOG_INFO(
-            "native-scene: taking over natively ({} items; prewarm {} done / {} dropped "
+            "native-scene: taking over natively ({} items; prewarm {} "
+            "done / {} dropped "
             "/ {} queued)",
             scene.items.size(), g_prewarm_done.load(std::memory_order_relaxed),
             g_prewarm_dropped.load(std::memory_order_relaxed), queued);
@@ -16786,8 +15567,8 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
     settling = frame_number < g_settle_until_frame;
     if (settling) {
       const auto settle_t0 = PerfClock::now();
-      const auto deadline =
-          std::chrono::steady_clock::now() + std::chrono::milliseconds(warmup_ms);
+      const auto deadline = std::chrono::steady_clock::now() +
+                            std::chrono::milliseconds(warmup_ms);
       WarmCounters wc;
       for (const DrawItem& item : scene.items) {
         WarmItemResources(context, base, frame_number, item, deadline, wc);
@@ -16801,11 +15582,14 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
         const int32_t max_frames =
             REXCVAR_GET(skate3_native_render_scene_settle_max_frames);
         const uint64_t extended = frame_number + 8;
-        if (max_frames <= 0 || extended <= g_takeover_frame + uint64_t(max_frames)) {
-          g_settle_until_frame = std::max<uint64_t>(g_settle_until_frame, extended);
+        if (max_frames <= 0 ||
+            extended <= g_takeover_frame + uint64_t(max_frames)) {
+          g_settle_until_frame =
+              std::max<uint64_t>(g_settle_until_frame, extended);
         } else if (g_settle_until_frame <= frame_number + 1) {
           REXLOG_INFO(
-              "native-scene: settle pass CAPPED {} frames after takeover with {} "
+              "native-scene: settle pass CAPPED {} frames after takeover with "
+              "{} "
               "deferred (revalidation churn?) - draw-path budgets resume",
               frame_number - g_takeover_frame, wc.deferred);
         }
@@ -16827,8 +15611,9 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
 
   if (!g_r.announced) {
     g_r.announced = true;
-    REXLOG_INFO("native-scene: rendering natively ({} items, {}x{})", scene.items.size(),
-                context.guest_output_width, context.guest_output_height);
+    REXLOG_INFO("native-scene: rendering natively ({} items, {}x{})",
+                scene.items.size(), context.guest_output_width,
+                context.guest_output_height);
   }
 
   // Commit finished worker decodes every frame (streamed arenas decode on
@@ -16853,17 +15638,14 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
   uint32_t shadow_draws = 0;
   const auto shadow_t0 = PerfClock::now();
   float owned_shadow_rows[36] = {};
-  const bool owned_shadow =
-      BuildOwnedShadowRows(scene, owned_shadow_rows);
-  const float* sh =
-      owned_shadow ? owned_shadow_rows : scene.shadow_rows;
-  const bool shadow_rows_valid =
-      owned_shadow || scene.shadow_valid;
+  const bool owned_shadow = BuildOwnedShadowRows(scene, owned_shadow_rows);
+  const float* sh = owned_shadow ? owned_shadow_rows : scene.shadow_rows;
+  const bool shadow_rows_valid = owned_shadow || scene.shadow_valid;
   const int32_t debug_mode = REXCVAR_GET(skate3_native_render_scene_debug);
   cmd->ProfileRegion(nrhi::ProfileStage::kShadow);
-  shadow_ready = RenderShadowAtlas(
-      context, scene, sh, shadow_rows_valid, owned_shadow, bone_region,
-      debug_mode, &shadow_draws);
+  shadow_ready =
+      RenderShadowAtlas(context, scene, sh, shadow_rows_valid, owned_shadow,
+                        bone_region, debug_mode, &shadow_draws);
   cmd->ProfileRegion(nrhi::ProfileStage::kStaticSun);
   RenderStaticSunMap(context, scene, bone_region, debug_mode, frame_number);
   g_pw_shadow.Add(perf_ns_since(shadow_t0));
@@ -16901,7 +15683,8 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
   // (ps_tonemap then writes the guest output), else the guest output itself.
   const bool hdr_on = g_r.hdr_active && g_r.hdr_resolved != nullptr &&
                       g_r.hdr_srv != nullptr && g_r.pso_tonemap != nullptr;
-  const bool msaa_on = g_r.msaa > 1 && g_r.msaa_color != nullptr && g_r.resolve_pso != nullptr;
+  const bool msaa_on =
+      g_r.msaa > 1 && g_r.msaa_color != nullptr && g_r.resolve_pso != nullptr;
   nrhi::Texture* scene_color =
       msaa_on ? g_r.msaa_color
               : (hdr_on ? g_r.hdr_resolved : context.guest_output);
@@ -16916,10 +15699,10 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
   // black); real scenes keep the sky-ish debug clear that shows through
   // undecoded holes.
   const bool sandbox = skate3::mechanics_sandbox::Active();
-  float clear_color[4] = {
-      loading_native ? 0.0f : (sandbox ? 0.075f : 0.25f),
+  float clear_color[4] = {loading_native ? 0.0f : (sandbox ? 0.075f : 0.25f),
       loading_native ? 0.0f : (sandbox ? 0.105f : 0.35f),
-      loading_native ? 0.0f : (sandbox ? 0.145f : 0.55f), 1.0f};
+                          loading_native ? 0.0f : (sandbox ? 0.145f : 0.55f),
+                          1.0f};
   if (hdr_on) {
     // The clear is authored in the final gamma space; the HDR plane holds
     // pre-tonemap values, so encode through the tone chain's inverse (the
@@ -16928,8 +15711,7 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
     for (int k = 0; k < 3; ++k) {
       const float tm =
           clear_color[k] * clear_color[k] * (2.0f / (1.41f * 1.41f));
-      clear_color[k] = tm > 1.0f
-                           ? tm * 4.0f - 3.0f
+      clear_color[k] = tm > 1.0f ? tm * 4.0f - 3.0f
                            : 1.0f - std::sqrt(std::max(1.0f - tm, 0.0f));
     }
   }
@@ -16966,19 +15748,17 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
   // blurred atlas at t5 (white when no atlas was rendered this frame; the
   // shader is also gated by sh_misc.y).
   if (g_r.shadow_cb != nullptr) {
-    static auto moving_light_clock =
-        std::chrono::steady_clock::now();
-    const auto moving_light_now =
-        std::chrono::steady_clock::now();
+    static auto moving_light_clock = std::chrono::steady_clock::now();
+    const auto moving_light_now = std::chrono::steady_clock::now();
     mechanics_sandbox::map::AdvanceMovingLights(
-        std::chrono::duration<float>(
-            moving_light_now - moving_light_clock).count());
+        std::chrono::duration<float>(moving_light_now - moving_light_clock)
+            .count());
     mechanics_sandbox::map::AdvanceDayNightCycle(
-        std::chrono::duration<float>(
-            moving_light_now - moving_light_clock).count());
+        std::chrono::duration<float>(moving_light_now - moving_light_clock)
+            .count());
     mechanics_sandbox::map::AdvanceWeather(
-        std::chrono::duration<float>(
-            moving_light_now - moving_light_clock).count());
+        std::chrono::duration<float>(moving_light_now - moving_light_clock)
+            .count());
     moving_light_clock = moving_light_now;
     const uint32_t cb_offset =
         uint32_t(frame_number % RendererState::kShadowCbRegions) *
@@ -17010,8 +15790,7 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
         // character bias in world metres and convert through the actual
         // owned depth row.
         const float owned_z_scale =
-            std::sqrt(sh[16] * sh[16] + sh[17] * sh[17] +
-                      sh[18] * sh[18]);
+            std::sqrt(sh[16] * sh[16] + sh[17] * sh[17] + sh[18] * sh[18]);
         cb[56] = 0.018f * owned_z_scale;
         cb[57] = 0.028f * owned_z_scale;
         cb[58] = 0.045f * owned_z_scale;
@@ -17036,8 +15815,7 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
       cb[138] =
           float(REXCVAR_GET(skate3_native_render_scene_shadow_pcss_max_m));
       const float zlen =
-          std::sqrt(sh[16] * sh[16] + sh[17] * sh[17] +
-                    sh[18] * sh[18]);
+          std::sqrt(sh[16] * sh[16] + sh[17] * sh[17] + sh[18] * sh[18]);
       // A small metric slope term suppresses grazing-angle acne on the
       // high-resolution owned character receiver without detaching feet,
       // board, or limb-on-body contact shadows.
@@ -17048,8 +15826,8 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
           std::sqrt(sh[0] * sh[0] + sh[1] * sh[1] + sh[2] * sh[2]);
       cb[141] = zlen > 1e-8f ? 1.0f / zlen : 0.0f;
       cb[142] = xlen;
-      cb[143] = float(
-          REXCVAR_GET(skate3_native_render_scene_shadow_pcss_min_texel));
+      cb[143] =
+          float(REXCVAR_GET(skate3_native_render_scene_shadow_pcss_min_texel));
     }
     // Native static sun-shadow rows (nsm_x/y/z + params, cb[144..163]);
     // nsm_p.x = 0 disables the term in every branch (the scene receive, the
@@ -17063,17 +15841,16 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
     // The game itself never sun-shadows static world geometry indoors;
     // standing the map down restores its exact lm^2 shading.
     if (g_r.static_sun_valid && (owned_shadow || scene.shadow_fresh)) {
-      const bool independent_owned =
-          owned_shadow && g_r.owned_nsm_active;
+      const bool independent_owned = owned_shadow && g_r.owned_nsm_active;
       const float* primary_rows =
           independent_owned ? g_r.owned_nsm_rows[0] : g_r.nsm_rows;
       const float primary_radius =
           independent_owned ? g_r.owned_nsm_radius[0] : g_r.nsm_radius;
-      const float primary_depth_range =
-          independent_owned ? g_r.owned_nsm_depth_range[0]
+      const float primary_depth_range = independent_owned
+                                            ? g_r.owned_nsm_depth_range[0]
                             : g_r.nsm_depth_range;
-      const uint32_t primary_size =
-          independent_owned ? g_r.owned_static_sun_size[0]
+      const uint32_t primary_size = independent_owned
+                                        ? g_r.owned_static_sun_size[0]
                             : g_r.static_sun_size;
       std::memcpy(cb + 144, primary_rows, sizeof(g_r.nsm_rows));
       cb[156] = std::clamp(
@@ -17085,12 +15862,12 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
       // the map has no dilation blur, so a sub-texel kernel exposes raw
       // stair-step aliasing at full strength; two texels of
       // rotated-poisson filtering dissolve the steps into a smooth edge.
-      cb[159] = 2.0f * 2.0f *
-                float(REXCVAR_GET(
-                    skate3_native_render_scene_shadow_pcss_min_texel)) /
+      cb[159] =
+          2.0f * 2.0f *
+          float(REXCVAR_GET(skate3_native_render_scene_shadow_pcss_min_texel)) /
                 float(std::max(1u, primary_size));
-      float bias_m = float(
-          REXCVAR_GET(skate3_native_render_scene_shadow_static_bias));
+      float bias_m =
+          float(REXCVAR_GET(skate3_native_render_scene_shadow_static_bias));
       if (context.device->backend() == nrhi::Backend::kVulkan) {
         // The two backends compile the caster/receiver depth math through
         // different shader toolchains; their rounding differences leave
@@ -17117,8 +15894,7 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
     }
     float owned_origin[3] = {};
     if (mechanics_sandbox::Active() &&
-        mechanics_sandbox::SandboxMapRenderOrigin(
-            owned_origin)) {
+        mechanics_sandbox::SandboxMapRenderOrigin(owned_origin)) {
       // Maps retain every authored light. Keep the per-frame shader work
       // bounded by selecting the 64 lights most relevant to the camera.
       constexpr std::size_t kMaximumOwnedLocalLights = 64;
@@ -17127,15 +15903,13 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
         float score = 0.0f;
       };
       std::vector<RankedOwnedLight> ranked_lights;
-      ranked_lights.reserve(
-          mechanics_sandbox::map::ActiveMovingLightCount());
+      ranked_lights.reserve(mechanics_sandbox::map::ActiveMovingLightCount());
       for (std::size_t light_index = 0;
-           light_index <
-               mechanics_sandbox::map::ActiveMovingLightCount();
+           light_index < mechanics_sandbox::map::ActiveMovingLightCount();
            ++light_index) {
         mechanics_sandbox::map::MovingLightSnapshot light;
-        if (!mechanics_sandbox::map::ActiveMovingLightSnapshot(
-                light_index, light)) {
+        if (!mechanics_sandbox::map::ActiveMovingLightSnapshot(light_index,
+                                                               light)) {
           continue;
         }
         const float world_x = owned_origin[0] + light.position[0];
@@ -17144,11 +15918,8 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
         const float delta_x = world_x - scene.cam_pos[0];
         const float delta_y = world_y - scene.cam_pos[1];
         const float delta_z = world_z - scene.cam_pos[2];
-        const float range =
-            std::max(light.influence_radius, 0.01f);
-        ranked_lights.push_back(
-            {light,
-             (delta_x * delta_x + delta_y * delta_y +
+        const float range = std::max(light.influence_radius, 0.01f);
+        ranked_lights.push_back({light, (delta_x * delta_x + delta_y * delta_y +
               delta_z * delta_z) /
                  (range * range)});
       }
@@ -17156,29 +15927,24 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
           std::min(ranked_lights.size(), kMaximumOwnedLocalLights);
       if (ranked_lights.size() > selected_light_count) {
         std::partial_sort(
-            ranked_lights.begin(),
-            ranked_lights.begin() + selected_light_count,
+            ranked_lights.begin(), ranked_lights.begin() + selected_light_count,
             ranked_lights.end(),
-            [](const RankedOwnedLight& left,
-               const RankedOwnedLight& right) {
+            [](const RankedOwnedLight& left, const RankedOwnedLight& right) {
               return left.score < right.score;
             });
       }
       std::size_t light_count = 0;
-      for (std::size_t light_index = 0;
-           light_index < selected_light_count; ++light_index) {
+      for (std::size_t light_index = 0; light_index < selected_light_count;
+           ++light_index) {
         const mechanics_sandbox::map::MovingLightSnapshot& light =
             ranked_lights[light_index].light;
         const std::size_t position = 244 + light_count * 4;
         const std::size_t color = 500 + light_count * 4;
         const std::size_t direction = 756 + light_count * 4;
         const std::size_t spot = 1012 + light_count * 4;
-        cb[position + 0] =
-            owned_origin[0] + light.position[0];
-        cb[position + 1] =
-            owned_origin[1] + light.position[1];
-        cb[position + 2] =
-            owned_origin[2] + light.position[2];
+        cb[position + 0] = owned_origin[0] + light.position[0];
+        cb[position + 1] = owned_origin[1] + light.position[1];
+        cb[position + 2] = owned_origin[2] + light.position[2];
         cb[position + 3] = light.influence_radius;
         cb[color + 0] = light.color[0];
         cb[color + 1] = light.color[1];
@@ -17195,18 +15961,14 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
       }
       mechanics_sandbox::map::MovingLightSnapshot lightning;
       if (light_count < kMaximumOwnedLocalLights &&
-          mechanics_sandbox::map::ActiveLightningLightSnapshot(
-              lightning)) {
+          mechanics_sandbox::map::ActiveLightningLightSnapshot(lightning)) {
         const std::size_t position = 244 + light_count * 4;
         const std::size_t color = 500 + light_count * 4;
         const std::size_t direction = 756 + light_count * 4;
         const std::size_t spot = 1012 + light_count * 4;
-        cb[position + 0] =
-            owned_origin[0] + lightning.position[0];
-        cb[position + 1] =
-            owned_origin[1] + lightning.position[1];
-        cb[position + 2] =
-            owned_origin[2] + lightning.position[2];
+        cb[position + 0] = owned_origin[0] + lightning.position[0];
+        cb[position + 1] = owned_origin[1] + lightning.position[1];
+        cb[position + 2] = owned_origin[2] + lightning.position[2];
         cb[position + 3] = lightning.influence_radius;
         cb[color + 0] = lightning.color[0];
         cb[color + 1] = lightning.color[1];
@@ -17225,9 +15987,7 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
       const skate::world::DayNightState celestial =
           mechanics_sandbox::map::ActiveDayNightState();
       cb[201] =
-          mechanics_sandbox::map::DynamicWorldLightingEnabled()
-              ? 1.0f
-              : 0.0f;
+          mechanics_sandbox::map::DynamicWorldLightingEnabled() ? 1.0f : 0.0f;
       cb[202] = celestial.night_amount;
       cb[203] = celestial.daylight_amount;
       cb[204] = celestial.light_direction_to_light.x;
@@ -17269,8 +16029,7 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
     // World-shading v2 row (sh_v2, cb[60..63]): x = stored-tangent
     // polarity, yzw = the build-up showcase split state (stage left/right
     // of the split + its position in output pixels; zeros = showcase off).
-    cb[60] =
-        float(REXCVAR_GET(skate3_native_render_scene_world_v2_tan_sign));
+    cb[60] = float(REXCVAR_GET(skate3_native_render_scene_world_v2_tan_sign));
     TickShowcase(context.guest_output_width, hdr_on);
     cb[61] = g_r.showcase_rows[0];
     cb[62] = g_r.showcase_rows[1];
@@ -17312,8 +16071,7 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
       std::memcpy(cb + 92, scene.ocean_rows, sizeof(scene.ocean_rows));
     }
     if (scene.oceanrefl_valid) {
-      std::memcpy(cb + 132, scene.oceanrefl_rows,
-                  sizeof(scene.oceanrefl_rows));
+      std::memcpy(cb + 132, scene.oceanrefl_rows, sizeof(scene.oceanrefl_rows));
     }
     cmd->SetConstantBuffer(6, g_r.shadow_cb, cb_offset);
     // b2 (character lighting) default: point at the ring base so the root
@@ -17326,10 +16084,11 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
     // v2 material table default (t8/t9 white) + independent static-shadow
     // maps at t10..t12. Every lit branch can sample them.
     nrhi::TextureView* t8_default[6] = {
-        g_r.white.srv, g_r.white.srv,
-        g_r.owned_nsm_active ? g_r.owned_static_sun_srv[0]
-                             : (g_r.static_sun_valid ? g_r.static_sun_srv
-                                                     : g_r.white.srv),
+        g_r.white.srv,
+        g_r.white.srv,
+        g_r.owned_nsm_active
+            ? g_r.owned_static_sun_srv[0]
+            : (g_r.static_sun_valid ? g_r.static_sun_srv : g_r.white.srv),
         g_r.owned_nsm_active ? g_r.owned_static_sun_srv[1] : g_r.white.srv,
         g_r.owned_nsm_active ? g_r.owned_static_sun_srv[2] : g_r.white.srv,
         g_r.white.srv};
@@ -17349,8 +16108,7 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
   // against its floor, ramps, and obstacles.
   DrawSandboxSky(context, cmd, scene, frame_number);
   std::vector<DrawItem> multiplayer_remote_items;
-  DrawSandboxMap(
-      context, cmd, scene, frame_number, use_depth, shadow_ready,
+  DrawSandboxMap(context, cmd, scene, frame_number, use_depth, shadow_ready,
       &multiplayer_remote_items);
   cmd->SetPipeline(use_depth ? g_r.pso : g_r.pso_nodepth);
 
@@ -17385,7 +16143,8 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
     ring_frame->sky_height = scene.sky_height;
     ring_frame->shadow_valid = scene.shadow_valid;
     ring_frame->shadow_ready = shadow_ready;
-    ring_frame->shadow_draws = uint16_t(std::min<uint32_t>(shadow_draws, 0xFFFFu));
+    ring_frame->shadow_draws =
+        uint16_t(std::min<uint32_t>(shadow_draws, 0xFFFFu));
     ring_frame->static_sun_valid = g_r.static_sun_valid;
     std::memcpy(ring_frame->shadow_rows, scene.shadow_rows,
                 sizeof(ring_frame->shadow_rows));
@@ -17396,7 +16155,8 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
   // buffers that change every frame). Static meshes and all textures route
   // to the decode workers on miss; the render thread never pays their
   // decode cost.
-  int32_t mesh_budget = REXCVAR_GET(skate3_native_render_scene_mesh_decode_budget);
+  int32_t mesh_budget =
+      REXCVAR_GET(skate3_native_render_scene_mesh_decode_budget);
   if (settling) {
     // Post-takeover settle window: cap inline dynamic decodes too, so the
     // takeover frame never absorbs an unbounded decode burst.
@@ -17412,9 +16172,11 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
   static const std::chrono::steady_clock::time_point water_t0 =
       std::chrono::steady_clock::now();
   const float water_time = float(
-      std::chrono::duration<double>(std::chrono::steady_clock::now() - water_t0).count() -
-      std::floor(
-          std::chrono::duration<double>(std::chrono::steady_clock::now() - water_t0).count() /
+      std::chrono::duration<double>(std::chrono::steady_clock::now() - water_t0)
+          .count() -
+      std::floor(std::chrono::duration<double>(
+                     std::chrono::steady_clock::now() - water_t0)
+                     .count() /
           3600.0) *
           3600.0);
 
@@ -17521,11 +16283,11 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
   // here rather than independently resolving streaming state a second time.
   std::unordered_map<const DrawItem*, const GuestTexture*>
       raytraced_diffuse_by_item;
-  const bool ssr_on =
-      hdr_on && use_depth && debug_mode == 0 && !loading_native &&
-      !g_r.ssr_failed && REXCVAR_GET(skate3_native_render_scene_ssr) &&
-      // The published projection must be the live perspective matrix (same
-      // gate as the SSAO pass).
+  const bool ssr_on = hdr_on && use_depth && debug_mode == 0 &&
+                      !loading_native && !g_r.ssr_failed &&
+                      REXCVAR_GET(skate3_native_render_scene_ssr) &&
+                      // The published projection must be the live perspective
+                      // matrix (same gate as the SSAO pass).
       scene.proj[11] == 1.0f && scene.proj[0] != 0.0f &&
       scene.proj[5] != 0.0f && scene.proj[14] != 0.0f;
 
@@ -17564,8 +16326,8 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
         item.ropa && REXCVAR_GET(skate3_native_render_scene_ropa_inline);
     const bool dynamic_payload = item.skinned || item.cloth_quads || item.ropa;
     auto it = g_r.meshes.find(item.mesh);
-    if (item.retained &&
-        (it == g_r.meshes.end() || it->second.fingerprint != item.fingerprint)) {
+    if (item.retained && (it == g_r.meshes.end() ||
+                          it->second.fingerprint != item.fingerprint)) {
       // Retained off-screen items (edge-of-view guard band) outlive their
       // guest-side lifetime guarantees; the arena may have streamed out or
       // been reused since capture. Draw only the exact cached decode; no
@@ -17608,7 +16370,9 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
         g_rr_decode_fail.fetch_add(1, std::memory_order_relaxed);
         static std::unordered_set<uint32_t> logged;
         if (logged.size() < 32 && logged.insert(item.mesh).second) {
-          REXLOG_WARN("native-scene: DecodeMesh FAILED mesh={:08X} vb={:08X} fmt={} stride={}",
+          REXLOG_WARN(
+              "native-scene: DecodeMesh FAILED mesh={:08X} vb={:08X} "
+              "fmt={} stride={}",
                       item.mesh, item.vb_addr, item.pos_fmt, item.stride);
         }
         return;
@@ -17622,19 +16386,16 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
     // cache entry is perfectly valid for raster drawing, but lacks the CPU
     // decoded copy needed by the mirror. Fill that sidecar once from the
     // live, fully classified item; keep the already-resident raster buffers.
-    if (item.dyn_entity &&
-        it->second.raytracing_verts.empty() &&
+    if (item.dyn_entity && it->second.raytracing_verts.empty() &&
         !item.retained) {
       MeshBuffers raytracing_decode;
-      if (DecodeMesh(
-              g_r.device, base, item, raytracing_decode)) {
+      if (DecodeMesh(g_r.device, base, item, raytracing_decode)) {
         it->second.raytracing_verts =
             std::move(raytracing_decode.raytracing_verts);
         it->second.raytracing_indices =
             std::move(raytracing_decode.raytracing_indices);
         if (item.ropa && !raytracing_decode.ropa_verts.empty()) {
-          it->second.ropa_verts =
-              std::move(raytracing_decode.ropa_verts);
+          it->second.ropa_verts = std::move(raytracing_decode.ropa_verts);
         }
         PoolMeshBuffer(g_r.device, raytracing_decode.vb);
         PoolMeshBuffer(g_r.device, raytracing_decode.ib);
@@ -17706,7 +16467,8 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
     // decode is in flight (first-sight miss or a still-failing heal); the
     // sticky wrapper below then serves the item's last-good texture instead.
     bool tex_pending = false;
-    const auto resolve_texture_raw = [&](uint32_t tex_ptr) -> const GuestTexture* {
+    const auto resolve_texture_raw =
+        [&](uint32_t tex_ptr) -> const GuestTexture* {
       if (tex_ptr == 0) {
         return &g_r.white;
       }
@@ -17739,7 +16501,8 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
               rit->second.demoted = true;
               g_demote_hold.fetch_add(1, std::memory_order_relaxed);
               if (trm) {
-                REXLOG_INFO("tex-trace: f{} obj={:08X} DEMOTED (route held, "
+                REXLOG_INFO(
+                    "tex-trace: f{} obj={:08X} DEMOTED (route held, "
                             "polls suspended)",
                             frame_number, tex_ptr);
               }
@@ -17808,7 +16571,8 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
           EnqueueWordsMiss(route.key, route.words);
         }
         if (trm) {
-          REXLOG_INFO("tex-trace: f{} obj={:08X} INVALID entry key={:016X} "
+          REXLOG_INFO(
+              "tex-trace: f{} obj={:08X} INVALID entry key={:016X} "
                       "(retry at f{})",
                       frame_number, tex_ptr, route.key, e.retry_after_frame);
         }
@@ -17825,8 +16589,7 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
       // near_black verdict re-decode regardless of the mip-0 fingerprint;
       // the commit's same-content dedup absorbs the no-ops. Suspended while
       // the route is demote-held (the probes would read the reused pool).
-      if (!item.retained && !route.demoted &&
-          frame_number >= e.recheck_frame &&
+      if (!item.retained && !route.demoted && frame_number >= e.recheck_frame &&
           REXCVAR_GET(skate3_native_render_scene_tex_revalidate)) {
         // Menu/editor contexts poll STEADY entries on a 2-frame cadence
         // (mirrors the 2D resolver): the CAS editor recomposes the skater's
@@ -17869,7 +16632,8 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
                 e.fetch_words[5]);
           }
           if (trm) {
-            REXLOG_INFO("tex-trace: f{} obj={:08X} ENQUEUE heal key={:016X} "
+            REXLOG_INFO(
+                "tex-trace: f{} obj={:08X} ENQUEUE heal key={:016X} "
                         "reason={}{}{}",
                         frame_number, tex_ptr, route.key, fp_new ? "fp" : "",
                         e.incomplete ? "inc" : "", e.near_black ? "nb" : "");
@@ -17932,7 +16696,8 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
         // store, so keep serving it while the downgrade is young. A
         // persistent downgrade (a real demote as the player leaves) adopts
         // after the hold window.
-        const int32_t hold = REXCVAR_GET(skate3_native_render_scene_detail_hold);
+        const int32_t hold =
+            REXCVAR_GET(skate3_native_render_scene_detail_hold);
         const uint64_t cur_key = FetchWordsKey(t->fetch_words);
         const uint64_t cur_area = FetchWordsArea(t->fetch_words);
         if (hold > 0 && site.area > cur_area && site.words_key != 0) {
@@ -17971,8 +16736,7 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
                 REXLOG_INFO(
                     "tex-trace: f{} slot={} DETAIL-HOLD serving fp={:016X} "
                     "(bound area {} < {})",
-                    frame_number, slot, held->payload_fp, cur_area,
-                    site.area);
+                    frame_number, slot, held->payload_fp, cur_area, site.area);
               }
               return held;
             }
@@ -17982,8 +16746,7 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
           REXLOG_INFO(
               "tex-trace: f{} slot={} ADOPT key {:016X}(area {}) -> "
               "{:016X}(area {})",
-              frame_number, slot, site.words_key, site.area, cur_key,
-              cur_area);
+              frame_number, slot, site.words_key, site.area, cur_key, cur_area);
         }
         site.words_key = cur_key;
         site.area = cur_area;
@@ -18004,7 +16767,8 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
             old->second.last_used_frame = frame_number;
             g_tex_sticky_served.fetch_add(1, std::memory_order_relaxed);
             if (trm) {
-              REXLOG_INFO("tex-trace: f{} slot={} STICKY serving key={:016X} "
+              REXLOG_INFO(
+                  "tex-trace: f{} slot={} STICKY serving key={:016X} "
                           "(pending {:08X})",
                           frame_number, slot, sit->second.words_key, tex_ptr);
             }
@@ -18044,12 +16808,13 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
         }
       }
     }
-    if (item.dyn_entity && diffuse != nullptr &&
-        diffuse->texture != nullptr && diffuse->srv != nullptr) {
+    if (item.dyn_entity && diffuse != nullptr && diffuse->texture != nullptr &&
+        diffuse->srv != nullptr) {
       raytraced_diffuse_by_item[&item] = diffuse;
     }
     const GuestTexture* lightmap =
-        item.lightmap_tex != 0 && REXCVAR_GET(skate3_native_render_scene_lightmaps)
+        item.lightmap_tex != 0 &&
+                REXCVAR_GET(skate3_native_render_scene_lightmaps)
             ? resolve_texture(item.lightmap_tex, 1)
             : nullptr;
     if (lightmap == &g_r.white) {
@@ -18093,7 +16858,8 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
       const uint32_t bytes = uint32_t(item.bones.size() * sizeof(float));
       const uint32_t offset = (g_r.bone_ring_offset + 255u) & ~255u;
       if (offset + bytes <= RendererState::kBoneRegionSize) {
-        std::memcpy(g_r.bone_ring_cpu + bone_region + offset, item.bones.data(), bytes);
+        std::memcpy(g_r.bone_ring_cpu + bone_region + offset, item.bones.data(),
+                    bytes);
         g_r.bone_ring_offset = offset + bytes;
         cmd->SetBufferSrv(3, g_r.bone_ring, bone_region + offset);
         bones_bound = true;
@@ -18224,7 +16990,8 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
         cit->second.last_used_frame = frame_number;
       }
     }
-    const GuestTexture* decal_tex = item.decal && item.decal_art != 0 &&
+    const GuestTexture* decal_tex =
+        item.decal && item.decal_art != 0 &&
                                             REXCVAR_GET(skate3_native_render_scene_decals)
                                         ? resolve_texture(item.decal_art, 4)
                                         : &g_r.white;
@@ -18270,8 +17037,7 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
       const auto fp_of = [](const GuestTexture* t) -> uint64_t {
         return t != nullptr && t->valid ? t->payload_fp : 0;
       };
-      for (const GuestTexture* t :
-           {diffuse, lightmap, macro_tex, decal_tex}) {
+      for (const GuestTexture* t : {diffuse, lightmap, macro_tex, decal_tex}) {
         if (t != nullptr && t != &g_r.white) {
           g_trace_keys.insert(FetchWordsKey(t->fetch_words));
         }
@@ -18291,9 +17057,8 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
             "dif={:08X}/{:016X} dec={:08X}/{:016X} lm={:08X}/{:016X} "
             "mac={:08X}/{:016X}",
             frame_number, item.ctx, item.retained ? 1 : 0, item.diffuse_tex,
-            fp_of(diffuse), item.decal_art, fp_of(decal_tex),
-            item.lightmap_tex, fp_of(lightmap), item.macro_tex,
-            fp_of(macro_tex));
+            fp_of(diffuse), item.decal_art, fp_of(decal_tex), item.lightmap_tex,
+            fp_of(lightmap), item.macro_tex, fp_of(macro_tex));
       }
     }
     // Exact env families without decal art bind the material's spec/ecc/
@@ -18354,7 +17119,8 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
       uint32_t gate = 0;
       if (!spec_bound) gate |= 1;
       if (item.water_normal == 0) gate |= 2;
-      if (spec_bound && (!decal_tex->valid || decal_tex->srv_mips == 0)) gate |= 4;
+      if (spec_bound && (!decal_tex->valid || decal_tex->srv_mips == 0))
+        gate |= 4;
       if (gate == 0) {
         const GuestTexture* nrm = resolve_texture(item.water_normal, 3);
         if (nrm == &g_r.white) {
@@ -18490,10 +17256,10 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
     // reflective trim path) is fams 5/6 only; fams 1-4 signal their
     // normal map through the misc.z flags instead.
     constants[47] =
-        is_decal ? (item.decal_tileable ? 2.0f : 1.0f)
-                 : (spec_bound ? ((normal_paired && item.env_family >= 5)
-                                      ? 4.0f
-                                      : 3.0f)
+        is_decal
+            ? (item.decal_tileable ? 2.0f : 1.0f)
+            : (spec_bound
+                   ? ((normal_paired && item.env_family >= 5) ? 4.0f : 3.0f)
                                : 0.0f);
     if (char_spec != 0.0f) {
       // Character fam 1/2 spec-mask state (see the bind above); chars
@@ -18642,18 +17408,20 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
           // packed mips of a constant texture hold the same constant).
           // Implausible results (non-DXT1 / unreadable / |fold| > 0.1)
           // keep the cvar values.
-          static std::unordered_map<uint32_t, std::pair<float, float>> fold_cache;
+          static std::unordered_map<uint32_t, std::pair<float, float>>
+              fold_cache;
           auto fit = fold_cache.find(item.detail_tex);
           if (fit == fold_cache.end()) {
             std::pair<float, float> fold{float(bx), float(by)};
             uint32_t raw[6];
-            if (GuestTryCopy(raw, base + item.detail_tex + 7 * 4, sizeof(raw))) {
+            if (GuestTryCopy(raw, base + item.detail_tex + 7 * 4,
+                             sizeof(raw))) {
               const uint32_t w0 = SwapU32(raw[0]);
               const uint32_t w1 = SwapU32(raw[1]);
               uint8_t block[8];
               if ((w0 & 3) == 2 && (w1 & 0x3F) == 0x12 &&
-                  GuestTryCopy(block,
-                               base + (0xA0000000u | ((w1 >> 12) << 12)), 8)) {
+                  GuestTryCopy(block, base + (0xA0000000u | ((w1 >> 12) << 12)),
+                               8)) {
                 uint8_t le[8];
                 for (int k = 0; k < 8; k += 2) {  // k_8in16 guest endianness
                   le[k] = block[k + 1];
@@ -18709,8 +17477,7 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
     // with live spec masks (the reflection mask rides t4.z), plus water,
     // for the reflection G-buffer pass after the scene pass.
     if (ssr_on && !item.skinned &&
-        (item.water ||
-         ((item.env_family == 5 || item.env_family == 6 ||
+        (item.water || ((item.env_family == 5 || item.env_family == 6 ||
            item.env_family == 13) &&
           constants[39] < -4.5f && constants[47] > 2.5f))) {
       SsrGbufItem si;
@@ -18751,8 +17518,11 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
       // Rebinding only t8/t9 would reset the three static-shadow maps.
       nrhi::TextureView* t8_views[6] = {
           (v2_detail != nullptr ? v2_detail : &g_r.white)->srv,
-          (v2_spec2 != nullptr ? v2_spec2 : &g_r.white)->srv, nsm_view,
-          nsm_mid_view, nsm_far_view, g_r.white.srv};
+          (v2_spec2 != nullptr ? v2_spec2 : &g_r.white)->srv,
+          nsm_view,
+          nsm_mid_view,
+          nsm_far_view,
+          g_r.white.srv};
       cmd->SetTextures(8, t8_views, 6);
     }
     // ROPA shape blend (see RendererState::ropa_shapes): combine the shape
@@ -18828,8 +17598,7 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
         }
       }
       const uint32_t region =
-          upload_region_index *
-          RendererState::kRopaRegionSize;
+          upload_region_index * RendererState::kRopaRegionSize;
       const uint32_t bytes = uint32_t(want_floats * sizeof(float));
       if (ng > 0 && total >= 0.5f && newest != nullptr &&
           buffers.vb_view.stride == 56 &&
@@ -18902,7 +17671,8 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
       const auto di_t4 = PerfClock::now();
       const auto ns = [](PerfClock::time_point a, PerfClock::time_point b) {
         return uint64_t(
-            std::chrono::duration_cast<std::chrono::nanoseconds>(b - a).count());
+            std::chrono::duration_cast<std::chrono::nanoseconds>(b - a)
+                .count());
       };
       g_pw_di_mesh.Add(ns(di_t0, di_t1));
       g_pw_di_tex.Add(ns(di_t1, di_t2));
@@ -18964,8 +17734,7 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
   const auto record_item_draws = [&](const DrawItem& item,
                                      uint32_t before_draws) {
     native_entity::CtxInfo identity;
-    if (item.ctx != 0 &&
-        native_entity::LookupCtx(item.ctx, &identity)) {
+    if (item.ctx != 0 && native_entity::LookupCtx(item.ctx, &identity)) {
       skate3::mechanics_sandbox::RecordRenderedPresentation(
           identity.entity, drawn - before_draws);
     }
@@ -18980,8 +17749,8 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
     // Statics only (same gate as the retention pass): a skinned/ropa item's
     // pose lives in its bone palette, its identity world + bind-pose bbox
     // say nothing about where it is; those always classify as visible.
-    const bool classifiable = !item.skinned && !item.ropa &&
-                              !item.cloth_quads && item.bones.empty();
+    const bool classifiable =
+        !item.skinned && !item.ropa && !item.cloth_quads && item.bones.empty();
     const bool off =
         classifiable && ItemOutsideFrustum(item, scene.view_proj, 1.0f);
     const bool occluded =
@@ -19039,8 +17808,8 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
   // doors/wheels through the body shell) from double-blending into an x-ray.
   const auto char_fade_zwrite = [&](const DrawItem& it) {
     return debug_mode == 0 && it.char_rows[14 * 4 + 1] > 0.0f &&
-           (it.char_family == 1 || it.char_family == 2 ||
-            it.char_family == 3 || it.char_family == 6) &&
+           (it.char_family == 1 || it.char_family == 2 || it.char_family == 3 ||
+            it.char_family == 6) &&
            REXCVAR_GET(skate3_native_render_scene_entity_fade) &&
            CharFadeAlpha(it) < 0.999f;
   };
@@ -19055,8 +17824,8 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
   // revealed. At gameplay speeds the grid refreshes well inside that
   // budget, so the gate only stands the cull down across teleports and
   // camera cuts.
-  bool occl_cull_active = occl_cull_wanted && debug_mode == 0 &&
-                          g_r.occl_grid_valid;
+  bool occl_cull_active =
+      occl_cull_wanted && debug_mode == 0 && g_r.occl_grid_valid;
   if (occl_cull_active) {
     float cam_d2 = 0.0f;
     for (int a = 0; a < 3; ++a) {
@@ -19104,10 +17873,10 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
       ri.indices = idx_total;
       ri.env_family = item.env_family;
       ri.char_family = item.char_family;
-      ri.flags = uint8_t((item.transparent ? 1u : 0u) | (item.water ? 2u : 0u) |
+      ri.flags =
+          uint8_t((item.transparent ? 1u : 0u) | (item.water ? 2u : 0u) |
                          (item.skinned ? 4u : 0u) | (item.retained ? 8u : 0u) |
-                         (item.pending ? 16u : 0u) |
-                         (item.caster_bank ? 32u : 0u) |
+                  (item.pending ? 16u : 0u) | (item.caster_bank ? 32u : 0u) |
                          (item.decal ? 64u : 0u));
       ring_map.emplace(&item, uint32_t(ring_frame->items.size()));
       ring_frame->items.push_back(ri);
@@ -19119,16 +17888,16 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
     // reflection-only windows at the captured alpha; vehicle bodies (fam 6)
     // stay opaque.
     const bool char_capture_ok = item.char_rows[14 * 4 + 1] > 0.0f;
-    const bool hair_blend = item.char_family >= 4 && item.char_family <= 5 &&
-                            char_capture_ok;
+    const bool hair_blend =
+        item.char_family >= 4 && item.char_family <= 5 && char_capture_ok;
     const bool glass_blend = item.char_family == 7 && char_capture_ok;
     // character.alpha accessory pieces (sunglass lenses): translucent, alpha
     // from the coverage texture at uv2 (ch_misc.z set by the capture); the
     // game draws them after every opaque character piece (see
     // DrawItem::char_alpha). Gated on the SAME capture validation as hair:
     // without validated rows ch_misc.z is 0 and the item stays opaque.
-    const bool cac_alpha_blend = item.char_alpha && char_capture_ok &&
-                                 item.char_rows[14 * 4 + 2] > 0.0f;
+    const bool cac_alpha_blend =
+        item.char_alpha && char_capture_ok && item.char_rows[14 * 4 + 2] > 0.0f;
     // Flicker probes: a hair/character-alpha piece whose pass route flips
     // between consecutive frames, or whose bone palette returns bit-exact
     // to the previous-but-one frame's value (A,B,A,B: genuine motion
@@ -19156,7 +17925,8 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
       if (!fresh2 && pr.route != route) {
         g_hair_route_flips.fetch_add(1, std::memory_order_relaxed);
         static std::atomic<uint32_t> s_flip_logged{0};
-        const uint32_t fl = s_flip_logged.fetch_add(1, std::memory_order_relaxed);
+        const uint32_t fl =
+            s_flip_logged.fetch_add(1, std::memory_order_relaxed);
         if (fl < 24 || (fl & 511u) == 0) {
           REXLOG_DEBUG(
               "native-scene: hair ROUTE FLIP mesh={:08X} ctx={:08X} fam={} "
@@ -19170,7 +17940,8 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
           bones_h == pr.bones_h2) {
         g_hair_bone_alternations.fetch_add(1, std::memory_order_relaxed);
         static std::atomic<uint32_t> s_bone_alt_logged{0};
-        const uint32_t bl = s_bone_alt_logged.fetch_add(1, std::memory_order_relaxed);
+        const uint32_t bl =
+            s_bone_alt_logged.fetch_add(1, std::memory_order_relaxed);
         if (bl < 24 || (bl & 1023u) == 0) {
           REXLOG_DEBUG(
               "native-scene: hair BONES ALTERNATION mesh={:08X} ctx={:08X} "
@@ -19194,7 +17965,8 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
     // capture to honor the fade: the entity alpha is authoritative even
     // when the capture chain failed; a spawn-settling NPC is invisible
     // regardless of whether its rows validated this frame.
-    const bool entity_fade = debug_mode == 0 && item.char_family != 0 &&
+    const bool entity_fade =
+        debug_mode == 0 && item.char_family != 0 &&
                              (char_capture_ok || item.lw_alpha >= 0.0f) &&
                              REXCVAR_GET(skate3_native_render_scene_entity_fade);
     const float fade_a = entity_fade ? CharFadeAlpha(item) : 1.0f;
@@ -19214,7 +17986,8 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
     // "NPC drops out of the sky with no fade" sighting).
     bool fade_blink = false;
     if (item.char_family != 0 && debug_mode == 0 && item.lw_alpha < 0.0f) {
-      static std::unordered_map<uint32_t, uint8_t> s_fade_opaque;  // render thread
+      static std::unordered_map<uint32_t, uint8_t>
+          s_fade_opaque;  // render thread
       uint8_t& was_opaque = s_fade_opaque[item.mesh];
       if (entity_fade && fade_a <= 0.004f && was_opaque) {
         fade_blink = true;
@@ -19247,8 +18020,7 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
     // the sorted alpha sub-pass whenever its exact branch is live (same
     // shadow_valid gate as cam_pos.w = -fam; the legacy fallback renders it
     // opaque exactly as before classification).
-    const bool refl_trans_blend =
-        item.env_family == 13 && scene.shadow_valid;
+    const bool refl_trans_blend = item.env_family == 13 && scene.shadow_valid;
     const auto stamp_route = [&](uint8_t route) {
       if (ring_frame != nullptr) {
         const auto rit = ring_map.find(&item);
@@ -19265,9 +18037,8 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
     // retained ones: a re-appended item's ctx may already be freed, and a
     // reused address would filter an unrelated new instance) feed the
     // guest-side dispatch filter via the publication below.
-    if (occl_cull_active && !item.skinned && !item.ropa &&
-        !item.cloth_quads && item.bones.empty() &&
-        ItemOccludedByGrid(item, 1.0f)) {
+    if (occl_cull_active && !item.skinned && !item.ropa && !item.cloth_quads &&
+        item.bones.empty() && ItemOccludedByGrid(item, 1.0f)) {
       g_occl_culled.fetch_add(1, std::memory_order_relaxed);
       if (!item.retained && item.ctx != 0) {
         culled_ctxs.push_back(item.ctx);
@@ -19301,23 +18072,17 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
     if (!SandboxShouldDrawItem(item)) {
       continue;
     }
-    const bool char_capture_ok =
-        item.char_rows[14 * 4 + 1] > 0.0f;
+    const bool char_capture_ok = item.char_rows[14 * 4 + 1] > 0.0f;
     const bool hair_blend =
-        item.char_family >= 4 && item.char_family <= 5 &&
-        char_capture_ok;
-    const bool glass_blend =
-        item.char_family == 7 && char_capture_ok;
+        item.char_family >= 4 && item.char_family <= 5 && char_capture_ok;
+    const bool glass_blend = item.char_family == 7 && char_capture_ok;
     const bool cac_alpha_blend =
-        item.char_alpha && char_capture_ok &&
-        item.char_rows[14 * 4 + 2] > 0.0f;
-    const bool refl_trans_blend =
-        item.env_family == 13 && scene.shadow_valid;
-    const bool ocean_opaque =
-        item.water && item.water_ocean == 1 &&
+        item.char_alpha && char_capture_ok && item.char_rows[14 * 4 + 2] > 0.0f;
+    const bool refl_trans_blend = item.env_family == 13 && scene.shadow_valid;
+    const bool ocean_opaque = item.water && item.water_ocean == 1 &&
         scene.shadow_valid && scene.ocean_valid;
-    if ((item.transparent || item.water || hair_blend ||
-         glass_blend || cac_alpha_blend || refl_trans_blend) &&
+    if ((item.transparent || item.water || hair_blend || glass_blend ||
+         cac_alpha_blend || refl_trans_blend) &&
         !ocean_opaque && debug_mode == 0) {
       if (REXCVAR_GET(skate3_native_render_scene_transparents)) {
         transparent_items.push_back(&item);
@@ -19349,7 +18114,8 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
     g_occl_pub_ms.store(now_ms, std::memory_order_relaxed);
   }
   if (REXCVAR_GET(skate3_native_render_scene_sort_opaque) && debug_mode == 0) {
-    std::stable_sort(opaque_items.begin(), opaque_items.end(),
+    std::stable_sort(
+        opaque_items.begin(), opaque_items.end(),
                      [](const auto& a, const auto& b) { return a.first < b.first; });
   }
   for (const auto& [dist, item] : opaque_items) {
@@ -19368,7 +18134,8 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
                        return view_dist2(*a) > view_dist2(*b);
                      });
     cmd->SetPipeline(use_depth ? g_r.pso_transparent : g_r.pso_nodepth);
-    nrhi::Pipeline* blend_bound = use_depth ? g_r.pso_transparent : g_r.pso_nodepth;
+    nrhi::Pipeline* blend_bound =
+        use_depth ? g_r.pso_transparent : g_r.pso_nodepth;
     for (const DrawItem* item : transparent_items) {
       // Mid-fade entity pieces: alpha blend with z-write ON (see pso_fade).
       if (use_depth && g_r.pso_fade != nullptr && char_fade_zwrite(*item)) {
@@ -19381,7 +18148,8 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
       }
       const bool hair = item->char_family >= 4 && item->char_family <= 5 &&
                         item->char_rows[14 * 4 + 1] > 0.0f;
-      if (hair && use_depth && g_r.pso_hair_a != nullptr && g_r.pso_hair_b != nullptr) {
+      if (hair && use_depth && g_r.pso_hair_a != nullptr &&
+          g_r.pso_hair_b != nullptr) {
         // The game's two hair passes: cull BACK then cull FRONT with the
         // same shader: keeps far-side strands from compositing over
         // near-side ones (one uncull(ed) pass reads as crunchy noise).
@@ -19424,8 +18192,8 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
   skate3::mechanics_sandbox::RecordRenderStage(
       skate3::mechanics_sandbox::RenderStage::MainPassComplete);
   g_pw_items.Add(perf_ns_since(items_t0));
-  g_pw_pre.Add(uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                   items_t0 - render_t0)
+  g_pw_pre.Add(uint64_t(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(items_t0 - render_t0)
                    .count()));
   const auto mid_t0 = PerfClock::now();
 
@@ -19441,8 +18209,8 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
   // video: the FMV triple resolves; content changes always decode inline
   // (frame-exact playback), and the caller additionally gates serving on
   // last_change_frame >= the movie session start (see the triple loop).
-  const auto resolve_2d_texture = [&](const uint32_t fetch[6],
-                                      bool force_inline = false,
+  const auto resolve_2d_texture =
+      [&](const uint32_t fetch[6], bool force_inline = false,
                                       bool video = false) -> const GuestTexture* {
     if ((fetch[0] & 0x3u) != 2 || fetch[1] == 0) {
       return &g_r.white;
@@ -19465,7 +18233,8 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
     // 100+ ms of per-pixel decode work, but routinely
     // skipping first-sight quads made every APT re-raster (new address =
     // new key) blink its element for 1-3 frames (the menu flicker).
-    const int32_t async_px = REXCVAR_GET(skate3_native_render_scene_2d_async_px);
+    const int32_t async_px =
+        REXCVAR_GET(skate3_native_render_scene_2d_async_px);
     const uint32_t px_w = (fetch[2] & 0x1FFFu) + 1;
     const uint32_t px_h = ((fetch[2] >> 13) & 0x1FFFu) + 1;
     const bool async_ui = !force_inline && async_px > 0 &&
@@ -19527,7 +18296,8 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
             return &it->second;
           }
           if (tr2d) {
-            REXLOG_INFO("2d-trace: f{} key={:016X} inplace update REFUSED - "
+            REXLOG_INFO(
+                "2d-trace: f{} key={:016X} inplace update REFUSED - "
                         "retire + fresh decode",
                         frame_number, key);
           }
@@ -19548,7 +18318,8 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
         // 16-frame recheck left the pre-resolve memory content, the
         // loading-poster flash, on screen for its full window.
         it->second.recheck_frame =
-            frame_number + (g_in_menus_frame.load(std::memory_order_relaxed) ? 2 : 16);
+            frame_number +
+            (g_in_menus_frame.load(std::memory_order_relaxed) ? 2 : 16);
       }
     }
     if (it == g_r.tex_store.end()) {
@@ -19594,14 +18365,16 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
               "forced={} (n={})",
               double(decode_ns) / 1e6, double(g_tex_dec_copy_ns) / 1e6,
               double(g_tex_dec_create_ns) / 1e6, double(g_tex_dec_gen_ns) / 1e6,
-              px_w, px_h, fetch[0], fetch[1], fetch[2], force_inline ? 1 : 0, n);
+              px_w, px_h, fetch[0], fetch[1], fetch[2], force_inline ? 1 : 0,
+              n);
         }
       }
       if (!gt.valid) {
         static std::unordered_set<uint64_t> logged;
         if (logged.size() < 32 && logged.insert(key).second) {
           REXLOG_INFO(
-              "native-scene: 2D texture decode FAILED fetch=[{:08X} {:08X} {:08X} "
+              "native-scene: 2D texture decode FAILED fetch=[{:08X} "
+              "{:08X} {:08X} "
               "{:08X} {:08X} {:08X}]",
               fetch[0], fetch[1], fetch[2], fetch[3], fetch[4], fetch[5]);
         }
@@ -19610,7 +18383,8 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
       gt.last_used_frame = frame_number;
       gt.last_change_frame = frame_number;
       if (tr2d) {
-        REXLOG_INFO("2d-trace: f{} key={:016X} INLINE decode valid={} inc={} "
+        REXLOG_INFO(
+            "2d-trace: f{} key={:016X} INLINE decode valid={} inc={} "
                     "fp={:016X}",
                     frame_number, key, gt.valid ? 1 : 0, gt.incomplete ? 1 : 0,
                     gt.payload_fp);
@@ -19626,7 +18400,8 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
       // exactly the stale-thumbnail bug; the buffer holds the new area's
       // art while we keep serving the previous decode.
       static std::mutex s_2d_log_mutex;
-      static std::unordered_map<uint32_t, uint64_t> s_2d_seen;  // w1 -> stored^live
+      static std::unordered_map<uint32_t, uint64_t>
+          s_2d_seen;  // w1 -> stored^live
       const uint64_t live_fp = SampleProbeFingerprint(base, it->second);
       const uint64_t sig = it->second.payload_fp ^ (live_fp * 3);
       std::lock_guard<std::mutex> lk(s_2d_log_mutex);
@@ -19646,7 +18421,8 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
     return it->second.valid ? &it->second : &g_r.white;
   };
   const uint32_t ui_region =
-      uint32_t(frame_number % RendererState::kUiRegions) * RendererState::kUiRegionSize;
+      uint32_t(frame_number % RendererState::kUiRegions) *
+      RendererState::kUiRegionSize;
   uint32_t ui_offset = 0;
 
   // In-world neon splines (waypoint arrows / marker beams): replayed inside
@@ -19665,7 +18441,8 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
       if (bytes == 0 || ui_offset + bytes > RendererState::kUiRegionSize) {
         continue;
       }
-      std::memcpy(g_r.ui_ring_cpu + ui_region + ui_offset, s.verts.data(), bytes);
+      std::memcpy(g_r.ui_ring_cpu + ui_region + ui_offset, s.verts.data(),
+                  bytes);
       const GuestTexture* spline_tex = resolve_2d_texture(s.fetch);
       if (spline_tex == nullptr) {
         continue;  // big-art decode in flight on the workers; skip a frame
@@ -19685,8 +18462,7 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
         return v < 255.5f || ((uint32_t(v + 0.5f) - 256u) & 1024u) == 0u;
       };
       spline_consts[18] = g_r.showcase_rows[2];
-      spline_consts[19] =
-          float((side_visible(g_r.showcase_rows[0]) ? 1 : 0) |
+      spline_consts[19] = float((side_visible(g_r.showcase_rows[0]) ? 1 : 0) |
                 (side_visible(g_r.showcase_rows[1]) ? 2 : 0));
       cmd->SetRootConstants(0, 20, spline_consts, 0);
       cmd->SetTexture(1, spline_tex->srv);
@@ -19698,13 +18474,10 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
     }
   }
 
-  if (use_depth && !loading_native &&
-      mechanics_sandbox::Active()) {
+  if (use_depth && !loading_native && mechanics_sandbox::Active()) {
     const RaytracedDynamicScene raytraced_dynamic =
-        BuildRaytracedLocalPresentation(
-            scene, raytraced_diffuse_by_item);
-    if (RenderRaytracedMirror(
-            context, cmd, scene, scene_color, g_r.depth,
+        BuildRaytracedLocalPresentation(scene, raytraced_diffuse_by_item);
+    if (RenderRaytracedMirror(context, cmd, scene, scene_color, g_r.depth,
             msaa_on ? g_r.msaa : 1u, &raytraced_dynamic)) {
       // The DXR composite owns a compact root signature. Restore the main
       // scene layout before outline/SSR/resolve: those paths deliberately
@@ -19752,10 +18525,9 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
       cmd->SetRootConstants(0, 52, si.constants, 0);
       cmd->SetTexture(4, si.t3);
       cmd->SetTexturePair(5, si.t4, si.t5);
-      cmd->SetVertexBuffer(mit->second.vb_view.buffer,
-                           mit->second.vb_view.offset,
-                           mit->second.vb_view.size_bytes,
-                           mit->second.vb_view.stride);
+      cmd->SetVertexBuffer(
+          mit->second.vb_view.buffer, mit->second.vb_view.offset,
+          mit->second.vb_view.size_bytes, mit->second.vb_view.stride);
       cmd->SetIndexBuffer(mit->second.ib_view.buffer,
                           mit->second.ib_view.offset,
                           mit->second.ib_view.size_bytes);
@@ -19767,8 +18539,7 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
         } else {
           continue;
         }
-        cmd->DrawIndexed(draw.index_count, draw.start_index,
-                         draw.base_vertex);
+        cmd->DrawIndexed(draw.index_count, draw.start_index, draw.base_vertex);
         ++gbuf_draws;
       }
     }
@@ -19861,8 +18632,7 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
   // classic path.
   cmd->ProfileRegion(nrhi::ProfileStage::kBloom);
   if (hdr_on) {
-    ApplyHdrPost(context, cmd, viewport, scissor, loading_native,
-                 frame_number);
+    ApplyHdrPost(context, cmd, viewport, scissor, loading_native, frame_number);
     post_ran = true;
     skate3::mechanics_sandbox::RecordRenderStage(
         skate3::mechanics_sandbox::RenderStage::HdrPostComplete);
@@ -19909,8 +18679,10 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
     // Output-sized targets (visualfx out, uber out, packed depth).
     bool pfx_ok = true;
     if (g_r.pfx_width != context.guest_output_width ||
-        g_r.pfx_height != context.guest_output_height || g_r.pfx_full[0] == nullptr) {
-      nrhi::Texture** res[3] = {&g_r.pfx_full[0], &g_r.pfx_full[1], &g_r.pfx_depth};
+        g_r.pfx_height != context.guest_output_height ||
+        g_r.pfx_full[0] == nullptr) {
+      nrhi::Texture** res[3] = {&g_r.pfx_full[0], &g_r.pfx_full[1],
+                                &g_r.pfx_depth};
       nrhi::TextureView** views[3] = {&g_r.pfx_srv[0], &g_r.pfx_srv[1],
                                       &g_r.pfx_srv[5]};
       nrhi::TextureDesc desc;
@@ -19984,8 +18756,8 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
       // EnsurePipeline on output change.)
       // The two static input textures (fetch words captured at the game's
       // own uber/fisheye flushes): the 512x2 vignette gradient + the grain.
-      const GuestTexture* vig =
-          resolve_2d_texture(scene.photo_fx.vignette_fetch, /*force_inline=*/true);
+      const GuestTexture* vig = resolve_2d_texture(
+          scene.photo_fx.vignette_fetch, /*force_inline=*/true);
       const GuestTexture* grain =
           resolve_2d_texture(scene.photo_fx.grain_fetch, /*force_inline=*/true);
       nrhi::TextureView* const vig_slot =
@@ -20051,10 +18823,12 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
         std::memset(dst, 0, 4096);
         float* rows = reinterpret_cast<float*>(dst);
         if (pass >= 0) {
-          std::memcpy(rows, scene.photo_fx.ps[pass], sizeof(scene.photo_fx.ps[pass]));
+          std::memcpy(rows, scene.photo_fx.ps[pass],
+                      sizeof(scene.photo_fx.ps[pass]));
           std::memcpy(rows + 240 * 4, scene.photo_fx.vs[pass],
                       sizeof(scene.photo_fx.vs[pass]));
-          std::memcpy(rows + 250 * 4, kPfxLiterals[pass], sizeof(kPfxLiterals[pass]));
+          std::memcpy(rows + 250 * 4, kPfxLiterals[pass],
+                      sizeof(kPfxLiterals[pass]));
           // The game's quad VSs add half a DEST texel to the sampling uv
           // (visualfx c3 = 0.5/1152,0.5/640; dof passes c3 = 0.5/576,
           // 0.5/320; fisheye c2 = 0.5/1280,0.5/720), D3D9/Xenos raster
@@ -20068,9 +18842,9 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
           // natively. Guarded to the expected sub-pixel magnitudes so a
           // mis-captured row is left alone.
           {
-            float* half_px =
-                rows + (pass == kPfxFisheye ? 242 : 243) * 4;
-            if (std::fabs(half_px[0]) < 0.002f && std::fabs(half_px[1]) < 0.004f) {
+            float* half_px = rows + (pass == kPfxFisheye ? 242 : 243) * 4;
+            if (std::fabs(half_px[0]) < 0.002f &&
+                std::fabs(half_px[1]) < 0.004f) {
               half_px[0] = 0.0f;
               half_px[1] = 0.0f;
             }
@@ -20084,7 +18858,8 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
       // One 8-entry texture table (pfx_layout param 1, registers t0..t7);
       // the argument order keeps the old per-parameter helper's shape (t5
       // last), the gather re-orders into register order.
-      const auto pfx_bind_all = [&](nrhi::TextureView* t0, nrhi::TextureView* t1,
+      const auto pfx_bind_all =
+          [&](nrhi::TextureView* t0, nrhi::TextureView* t1,
                                     nrhi::TextureView* t2, nrhi::TextureView* t3,
                                     nrhi::TextureView* t4, nrhi::TextureView* t6,
                                     nrhi::TextureView* t7, nrhi::TextureView* t5) {
@@ -20092,13 +18867,19 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
         cmd->SetTextures(1, views, 8);
       };
       nrhi::TextureView* const W = g_r.white.srv;
-      const nrhi::Viewport half_vp{0.0f, 0.0f, float(RendererState::kPfxHalfW),
-                                   float(RendererState::kPfxHalfH), 0.0f, 1.0f};
+      const nrhi::Viewport half_vp{0.0f,
+                                   0.0f,
+                                   float(RendererState::kPfxHalfW),
+                                   float(RendererState::kPfxHalfH),
+                                   0.0f,
+                                   1.0f};
       const nrhi::Rect half_sc{0, 0, int32_t(RendererState::kPfxHalfW),
                                int32_t(RendererState::kPfxHalfH)};
-      const nrhi::Viewport quarter_vp{0.0f, 0.0f,
+      const nrhi::Viewport quarter_vp{0.0f,
+                                      0.0f,
                                       float(RendererState::kPfxQuarterW),
-                                      float(RendererState::kPfxQuarterH), 0.0f,
+                                      float(RendererState::kPfxQuarterH),
+                                      0.0f,
                                       1.0f};
       const nrhi::Rect quarter_sc{0, 0, int32_t(RendererState::kPfxQuarterW),
                                   int32_t(RendererState::kPfxQuarterH)};
@@ -20198,7 +18979,8 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
       set_rtv(g_r.pfx_half[1]);
       cmd->SetPipeline(g_r.pfx_pso[3]);
       cmd->SetConstantBuffer(0, g_r.pfx_cb, fill_cb(kPfxDofMB));
-      pfx_bind_all(g_r.pfx_srv[2], g_r.pfx_srv[5], W, W, g_r.pfx_srv[6], W, W, W);
+      pfx_bind_all(g_r.pfx_srv[2], g_r.pfx_srv[5], W, W, g_r.pfx_srv[6], W, W,
+                   W);
       cmd->Draw(3, 0);
       pfx_to_srv(g_r.pfx_half[1]);
       pfx_to_rt(g_r.pfx_half[0]);
@@ -20244,8 +19026,8 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
       if (pfx_debug > 0 && g_r.pfx_pso[8] != nullptr) {
         cmd->SetPipeline(g_r.pfx_pso[8]);
         cmd->SetConstantBuffer(0, g_r.pfx_cb, fill_cb(-1));
-        pfx_bind_all(g_r.pfx_srv[0], g_r.pfx_srv[5], W, W, g_r.pfx_srv[6], W,
-                     W, W);
+        pfx_bind_all(g_r.pfx_srv[0], g_r.pfx_srv[5], W, W, g_r.pfx_srv[6], W, W,
+                     W);
         cmd->Draw(3, 0);
       }
 
@@ -20288,7 +19070,8 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
       if (s_pfx_first) {
         s_pfx_first = false;
         REXLOG_INFO(
-            "native-scene: photo editor postfx chain LIVE (native; accum mode {}, "
+            "native-scene: photo editor postfx chain LIVE (native; "
+            "accum mode {}, "
             "vignette {}, grain {})",
             accum_mode, vig_slot == W ? "WHITE-fallback" : "resolved",
             grain_slot == W ? "WHITE-fallback" : "resolved");
@@ -20304,8 +19087,9 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
   // the photo grab center-crops the same band.
   const float out_aspect2d =
       float(context.guest_output_width) / float(context.guest_output_height);
-  const float wide_2d_scale =
-      out_aspect2d > (16.0f / 9.0f) * 1.01f ? (16.0f / 9.0f) / out_aspect2d : 1.0f;
+  const float wide_2d_scale = out_aspect2d > (16.0f / 9.0f) * 1.01f
+                                  ? (16.0f / 9.0f) / out_aspect2d
+                                  : 1.0f;
 
   cmd->ProfileRegion(nrhi::ProfileStage::k2d);
 
@@ -20361,10 +19145,11 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
         const auto tile_t0 = PerfClock::now();
         // Make the GPU's completed copy visible to the CPU read below (no-op
         // on D3D12; cache invalidate on non-coherent Vulkan memory).
-        g_r.device->InvalidateForRead(
-            g_r.grab_readback[newest], 0,
-            uint64_t(RendererState::kGrabRowPitch) * RendererState::kBlurHeight);
-        const bool wrote = GrabTargetValid(base) &&
+        g_r.device->InvalidateForRead(g_r.grab_readback[newest], 0,
+                                      uint64_t(RendererState::kGrabRowPitch) *
+                                          RendererState::kBlurHeight);
+        const bool wrote =
+            GrabTargetValid(base) &&
                            WriteGrabToGuest(base, g_r.grab_readback_ptr[newest]);
         if (wrote) {
           g_r.grab_cpu_us +=
@@ -20463,8 +19248,9 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
   // stretch back over the output. Runs only on frames where the game issued
   // the blur draws (scene.ui_blur = captured kernel scale). The popup's own
   // 2D draws follow after and stay sharp.
-  if (scene.ui_blur > 0.0f && g_r.pso_blur != nullptr && g_r.pso_blur_blit != nullptr &&
-      g_r.pso_blur_down != nullptr && g_r.blur_tex[0] != nullptr) {
+  if (scene.ui_blur > 0.0f && g_r.pso_blur != nullptr &&
+      g_r.pso_blur_blit != nullptr && g_r.pso_blur_down != nullptr &&
+      g_r.blur_tex[0] != nullptr) {
     // Temporal smoothing of the captured radius + fade (~50 ms time
     // constant, render thread): the live bank reads can land mid-rewrite
     // (1-frame value flaps = the tinted-backdrop flicker), and smoothing
@@ -20476,10 +19262,12 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
     static float s_blur_r = 0.0f;
     static float s_blur_tint[3] = {1.0f, 1.0f, 1.0f};
     static int64_t s_blur_ns = 0;
-    const int64_t blur_now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+    const int64_t blur_now_ns =
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
                                     PerfClock::now().time_since_epoch())
                                     .count();
-    float blur_dt = s_blur_ns != 0 ? float(blur_now_ns - s_blur_ns) * 1e-9f : 1.0f;
+    float blur_dt =
+        s_blur_ns != 0 ? float(blur_now_ns - s_blur_ns) * 1e-9f : 1.0f;
     if (blur_dt > 0.25f) {
       s_blur_r = 0.0f;
       s_blur_tint[0] = s_blur_tint[1] = s_blur_tint[2] = 1.0f;
@@ -20493,8 +19281,12 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
     }
     // (The guest output texture can change between frames; the dedicated
     // view g_r.output_srv_slot is re-pointed by EnsurePipeline on change.)
-    const nrhi::Viewport blur_vp{0.0f, 0.0f, float(RendererState::kBlurWidth),
-                                 float(RendererState::kBlurHeight), 0.0f, 1.0f};
+    const nrhi::Viewport blur_vp{0.0f,
+                                 0.0f,
+                                 float(RendererState::kBlurWidth),
+                                 float(RendererState::kBlurHeight),
+                                 0.0f,
+                                 1.0f};
     const nrhi::Rect blur_sc{0, 0, int32_t(RendererState::kBlurWidth),
                              int32_t(RendererState::kBlurHeight)};
     const auto to_srv = [&](nrhi::Texture* r) {
@@ -20533,14 +19325,9 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
     flush();
     cmd->SetRenderTargets(g_r.blur_tex[1], nullptr);
     cmd->SetPipeline(g_r.pso_blur);
-    const float h_consts[8] = {1.0f,
-                               0.0f,
-                               s_blur_r,
-                               0.0f,
-                               s_blur_tint[0],
-                               s_blur_tint[1],
-                               s_blur_tint[2],
-                               1.0f};
+    const float h_consts[8] = {
+        1.0f,           0.0f,           s_blur_r,       0.0f,
+        s_blur_tint[0], s_blur_tint[1], s_blur_tint[2], 1.0f};
     cmd->SetRootConstants(0, 8, h_consts, 0);
     cmd->SetTexture(1, g_r.blur_srv[0]);
     cmd->Draw(3, 0);
@@ -20549,14 +19336,9 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
     to_rt(g_r.blur_tex[0]);
     flush();
     cmd->SetRenderTargets(g_r.blur_tex[0], nullptr);
-    const float v_consts[8] = {0.0f,
-                               1.0f,
-                               s_blur_r,
-                               0.0f,
-                               s_blur_tint[0],
-                               s_blur_tint[1],
-                               s_blur_tint[2],
-                               1.0f};
+    const float v_consts[8] = {
+        0.0f,           1.0f,           s_blur_r,       0.0f,
+        s_blur_tint[0], s_blur_tint[1], s_blur_tint[2], 1.0f};
     cmd->SetRootConstants(0, 8, v_consts, 0);
     cmd->SetTexture(1, g_r.blur_srv[1]);
     cmd->Draw(3, 0);
@@ -20610,7 +19392,8 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
           g_draws_2d_dropped.fetch_add(1, std::memory_order_relaxed);
           return;
         }
-        std::memcpy(g_r.ui_ring_cpu + ui_region + ui_offset, d.verts.data(), bytes);
+        std::memcpy(g_r.ui_ring_cpu + ui_region + ui_offset, d.verts.data(),
+                    bytes);
         nrhi::TextureView* srv_view;
         if (yuv != nullptr) {
           srv_view = yuv[0];
@@ -20697,9 +19480,12 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
             s2[1] == s0[1] || s1[1] == s2[1]) {
           return false;
         }
-        const uint32_t w0 = (s0[2] & 0x1FFFu) + 1, h0 = ((s0[2] >> 13) & 0x1FFFu) + 1;
-        const uint32_t w1 = (s1[2] & 0x1FFFu) + 1, h1 = ((s1[2] >> 13) & 0x1FFFu) + 1;
-        const uint32_t w2 = (s2[2] & 0x1FFFu) + 1, h2 = ((s2[2] >> 13) & 0x1FFFu) + 1;
+        const uint32_t w0 = (s0[2] & 0x1FFFu) + 1,
+                       h0 = ((s0[2] >> 13) & 0x1FFFu) + 1;
+        const uint32_t w1 = (s1[2] & 0x1FFFu) + 1,
+                       h1 = ((s1[2] >> 13) & 0x1FFFu) + 1;
+        const uint32_t w2 = (s2[2] & 0x1FFFu) + 1,
+                       h2 = ((s2[2] >> 13) & 0x1FFFu) + 1;
         const auto half = [](uint32_t full, uint32_t c) {
           return c == full / 2 || c == (full + 1) / 2;
         };
@@ -20782,23 +19568,26 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
                 // resolve inline-decodes any content change (video=true).
                 auto hot = g_r.tex_store.find(FetchWordsKey(w));
                 if (hot != g_r.tex_store.end()) {
-                  hot->second.recheck_frame = 0;  // content-hot: per-frame probe
+                  hot->second.recheck_frame =
+                      0;  // content-hot: per-frame probe
                 }
-                const GuestTexture* t =
-                    resolve_2d_texture(w, /*force_inline=*/false, /*video=*/true);
+                const GuestTexture* t = resolve_2d_texture(
+                    w, /*force_inline=*/false, /*video=*/true);
                 // Session gate: only content decoded during THIS movie
                 // session serves; at a video boundary both the store and
                 // guest memory can still hold the PREVIOUS video's last
                 // frame (the plane copies keep their addresses); the quad
                 // holds black until the new video's first frame lands.
-                e->ok = t != nullptr && t != &g_r.white && t->texture != nullptr &&
+                e->ok = t != nullptr && t != &g_r.white &&
+                        t->texture != nullptr &&
                         t->last_change_frame >= s_movie_session_frame;
                 decode_failed |= t == &g_r.white;
                 e->slots[p] = e->ok ? t->srv : nullptr;
               }
               if (decode_failed) {
                 static std::atomic<uint32_t> s_triple_failed{0};
-                if (s_triple_failed.fetch_add(1, std::memory_order_relaxed) < 8) {
+                if (s_triple_failed.fetch_add(1, std::memory_order_relaxed) <
+                    8) {
                   REXLOG_INFO(
                       "native-scene: FMV plane triple resolve FAILED "
                       "(y={:08X})",
@@ -20869,8 +19658,8 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
   // which the startup flow doesn't reliably produce (stale scenes rendered
   // with a frozen sigma of 0).
   if (g_vanilla_ui_backdrop.load(std::memory_order_relaxed)) {
-    ApplyVanillaUiBackdropPass(
-        context, cmd, /*output_in_guest_output_state=*/false);
+    ApplyVanillaUiBackdropPass(context, cmd,
+                               /*output_in_guest_output_state=*/false);
   } else {
     const float menu_blur_target =
         g_settings_menu_blur.load(std::memory_order_relaxed)
@@ -20888,8 +19677,8 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
       skate3::mechanics_sandbox::RenderStage::Presented);
 
   g_pw_2d.Add(perf_ns_since(twod_t0));
-  g_pw_tail.Add(uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                    twod_t0 - mid_t0)
+  g_pw_tail.Add(uint64_t(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(twod_t0 - mid_t0)
                     .count()));
   g_pw_render.Add(perf_ns_since(render_t0));
   const uint64_t frames = g_frames_rendered.fetch_add(1) + 1;
@@ -20920,7 +19709,8 @@ void Install() {
   // Settings-menu backdrop blur over frames the EMULATED path produced
   // (boot/startup before the native scene takes over, manual emulated
   // mode); native-rendered frames blur inline in RenderScene.
-  rex::graphics::SetNativeGuestOutputPostProcessor(&PostProcessGuestOutput, nullptr);
+  rex::graphics::SetNativeGuestOutputPostProcessor(&PostProcessGuestOutput,
+                                                   nullptr);
   REXLOG_INFO("native-scene: guest output renderer registered (scene {})",
               SceneEnabled() ? "on" : "off");
 }

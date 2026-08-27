@@ -12,6 +12,7 @@
 #include <fstream>
 #include <limits>
 #include <mutex>
+#include <optional>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -23,6 +24,7 @@
 #include <vector>
 
 #include <zlib.h>
+#include <zstd.h>
 
 namespace skate::world {
 namespace {
@@ -55,9 +57,21 @@ constexpr std::array<char, 8> kMagicV13 = {
     'S', 'K', 'A', 'T', 'E', '1', '3', '\0'};
 constexpr std::array<char, 8> kMagicV14 = {
     'S', 'K', 'A', 'T', 'E', '1', '4', '\0'};
+constexpr std::array<char, 8> kMagicV15 = {
+    'S', 'K', 'A', 'T', 'E', '1', '5', '\0'};
 constexpr std::uint32_t kEndianMarker = 0x12345678u;
 constexpr std::uint32_t kStorageRaw = 0;
 constexpr std::uint32_t kStorageDeflate = 1;
+constexpr std::uint32_t kStorageZstd = 2;
+constexpr std::uint32_t kStorageZstdRgbaFilter = 3;
+constexpr std::uint32_t kStorageZstdVertexSoa = 4;
+constexpr std::uint32_t kStorageZstdIndexDelta = 5;
+constexpr std::uint32_t kStorageZstdCollisionIndexed = 6;
+constexpr std::uint32_t kStorageDeflateRgbaFilter = 7;
+constexpr std::uint32_t kStorageDeflateVertexSoa = 8;
+constexpr std::uint32_t kStorageDeflateIndexDelta = 9;
+constexpr std::uint32_t kStorageDeflateCollisionIndexed = 10;
+constexpr std::uint32_t kStorageTextureReference = 11;
 constexpr std::uint32_t kMaximumCount = 16u * 1024u * 1024u;
 constexpr std::uint32_t kMaximumGeometryCount = 64u * 1024u * 1024u;
 constexpr std::uint32_t kMaximumIndexCount = 128u * 1024u * 1024u;
@@ -66,6 +80,7 @@ constexpr std::uint32_t kMaximumTextureBytes =
     kMaximumTextureDimension * kMaximumTextureDimension * 4u;
 constexpr std::uint32_t kMaximumStringBytes = 64u * 1024u;
 constexpr std::uint32_t kMaximumMetadataBytes = 128u * 1024u * 1024u;
+constexpr std::uint32_t kMaximumMaterialBytes = 512u * 1024u * 1024u;
 constexpr std::uint32_t kMaximumEmbeddedCollisionBytes =
     512u * 1024u * 1024u;
 constexpr std::uint64_t kMaximumPackageBytes = 4ull * 1024ull * 1024ull * 1024ull;
@@ -193,11 +208,257 @@ StoredPayload ReadStoredPayload(
     }
     return payload;
   }
-  if (method != kStorageDeflate) {
+  if (method != kStorageDeflate && method != kStorageZstd &&
+      method != kStorageZstdRgbaFilter &&
+      method != kStorageZstdVertexSoa &&
+      method != kStorageZstdIndexDelta &&
+      method != kStorageZstdCollisionIndexed &&
+      method != kStorageDeflateRgbaFilter &&
+      method != kStorageDeflateVertexSoa &&
+      method != kStorageDeflateIndexDelta &&
+      method != kStorageDeflateCollisionIndexed &&
+      method != kStorageTextureReference) {
     throw std::runtime_error(
         std::string("SKATE ") + label + " storage method is unsupported");
   }
   return payload;
+}
+
+std::vector<std::uint8_t> InflateBytes(
+    std::span<const std::uint8_t> bytes,
+    std::size_t expected_size,
+    const char* label) {
+  if (expected_size > std::numeric_limits<uLongf>::max()) {
+    throw std::runtime_error(
+        std::string("SKATE ") + label + " decoded size is invalid");
+  }
+  std::vector<std::uint8_t> decoded(expected_size);
+  uLongf decoded_size = static_cast<uLongf>(expected_size);
+  const int result = uncompress(
+      decoded.data(), &decoded_size, bytes.data(),
+      static_cast<uLong>(bytes.size()));
+  if (result != Z_OK || decoded_size != expected_size) {
+    throw std::runtime_error(
+        std::string("SKATE ") + label + " DEFLATE payload is invalid");
+  }
+  return decoded;
+}
+
+std::vector<std::uint8_t> DecompressZstd(
+    std::span<const std::uint8_t> bytes,
+    std::size_t expected_size,
+    const char* label) {
+  std::vector<std::uint8_t> decoded(expected_size);
+  const std::size_t result = ZSTD_decompress(
+      decoded.data(), decoded.size(), bytes.data(), bytes.size());
+  if (ZSTD_isError(result) || result != expected_size) {
+    throw std::runtime_error(
+        std::string("SKATE ") + label + " Zstandard payload is invalid");
+  }
+  return decoded;
+}
+
+std::uint8_t PaethPredictor(
+    std::uint8_t left, std::uint8_t above, std::uint8_t upper_left) {
+  const int prediction =
+      static_cast<int>(left) + static_cast<int>(above) -
+      static_cast<int>(upper_left);
+  const int left_distance = std::abs(prediction - static_cast<int>(left));
+  const int above_distance = std::abs(prediction - static_cast<int>(above));
+  const int diagonal_distance =
+      std::abs(prediction - static_cast<int>(upper_left));
+  if (left_distance <= above_distance &&
+      left_distance <= diagonal_distance) {
+    return left;
+  }
+  return above_distance <= diagonal_distance ? above : upper_left;
+}
+
+std::vector<std::uint8_t> UndoRgbaFilters(
+    std::vector<std::uint8_t> transformed,
+    std::size_t expected_size,
+    const char* label) {
+  Reader reader(std::move(transformed));
+  const std::uint32_t width = reader.Scalar<std::uint32_t>();
+  const std::uint32_t height = reader.Scalar<std::uint32_t>();
+  const std::uint64_t byte_count = std::uint64_t(width) * height * 4u;
+  if (byte_count != expected_size ||
+      width > kMaximumTextureDimension ||
+      height > kMaximumTextureDimension) {
+    throw std::runtime_error(
+        std::string("SKATE ") + label + " filtered dimensions are invalid");
+  }
+  const std::size_t row_size = std::size_t(width) * 4u;
+  std::vector<std::uint8_t> decoded(expected_size);
+  for (std::uint32_t y = 0; y < height; ++y) {
+    const std::uint8_t filter = reader.Scalar<std::uint8_t>();
+    if (filter > 4) {
+      throw std::runtime_error(
+          std::string("SKATE ") + label + " row filter is invalid");
+    }
+    const std::span<const std::uint8_t> source = reader.View(row_size);
+    std::uint8_t* row = decoded.data() + std::size_t(y) * row_size;
+    const std::uint8_t* previous =
+        y == 0 ? nullptr : row - row_size;
+    for (std::size_t x = 0; x < row_size; ++x) {
+      const std::uint8_t left = x >= 4 ? row[x - 4] : 0;
+      const std::uint8_t above = previous ? previous[x] : 0;
+      const std::uint8_t upper_left =
+          previous && x >= 4 ? previous[x - 4] : 0;
+      std::uint8_t predictor = 0;
+      switch (filter) {
+        case 1:
+          predictor = left;
+          break;
+        case 2:
+          predictor = above;
+          break;
+        case 3:
+          predictor = static_cast<std::uint8_t>(
+              (static_cast<unsigned>(left) + above) / 2u);
+          break;
+        case 4:
+          predictor = PaethPredictor(left, above, upper_left);
+          break;
+        default:
+          break;
+      }
+      row[x] = static_cast<std::uint8_t>(source[x] + predictor);
+    }
+  }
+  reader.RequireEnd();
+  return decoded;
+}
+
+std::vector<std::uint8_t> UndoVertexSoa(
+    std::vector<std::uint8_t> transformed,
+    std::size_t expected_size,
+    const char* label) {
+  constexpr std::size_t kVertexSize = 56u;
+  if (expected_size % kVertexSize != 0 ||
+      transformed.size() != expected_size) {
+    throw std::runtime_error(
+        std::string("SKATE ") + label + " vertex streams are invalid");
+  }
+  const std::size_t count = expected_size / kVertexSize;
+  constexpr std::array<std::size_t, 7> kFieldSizes{
+      12u, 12u, 8u, 8u, 4u, 8u, 4u};
+  constexpr std::array<std::size_t, 7> kFieldOffsets{
+      0u, 12u, 24u, 32u, 40u, 44u, 52u};
+  std::vector<std::uint8_t> decoded(expected_size);
+  std::size_t source_offset = 0;
+  for (std::size_t field = 0; field < kFieldSizes.size(); ++field) {
+    for (std::size_t index = 0; index < count; ++index) {
+      std::memcpy(
+          decoded.data() + index * kVertexSize + kFieldOffsets[field],
+          transformed.data() + source_offset,
+          kFieldSizes[field]);
+      source_offset += kFieldSizes[field];
+    }
+  }
+  return decoded;
+}
+
+std::uint64_t ReadVaruint(
+    std::span<const std::uint8_t> bytes,
+    std::size_t& offset,
+    const char* label) {
+  std::uint64_t value = 0;
+  for (unsigned shift = 0; shift < 64; shift += 7) {
+    if (offset >= bytes.size()) {
+      throw std::runtime_error(
+          std::string("SKATE ") + label + " varint is truncated");
+    }
+    const std::uint8_t byte = bytes[offset++];
+    value |= std::uint64_t(byte & 0x7Fu) << shift;
+    if ((byte & 0x80u) == 0) {
+      return value;
+    }
+  }
+  throw std::runtime_error(
+      std::string("SKATE ") + label + " varint is invalid");
+}
+
+std::vector<std::uint8_t> UndoIndexDelta(
+    std::vector<std::uint8_t> transformed,
+    std::size_t expected_size,
+    const char* label) {
+  if (expected_size % sizeof(std::uint32_t) != 0) {
+    throw std::runtime_error(
+        std::string("SKATE ") + label + " index size is invalid");
+  }
+  const std::size_t count = expected_size / sizeof(std::uint32_t);
+  std::vector<std::uint8_t> decoded(expected_size);
+  std::size_t offset = 0;
+  std::int64_t previous = 0;
+  for (std::size_t index = 0; index < count; ++index) {
+    const std::uint64_t zigzag =
+        ReadVaruint(transformed, offset, label);
+    const std::int64_t delta =
+        static_cast<std::int64_t>(zigzag >> 1) ^
+        -static_cast<std::int64_t>(zigzag & 1u);
+    const std::int64_t current = previous + delta;
+    if (current < 0 ||
+        current > std::numeric_limits<std::uint32_t>::max()) {
+      throw std::runtime_error(
+          std::string("SKATE ") + label + " index delta is invalid");
+    }
+    const auto value = static_cast<std::uint32_t>(current);
+    std::memcpy(
+        decoded.data() + index * sizeof(value), &value, sizeof(value));
+    previous = current;
+  }
+  if (offset != transformed.size()) {
+    throw std::runtime_error(
+        std::string("SKATE ") + label + " has trailing index data");
+  }
+  return decoded;
+}
+
+std::vector<std::uint8_t> UndoIndexedCollision(
+    std::vector<std::uint8_t> transformed,
+    std::size_t expected_size,
+    const char* label) {
+  constexpr std::size_t kTriangleSize = 48u;
+  if (expected_size % kTriangleSize != 0) {
+    throw std::runtime_error(
+        std::string("SKATE ") + label + " collision size is invalid");
+  }
+  Reader reader(std::move(transformed));
+  const std::uint32_t vertex_count = reader.Scalar<std::uint32_t>();
+  if (vertex_count > kMaximumGeometryCount) {
+    throw std::runtime_error(
+        std::string("SKATE ") + label +
+        " collision vertex count exceeds the format limit");
+  }
+  const std::span<const std::uint8_t> vertices =
+      reader.View(std::size_t(vertex_count) * sizeof(float) * 3u);
+  const std::size_t triangle_count = expected_size / kTriangleSize;
+  std::vector<std::uint8_t> decoded(expected_size);
+  for (std::size_t triangle = 0; triangle < triangle_count; ++triangle) {
+    std::uint8_t* packed =
+        decoded.data() + triangle * kTriangleSize;
+    for (std::size_t corner = 0; corner < 3; ++corner) {
+      const std::uint32_t vertex = reader.Scalar<std::uint32_t>();
+      if (vertex >= vertex_count) {
+        throw std::runtime_error(
+            std::string("SKATE ") + label +
+            " collision vertex index is invalid");
+      }
+      std::memcpy(
+          packed + corner * sizeof(float) * 3u,
+          vertices.data() + std::size_t(vertex) * sizeof(float) * 3u,
+          sizeof(float) * 3u);
+    }
+    const std::uint32_t surface = reader.Scalar<std::uint32_t>();
+    const std::uint32_t material = reader.Scalar<std::uint32_t>();
+    std::memcpy(packed + 36u, &surface, sizeof(surface));
+    std::memcpy(packed + 40u, &material, sizeof(material));
+    reader.Bytes(packed + 44u, 3u);
+    packed[47] = reader.Scalar<std::uint8_t>();
+  }
+  reader.RequireEnd();
+  return decoded;
 }
 
 std::vector<std::uint8_t> DecodeStoredPayload(
@@ -206,23 +467,57 @@ std::vector<std::uint8_t> DecodeStoredPayload(
   if (payload.method == kStorageRaw) {
     return std::move(payload.bytes);
   }
-  const std::size_t expected_size = payload.expected_size;
-  if (expected_size > std::numeric_limits<uLongf>::max()) {
+  if (payload.method == kStorageTextureReference) {
     throw std::runtime_error(
-        std::string("SKATE ") + label + " decoded size is invalid");
+        std::string("SKATE ") + label +
+        " texture reference is invalid in this context");
   }
-  std::vector<std::uint8_t> decoded(expected_size);
-  uLongf decoded_size = static_cast<uLongf>(expected_size);
-  const int result = uncompress(
-      decoded.data(),
-      &decoded_size,
-      payload.bytes.data(),
-      static_cast<uLong>(payload.bytes.size()));
-  if (result != Z_OK || decoded_size != expected_size) {
+  const bool transformed = payload.method >= kStorageZstdRgbaFilter;
+  if (!transformed) {
+    return payload.method == kStorageDeflate
+               ? InflateBytes(payload.bytes, payload.expected_size, label)
+               : DecompressZstd(
+                     payload.bytes, payload.expected_size, label);
+  }
+  if (payload.bytes.size() < sizeof(std::uint32_t)) {
     throw std::runtime_error(
-        std::string("SKATE ") + label + " DEFLATE payload is invalid");
+        std::string("SKATE ") + label + " transformed payload is truncated");
   }
-  return decoded;
+  std::uint32_t transformed_size = 0;
+  std::memcpy(
+      &transformed_size, payload.bytes.data(), sizeof(transformed_size));
+  const std::span<const std::uint8_t> compressed(
+      payload.bytes.data() + sizeof(transformed_size),
+      payload.bytes.size() - sizeof(transformed_size));
+  const bool uses_zstd =
+      payload.method >= kStorageZstdRgbaFilter &&
+      payload.method <= kStorageZstdCollisionIndexed;
+  std::vector<std::uint8_t> transformed_bytes =
+      uses_zstd
+          ? DecompressZstd(compressed, transformed_size, label)
+          : InflateBytes(compressed, transformed_size, label);
+  switch (payload.method) {
+    case kStorageZstdRgbaFilter:
+    case kStorageDeflateRgbaFilter:
+      return UndoRgbaFilters(
+          std::move(transformed_bytes), payload.expected_size, label);
+    case kStorageZstdVertexSoa:
+    case kStorageDeflateVertexSoa:
+      return UndoVertexSoa(
+          std::move(transformed_bytes), payload.expected_size, label);
+    case kStorageZstdIndexDelta:
+    case kStorageDeflateIndexDelta:
+      return UndoIndexDelta(
+          std::move(transformed_bytes), payload.expected_size, label);
+    case kStorageZstdCollisionIndexed:
+    case kStorageDeflateCollisionIndexed:
+      return UndoIndexedCollision(
+          std::move(transformed_bytes), payload.expected_size, label);
+    default:
+      break;
+  }
+  throw std::runtime_error(
+      std::string("SKATE ") + label + " transform is unsupported");
 }
 
 std::vector<std::uint8_t> ReadStoredBytes(
@@ -242,7 +537,9 @@ void SkipStoredBytes(Reader& reader,
     throw std::runtime_error(
         std::string("SKATE ") + label + " raw size is invalid");
   }
-  if (method != kStorageRaw && method != kStorageDeflate) {
+  if (method != kStorageRaw &&
+      (method < kStorageDeflate ||
+       method > kStorageDeflateCollisionIndexed)) {
     throw std::runtime_error(
         std::string("SKATE ") + label + " storage method is unsupported");
   }
@@ -819,7 +1116,9 @@ void Validate(MapDefinition& map) {
         texture.rgba8.empty() &&
         ((texture.stored_rgba8_method == kStorageRaw &&
           texture.stored_rgba8.size() == expected) ||
-         (texture.stored_rgba8_method == kStorageDeflate &&
+         (texture.stored_rgba8_method >= kStorageDeflate &&
+          texture.stored_rgba8_method <=
+              kStorageDeflateCollisionIndexed &&
           (expected == 0 || !texture.stored_rgba8.empty())));
     if (texture.id == 0 || texture.name.empty() ||
         !texture_ids.insert(texture.id).second ||
@@ -828,7 +1127,10 @@ void Validate(MapDefinition& map) {
           texture.width > kMaximumTextureDimension ||
           texture.height > kMaximumTextureDimension)) ||
         (!empty_placeholder && !decoded && !package_backed)) {
-      throw std::runtime_error("SKATE embedded texture is invalid");
+      throw std::runtime_error(
+          "SKATE embedded texture " + std::to_string(texture.id) +
+          " is invalid (" + std::to_string(texture.width) + "x" +
+          std::to_string(texture.height) + ")");
     }
   }
 
@@ -1291,9 +1593,10 @@ MapDefinition LoadOwnedMapPackage(const std::filesystem::path& path) {
   const bool version_12 = magic == kMagicV12;
   const bool version_13 = magic == kMagicV13;
   const bool version_14 = magic == kMagicV14;
+  const bool version_15 = magic == kMagicV15;
   const bool version_10_or_newer =
       version_10 || version_11 || version_12 || version_13 ||
-      version_14;
+      version_14 || version_15;
   const bool skate_magic =
       std::memcmp(magic.data(), "SKATE", 5) == 0 &&
       std::isdigit(static_cast<unsigned char>(magic[5])) &&
@@ -1310,7 +1613,7 @@ MapDefinition LoadOwnedMapPackage(const std::filesystem::path& path) {
   if ((!version_1 && !version_2 && !version_3 && !version_4 && !version_5 &&
        !version_6 && !version_7 && !version_8 && !version_9 &&
        !version_10 && !version_11 && !version_12 && !version_13 &&
-       !version_14) ||
+       !version_14 && !version_15) ||
       reader.Scalar<std::uint32_t>() != kEndianMarker) {
     throw std::runtime_error(
         "file is not a supported little-endian SKATE v1-v" +
@@ -1377,98 +1680,129 @@ MapDefinition LoadOwnedMapPackage(const std::filesystem::path& path) {
   RequireCount(local_light_count, "local light");
   RequireCount(npc_route_count, "NPC route");
 
+  std::optional<Reader> material_block;
+  Reader* material_reader = &reader;
+  if (version_15) {
+    const std::uint32_t decoded_size = reader.Scalar<std::uint32_t>();
+    if (decoded_size > kMaximumMaterialBytes) {
+      throw std::runtime_error(
+          "SKATE material block exceeds the format limit");
+    }
+    material_block.emplace(ReadStoredBytes(
+        reader, decoded_size, "material block"));
+    material_reader = &*material_block;
+  }
+
   map.materials.reserve(material_count);
   for (std::uint32_t index = 0; index < material_count; ++index) {
     SurfaceMaterial material;
     material.id = index + 1;
-    material.name = reader.String();
+    material.name = material_reader->String();
     material.flags =
-        static_cast<SurfaceFlags>(reader.Scalar<std::uint32_t>());
-    material.friction = reader.Scalar<float>();
-    material.restitution = reader.Scalar<float>();
-    material.display_color = reader.Vector3();
-    material.roughness = reader.Scalar<float>();
-    material.emissive_intensity = reader.Scalar<float>();
-    material.albedo_texture = reader.Scalar<TextureId>();
-    material.indirect_lightmap = reader.Scalar<TextureId>();
-    material.baked_indirect_strength = reader.Scalar<float>();
+        static_cast<SurfaceFlags>(
+            material_reader->Scalar<std::uint32_t>());
+    material.friction = material_reader->Scalar<float>();
+    material.restitution = material_reader->Scalar<float>();
+    material.display_color = material_reader->Vector3();
+    material.roughness = material_reader->Scalar<float>();
+    material.emissive_intensity = material_reader->Scalar<float>();
+    material.albedo_texture = material_reader->Scalar<TextureId>();
+    material.indirect_lightmap =
+        material_reader->Scalar<TextureId>();
+    material.baked_indirect_strength =
+        material_reader->Scalar<float>();
     if (package_version >= 2) {
-      material.normal_texture = reader.Scalar<TextureId>();
-      material.orm_texture = reader.Scalar<TextureId>();
-      material.emissive_texture = reader.Scalar<TextureId>();
+      material.normal_texture =
+          material_reader->Scalar<TextureId>();
+      material.orm_texture =
+          material_reader->Scalar<TextureId>();
+      material.emissive_texture =
+          material_reader->Scalar<TextureId>();
       material.alpha_mode =
           static_cast<SurfaceMaterial::AlphaMode>(
-              reader.Scalar<std::uint32_t>());
-      material.alpha_cutoff = reader.Scalar<float>();
+              material_reader->Scalar<std::uint32_t>());
+      material.alpha_cutoff = material_reader->Scalar<float>();
       material.skate_audio_surface =
-          static_cast<std::uint8_t>(reader.Scalar<std::uint32_t>());
+          static_cast<std::uint8_t>(
+              material_reader->Scalar<std::uint32_t>());
       material.skate_physics_surface =
-          static_cast<std::uint8_t>(reader.Scalar<std::uint32_t>());
+          static_cast<std::uint8_t>(
+              material_reader->Scalar<std::uint32_t>());
       material.skate_surface_pattern =
-          static_cast<std::uint8_t>(reader.Scalar<std::uint32_t>());
+          static_cast<std::uint8_t>(
+              material_reader->Scalar<std::uint32_t>());
     }
     if (package_version >= 13) {
       material.presentation_depth_layer =
-          reader.Scalar<std::uint32_t>();
+          material_reader->Scalar<std::uint32_t>();
     } else {
       material.presentation_depth_layer =
           InferPresentationDepthLayer(material);
     }
     if (package_version >= 12) {
       material.retail.enabled =
-          reader.Scalar<std::uint32_t>() != 0;
+          material_reader->Scalar<std::uint32_t>() != 0;
       if (material.retail.enabled) {
         material.retail.material_guid =
-            reader.Scalar<std::uint64_t>();
+            material_reader->Scalar<std::uint64_t>();
         material.retail.material_handle =
-            reader.Scalar<std::uint32_t>();
+            material_reader->Scalar<std::uint32_t>();
         material.retail.material_group_index =
-            reader.Scalar<std::int32_t>();
-        material.retail.shader_name = reader.String();
+            material_reader->Scalar<std::int32_t>();
+        material.retail.shader_name = material_reader->String();
         material.retail.shader_family =
             static_cast<RetailShaderFamily>(
-                reader.Scalar<std::uint32_t>());
+                material_reader->Scalar<std::uint32_t>());
         material.retail.render_flags =
             static_cast<RetailRenderFlags>(
-                reader.Scalar<std::uint32_t>());
+                material_reader->Scalar<std::uint32_t>());
         const std::uint32_t binding_count =
-            reader.Scalar<std::uint32_t>();
+            material_reader->Scalar<std::uint32_t>();
         RequireCount(binding_count, "retail texture binding");
         material.retail.texture_bindings.reserve(binding_count);
         for (std::uint32_t binding_index = 0;
              binding_index < binding_count; ++binding_index) {
           RetailTextureBinding binding;
-          binding.semantic = reader.String();
-          binding.texture = reader.Scalar<TextureId>();
-          binding.uv_set = reader.Scalar<std::uint32_t>();
-          binding.address_u = reader.Scalar<std::uint32_t>();
-          binding.address_v = reader.Scalar<std::uint32_t>();
+          binding.semantic = material_reader->String();
+          binding.texture =
+              material_reader->Scalar<TextureId>();
+          binding.uv_set =
+              material_reader->Scalar<std::uint32_t>();
+          binding.address_u =
+              material_reader->Scalar<std::uint32_t>();
+          binding.address_v =
+              material_reader->Scalar<std::uint32_t>();
           material.retail.texture_bindings.push_back(
               std::move(binding));
         }
         const std::uint32_t parameter_count =
-            reader.Scalar<std::uint32_t>();
+            material_reader->Scalar<std::uint32_t>();
         RequireCount(parameter_count, "retail material parameter");
         material.retail.parameters.reserve(parameter_count);
         for (std::uint32_t parameter_index = 0;
              parameter_index < parameter_count; ++parameter_index) {
           RetailMaterialParameter parameter;
-          parameter.name = reader.String();
+          parameter.name = material_reader->String();
           const std::uint32_t value_count =
-              reader.Scalar<std::uint32_t>();
+              material_reader->Scalar<std::uint32_t>();
           RequireCount(value_count, "retail material parameter value");
           parameter.values.reserve(value_count);
           for (std::uint32_t value_index = 0;
                value_index < value_count; ++value_index) {
-            parameter.values.push_back(reader.String());
+            parameter.values.push_back(
+                material_reader->String());
           }
           material.retail.parameters.push_back(
               std::move(parameter));
         }
-        material.retail.source_metadata_json = reader.String();
+        material.retail.source_metadata_json =
+            material_reader->String();
       }
     }
     map.materials.push_back(std::move(material));
+  }
+  if (material_block) {
+    material_reader->RequireEnd();
   }
 
   map.textures.reserve(texture_count);
@@ -1496,8 +1830,33 @@ MapDefinition LoadOwnedMapPackage(const std::filesystem::path& path) {
           reader,
           static_cast<std::size_t>(expected_byte_count),
           "embedded texture");
-      texture.stored_rgba8_method = payload.method;
-      texture.stored_rgba8 = std::move(payload.bytes);
+      if (payload.method == kStorageTextureReference) {
+        if (!version_15 ||
+            payload.bytes.size() != sizeof(std::uint32_t)) {
+          throw std::runtime_error(
+              "SKATE embedded texture reference is invalid");
+        }
+        std::uint32_t source_index = 0;
+        std::memcpy(
+            &source_index, payload.bytes.data(), sizeof(source_index));
+        if (source_index >= map.textures.size()) {
+          throw std::runtime_error(
+              "SKATE embedded texture reference is out of range");
+        }
+        const ImageTexture& source = map.textures[source_index];
+        if (source.width != texture.width ||
+            source.height != texture.height) {
+          throw std::runtime_error(
+              "SKATE embedded texture reference dimensions differ");
+        }
+        texture.stored_rgba8_method =
+            source.stored_rgba8_method;
+        texture.stored_rgba8 = source.stored_rgba8;
+        texture.rgba8 = source.rgba8;
+      } else {
+        texture.stored_rgba8_method = payload.method;
+        texture.stored_rgba8 = std::move(payload.bytes);
+      }
     } else {
       const std::uint32_t byte_count = reader.Scalar<std::uint32_t>();
       if (byte_count != expected_byte_count) {
@@ -1695,6 +2054,7 @@ MapDefinition LoadOwnedMapPackage(const std::filesystem::path& path) {
     std::uint32_t break_group_schema = 0;
     bool break_group_seen = false;
     bool embedded_retail_collision_seen = false;
+    bool world_config_seen = false;
     const std::uint32_t extension_count =
         reader.Scalar<std::uint32_t>();
     RequireCount(extension_count, "extension");
@@ -1831,6 +2191,23 @@ MapDefinition LoadOwnedMapPackage(const std::filesystem::path& path) {
         sky_reader.RequireEnd();
         map.textured_sky = std::move(sky);
         map.sky.enabled = true;
+      } else if (
+          tag == std::array<char, 4>{'W', 'C', 'F', 'G'}) {
+        if (world_config_seen || schema != 1) {
+          throw std::runtime_error(
+              "SKATE world configuration extension is invalid");
+        }
+        Reader config_reader(std::move(payload));
+        const std::uint32_t dynamic_lighting =
+            config_reader.Scalar<std::uint32_t>();
+        if (dynamic_lighting > 1) {
+          throw std::runtime_error(
+              "SKATE dynamic-lighting default is invalid");
+        }
+        map.dynamic_lighting_enabled_by_default =
+            dynamic_lighting != 0;
+        config_reader.RequireEnd();
+        world_config_seen = true;
       } else if (tag == std::array<char, 4>{'M', 'O', 'B', 'J'}) {
         if (map.map_object_schema_version != 0) {
           throw std::runtime_error(
@@ -1964,38 +2341,28 @@ bool DecodeOwnedMapTexture(
     texture.rgba8 = texture.stored_rgba8;
     return true;
   }
-  if (texture.stored_rgba8_method != kStorageDeflate) {
+  if (texture.stored_rgba8_method < kStorageDeflate ||
+      texture.stored_rgba8_method >
+          kStorageDeflateCollisionIndexed) {
     if (error != nullptr) {
       *error = "texture storage method is unsupported";
     }
     return false;
   }
-  if (expected == 0) {
-    return texture.stored_rgba8.empty();
-  }
-  if (texture.stored_rgba8.empty() ||
-      texture.stored_rgba8.size() >
-          std::numeric_limits<uLong>::max() ||
-      expected > std::numeric_limits<uLongf>::max()) {
+  try {
+    texture.rgba8 = DecodeStoredPayload(
+        StoredPayload{
+            texture.stored_rgba8_method,
+            expected,
+            texture.stored_rgba8},
+        "texture");
+    return true;
+  } catch (const std::exception& exception) {
     if (error != nullptr) {
-      *error = "compressed texture payload is invalid";
+      *error = exception.what();
     }
     return false;
   }
-  std::vector<std::uint8_t> decoded(expected);
-  uLongf decoded_size = static_cast<uLongf>(expected);
-  const int status = uncompress(
-      decoded.data(), &decoded_size,
-      texture.stored_rgba8.data(),
-      static_cast<uLong>(texture.stored_rgba8.size()));
-  if (status != Z_OK || decoded_size != expected) {
-    if (error != nullptr) {
-      *error = "texture DEFLATE payload did not decode to the expected size";
-    }
-    return false;
-  }
-  texture.rgba8 = std::move(decoded);
-  return true;
 }
 
 void ReleaseOwnedMapTexturePixels(const ImageTexture& texture) {

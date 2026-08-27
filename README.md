@@ -49,7 +49,7 @@ source releases.
 | Installing and switching custom maps | [Custom Maps](CUSTOM_MAPS.md) |
 | Creating and exporting a map in Blender | [Blender Map Authoring](tools/blender_owned_map/README.md) |
 | Extracting legally owned vanilla maps for Blender | [Vanilla Map Extraction](tools/vanilla_map_extraction/README.md) |
-| SKATE v14 binary specification | [SKATE Format](tools/blender_owned_map/SKATE_FORMAT.md) |
+| SKATE v15 binary specification | [SKATE Format](tools/blender_owned_map/SKATE_FORMAT.md) |
 | Building and packaging a release | [Release Guide](RELEASE.md) |
 | Multiplayer sessions and visual replication | [Multiplayer](MULTIPLAYER.md) |
 | Preview limitations | [Known Issues](KNOWN_ISSUES.md) |

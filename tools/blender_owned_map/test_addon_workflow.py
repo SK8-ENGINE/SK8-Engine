@@ -474,6 +474,7 @@ def main() -> None:
         settings.cycle_ping_pong = True
         settings.start_hour = 8.0
         settings.end_hour = 18.0
+        settings.dynamic_lighting_enabled_by_default = False
 
         # AI routes are experimental and optional. Their collection must not
         # be required for validation or export.
@@ -512,10 +513,14 @@ def main() -> None:
         require(output.is_file(), "Quick Export did not create an SKATE")
         require(cache.is_file(), "Quick Export did not create its cache")
         require(
-            output.read_bytes()[:8] == b"SKATE14\0",
+            output.read_bytes()[:8] == b"SKATE15\0",
             "Exported package has the wrong magic",
         )
         analysis = analyze_package(output, include_payloads=True)
+        require(
+            analysis["dynamic_lighting_enabled_by_default"] is False,
+            "Full export did not store the map's dynamic-lighting default",
+        )
         require(
             "MOBJ" in analysis["extension_tags"],
             "Exported package did not preserve Blender object records",
@@ -643,6 +648,18 @@ def main() -> None:
             in settings.validation_details,
             "Quick Export did not retain collision cleanup guidance",
         )
+        settings.dynamic_lighting_enabled_by_default = True
+        settings.export_mode = "METADATA"
+        require(
+            bpy.ops.skate_map.quick_export() == {"FINISHED"},
+            "Lighting-only export did not patch the dynamic-lighting default",
+        )
+        lighting_only = analyze_package(output)
+        require(
+            lighting_only["dynamic_lighting_enabled_by_default"] is True,
+            "Lighting-only export left a stale dynamic-lighting default",
+        )
+        settings.export_mode = "AUTO"
         require(
             bpy.ops.skate_map.quick_export() == {"FINISHED"},
             "Incremental export failed after collision sanitation",

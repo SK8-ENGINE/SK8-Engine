@@ -1,10 +1,10 @@
-# SKATE v14 binary format
+# SKATE v15 binary format
 
 All integers and IEEE-754 floats are little-endian. Strings are a `u32` byte
 length followed by UTF-8 bytes. Coordinates are right-handed Y-up metres.
 
 ```text
-char[8] magic = "SKATE14\0"
+char[8] magic = "SKATE15\0"
 u32 endian_marker = 0x12345678
 string map_name
 f32 spawn_position[3]
@@ -27,7 +27,9 @@ u32 hinged_door_count
 u32 local_light_count
 u32 npc_route_count
 
-material[material_count]:
+u32 material_decoded_byte_count
+stored_bytes material_records:
+ material[material_count]:
   string name
   u32 surface_flags
   f32 friction, restitution
@@ -156,17 +158,56 @@ extension[extension_count]:
 Each `stored_bytes` record is:
 
 ```text
-u32 storage_method       # 0 raw, 1 zlib-wrapped DEFLATE
+u32 storage_method
 u32 stored_byte_count
 u8 payload[stored_byte_count]
 ```
 
 The decoded byte count is inferred from the corresponding dimensions or
-record count and checked before allocation. The exporter uses raw storage
-only when DEFLATE would not reduce a texture. Visual vertices, indices, and
-collision are emitted as bounded DEFLATE blocks. Compression is lossless:
-the runtime reconstructs the same float32/u32 records and RGBA8 texels before
-normal validation and renderer upload.
+record count and checked before allocation. Methods 0 through 2 are generic:
+
+```text
+0  raw
+1  zlib-wrapped DEFLATE
+2  Zstandard
+```
+
+Methods 3 through 6 apply a reversible transform before Zstandard:
+
+```text
+3  per-row RGBA8 filters
+4  56-byte visual vertices transposed from records to component streams
+5  u32 indices encoded as signed-delta ZigZag varints
+6  exact collision vertices pooled by float32 bit pattern and indexed
+```
+
+Methods 7 through 10 are the same transforms followed by DEFLATE, allowing
+the exporter to remain functional when Python's Zstandard module is
+unavailable. Method 11 is texture-only and references the complete previously
+decoded texture payload when name-independent dimensions and SHA-256 content
+match. References can never be recursive.
+
+For every block, the exporter compares the transformed candidates with direct
+raw, DEFLATE, and Zstandard storage and keeps the smallest representation.
+No transform is compulsory and a larger encoding is never selected.
+Compression is lossless: the runtime reconstructs the same float32/u32
+records, triangle order, collision metadata, and RGBA8 texels before normal
+validation and renderer upload. Material records are compressed as one block,
+so repeated shader names, binding semantics, parameter names, and metadata
+strings share the compressor's dictionary instead of paying their full cost
+for every record.
+
+### Optional `WCFG` schema 1 extension
+
+`WCFG` stores map-level runtime defaults:
+
+```text
+u32 dynamic_lighting_enabled_by_default  # exactly 0 or 1
+```
+
+Maps without `WCFG` default to enabled, preserving prior behavior. The value
+sets the initial and reset state of the runtime Dynamic Lighting option; the
+player can still toggle that option during the session.
 
 The optional `RWCM` extension uses schema version 1. Its decoded payload is
 one complete `RWCMSET1` exact-retail collision archive. Compatible runtimes
@@ -305,7 +346,7 @@ v13 packages with no physics fields continue to load unchanged.
 ### Optional `BGRP` schema 1 extension
 
 `BGRP` adds deterministic pre-fractured break groups without changing
-SKATE14 or MOBJ schema 3. Unknown-extension compatibility therefore remains
+the core object layout or MOBJ schema 3. Unknown-extension compatibility therefore remains
 intact. Its decoded payload is:
 
 ```text
@@ -429,7 +470,7 @@ partners used for intentional two-sided foliage. Exporters infer a default
 from alpha mode and common sign/decal material names, while `ow_depth_layer`
 can explicitly select 0 through 3.
 
-The loader retains read compatibility with SKATE v1 through v14. Missing v2
+The loader retains read compatibility with SKATE v1 through v15. Missing v2
 material fields use opaque, polished-concrete/smooth defaults with no
 additional PBR maps. Missing v3 cycle fields retain the original full-day
 behavior. Missing v6 environment fields use the engine's neutral sky grading
@@ -437,8 +478,10 @@ and standard twilight, night, sun, moon, and ambient defaults. Older packages
 simply contain no authored local lights or NPC routes. Packages before v12 use
 the base UV as decal UV and have no tangent frame, retail material definition,
 or extension table. Packages before v13 infer their presentation depth layer
-from alpha mode and material name. NPC routes in v8 are experimental runtime
-data and are not yet a stable gameplay feature.
+from alpha mode and material name. Packages before v15 store material records
+directly and support only raw or DEFLATE section payloads. A missing `WCFG`
+extension defaults dynamic lighting to on. NPC routes in v8 are experimental
+runtime data and are not yet a stable gameplay feature.
 
 ## Version compatibility
 

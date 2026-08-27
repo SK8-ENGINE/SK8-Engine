@@ -12,7 +12,8 @@ Write UTF-8 JSON using this structure:
       "audio_surface": 4,
       "physics_surface": 2,
       "surface_pattern": 0,
-      "collision_enabled": true
+      "collision_enabled": true,
+      "emissive_strength": 1.0
     }
   ],
   "object_group_roles": [
@@ -67,6 +68,15 @@ grouped inventory. IDs must come from `MATERIALS.md`.
 visual-only or ignored. Group roles and explicit overrides, not material
 names, decide whether mesh geometry enters collision export.
 
+`emissive_strength` is optional for ordinary materials and must be between
+`0.0` and `64.0` when present. Include a positive value for every visible
+fixture material associated with a generated local light. Preserve a positive
+authored Blender emission; otherwise use `1.0` as the neutral visible-glow
+default. Omit the field for unrelated materials so their authored emission is
+preserved. This field changes only the visible material and must not be used
+to alter or replace the light's `energy`, `range`, `color`, placement, or
+direction.
+
 ## Lights
 
 Supported types are `POINT`, `SPOT`, and `AREA`. If `location` is omitted,
@@ -89,6 +99,13 @@ For a spot or area light, include `target` to aim it:
 
 Use `location` directly when the source object's center is not a useful light
 position. Do not add a light when a suitable Blender light already exists.
+
+When a light represents a visible lamp, bulb, sign, or fixture, identify its
+visible material from the grouped inventory and give that material a positive
+`emissive_strength`. Suns, invisible helper lights, and lights without
+associated presentation geometry are exempt. If the source shader contains a
+missing or unassigned image, report it for Blender cleanup; do not interpret
+the magenta fallback as an intended fixture color.
 
 ## Spawn
 

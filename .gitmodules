@@ -9,3 +9,6 @@
 [submodule "third_party/box3d"]
 	path = third_party/box3d
 	url = https://github.com/erincatto/box3d.git
+[submodule "third_party/zstd"]
+	path = third_party/zstd
+	url = https://github.com/facebook/zstd.git

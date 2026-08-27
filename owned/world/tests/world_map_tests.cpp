@@ -127,7 +127,8 @@ int main() {
   static_assert(IsSupportedOwnedMapPackageVersion(1));
   static_assert(IsSupportedOwnedMapPackageVersion(14));
   static_assert(!IsSupportedOwnedMapPackageVersion(0));
-  static_assert(!IsSupportedOwnedMapPackageVersion(15));
+  static_assert(IsSupportedOwnedMapPackageVersion(15));
+  static_assert(!IsSupportedOwnedMapPackageVersion(16));
 
   {
     const auto future_package =

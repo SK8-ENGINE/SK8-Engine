@@ -47,14 +47,21 @@ def make_plane(
     return obj
 
 
-def material_plan(name: str, collision: bool) -> dict:
-    return {
+def material_plan(
+    name: str,
+    collision: bool,
+    emissive_strength: float | None = None,
+) -> dict:
+    result = {
         "material": name,
         "audio_surface": 4,
         "physics_surface": 2,
         "surface_pattern": 0,
         "collision_enabled": collision,
     }
+    if emissive_strength is not None:
+        result["emissive_strength"] = emissive_strength
+    return result
 
 
 def main() -> None:
@@ -140,7 +147,11 @@ def main() -> None:
         "version": 3,
         "map_name": "Grouped Plan Test",
         "materials": [
-            material_plan(fixture_material.name, True),
+            material_plan(
+                fixture_material.name,
+                True,
+                emissive_strength=1.0,
+            ),
             material_plan(plaza_material.name, True),
         ],
         "object_group_roles": [
@@ -188,6 +199,11 @@ def main() -> None:
         f"Unexpected grouped apply result: {result}",
     )
     require(result["lights"] == 2, "Grouped fixture lights were not expanded")
+    require(
+        abs(float(fixture_material.get("ow_emissive", 0.0)) - 1.0)
+        < 1.0e-6,
+        "Visible fixture material was not made emissive",
+    )
     require(result["spawn"], "Explicit visual spawn was not applied")
     require(
         tuple(round(float(value), 4) for value in bpy.data.objects["OW_SPAWN"].location)

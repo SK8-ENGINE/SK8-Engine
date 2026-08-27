@@ -17,6 +17,20 @@ if(NOT TARGET ZLIB::ZLIBSTATIC)
   )
 endif()
 
+if(NOT TARGET libzstd_static)
+  set(ZSTD_BUILD_PROGRAMS OFF CACHE BOOL "" FORCE)
+  set(ZSTD_BUILD_CONTRIB OFF CACHE BOOL "" FORCE)
+  set(ZSTD_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+  set(ZSTD_BUILD_SHARED OFF CACHE BOOL "" FORCE)
+  set(ZSTD_BUILD_STATIC ON CACHE BOOL "" FORCE)
+  set(ZSTD_BUILD_DICTBUILDER OFF CACHE BOOL "" FORCE)
+  add_subdirectory(
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../third_party/zstd/build/cmake"
+    "${CMAKE_CURRENT_BINARY_DIR}/zstd"
+    EXCLUDE_FROM_ALL
+  )
+endif()
+
 if(NOT TARGET box3d::box3d)
   add_subdirectory(
     "${CMAKE_CURRENT_SOURCE_DIR}/../../third_party/box3d"
@@ -41,7 +55,7 @@ add_library(skate_owned_world STATIC
 
 target_link_libraries(
   skate_owned_world
-  PRIVATE ZLIB::ZLIBSTATIC
+  PRIVATE ZLIB::ZLIBSTATIC libzstd_static
   PUBLIC box3d::box3d
 )
 

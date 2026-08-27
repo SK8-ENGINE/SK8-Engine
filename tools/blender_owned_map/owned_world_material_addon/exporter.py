@@ -1,4 +1,4 @@
-"""Original Blender -> SKATE v14 exporter.
+"""Original Blender -> SKATE v15 exporter.
 
 This module intentionally targets the narrow project-owned scene contract
 documented beside it. It has no ArenaBuilder imports or runtime dependency.
@@ -26,12 +26,26 @@ try:
     import numpy
 except ImportError:
     numpy = None
+try:
+    from compression import zstd
+except ImportError:
+    zstd = None
 
 
-MAGIC = b"SKATE14\0"
+MAGIC = b"SKATE15\0"
 ENDIAN_MARKER = 0x12345678
 STORAGE_RAW = 0
 STORAGE_DEFLATE = 1
+STORAGE_ZSTD = 2
+STORAGE_ZSTD_RGBA_FILTER = 3
+STORAGE_ZSTD_VERTEX_SOA = 4
+STORAGE_ZSTD_INDEX_DELTA = 5
+STORAGE_ZSTD_COLLISION_INDEXED = 6
+STORAGE_DEFLATE_RGBA_FILTER = 7
+STORAGE_DEFLATE_VERTEX_SOA = 8
+STORAGE_DEFLATE_INDEX_DELTA = 9
+STORAGE_DEFLATE_COLLISION_INDEXED = 10
+STORAGE_TEXTURE_REFERENCE = 11
 PRESENTATION_COLLISION_COLLECTION = "OW_GROUP_1_PRESENTATION_COLLISION"
 NO_PRESENTATION_COLLECTION = "OW_GROUP_2_NO_PRESENTATION"
 NO_COLLISION_COLLECTION = "OW_GROUP_3_NO_COLLISION"
@@ -61,7 +75,7 @@ _HELPER_OBJECT_MARKERS = (
     "scale_reference",
     "scale reference",
 )
-CACHE_SCHEMA = 21
+CACHE_SCHEMA = 22
 METADATA_FLOAT_COUNT = 49
 METADATA_BYTE_COUNT = METADATA_FLOAT_COUNT * 4
 RETAIL_NORMAL_ATTRIBUTE = "skate3_retail_normal"
@@ -262,41 +276,182 @@ def _write_stored_bytes(
     stream: BinaryIO,
     decoded: bytes,
 ) -> tuple[int, int]:
-    compressed = zlib.compress(decoded, level=6)
-    if len(compressed) >= len(decoded):
-        _write_u32(stream, STORAGE_RAW)
-        _write_u32(stream, len(decoded))
-        stream.write(decoded)
-        return STORAGE_RAW, len(decoded)
-    _write_u32(stream, STORAGE_DEFLATE)
-    _write_u32(stream, len(compressed))
-    stream.write(compressed)
-    return STORAGE_DEFLATE, len(compressed)
+    candidates = [
+        (STORAGE_DEFLATE, zlib.compress(decoded, level=9)),
+    ]
+    if zstd is not None:
+        candidates.append((STORAGE_ZSTD, zstd.compress(decoded, level=10)))
+    method, payload = min(candidates, key=lambda item: len(item[1]))
+    if len(payload) >= len(decoded):
+        method, payload = STORAGE_RAW, decoded
+    _write_u32(stream, method)
+    _write_u32(stream, len(payload))
+    stream.write(payload)
+    return method, len(payload)
+
+
+def _write_transformed_bytes(
+    stream: BinaryIO,
+    decoded: bytes,
+    transformed: bytes,
+    *,
+    zstd_method: int,
+    deflate_method: int,
+) -> tuple[int, int]:
+    prefix = struct.pack("<I", len(transformed))
+    candidates = [
+        (
+            deflate_method,
+            prefix + zlib.compress(transformed, level=9),
+        ),
+        (STORAGE_DEFLATE, zlib.compress(decoded, level=9)),
+    ]
+    if zstd is not None:
+        candidates.extend(
+            (
+                (
+                    zstd_method,
+                    prefix + zstd.compress(transformed, level=10),
+                ),
+                (STORAGE_ZSTD, zstd.compress(decoded, level=10)),
+            )
+        )
+    method, payload = min(candidates, key=lambda item: len(item[1]))
+    if len(payload) >= len(decoded):
+        method, payload = STORAGE_RAW, decoded
+    _write_u32(stream, method)
+    _write_u32(stream, len(payload))
+    stream.write(payload)
+    return method, len(payload)
+
+
+def _filter_rgba8(decoded: bytes, width: int, height: int) -> bytes:
+    row_size = width * 4
+    if len(decoded) != row_size * height:
+        raise ValueError("RGBA8 texture dimensions do not match its bytes")
+    output = bytearray(struct.pack("<II", width, height))
+    previous = bytes(row_size)
+    for row_index in range(height):
+        row = decoded[row_index * row_size : (row_index + 1) * row_size]
+        if numpy is not None and row_size:
+            current_u8 = numpy.frombuffer(row, dtype=numpy.uint8)
+            current = current_u8.astype(numpy.int16)
+            above = numpy.frombuffer(previous, dtype=numpy.uint8).astype(
+                numpy.int16
+            )
+            left = numpy.zeros(row_size, dtype=numpy.int16)
+            left[4:] = current[:-4]
+            candidates = (
+                current_u8,
+                ((current - left) & 0xFF).astype(numpy.uint8),
+                ((current - above) & 0xFF).astype(numpy.uint8),
+                (
+                    (
+                        current
+                        - ((left.astype(numpy.int32) + above) // 2)
+                    )
+                    & 0xFF
+                ).astype(numpy.uint8),
+            )
+            scores = [
+                int(
+                    numpy.minimum(
+                        candidate.astype(numpy.uint16),
+                        256 - candidate.astype(numpy.uint16),
+                    ).sum()
+                )
+                for candidate in candidates
+            ]
+            filter_type = min(range(len(scores)), key=scores.__getitem__)
+            filtered = candidates[filter_type].tobytes()
+        else:
+            sub = bytes(
+                (
+                    value - (row[index - 4] if index >= 4 else 0)
+                )
+                & 0xFF
+                for index, value in enumerate(row)
+            )
+            up = bytes(
+                (value - previous[index]) & 0xFF
+                for index, value in enumerate(row)
+            )
+            options = (row, sub, up)
+            scores = [
+                sum(min(value, 256 - value) for value in option)
+                for option in options
+            ]
+            filter_type = min(range(len(scores)), key=scores.__getitem__)
+            filtered = options[filter_type]
+        output.append(filter_type)
+        output.extend(filtered)
+        previous = row
+    return bytes(output)
+
+
+def _vertex_soa(decoded: bytes) -> bytes:
+    vertex_size = 56
+    if len(decoded) % vertex_size:
+        raise ValueError("visual vertex block is not SKATE15-compatible")
+    fields = ((0, 12), (12, 12), (24, 8), (32, 8), (40, 4),
+              (44, 8), (52, 4))
+    output = bytearray(len(decoded))
+    offset = 0
+    for field_offset, field_size in fields:
+        for vertex in range(0, len(decoded), vertex_size):
+            output[offset : offset + field_size] = decoded[
+                vertex + field_offset : vertex + field_offset + field_size
+            ]
+            offset += field_size
+    return bytes(output)
+
+
+def _index_delta_varints(decoded: bytes) -> bytes:
+    if len(decoded) % 4:
+        raise ValueError("visual index block is not u32-aligned")
+    output = bytearray()
+    previous = 0
+    for (current,) in struct.iter_unpack("<I", decoded):
+        delta = current - previous
+        zigzag = (delta << 1) if delta >= 0 else ((-delta << 1) - 1)
+        while zigzag >= 0x80:
+            output.append((zigzag & 0x7F) | 0x80)
+            zigzag >>= 7
+        output.append(zigzag)
+        previous = current
+    return bytes(output)
+
+
+def _indexed_collision(decoded: bytes) -> bytes:
+    triangle = struct.Struct("<9fII4B")
+    if len(decoded) % triangle.size:
+        raise ValueError("collision block is not SKATE15-compatible")
+    vertices: list[bytes] = []
+    vertex_indices: dict[bytes, int] = {}
+    records = bytearray()
+    for values in triangle.iter_unpack(decoded):
+        packed_vertices = struct.pack("<9f", *values[:9])
+        for corner in range(3):
+            packed = packed_vertices[corner * 12 : corner * 12 + 12]
+            index = vertex_indices.get(packed)
+            if index is None:
+                index = len(vertices)
+                vertex_indices[packed] = index
+                vertices.append(packed)
+            records.extend(struct.pack("<I", index))
+        records.extend(struct.pack("<II4B", *values[9:]))
+    return (
+        struct.pack("<I", len(vertices))
+        + b"".join(vertices)
+        + bytes(records)
+    )
 
 
 def _write_stored_chunks(
     stream: BinaryIO,
     chunks: list[bytes],
 ) -> tuple[int, int]:
-    header_offset = stream.tell()
-    _write_u32(stream, STORAGE_DEFLATE)
-    _write_u32(stream, 0)
-    compressor = zlib.compressobj(level=6)
-    stored_size = 0
-    for chunk in chunks:
-        compressed = compressor.compress(chunk)
-        stream.write(compressed)
-        stored_size += len(compressed)
-    compressed = compressor.flush()
-    stream.write(compressed)
-    stored_size += len(compressed)
-    if stored_size > 0xFFFFFFFF:
-        raise ValueError("compressed SKATE block exceeds the u32 size limit")
-    end = stream.tell()
-    stream.seek(header_offset + 4)
-    _write_u32(stream, stored_size)
-    stream.seek(end)
-    return STORAGE_DEFLATE, stored_size
+    return _write_stored_bytes(stream, b"".join(chunks))
 
 
 def _map_object_extension(
@@ -659,6 +814,19 @@ def _scene_content_fingerprint(
         digest,
         f"EXPORT_EDITABLE_OBJECTS={int(export_editable_objects)}",
     )
+    _hash_text(
+        digest,
+        "DYNAMIC_LIGHTING_DEFAULT="
+        + str(
+            int(
+                bool(
+                    bpy.context.scene.get(
+                        "ow_dynamic_lighting_enabled_by_default", True
+                    )
+                )
+            )
+        ),
+    )
 
     material_properties = (
         "ow_flags",
@@ -990,7 +1158,7 @@ def _sun_metadata() -> tuple[tuple[float, float, float], float, float]:
 def _read_package_header(output: Path) -> tuple[str, int, tuple[int, ...]]:
     with output.open("rb") as stream:
         if stream.read(len(MAGIC)) != MAGIC:
-            raise ValueError(f"{output} is not an SKATE v14 package")
+            raise ValueError(f"{output} is not an SKATE v15 package")
         marker = struct.unpack("<I", stream.read(4))[0]
         if marker != ENDIAN_MARKER:
             raise ValueError(f"{output} has an invalid endian marker")
@@ -1002,17 +1170,36 @@ def _read_package_header(output: Path) -> tuple[str, int, tuple[int, ...]]:
     return package_name, metadata_offset, counts
 
 
-def _package_static_digest(output: Path, metadata_offset: int) -> str:
+def _package_static_digest(
+    output: Path,
+    metadata_offset: int,
+    world_config_value_offset: int | None = None,
+) -> str:
     digest = hashlib.sha256()
+    excluded_ranges = [
+        (metadata_offset, metadata_offset + METADATA_BYTE_COUNT),
+    ]
+    if world_config_value_offset is not None:
+        excluded_ranges.append(
+            (world_config_value_offset, world_config_value_offset + 4)
+        )
+    excluded_ranges.sort()
     with output.open("rb") as stream:
-        remaining = metadata_offset
-        while remaining:
-            data = stream.read(min(8 * 1024 * 1024, remaining))
-            if not data:
-                raise ValueError(f"{output} ended before its metadata")
-            digest.update(data)
-            remaining -= len(data)
-        stream.seek(METADATA_BYTE_COUNT, os.SEEK_CUR)
+        cursor = 0
+        for excluded_start, excluded_end in excluded_ranges:
+            remaining = excluded_start - cursor
+            if remaining < 0:
+                raise ValueError("SKATE cache exclusions overlap")
+            while remaining:
+                data = stream.read(min(8 * 1024 * 1024, remaining))
+                if not data:
+                    raise ValueError(
+                        f"{output} ended before its cached metadata"
+                    )
+                digest.update(data)
+                remaining -= len(data)
+            stream.seek(excluded_end - excluded_start, os.SEEK_CUR)
+            cursor = excluded_end
         while True:
             data = stream.read(8 * 1024 * 1024)
             if not data:
@@ -1062,7 +1249,7 @@ def _scene_metadata(output: Path) -> tuple[str, bytes]:
     return map_name, struct.pack("<49f", *(float(value) for value in values))
 
 
-def _patch_package_metadata(output: Path) -> None:
+def _patch_package_metadata(output: Path, manifest: dict | None = None) -> None:
     map_name, metadata = _scene_metadata(output)
     package_name, metadata_offset, _ = _read_package_header(output)
     if package_name != map_name:
@@ -1073,6 +1260,33 @@ def _patch_package_metadata(output: Path) -> None:
     with output.open("r+b") as stream:
         stream.seek(metadata_offset)
         stream.write(metadata)
+        if manifest is not None:
+            world_config_value_offset = manifest.get(
+                "world_config_value_offset"
+            )
+            if not isinstance(world_config_value_offset, int):
+                raise ValueError(
+                    "metadata-only export requires a fresh SKATE v15 cache; "
+                    "run one normal export"
+                )
+            stream.seek(world_config_value_offset - 20)
+            if stream.read(20) != struct.pack(
+                "<4sIIII", b"WCFG", 1, 4, STORAGE_RAW, 4
+            ):
+                raise ValueError(
+                    "cached dynamic-lighting metadata is invalid; "
+                    "run one normal export"
+                )
+            _write_u32(
+                stream,
+                1
+                if bool(
+                    bpy.context.scene.get(
+                        "ow_dynamic_lighting_enabled_by_default", True
+                    )
+                )
+                else 0,
+            )
         stream.flush()
         os.fsync(stream.fileno())
 
@@ -1093,6 +1307,7 @@ def _write_cache_manifest(
     fingerprint: SceneContentFingerprint,
     material_count: int,
     texture_count: int,
+    world_config_value_offset: int | None = None,
 ) -> None:
     package_name, metadata_offset, counts = _read_package_header(output)
     output_stat = output.stat()
@@ -1101,7 +1316,9 @@ def _write_cache_manifest(
         "package_name": package_name,
         "output_length": output_stat.st_size,
         "output_mtime_ns": output_stat.st_mtime_ns,
-        "static_sha256": _package_static_digest(output, metadata_offset),
+        "static_sha256": _package_static_digest(
+            output, metadata_offset, world_config_value_offset
+        ),
         "content_sha256": fingerprint.digest,
         "material_count": material_count,
         "texture_count": texture_count,
@@ -1114,6 +1331,8 @@ def _write_cache_manifest(
         "local_light_count": fingerprint.local_lights,
         "package_counts": list(counts),
     }
+    if world_config_value_offset is not None:
+        manifest["world_config_value_offset"] = world_config_value_offset
     path = _cache_manifest_path(output)
     temporary = path.with_name(path.name + ".tmp")
     temporary.write_text(
@@ -1158,7 +1377,11 @@ def _manifest_matches_package(output: Path, manifest: dict) -> bool:
     if output.stat().st_mtime_ns == manifest.get("output_mtime_ns"):
         return True
     return (
-        _package_static_digest(output, metadata_offset)
+        _package_static_digest(
+            output,
+            metadata_offset,
+            manifest.get("world_config_value_offset"),
+        )
         == manifest.get("static_sha256")
     )
 
@@ -3803,7 +4026,7 @@ def export_scene(
                 "metadata-only export requires a valid incremental cache; "
                 "run a normal export once or use --adopt-existing-cache"
             )
-        _patch_package_metadata(output)
+        _patch_package_metadata(output, manifest)
         _refresh_manifest_file_state(output, manifest)
         print(
             "SKATE incremental export:",
@@ -4027,7 +4250,7 @@ def export_scene(
             fingerprint.digest == manifest.get("content_sha256")
             and _manifest_matches_package(output, manifest)
         ):
-            _patch_package_metadata(output)
+            _patch_package_metadata(output, manifest)
             _refresh_manifest_file_state(output, manifest)
             print(
                 "SKATE incremental export:",
@@ -4070,6 +4293,7 @@ def export_scene(
     scene = bpy.context.scene
     sun_color, sun_intensity, orbit_azimuth = _sun_metadata()
 
+    world_config_value_offset: int | None = None
     with output.open("wb") as stream:
         stream.write(MAGIC)
         _write_u32(stream, ENDIAN_MARKER)
@@ -4133,6 +4357,9 @@ def export_scene(
         ):
             _write_u32(stream, count)
 
+        package_stream = stream
+        material_stream = io.BytesIO()
+        stream = material_stream
         for exported in export_materials:
             material = exported.blender_material
             lightmap_encoding = str(
@@ -4223,6 +4450,10 @@ def export_scene(
                     for value in values:
                         _write_string(stream, value)
                 _write_string(stream, exported.retail_source_metadata)
+        stream = package_stream
+        material_bytes = material_stream.getvalue()
+        _write_u32(stream, len(material_bytes))
+        _write_stored_bytes(stream, material_bytes)
 
         lightmap_encodings: dict[str, str] = {}
         for material in materials:
@@ -4238,6 +4469,7 @@ def export_scene(
                 )
         checked_rgb_images = 0
         any_checked_rgb = False
+        texture_payloads: dict[tuple[int, int, bytes], int] = {}
         for image_index, image in enumerate(images, start=1):
             lightmap_encoding = lightmap_encodings.get(image.name, "")
             rgba8 = _image_rgba8(
@@ -4264,7 +4496,23 @@ def export_scene(
             # so their Non-Color bytes pass through without a second transfer.
             # Compression is lossless in both cases.
             _write_u32(stream, 0)
-            _write_stored_bytes(stream, rgba8)
+            width = int(image.size[0])
+            height = int(image.size[1])
+            identity = (width, height, hashlib.sha256(rgba8).digest())
+            source_index = texture_payloads.get(identity)
+            if source_index is not None:
+                _write_u32(stream, STORAGE_TEXTURE_REFERENCE)
+                _write_u32(stream, 4)
+                _write_u32(stream, source_index)
+            else:
+                texture_payloads[identity] = image_index - 1
+                _write_transformed_bytes(
+                    stream,
+                    rgba8,
+                    _filter_rgba8(rgba8, width, height),
+                    zstd_method=STORAGE_ZSTD_RGBA_FILTER,
+                    deflate_method=STORAGE_DEFLATE_RGBA_FILTER,
+                )
             _report_progress(
                 progress,
                 0.72
@@ -4278,9 +4526,23 @@ def export_scene(
                 "refusing to export a black SKATE package"
             )
 
-        _write_stored_chunks(stream, geometry.vertex_chunks)
+        vertex_bytes = b"".join(geometry.vertex_chunks)
+        _write_transformed_bytes(
+            stream,
+            vertex_bytes,
+            _vertex_soa(vertex_bytes),
+            zstd_method=STORAGE_ZSTD_VERTEX_SOA,
+            deflate_method=STORAGE_DEFLATE_VERTEX_SOA,
+        )
         _report_progress(progress, 0.86, "Compressed visual vertices")
-        _write_stored_chunks(stream, geometry.index_chunks)
+        index_bytes = b"".join(geometry.index_chunks)
+        _write_transformed_bytes(
+            stream,
+            index_bytes,
+            _index_delta_varints(index_bytes),
+            zstd_method=STORAGE_ZSTD_INDEX_DELTA,
+            deflate_method=STORAGE_DEFLATE_INDEX_DELTA,
+        )
         _report_progress(progress, 0.89, "Compressed visual indices")
         packed_collision = struct.Struct("<9fII4B")
         collision_chunks: list[bytes] = []
@@ -4321,7 +4583,14 @@ def export_scene(
                     f"Writing collision ({collision_index}/"
                     f"{len(collision)})",
                 )
-        _write_stored_chunks(stream, collision_chunks)
+        collision_bytes = b"".join(collision_chunks)
+        _write_transformed_bytes(
+            stream,
+            collision_bytes,
+            _indexed_collision(collision_bytes),
+            zstd_method=STORAGE_ZSTD_COLLISION_INDEXED,
+            deflate_method=STORAGE_DEFLATE_COLLISION_INDEXED,
+        )
         for rail in rails:
             _write_string(stream, rail.name)
             _write_u32(stream, 1 if rail.closed else 0)
@@ -4430,9 +4699,24 @@ def export_scene(
         )
         _write_u32(
             stream,
-            2 + (1 if has_break_groups else 0) +
+            3 + (1 if has_break_groups else 0) +
             (1 if retail_manifest is not None else 0),
         )
+        world_config = struct.pack(
+            "<I",
+            1
+            if bool(
+                scene.get("ow_dynamic_lighting_enabled_by_default", True)
+            )
+            else 0,
+        )
+        stream.write(b"WCFG")
+        _write_u32(stream, 1)
+        _write_u32(stream, len(world_config))
+        _write_u32(stream, STORAGE_RAW)
+        _write_u32(stream, len(world_config))
+        world_config_value_offset = stream.tell()
+        stream.write(world_config)
         stream.write(b"MOBJ")
         _write_u32(stream, 3)
         _write_u32(stream, len(map_objects))
@@ -4487,7 +4771,11 @@ def export_scene(
             ),
         )
     _write_cache_manifest(
-        output, fingerprint, len(export_materials), len(images)
+        output,
+        fingerprint,
+        len(export_materials),
+        len(images),
+        world_config_value_offset,
     )
     print(
         "SKATE cache: manifest updated",

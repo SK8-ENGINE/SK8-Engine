@@ -23,6 +23,9 @@ leave fine cleanup to the user.
 4. Write a version 3 `map_plan.json`:
    - assign every used Blender material a Skate 3 audio surface, physics
      behavior, and contact pattern;
+   - give every visible fixture material associated with an added local light
+     a positive `emissive_strength`; preserve a positive authored Blender
+     emission, otherwise use `1.0` as the neutral visible-glow default;
    - assign every mesh group exactly one object role: `DEFAULT`,
      `COLLISION_ONLY`, `VISUAL_ONLY`, or `IGNORE`;
    - add lights for objects that are clearly lamps, bulbs, signs, or other
@@ -40,6 +43,13 @@ the supplied catalog. Do not add lights to every emissive-looking material:
 use object names, material names, dimensions, and location together.
 Local fixture lights supplement the map's global sun and ambient lighting.
 Never zero or rewrite world ambient merely because local lights exist.
+When a local light is inferred from a visible lamp, bulb, sign, or fixture,
+the corresponding visible material must also be emissive so the source looks
+lit. This does not apply to suns, invisible helper lights, or local lights
+without associated presentation geometry. Emission controls the appearance
+of the fixture and is separate from the light's `energy`, `range`, `color`,
+placement, and direction; never alter those light settings merely to add
+fixture emission.
 
 Spawn placement is a visual agent decision. Inspect the top, south, east, and
 isometric previews before choosing it. Cross-reference recognizable floor
@@ -71,6 +81,9 @@ If validation reports that this deterministic bake failed, or reports scalar
 Bump height, an independently mapped PBR channel, or a missing explicit packed
 ORM, leave it for deterministic Blender authoring rather than guessing. Never
 have the agent repair UVs or shader graphs by interpreting image filenames.
+If a visible fixture's shader contains a missing or unassigned image, report
+that source-material problem rather than treating Blender's magenta fallback
+as the intended emission color.
 
 The grouped inventory contains one representative record plus an instance
 count and spatial range for each deterministic group. Blender groups exact

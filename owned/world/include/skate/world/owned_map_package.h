@@ -7,7 +7,7 @@
 
 namespace skate::world {
 
-inline constexpr int kLatestSupportedOwnedMapPackageVersion = 14;
+inline constexpr int kLatestSupportedOwnedMapPackageVersion = 15;
 
 constexpr bool IsSupportedOwnedMapPackageVersion(int version) {
   return version >= 1 && version <= kLatestSupportedOwnedMapPackageVersion;

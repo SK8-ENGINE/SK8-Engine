@@ -238,17 +238,22 @@ work is Blender data extraction and binary file packing, where avoiding Python
 scalar overhead is substantially more useful than transferring the data to a
 graphics device. Complete float32 vertex records are indexed exactly, so
 shared corners no longer duplicate position, normal, UV, lightmap UV, and
-material data. SKATE v14 then applies bounded lossless DEFLATE to RGBA8
-textures, vertices, indices, and collision. The loader reconstructs and
-validates the original runtime records; export does not simplify meshes,
-reduce texture resolution, omit maps, quantize attributes, or merge UV/hard
-normal seams. V12 added a third decal UV, a compact SNORM8 tangent frame,
+material data. SKATE v15 compares raw, DEFLATE, and Zstandard storage with
+reversible texture-row, vertex-stream, index-delta, and exact-collision
+encodings, then keeps the smallest representation for each block. Repeated
+material metadata is compressed as one block, and byte-identical textures can
+reference an earlier payload. The loader reconstructs and validates the
+original runtime records; export does not simplify meshes, reduce texture
+resolution, omit maps, quantize attributes, reorder triangles, or merge
+UV/hard-normal seams. V12 added a third decal UV, a compact SNORM8 tangent frame,
 complete named retail shader bindings/parameters, and an extensible world
 metadata table. V13 adds semantic presentation depth layers for coplanar
 cutouts, signs, decals, and blended surfaces. These layers alter only raster
 depth ordering, never authored transforms or collision. Every material remains
 dynamically lit; a lightmap contributes additive static indirect illumination
-rather than selecting a baked-only mode. Extracted retail collision can
+rather than selecting a baked-only mode. V15 also stores whether the runtime
+Dynamic Lighting option starts on or off for that map; older maps default to
+on and the player can still toggle it. Extracted retail collision can
 additionally carry exact
 per-triangle RenderWare edge/corner feature codes as face attributes; ordinary
 authored maps continue to generate those codes automatically.
@@ -264,7 +269,7 @@ Retail-imported meshes may carry the hidden point attributes
 `skate3_retail_tangent_handedness`. When the complete validated set is
 present, the exporter uses the authored tangent rather than recalculating it
 from Blender UVs, then reconstructs the compact runtime binormal expected by
-SKATE v14. This preserves the game's authored per-island lighting
+SKATE v15. This preserves the game's authored per-island lighting
 orientation. Existing University working files whose tangent was stored under
 the old `skate3_retail_binormal` name remain supported as a migration path.
 Ordinary custom maps do not need these attributes and continue to use
@@ -288,8 +293,8 @@ geometry and the skater.
   choice.
 - **Force Full Rebuild** ignores the incremental cache.
 - **Lighting / Spawn Only** updates fixed-size map, spawn, sky, and daylight
-  metadata in an existing package. A valid prior automatic export is
-  required.
+  metadata, including the Dynamic Lighting default, in an existing package.
+  A valid prior automatic v15 export is required.
 
 The result can be copied into the game's `maps` folder and selected through
 **Settings > Maps**. Every lighting value is the map's load-time default;
@@ -482,7 +487,7 @@ In the development workspace this creates:
 - `maps/blender_bake_showcase.blend`
 - `maps/blender_bake_showcase.skate`
 
-The current SKATE v14 build preserves the park's static Blender features as
+The current SKATE v15 build preserves the park's static Blender features as
 independent editor objects. Each collision proxy is associated with its
 visual owner, and each complete rail owns its matching grind spline.
 

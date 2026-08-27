@@ -100,6 +100,13 @@ def _apply_materials(plan: dict) -> int:
         material["ow_collision_enabled"] = bool(
             assignment.get("collision_enabled", True)
         )
+        if "emissive_strength" in assignment:
+            emissive = float(assignment["emissive_strength"])
+            if not math.isfinite(emissive) or not 0.0 <= emissive <= 64.0:
+                raise ValueError(
+                    f"{name}: emissive_strength must be finite and 0..64"
+                )
+            material["ow_emissive"] = emissive
         material["ow_agent_mapped"] = True
         material["ow_auto_imported"] = False
         count += 1
