@@ -383,6 +383,28 @@ int main() {
             duplicate_world.chunks[0].batches.size() == 1 &&
             duplicate_world.chunks[0].batches[0].cull_backfaces,
         "reverse-wound presentation twins did not enable backface culling");
+
+    SurfaceMaterial explicit_two_sided;
+    explicit_two_sided.id = 1;
+    explicit_two_sided.name = "Blender two sided";
+    explicit_two_sided.cull_mode =
+        SurfaceMaterial::CullMode::TwoSided;
+    duplicate_faces.materials = {explicit_two_sided};
+    const RenderWorld explicit_two_sided_world =
+        BuildRenderWorld(duplicate_faces, options);
+    Require(
+        explicit_two_sided_world.backface_culled_material_count == 0 &&
+            !explicit_two_sided_world.chunks[0].batches[0].cull_backfaces,
+        "Blender two-sided policy was overridden by geometry inference");
+
+    duplicate_faces.materials[0].cull_mode =
+        SurfaceMaterial::CullMode::BackFaces;
+    const RenderWorld explicit_culled_world =
+        BuildRenderWorld(duplicate_faces, options);
+    Require(
+        explicit_culled_world.backface_culled_material_count == 1 &&
+            explicit_culled_world.chunks[0].batches[0].cull_backfaces,
+        "Blender backface-culling policy did not reach render batches");
   }
 
   {

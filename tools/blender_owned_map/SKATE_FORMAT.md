@@ -149,6 +149,7 @@ u32 extension_count
 extension[extension_count]:
   char tag[4]
   u32 schema_version
+  u32 decoded_byte_count
   stored_bytes payload
 ```
 
@@ -193,6 +194,48 @@ normal2, specular, lightmap, detail, macrooverlay, decal, environment, and
 noise. Parameter values remain strings because retail Attribulator data
 contains numbers, texture resource names, empty markers, and other
 shader-specific tokens.
+
+The `BMAT` extension uses schema version 1 and has one record for every core
+material:
+
+```text
+u32 material_count
+blender_material[material_count]:
+  u32 material_id
+  u32 secondary_albedo_texture_id
+  u32 blend_mask_texture_id
+  f32 blend_factor
+  u32 blend_mask_channel          # 0 luma, 1 R, 2 G, 3 B, 4 A
+  u32 albedo_address_mode         # 0 repeat, 1 extend, 2 clip, 3 mirror
+  u32 secondary_address_mode
+  u32 blend_mask_address_mode
+  u32 cull_mode                   # 1 two-sided, 2 cull back faces
+```
+
+It retains a common Blender two-image Mix material, Image Texture extension
+settings, and Blender's explicit backface-culling policy without changing the
+v13 core record. Generic materials use vertex UV0 for the primary/PBR maps
+and vertex UV2 for the shared secondary colour and blend mask mapping. An
+older v13 package without `BMAT` remains valid; its culling follows the
+runtime's legacy winding inference and the additional texture bindings are
+absent.
+
+One Blender material may produce multiple core material records when its
+shader consumes Object Info **Color** and its users have different object
+colours. Those records share the same texture IDs and differ only in their
+core display-colour tint. Unsupported Base Color graphs are flattened by
+Blender across a complete 0–1 texture domain to one packed neutral albedo
+before this tint expansion. The flattening evaluates the Base Color graph
+through an emission pass rather than the Principled diffuse lobe, preserving
+metallic colours, and supplies neutral-white named vertex-colour layers on the
+synthetic bake mesh. This prevents metallic shading or a missing temporary
+`TINT` attribute from producing black albedo, while complete-domain coverage
+prevents one object's UV islands from leaving gaps for other users. The file
+format and renderer require no map-specific shader interpretation. Transparent
+complex materials use a second scalar bake of the effective Principled Alpha
+input; that result replaces the opaque alpha produced by Blender's emission
+bake. An active physical Glass BSDF is translated deterministically to a
+small tinted alpha-blended texture because v13 has no refraction shader.
 
 The `WMET` extension uses schema version 1 and contains the losslessly
 DEFLATE-compressed extraction manifest JSON. It preserves source archives,

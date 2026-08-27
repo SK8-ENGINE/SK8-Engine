@@ -643,6 +643,14 @@ void PopulateVisualDrawMaterial(
   draw.normal_texture = material.normal_texture;
   draw.orm_texture = material.orm_texture;
   draw.emissive_texture = material.emissive_texture;
+  draw.secondary_albedo_texture =
+      material.secondary_albedo_texture;
+  draw.blend_mask_texture = material.blend_mask_texture;
+  draw.blend_factor = material.blend_factor;
+  draw.blend_mask_channel = material.blend_mask_channel;
+  draw.albedo_address_mode = material.albedo_address_mode;
+  draw.secondary_address_mode = material.secondary_address_mode;
+  draw.blend_mask_address_mode = material.blend_mask_address_mode;
   draw.baked_indirect_strength = material.baked_indirect_strength;
   draw.alpha_mode = material.alpha_mode;
   draw.alpha_cutoff = material.alpha_cutoff;
@@ -653,6 +661,12 @@ void PopulateVisualDrawMaterial(
   // collisions in large imported worlds while remaining exactly encodable
   // in the float-backed owned-material flag word.
   draw.presentation_depth_order = material.id & 255u;
+  if (material.cull_mode !=
+      skate::world::SurfaceMaterial::CullMode::InferFromGeometry) {
+    draw.cull_backfaces =
+        material.cull_mode ==
+        skate::world::SurfaceMaterial::CullMode::BackFaces;
+  }
   if (!material.retail.enabled) {
     return;
   }

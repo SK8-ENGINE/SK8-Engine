@@ -205,6 +205,21 @@ def main() -> None:
             bpy.ops.skate_map.create_uv_layers() == {"FINISHED"},
             "UV layer helper failed",
         )
+        # Imported meshes can retain an empty material slot that no polygon
+        # uses. The vectorized exporter must validate referenced slots only,
+        # matching the scalar path, instead of rejecting harmless source data.
+        bpy.context.view_layer.objects.active = floor
+        floor.select_set(True)
+        require(
+            bpy.ops.object.material_slot_add() == {"FINISHED"},
+            "Could not create an unused empty material slot",
+        )
+        require(
+            len(floor.material_slots) == 2
+            and floor.material_slots[1].material is None
+            and all(polygon.material_index == 0 for polygon in floor.data.polygons),
+            "Unused empty material slot regression setup is invalid",
+        )
 
         # Independently editable maps commonly keep a low-detail collision
         # proxy separate from the rendered Blender object. The explicit owner

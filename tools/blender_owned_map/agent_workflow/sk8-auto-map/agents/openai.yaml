@@ -1,0 +1,4 @@
+interface:
+  display_name: "SK8 Auto Map"
+  short_description: "Prepare Blender maps without duplicate AI work"
+  default_prompt: "Use $sk8-auto-map to inspect this Blender map, classify its duplicate-collapsed mesh groups in a version 3 plan, map its used materials, and create a new prepared blend file."

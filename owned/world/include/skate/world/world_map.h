@@ -173,6 +173,26 @@ struct SurfaceMaterial {
   TextureId normal_texture = 0;
   TextureId orm_texture = 0;
   TextureId emissive_texture = 0;
+  // Ordinary Blender materials can use one deterministic Mix node for two
+  // visible colour layers. These optional bindings retain that common case
+  // without baking, flattening, or guessing from image names.
+  TextureId secondary_albedo_texture = 0;
+  TextureId blend_mask_texture = 0;
+  float blend_factor = 0.0f;
+  // 0 = luminance, 1/2/3/4 = R/G/B/A.
+  std::uint8_t blend_mask_channel = 0;
+  // Blender Image Texture extension: 0 = repeat, 1 = extend/clamp,
+  // 2 = clip outside [0,1], 3 = mirror.
+  std::uint8_t albedo_address_mode = 0;
+  std::uint8_t secondary_address_mode = 0;
+  std::uint8_t blend_mask_address_mode = 0;
+  enum class CullMode : std::uint8_t {
+    // Legacy packages did not carry Blender's material culling policy.
+    InferFromGeometry = 0,
+    TwoSided = 1,
+    BackFaces = 2,
+  };
+  CullMode cull_mode = CullMode::InferFromGeometry;
   float baked_indirect_strength = 0.0f;
   enum class AlphaMode : std::uint8_t {
     Opaque = 0,

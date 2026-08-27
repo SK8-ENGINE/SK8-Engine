@@ -6,10 +6,12 @@ runtime. It does not invoke, import, redistribute, or depend on ArenaBuilder.
 The exporter treats the Blender file as authoring data and writes one
 renderer-neutral package containing:
 
-- visual triangles with base-texture UVs and independent lightmap UVs;
+- visual triangles with material-selected base UVs, an independent lightmap
+  UV, and a shared secondary/mask UV;
 - losslessly compressed RGBA8 base textures and baked indirect-light
   textures;
-- normal, packed ORM, emissive, cutout, and blended-transparent materials;
+- normal, packed ORM, emissive, cutout, blended-transparent, and common
+  two-image Mix materials;
 - native Skate 3 audio, physics, and contact-pattern channels per material;
 - independent authoritative collision triangles;
 - named grind centerlines;
@@ -19,6 +21,60 @@ renderer-neutral package containing:
 - ordinary Blender Point, Spot, Area, and Sun lighting;
 - spawn and accelerated day/night metadata, including complete day,
   twilight, and night palettes plus sun, moon, ambient, and sky colour.
+
+## Agent-assisted large-map preparation
+
+The portable agent workflow is under:
+
+`tools/blender_owned_map/agent_workflow/sk8-auto-map`
+
+Give its `SKILL.md` to an agent and provide a Blender map. The workflow:
+
+1. inventories every scene object, used material, shader, texture, and light,
+   collapsing repeated instances into deterministic groups before the agent
+   sees them;
+2. renders top, side, and isometric whole-map previews so the agent can use
+   vision to choose an explicit safe spawn instead of trusting a mesh
+   bounding-box center;
+3. gives the agent the complete native Skate 3 audio, physics, and contact
+   material reference;
+4. has the agent classify each mesh group as presentation+collision,
+   collision-only, presentation-only, or ignored;
+5. recomputes the groups from the unchanged source, expands each decision to
+   every exact Blender object, and applies the JSON material, light, and spawn
+   plan to a new Blender file; and
+6. generates broad grind coverage from exposed mesh edges while joining
+   connected segments and removing near-duplicates.
+
+The source `.blend` is never overwritten. Generated grinds and lights are
+tagged so rerunning the workflow replaces its own output without deleting
+manual authoring. `scene_inventory_members.json` retains exact group
+membership for scripts and targeted cleanup, but ordinary agent planning reads
+only the duplicate-collapsed `scene_inventory.json`.
+
+### Imported-map development policy
+
+Imported maps are disposable local test inputs, not project assets. Put each
+test case under an ignored path such as
+`out/local-tools/imported-map-tests/<case>/` or outside the repository. This
+includes the source map, unpacked textures, `.blend` files, inventories,
+agent plans, generated `.skate` packages, previews, launchers, and logs. None
+of those files should be staged or committed.
+
+The purpose of testing real maps is to improve the shared pipeline:
+
+- Blender is the authority for how an authored map should look.
+- Fixes belong in reusable exporter, renderer, collision, validation, or
+  agent-workflow behavior.
+- Do not hardcode a tested map's filename, object/material names, coordinates,
+  or assets.
+- Add minimal synthetic regression scenes or metadata for general failures;
+  never copy content from the imported map into a test fixture.
+- Keep `agent_workflow/sk8-auto-map/SKILL.md`, its plan format, and this
+  documentation aligned with behavior changes.
+
+Only portable source, schemas, synthetic tests, documentation, and reusable
+tooling are candidates for version control.
 
 ## Install the addon
 
@@ -60,29 +116,71 @@ collections before export:
    heading.
 3. Choose **Export As...**.
 
-Validate and Export automatically adopts visible mesh objects, reads normal
-Principled BSDF base-colour, normal, emission, roughness, metallic and alpha
-inputs, copies existing UVs into the required map channels, assigns sensible
-Skate contact defaults from material names, generates subtle normal, packed
-ORM, and emissive maps where shaders only provide scalar values, and
-generates static collision from solid visible geometry. Existing collider
-conventions such as
-`Collider`, `Collision`, `UCX_`, `UBX_`, `USP_`, and `UCP_` are recognised as
-collision-only proxies. Common foliage, decal, backdrop, probe, and shadow-
-helper names remain presentation-only or are omitted as appropriate.
+Validate and Export adopts otherwise-unassigned visible mesh objects as
+presentation+collision, reads Principled BSDF base-colour, normal, emission,
+scalar roughness, scalar metallic, alpha, and one common two-image Mix input,
+then copies the requested Blender UV channels into the package. Image Texture
+Repeat, Extend, Clip, Mirror and a direct UV Map → Mapping → Image transform
+are retained. Blender's material backface-culling choice is explicit in the
+package instead of being guessed from triangle winding. This translation is
+deterministic: connected Image Textures are followed through the shader graph,
+while packed ORM and lightmap images must be assigned explicitly in
+**Owned World Material**. Texture filenames are never used to infer their
+purpose.
+
+When Base Color uses a procedural graph, nested imported shader graph, or
+non-MIX colour operation that the package cannot represent directly, Auto
+Prepare asks Blender to flatten that visible Base Color graph across the
+complete 0–1 texture domain to a packed albedo (up to 1024 pixels per axis).
+The bake reads Base Color through a temporary emission path, so metallic
+surfaces retain their colour instead of becoming black in a diffuse-only
+bake. Synthetic bake meshes also supply neutral-white named vertex-colour
+layers, preventing imported `TINT` inputs from turning the result black merely
+because the temporary plane lacks the source mesh's attributes. It bakes once
+and reuses the result on later exports; it never limits the bake to one
+representative object's UV islands. When the Principled Alpha input is
+connected and the material is transparent, a second scalar pass preserves
+that evaluated alpha in the packed albedo instead of replacing it with opaque
+alpha. This keeps the invisible RGB around decals, stains, signs, and foliage
+from appearing as black rectangles.
+Blender Object Info **Color** is kept outside that neutral bake: objects that
+share one material but use different object colours export as lightweight
+material-tint variants, preserving features such as differently painted wall
+sections without duplicating geometry or textures. A failed Blender bake,
+scalar Bump height, or independently mapped PBR channel still produces an
+actionable warning and predictable fallback rather than silently selecting an
+unrelated image.
+Visible Curve, Text, Surface, and Metaball objects likewise warn that they
+must be converted to meshes before export.
+Scalar-only materials remain scalar-only: Auto Prepare does not invent normal
+detail or an unnecessary ORM texture. It creates a tiny packed ORM only when
+the shader has scalar metallic data that the current package record cannot
+otherwise carry, and creates an emissive map when needed. It preserves
+explicit SKATE group and material choices.
+
+Automatic adoption deliberately does not guess collision, contact behavior,
+cutout presentation, collider proxies, grinds, or paths from names such as
+`grass`, `plant`, `UCX_`, or `collision`. Blender has no portable game-export
+collision flag shared by OBJ, FBX, and glTF, and Blender rigid-body settings
+only control Blender's own simulation. Use the map groups manually, or run
+the agent workflow to classify every imported mesh. This avoids silently
+making solid scenery non-colliding because of an ambiguous name.
 
 Point, Spot, Area, and Sun objects that are genuine Blender lights export
 automatically. Empties merely named `Point Light`, `Spot Light`, or similar
 are not converted into invented lights. Existing `OW_*` authoring metadata is
 never replaced by automatic defaults.
 
-**Auto Prepare Blender Map** exposes the same conversion before export so its
-choices can be inspected. It adds each eligible object to exactly one of the
-five map groups while preserving unrelated collection links, source meshes,
-existing UVs, and shader nodes. A mesh with no source UVs receives empty
-required layers and is reported for normal Blender unwrapping. When real
-Point, Spot, or Area lights are present, day and night ambient defaults become
-zero so the scene is not double-lit.
+**Adopt Blender Scene** exposes the same conversion before export so its
+changes can be inspected. It assigns eligible ungrouped visible meshes to
+Group 1 while preserving unrelated collection links, source meshes, existing
+UVs, shader nodes, and every explicit SKATE role. A mesh with no source UVs
+receives a deterministic normalized box projection, preventing every texel
+from collapsing onto one point. This is a usable import fallback; artist-made
+seams and unwraps remain preferable for hero assets.
+Real Point, Spot, and Area lights supplement the scene's global sun and
+ambient lighting. Auto Prepare preserves the authored day and night ambient
+values instead of rewriting them when local lights are present.
 
 Grind splines and experimental NPC paths remain deliberate authoring inputs;
 they cannot be inferred reliably from arbitrary visual geometry.
@@ -110,7 +208,8 @@ they cannot be inferred reliably from arbitrary visual geometry.
    of the supported release feature set.
 6. If validation reports missing UV layers, select the affected meshes and
    choose **Create Missing UV Layers**. Existing UVs are copied when
-   possible; a mesh with no UVs still needs a normal Blender unwrap.
+   possible; a mesh with no UVs receives a deterministic box projection that
+   can be replaced with a normal Blender unwrap later.
 7. Choose **Create / Select Spawn Locator**, move its 4x4 pad where the
    player should appear, and rotate the arrow for heading.
 8. Set the map name, daylight range, sky colours, and SKATE destination.
@@ -153,6 +252,12 @@ rather than selecting a baked-only mode. Extracted retail collision can
 additionally carry exact
 per-triangle RenderWare edge/corner feature codes as face attributes; ordinary
 authored maps continue to generate those codes automatically.
+
+The v13 `BMAT` compatibility extension retains ordinary Blender details that
+do not fit the original core material record: a second albedo, blend mask and
+factor, image addressing, and explicit culling. Older v13 packages remain
+valid and use the renderer's legacy geometry inference when `BMAT` is absent.
+The Direct3D and Vulkan shader paths consume the same fields.
 
 Retail-imported meshes may carry the hidden point attributes
 `skate3_retail_normal`, `skate3_retail_tangent`, and
@@ -210,11 +315,24 @@ The panel contains:
   transparency controls.
 
 **Sync Materials from Shaders** deliberately refreshes the PBR Presentation
-tab from selected meshes' Principled shaders. It also overwrites maps created
-by Auto Prepare, so changing shader roughness, metallic, emission, alpha, or
-the small **Generated Normal Strength** value can be propagated later without
-touching authored texture maps. Add-on-generated maps are packed into the
-blend file so their pixels survive saving and reopening.
+tab from selected meshes' Principled shaders. It refreshes the small ORM or
+emissive maps created by Auto Prepare when scalar metallic or emission changes,
+without touching authored texture maps. Add-on-generated maps are packed into
+the blend file so their pixels survive saving and reopening.
+
+For automatically adopted imports, Blender's Principled Alpha input is
+authoritative. A disconnected Alpha input remains opaque even when the colour
+image contains non-opaque alpha, because imported textures commonly pack
+layer, tint, roughness, or other masks in that channel. When the shader
+explicitly connects an image to Alpha, Auto Prepare samples that image and
+exports meaningful transparency as cutout or blend presentation. Manually
+authored SKATE transparency remains authoritative.
+
+An active physical Blender Glass BSDF is detected from its shader node, not
+from a material or texture name. Because the SK8 runtime does not reproduce
+Blender refraction, Auto Prepare exports it as a basic tinted blended-glass
+fallback. This avoids missing-texture purple while retaining deterministic,
+usable windows.
 
 For a physical door, select the complete door-leaf mesh and open **Physics
 Properties > Owned World Physics**. Choose **Hinged Door**, place the 3D

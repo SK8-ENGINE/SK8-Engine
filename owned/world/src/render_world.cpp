@@ -368,6 +368,19 @@ RenderWorld BuildRenderWorld(
       backface_culled_materials.insert(material);
     }
   }
+  // SKATE v13 Blender compatibility metadata is authoritative when present.
+  // Geometry inference remains only for legacy packages and handwritten test
+  // maps that predate an explicit material culling policy.
+  for (const SurfaceMaterial& material : definition.materials) {
+    if (material.cull_mode ==
+        SurfaceMaterial::CullMode::BackFaces) {
+      backface_culled_materials.insert(material.id);
+    } else if (
+        material.cull_mode ==
+        SurfaceMaterial::CullMode::TwoSided) {
+      backface_culled_materials.erase(material.id);
+    }
+  }
   world.backface_culled_material_count =
       backface_culled_materials.size();
   std::unordered_map<std::size_t, std::uint8_t>

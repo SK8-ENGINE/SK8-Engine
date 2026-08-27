@@ -94,6 +94,23 @@ SamplerState smp : register(s0);
 // wrap sampling tiled the graffiti across the whole plaza.
 SamplerState smp_clamp : register(s1);
 
+float4 SampleOwnedBlenderTexture(
+    Texture2D<float4> texture_map, float2 uv, uint address_mode) {
+  if (address_mode == 2u &&
+      (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0)) {
+    return 0.0;
+  }
+  if (address_mode == 1u || address_mode == 2u) {
+    return texture_map.Sample(smp_clamp, uv);
+  }
+  if (address_mode == 3u) {
+    const float2 mirrored =
+        1.0 - abs(frac(uv * 0.5) * 2.0 - 1.0);
+    return texture_map.Sample(smp, mirrored);
+  }
+  return texture_map.Sample(smp, uv);
+}
+
 float3 DecodeRetailLightmap(
     float3 packed_lightmap, float2 uv, float skate2_component) {
   if (skate2_component >= -0.5) {
@@ -273,7 +290,7 @@ float3 OwnedMovingLightContribution(
     const float3 delta =
         owned_authored_light_position[light_index].xyz - world_position;
     const float distance_squared =
-        max(dot(delta, delta), 0.04);
+        max(dot(delta, delta), 1.0e-8);
     const float distance_to_light = sqrt(distance_squared);
     const float range =
         max(owned_authored_light_position[light_index].w, 0.01);
@@ -297,11 +314,27 @@ float3 OwnedMovingLightContribution(
       shape *= shape;
     }
     const float ndotl = saturate(dot(normal, direction));
+    // Match Blender Eevee's local-light attenuation:
+    //   influence = (1 - (distance^2 / range^2)^2)^2
+    // and Cem Yuksel's singularity-free point-light falloff. The previous
+    // 1 / (0.22 * distance^2) approximation was roughly 4.5x brighter and
+    // combined with Blender's inactive default 40 m cutoff to flood indoor
+    // maps with lights from neighbouring rooms.
+    const float influence_factor =
+        distance_squared / (range * range);
     const float range_fade =
-        saturate(1.0 - distance_squared / (range * range));
+        saturate(1.0 - influence_factor * influence_factor);
+    const float source_radius =
+        max(owned_authored_light_spot[light_index].z, 0.001);
+    const float source_radius_squared =
+        source_radius * source_radius;
+    const float point_falloff =
+        2.0 /
+        (distance_squared + source_radius_squared +
+         distance_to_light *
+             sqrt(distance_squared + source_radius_squared));
     const float attenuation =
-        shape * range_fade * range_fade /
-        max(1.0, distance_squared * 0.22);
+        shape * range_fade * range_fade * point_falloff;
     const float3 radiance =
         owned_authored_light_color[light_index].rgb *
         owned_authored_light_color[light_index].w * attenuation;
@@ -452,6 +485,21 @@ float4 ShadePixel(VSOut i) {
     bool has_orm_map = (owned_flags & 16) != 0;
     bool has_emissive_map = (owned_flags & 32) != 0;
     bool has_indirect_lightmap = (owned_flags & 64) != 0;
+    bool has_secondary_albedo = (owned_flags & (1u << 22)) != 0;
+    bool has_blend_mask = (owned_flags & (1u << 23)) != 0;
+    uint blender_compatibility = asuint(tint.a);
+    float alpha_cutoff =
+        (float)(blender_compatibility & 255u) / 255.0;
+    float authored_blend_factor =
+        (float)((blender_compatibility >> 8) & 255u) / 255.0;
+    uint blend_mask_channel =
+        (blender_compatibility >> 16) & 7u;
+    uint albedo_address_mode =
+        (blender_compatibility >> 19) & 3u;
+    uint secondary_address_mode =
+        (blender_compatibility >> 21) & 3u;
+    uint blend_mask_address_mode =
+        (blender_compatibility >> 23) & 3u;
     float skate2_lightmap_component =
         (float)((owned_flags >> 8) & 3) - 1.0;
     int pattern = (int)(misc.x + 0.5);
@@ -463,10 +511,29 @@ float4 ShadePixel(VSOut i) {
                                  ? 0.12
                                  : saturate(misc.z));
     float4 base_sample =
-        imported_material ? diffuse.Sample(smp, i.uv)
+        imported_material
+            ? SampleOwnedBlenderTexture(
+                  diffuse, i.uv, albedo_address_mode)
                           : float4(1.0, 1.0, 1.0, 1.0);
+    if (imported_material && has_secondary_albedo) {
+      float blend = authored_blend_factor;
+      if (has_blend_mask) {
+        float4 mask = SampleOwnedBlenderTexture(
+            chromaticity, i.uv3, blend_mask_address_mode);
+        blend =
+            blend_mask_channel == 1u ? mask.r
+            : blend_mask_channel == 2u ? mask.g
+            : blend_mask_channel == 3u ? mask.b
+            : blend_mask_channel == 4u ? mask.a
+                                       : dot(mask.rgb, float3(
+                                             0.2126, 0.7152, 0.0722));
+      }
+      float4 secondary_sample = SampleOwnedBlenderTexture(
+          macro, i.uv3, secondary_address_mode);
+      base_sample = lerp(base_sample, secondary_sample, saturate(blend));
+    }
     if (imported_material && alpha_mode == 1) {
-      clip(base_sample.a - max(-tint.a, 0.0));
+      clip(base_sample.a - alpha_cutoff);
     }
     float output_alpha =
         imported_material && alpha_mode == 2 ? base_sample.a : 1.0;
@@ -478,14 +545,16 @@ float4 ShadePixel(VSOut i) {
     float ao = 1.0;
     float metallic = 0.0;
     if (imported_material && has_orm_map) {
-      float3 orm = spec2_map.Sample(smp, i.uv).rgb;
+      float3 orm = SampleOwnedBlenderTexture(
+          spec2_map, i.uv, albedo_address_mode).rgb;
       ao = orm.r;
       roughness = saturate(orm.g);
       metallic = saturate(orm.b);
     }
     if (imported_material && has_normal_map) {
       float3 tangent_normal =
-          normal_map.Sample(smp, i.uv).xyz * 2.0 - 1.0;
+          SampleOwnedBlenderTexture(
+              normal_map, i.uv, albedo_address_mode).xyz * 2.0 - 1.0;
       float3 dpdx = ddx(world_pos);
       float3 dpdy = ddy(world_pos);
       float2 duvdx = ddx(i.uv);
@@ -538,8 +607,7 @@ float4 ShadePixel(VSOut i) {
     float3 ambient_light =
         dynamic_lighting
             ? sky_fill *
-                  (celestial_ambient * lerp(0.72, 1.12, sky_amount)) *
-                  (imported_material ? 0.45 : 1.0)
+                  (celestial_ambient * lerp(0.72, 1.12, sky_amount))
             : float3(0.0, 0.0, 0.0);
     if (imported_material && has_indirect_lightmap) {
       // UV1 holds static indirect illumination baked in Blender. It remains
@@ -570,8 +638,7 @@ float4 ShadePixel(VSOut i) {
     float3 diffuse_light =
         dynamic_lighting
             ? overlay.rgb * overlay.w *
-                  lerp(wrap * 0.24, ndotl, 0.84) *
-                  (imported_material ? 0.55 : 1.0)
+                  lerp(wrap * 0.24, ndotl, 0.84)
             : float3(0.0, 0.0, 0.0);
     float dynamic_visibility =
         SampleCsmShadowSoft(world_pos, 0.0, normal, i.pos.xy);
@@ -604,10 +671,16 @@ float4 ShadePixel(VSOut i) {
     }
     float3 emissive_color =
         has_emissive_map
-            ? decal_art.Sample(smp, i.uv).rgb
+            ? SampleOwnedBlenderTexture(
+                  decal_art, i.uv, albedo_address_mode).rgb
             : albedo;
     lit += emissive_color * emissive_intensity;
-    return float4(PassGamma(max(lit, 0.0)), output_alpha);
+    // Blender Principled inputs, exported emissive strength, and authored
+    // local-light radiance all share this branch's scene-linear HDR space.
+    // PassGamma is only for legacy values authored as final display colour;
+    // applying its inverse tone curve here amplified Blender emission before
+    // bloom (for example, a blue channel of 5 became roughly 98 HDR units).
+    return ToneOut(max(lit, 0.0), output_alpha, false);
   }
   if (cam_pos.w < -42.5 && cam_pos.w > -43.5) {
     // Project-owned simulated water. Large waves and normals come from the
