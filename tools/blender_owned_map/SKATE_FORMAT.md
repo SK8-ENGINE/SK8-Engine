@@ -168,6 +168,15 @@ collision are emitted as bounded DEFLATE blocks. Compression is lossless:
 the runtime reconstructs the same float32/u32 records and RGBA8 texels before
 normal validation and renderer upload.
 
+The optional `RWCM` extension uses schema version 1. Its decoded payload is
+one complete `RWCMSET1` exact-retail collision archive. Compatible runtimes
+prefer it over a sibling `.spawn-collision.rwcmset` file, while the ordinary
+portable collision block remains the fallback for older maps and runtimes.
+`RWCM` is deliberately not round-tripped by Blender: exporting edited
+collision omits the acceleration payload so stale exact hitboxes cannot
+survive geometry changes. Reattach a freshly generated and validated archive
+only after collision authoring is complete.
+
 Visual vertices are indexed by their complete record. Two corners share a
 vertex only when position, normal, all three UV channels, material ID, and the
 packed tangent frame are bit-identical. UV seams, hard normals, material

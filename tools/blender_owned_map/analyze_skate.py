@@ -16,6 +16,7 @@ VERTEX_BYTES = 44
 VERTEX_BYTES_V12 = 56
 COLLISION_TRIANGLE_BYTES_V10 = 44
 COLLISION_TRIANGLE_BYTES_V11 = 48
+RETAIL_COLLISION_ARCHIVE_MAGIC = b"RWCMSET1"
 
 
 class PackageError(ValueError):
@@ -82,6 +83,43 @@ def _section(
     start: int,
 ) -> None:
     sections[name] = reader.offset - start
+
+
+def _summarize_retail_collision_archive(
+    payload: bytes,
+) -> dict[str, object]:
+    archive = Reader(payload)
+    if archive.take(8, "RWCM archive magic") != RETAIL_COLLISION_ARCHIVE_MAGIC:
+        raise PackageError("RWCM extension archive magic is invalid")
+    mesh_count = archive.u32("RWCM mesh count")
+    if mesh_count == 0:
+        raise PackageError("RWCM extension contains no meshes")
+    mesh_payload_bytes = 0
+    for index in range(mesh_count):
+        name_size = archive.u32(f"RWCM mesh {index} name length")
+        if name_size == 0 or name_size > 4096:
+            raise PackageError(f"RWCM mesh {index} name is invalid")
+        try:
+            archive.take(
+                name_size, f"RWCM mesh {index} name"
+            ).decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise PackageError(
+                f"RWCM mesh {index} name is not valid UTF-8"
+            ) from error
+        mesh_size = archive.u32(f"RWCM mesh {index} payload size")
+        if mesh_size < 96:
+            raise PackageError(f"RWCM mesh {index} payload is invalid")
+        archive.skip(mesh_size, f"RWCM mesh {index} payload")
+        mesh_payload_bytes += mesh_size
+    if archive.offset != len(payload):
+        raise PackageError("RWCM extension archive has trailing bytes")
+    return {
+        "meshes": mesh_count,
+        "decoded_bytes": len(payload),
+        "mesh_payload_bytes": mesh_payload_bytes,
+        "sha256": hashlib.sha256(payload).hexdigest(),
+    }
 
 
 def analyze_package(
@@ -439,6 +477,8 @@ def analyze_package(
     map_objects: list[dict[str, object]] = []
     break_groups: dict[int, dict[str, object]] = {}
     blender_material_compatibility: list[dict[str, object]] = []
+    embedded_retail_collision: dict[str, object] | None = None
+    embedded_retail_collision_bytes = b""
     extension_bytes = b""
     if version >= 12:
         start = reader.offset
@@ -652,6 +692,20 @@ def analyze_package(
                     raise PackageError(
                         "Blender material compatibility has trailing bytes"
                     )
+            elif tag == "RWCM":
+                if schema != 1:
+                    raise PackageError(
+                        f"RWCM schema {schema} is unsupported"
+                    )
+                if embedded_retail_collision is not None:
+                    raise PackageError(
+                        "package contains duplicate RWCM extensions"
+                    )
+                embedded_retail_collision = (
+                    _summarize_retail_collision_archive(payload)
+                )
+                embedded_retail_collision["schema"] = schema
+                embedded_retail_collision_bytes = payload
         objects_by_id = {record["id"]: record for record in map_objects}
         for object_id, breakable in break_groups.items():
             record = objects_by_id.get(object_id)
@@ -742,6 +796,7 @@ def analyze_package(
         "material_depth_layers": material_depth_layers,
         "retail_shader_families": retail_family_counts,
         "extension_tags": extension_tags,
+        "embedded_retail_collision": embedded_retail_collision,
         "map_objects": map_objects,
         "blender_material_compatibility": (
             blender_material_compatibility
@@ -782,6 +837,9 @@ def analyze_package(
         result["_vertex_bytes"] = vertex_bytes
         result["_indices"] = indices
         result["_collision_bytes"] = collision_bytes
+        result["_embedded_retail_collision_bytes"] = (
+            embedded_retail_collision_bytes
+        )
     return result
 
 

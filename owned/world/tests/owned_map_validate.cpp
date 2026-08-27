@@ -166,6 +166,8 @@ int main(int argc, char** argv) {
         << " indices=" << map.render_mesh.indices.size()
         << " triangles=" << map.render_mesh.indices.size() / 3
         << " collision=" << map.collision_triangles.size()
+        << " embedded_retail_collision_bytes="
+        << map.embedded_retail_collision_archive.size()
         << " editable_objects=" << map.editable_objects.size()
         << " rails=" << map.grind_rails.size()
         << " doors=" << map.hinged_doors.size()

@@ -28,6 +28,7 @@
 #include <optional>
 #include <ostream>
 #include <string>
+#include <string_view>
 #include <unordered_set>
 #include <vector>
 
@@ -1007,47 +1008,40 @@ const char* RetailCollisionArchivePath() {
   return sidecar_path.empty() ? nullptr : sidecar_path.c_str();
 }
 
-OwnedCollisionBuildSet LoadRetailCollisionArchive(const char* path) {
+bool HasExactRetailCollisionArchive() {
+  return !mechanics_sandbox::map::ActiveDefinition()
+              .embedded_retail_collision_archive.empty() ||
+         RetailCollisionArchivePath() != nullptr;
+}
+
+OwnedCollisionBuildSet LoadRetailCollisionArchive(
+    std::span<const std::uint8_t> archive,
+    std::string_view source_label) {
   OwnedCollisionBuildSet result;
-  std::ifstream stream(path, std::ios::binary | std::ios::ate);
-  if (!stream) {
-    result.error = std::string("could not open retail collision archive '") +
-                   path + "'";
-    return result;
-  }
-  const std::streamoff end = stream.tellg();
   constexpr std::uint64_t kMaximumCollisionArchiveBytes =
       16ull * 1024ull * 1024ull * 1024ull;
-  if (end < 12 ||
-      static_cast<std::uint64_t>(end) >
-          kMaximumCollisionArchiveBytes) {
+  if (archive.size() < 12 ||
+      archive.size() > kMaximumCollisionArchiveBytes) {
     result.error = "retail collision archive size is invalid";
     return result;
   }
-  stream.seekg(0);
   constexpr std::array<std::uint8_t, 8> kMagic{
       'R', 'W', 'C', 'M', 'S', 'E', 'T', '1'};
-  std::array<std::uint8_t, 8> magic{};
-  stream.read(
-      reinterpret_cast<char*>(magic.data()),
-      static_cast<std::streamsize>(magic.size()));
-  if (!stream || magic != kMagic) {
+  if (!std::equal(kMagic.begin(), kMagic.end(), archive.begin())) {
     result.error = "retail collision archive magic is invalid";
     return result;
   }
+  std::size_t cursor = kMagic.size();
   auto read_u32 = [&]() -> std::optional<std::uint32_t> {
-    std::array<std::uint8_t, 4> bytes{};
-    stream.read(
-        reinterpret_cast<char*>(bytes.data()),
-        static_cast<std::streamsize>(bytes.size()));
-    if (!stream) {
+    if (cursor > archive.size() || archive.size() - cursor < 4) {
       return std::nullopt;
     }
     const std::uint32_t value =
-        static_cast<std::uint32_t>(bytes[0]) |
-        (static_cast<std::uint32_t>(bytes[1]) << 8u) |
-        (static_cast<std::uint32_t>(bytes[2]) << 16u) |
-        (static_cast<std::uint32_t>(bytes[3]) << 24u);
+        static_cast<std::uint32_t>(archive[cursor]) |
+        (static_cast<std::uint32_t>(archive[cursor + 1]) << 8u) |
+        (static_cast<std::uint32_t>(archive[cursor + 2]) << 16u) |
+        (static_cast<std::uint32_t>(archive[cursor + 3]) << 24u);
+    cursor += 4;
     return value;
   };
   const std::optional<std::uint32_t> count = read_u32();
@@ -1068,31 +1062,34 @@ OwnedCollisionBuildSet LoadRetailCollisionArchive(const char* path) {
       result.chunks.clear();
       return result;
     }
-    std::string name(*name_size, '\0');
-    stream.read(name.data(), static_cast<std::streamsize>(name.size()));
-    if (!stream) {
+    if (cursor > archive.size() ||
+        *name_size > archive.size() - cursor) {
       result.error = "retail collision archive mesh name is truncated";
       result.chunks.clear();
       return result;
     }
+    std::string name(
+        reinterpret_cast<const char*>(archive.data() + cursor),
+        *name_size);
+    cursor += *name_size;
     const std::optional<std::uint32_t> mesh_size = read_u32();
     if (!mesh_size || *mesh_size < 96u) {
       result.error = "retail collision archive mesh payload is invalid";
       result.chunks.clear();
       return result;
     }
-    std::vector<std::uint8_t> serialized(*mesh_size);
-    stream.read(
-        reinterpret_cast<char*>(serialized.data()),
-        static_cast<std::streamsize>(serialized.size()));
-    if (!stream) {
+    if (cursor > archive.size() ||
+        *mesh_size > archive.size() - cursor) {
       result.error = name + ": collision mesh payload is truncated";
       result.chunks.clear();
       return result;
     }
+    const std::span<const std::uint8_t> serialized(
+        archive.data() + cursor, *mesh_size);
+    cursor += *mesh_size;
     skate::world::RwCollisionBuildResult mesh =
         skate::world::LoadSerializedRwCollisionMesh(
-            std::span<const std::uint8_t>(serialized));
+            serialized);
     if (!mesh.ok) {
       result.error = name + ": " + mesh.error;
       result.chunks.clear();
@@ -1106,33 +1103,75 @@ OwnedCollisionBuildSet LoadRetailCollisionArchive(const char* path) {
     result.names.push_back(name);
     if ((index + 1u) % 16u == 0u || index + 1u == *count) {
       REXLOG_INFO(
-          "native-collision: sidecar load progress {}/{} ({}%)",
+          "native-collision: exact archive load progress {}/{} ({}%)",
           index + 1u, *count,
           (static_cast<std::uint64_t>(index + 1u) * 100u) / *count);
     }
   }
-  const std::streamoff consumed = stream.tellg();
-  if (consumed != end) {
+  if (cursor != archive.size()) {
     result.error = "retail collision archive has trailing bytes";
     result.chunks.clear();
     result.names.clear();
   } else {
     REXLOG_INFO(
-        "native-collision: adopted {} exact retail meshes "
+        "native-collision: adopted {} exact retail meshes from {} "
         "(triangles={} vertices={} clusters={} mesh_bytes={})",
-        result.chunks.size(), total_triangles, total_vertices,
+        result.chunks.size(), source_label, total_triangles, total_vertices,
         total_clusters, total_mesh_bytes);
   }
   return result;
 }
 
+OwnedCollisionBuildSet LoadRetailCollisionArchiveFile(const char* path) {
+  OwnedCollisionBuildSet result;
+  std::ifstream stream(path, std::ios::binary | std::ios::ate);
+  if (!stream) {
+    result.error = std::string("could not open retail collision archive '") +
+                   path + "'";
+    return result;
+  }
+  const std::streamoff end = stream.tellg();
+  constexpr std::uint64_t kMaximumCollisionArchiveBytes =
+      16ull * 1024ull * 1024ull * 1024ull;
+  if (end < 12 ||
+      static_cast<std::uint64_t>(end) >
+          kMaximumCollisionArchiveBytes ||
+      static_cast<std::uint64_t>(end) >
+          std::numeric_limits<std::size_t>::max()) {
+    result.error = "retail collision archive size is invalid";
+    return result;
+  }
+  stream.seekg(0);
+  std::vector<std::uint8_t> archive(static_cast<std::size_t>(end));
+  stream.read(
+      reinterpret_cast<char*>(archive.data()),
+      static_cast<std::streamsize>(archive.size()));
+  if (!stream) {
+    result.error = std::string(
+        "could not read complete retail collision archive '") + path + "'";
+    return result;
+  }
+  return LoadRetailCollisionArchive(archive, path);
+}
+
 OwnedCollisionBuildSet CompileOwnedMapChunks(
     const float world_translation[3]) {
+  const skate::world::MapDefinition& source =
+      mechanics_sandbox::map::ActiveDefinition();
+  if (!source.embedded_retail_collision_archive.empty()) {
+    REXLOG_INFO(
+        "native-collision: loading embedded exact retail collision "
+        "archive ({} bytes)",
+        source.embedded_retail_collision_archive.size());
+    return LoadRetailCollisionArchive(
+        source.embedded_retail_collision_archive,
+        "embedded RWCM extension");
+  }
   if (const char* archive = RetailCollisionArchivePath()) {
     // Load each retail ClusteredMesh without flattening or rebuilding it.
     // EnsureInstalled later bakes one rigid translation into the coordinate
     // fields while preserving the native KD/cluster and unit structure.
-    return LoadRetailCollisionArchive(archive);
+    return LoadRetailCollisionArchiveFile(archive);
   }
   OwnedCollisionBuildSet result;
   skate::world::RwCollisionBuildOptions options;
@@ -1141,8 +1180,6 @@ OwnedCollisionBuildSet CompileOwnedMapChunks(
   const std::uint16_t concrete =
       skate::world::EncodeRwSurfaceId(3, 1, 0);
   options.default_surface_id = concrete;
-  const skate::world::MapDefinition& source =
-      mechanics_sandbox::map::ActiveDefinition();
   options.excluded_triangle_ranges.reserve(
       source.editable_objects.size());
   for (const skate::world::MapObject& object :
@@ -3434,8 +3471,7 @@ void EnsureInstalled(PPCContext& ctx,
     g_state.store(State::BuildFailed, std::memory_order_release);
     return;
   }
-  const bool exact_retail_archive =
-      RetailCollisionArchivePath() != nullptr;
+  const bool exact_retail_archive = HasExactRetailCollisionArchive();
   if (exact_retail_archive) {
     const skate::world::Vec3 requested_translation{
         translation[0], translation[1], translation[2]};
@@ -4691,7 +4727,7 @@ bool UpdateDynamicEditableObjectCollisionPose(
 bool UpdateExactRetailEditableObjects(
     PPCContext &ctx, std::uint8_t *base, std::uint32_t collection,
     const skate::world::MapDefinition &definition, const float map_origin[3]) {
-  if (RetailCollisionArchivePath() == nullptr ||
+  if (!HasExactRetailCollisionArchive() ||
       !skate::world::HasRetailCollisionIdentity(definition) ||
       definition.retail_collision_resource_names != g_static_resource_names) {
     return false;
@@ -6243,7 +6279,7 @@ void AppendTelemetry(std::ostream& out) {
       << g_editor_collision_failures.load(
              std::memory_order_relaxed)
       << " map_editor_collision_exact_identity="
-      << (RetailCollisionArchivePath() != nullptr &&
+      << (HasExactRetailCollisionArchive() &&
                   !g_static_resource_names.empty()
               ? 1
               : 0)

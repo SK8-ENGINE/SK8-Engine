@@ -66,6 +66,8 @@ constexpr std::uint32_t kMaximumTextureBytes =
     kMaximumTextureDimension * kMaximumTextureDimension * 4u;
 constexpr std::uint32_t kMaximumStringBytes = 64u * 1024u;
 constexpr std::uint32_t kMaximumMetadataBytes = 128u * 1024u * 1024u;
+constexpr std::uint32_t kMaximumEmbeddedCollisionBytes =
+    512u * 1024u * 1024u;
 constexpr std::uint64_t kMaximumPackageBytes = 4ull * 1024ull * 1024ull * 1024ull;
 constexpr float kAreaEpsilon = 1.0e-10f;
 constexpr std::uint32_t kTexturedSkyVertexBytes = sizeof(float) * 5u;
@@ -1692,6 +1694,7 @@ MapDefinition LoadOwnedMapPackage(const std::filesystem::path& path) {
     std::vector<std::uint8_t> break_group_payload;
     std::uint32_t break_group_schema = 0;
     bool break_group_seen = false;
+    bool embedded_retail_collision_seen = false;
     const std::uint32_t extension_count =
         reader.Scalar<std::uint32_t>();
     RequireCount(extension_count, "extension");
@@ -1702,7 +1705,12 @@ MapDefinition LoadOwnedMapPackage(const std::filesystem::path& path) {
       const std::uint32_t schema = reader.Scalar<std::uint32_t>();
       const std::uint32_t decoded_size =
           reader.Scalar<std::uint32_t>();
-      if (decoded_size > kMaximumMetadataBytes) {
+      const bool supported_large_embedded_collision =
+          tag == std::array<char, 4>{'R', 'W', 'C', 'M'} &&
+          schema == 1 &&
+          decoded_size <= kMaximumEmbeddedCollisionBytes;
+      if (decoded_size > kMaximumMetadataBytes &&
+          !supported_large_embedded_collision) {
         // WMET is provenance for extraction and round-tripping, not data
         // needed by the runtime world. Very large combined retail maps may
         // legitimately carry more metadata than the runtime's allocation
@@ -1837,6 +1845,26 @@ MapDefinition LoadOwnedMapPackage(const std::filesystem::path& path) {
         ReadMapObjects(std::move(payload), schema, map);
       } else if (tag == std::array<char, 4>{'R', 'C', 'I', 'D'}) {
         ReadRetailCollisionIdentity(std::move(payload), schema, map);
+      } else if (tag == std::array<char, 4>{'R', 'W', 'C', 'M'}) {
+        if (embedded_retail_collision_seen) {
+          throw std::runtime_error(
+              "SKATE package contains duplicate RWCM extensions");
+        }
+        if (schema != 1) {
+          throw std::runtime_error(
+              "SKATE RWCM extension uses an unsupported schema");
+        }
+        constexpr std::array<std::uint8_t, 8> kArchiveMagic{
+            'R', 'W', 'C', 'M', 'S', 'E', 'T', '1'};
+        if (payload.size() < 12 ||
+            !std::equal(
+                kArchiveMagic.begin(), kArchiveMagic.end(),
+                payload.begin())) {
+          throw std::runtime_error(
+              "SKATE RWCM extension is not an RWCMSET1 archive");
+        }
+        embedded_retail_collision_seen = true;
+        map.embedded_retail_collision_archive = std::move(payload);
       } else if (tag == std::array<char, 4>{'B', 'G', 'R', 'P'}) {
         if (break_group_seen) {
           throw std::runtime_error(

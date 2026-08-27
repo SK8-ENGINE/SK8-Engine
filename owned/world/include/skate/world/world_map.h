@@ -652,6 +652,11 @@ struct MapDefinition {
   // Generic and older maps leave both vectors empty.
   std::vector<std::string> retail_collision_resource_names;
   std::vector<RetailCollisionAssociation> retail_collision_associations;
+  // RWCM v1 optionally carries the corresponding untouched RWCMSET1 archive
+  // inside the package. It is a runtime acceleration/accuracy payload rather
+  // than editable geometry: exporters deliberately omit it when collision is
+  // regenerated, preventing stale exact meshes from surviving map edits.
+  std::vector<std::uint8_t> embedded_retail_collision_archive;
   std::vector<MapObject> editable_objects;
   std::vector<GrindRail> grind_rails;
   std::vector<NpcRoute> npc_routes;
