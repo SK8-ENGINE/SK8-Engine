@@ -1,4 +1,5 @@
 #include "skate3_steam_backend.h"
+#include "skate3_steam_availability.h"
 
 #include <rex/logging.h>
 
@@ -12,12 +13,11 @@
 #include <mutex>
 #include <optional>
 #include <string_view>
+#include <thread>
 
 #if defined(_WIN32)
 #define NOMINMAX
 #include <Windows.h>
-#include <shellapi.h>
-#include <tlhelp32.h>
 #endif
 
 namespace skate3::multiplayer::steam {
@@ -56,6 +56,11 @@ constexpr std::string_view kSteamRuntimeArchiveSha256 =
     "9412348cc404563be5a43a28347cfeda3c679ee044a14d87a507ed2d796a537d";
 constexpr std::string_view kSteamRuntimeDllSha256 =
     "eb17909a76668cf9ae0b92a618a34a50f6c73d3a6787cb4dd8ce36a8b10bfb75";
+constexpr auto kInitializeRetryInterval = std::chrono::seconds(5);
+constexpr auto kServiceCheckInterval = std::chrono::seconds(1);
+constexpr auto kAvailabilityMonitorInterval = std::chrono::seconds(1);
+constexpr std::string_view kUnavailableStatus =
+    "Start Steam to use multiplayer.";
 
 #pragma pack(push, 8)
 struct CallbackMessage {
@@ -169,6 +174,7 @@ struct Api {
   using InputInit = bool (*)(void*, bool);
   using InputShutdown = bool (*)(void*);
   using InputSetActionManifest = bool (*)(void*, const char*);
+  using UserBLoggedOn = bool (*)(void*);
   using UserGetSteamId = std::uint64_t (*)(void*);
   using FriendsGetPersonaName = const char* (*)(void*);
   using RequestLobbyList = std::uint64_t (*)(void*);
@@ -213,6 +219,7 @@ struct Api {
   InputInit input_init = nullptr;
   InputShutdown input_shutdown = nullptr;
   InputSetActionManifest input_set_action_manifest = nullptr;
+  UserBLoggedOn user_b_logged_on = nullptr;
   UserGetSteamId user_get_steam_id = nullptr;
   FriendsGetPersonaName friends_get_persona_name = nullptr;
   RequestLobbyList request_lobby_list = nullptr;
@@ -247,6 +254,7 @@ struct Runtime {
   void* networking = nullptr;
   void* input = nullptr;
   bool input_initialized = false;
+  bool api_session_active = false;
   int pipe = 0;
   std::uint64_t pending_lobby_list = 0;
   std::uint64_t pending_create = 0;
@@ -260,12 +268,15 @@ struct Runtime {
   std::uint32_t pending_privacy = 0;
   bool pending_allow_late_join = true;
   std::uint64_t pending_password_hash = 0;
-  bool bootstrap_attempted = false;
+  availability::Tracker availability;
   std::chrono::steady_clock::time_point initialize_retry_after{};
+  std::chrono::steady_clock::time_point service_check_after{};
 };
 
 std::mutex g_mutex;
 Runtime g_runtime;
+std::mutex g_monitor_mutex;
+std::jthread g_availability_monitor;
 
 std::filesystem::path ExecutableDirectory() {
 #if defined(_WIN32)
@@ -514,6 +525,7 @@ try {
 }
 
 bool BootstrapSteamRuntime(const std::filesystem::path& install_root,
+                           std::stop_token stop_token,
                            std::string& status) {
   std::error_code ec;
   const auto work = install_root / ".cel-steam";
@@ -544,9 +556,22 @@ bool BootstrapSteamRuntime(const std::filesystem::path& install_root,
     return false;
   }
   CloseHandle(process.hThread);
-  const DWORD wait = WaitForSingleObject(process.hProcess, 120000);
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(120);
+  DWORD wait = WAIT_TIMEOUT;
+  while (!stop_token.stop_requested() &&
+         std::chrono::steady_clock::now() < deadline) {
+    wait = WaitForSingleObject(process.hProcess, 250);
+    if (wait != WAIT_TIMEOUT) {
+      break;
+    }
+  }
   DWORD exit_code = 1;
-  if (wait == WAIT_TIMEOUT) {
+  if (stop_token.stop_requested()) {
+    TerminateProcess(process.hProcess, 1);
+    WaitForSingleObject(process.hProcess, 1000);
+    status = "Steam multiplayer setup was cancelled.";
+  } else if (wait == WAIT_TIMEOUT) {
     TerminateProcess(process.hProcess, 1);
     status = "Automatic Steam setup timed out.";
   } else if (wait != WAIT_OBJECT_0 ||
@@ -556,7 +581,8 @@ bool BootstrapSteamRuntime(const std::filesystem::path& install_root,
              "). See .cel-steam/bootstrap.log.";
   }
   CloseHandle(process.hProcess);
-  if (wait != WAIT_OBJECT_0 || exit_code != 0) {
+  if (stop_token.stop_requested() || wait != WAIT_OBJECT_0 ||
+      exit_code != 0) {
     return false;
   }
   const auto library = install_root / "steam_api64.dll";
@@ -581,25 +607,6 @@ void EnsureDevelopmentAppId(const std::filesystem::path& install_root) {
   }
 }
 
-bool IsSteamRunning() {
-  const HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-  if (snapshot == INVALID_HANDLE_VALUE) {
-    return false;
-  }
-  PROCESSENTRY32W entry{};
-  entry.dwSize = sizeof(entry);
-  bool running = false;
-  if (Process32FirstW(snapshot, &entry)) {
-    do {
-      if (_wcsicmp(entry.szExeFile, L"steam.exe") == 0) {
-        running = true;
-        break;
-      }
-    } while (Process32NextW(snapshot, &entry));
-  }
-  CloseHandle(snapshot);
-  return running;
-}
 #endif
 
 std::string LobbyData(Runtime& runtime, std::uint64_t lobby, const char* key) {
@@ -927,22 +934,8 @@ bool LoadApi(Runtime& runtime) {
   const auto library_path = install_root / "steam_api64.dll";
   runtime.state.library_found = std::filesystem::is_regular_file(library_path);
   if (!runtime.state.library_found) {
-    if (runtime.bootstrap_attempted) {
-      return false;
-    }
-    runtime.bootstrap_attempted = true;
-    runtime.state.status =
-        "Installing the verified Steam multiplayer runtime...";
-    REXLOG_INFO(
-        "steam-multiplayer: runtime missing; downloading {} "
-        "(archive_sha256={} dll_sha256={})",
-        kSteamRuntimeUrl, kSteamRuntimeArchiveSha256, kSteamRuntimeDllSha256);
-    runtime.state.library_found =
-        BootstrapSteamRuntime(install_root, runtime.state.status);
-    if (!runtime.state.library_found) {
-      REXLOG_WARN("steam-multiplayer: {}", runtime.state.status);
-      return false;
-    }
+    runtime.state.status = "Steam multiplayer runtime is unavailable.";
+    return false;
   }
   runtime.api.module = LoadLibraryW(library_path.c_str());
   if (runtime.api.module == nullptr) {
@@ -953,6 +946,8 @@ bool LoadApi(Runtime& runtime) {
   if (!LoadFunction(runtime.api.module, export_name, runtime.api.field)) { \
     runtime.state.status =                                                 \
         std::string("Steam API export missing: ") + export_name;           \
+    FreeLibrary(runtime.api.module);                                       \
+    runtime.api = {};                                                      \
     return false;                                                          \
   }
   LOAD_STEAM(init_flat, "SteamAPI_InitFlat");
@@ -968,6 +963,7 @@ bool LoadApi(Runtime& runtime) {
   LOAD_STEAM(friends_interface, "SteamAPI_SteamFriends_v018");
   LOAD_STEAM(networking_interface,
              "SteamAPI_SteamNetworkingMessages_SteamAPI_v002");
+  LOAD_STEAM(user_b_logged_on, "SteamAPI_ISteamUser_BLoggedOn");
   LOAD_STEAM(user_get_steam_id, "SteamAPI_ISteamUser_GetSteamID");
   LOAD_STEAM(friends_get_persona_name, "SteamAPI_ISteamFriends_GetPersonaName");
   LOAD_STEAM(request_lobby_list, "SteamAPI_ISteamMatchmaking_RequestLobbyList");
@@ -1030,6 +1026,72 @@ bool LoadApi(Runtime& runtime) {
 #endif
 }
 
+void RecordAvailabilityLocked(Runtime& runtime, bool available,
+                              std::string_view detail,
+                              bool active_lobby = false) {
+  const bool was_available = runtime.availability.available();
+  const availability::Transition transition =
+      runtime.availability.Observe(available);
+  if (transition == availability::Transition::kBecameAvailable) {
+    REXLOG_INFO(
+        "steam-multiplayer: availability unavailable -> available ({})",
+        detail);
+  } else if (transition ==
+             availability::Transition::kBecameUnavailable) {
+    if (was_available) {
+      REXLOG_WARN(
+          "steam-multiplayer: availability available -> unavailable; {} ({})",
+          active_lobby ? "active lobby disconnected safely"
+                       : "multiplayer services disconnected",
+          detail);
+    } else {
+      REXLOG_INFO(
+          "steam-multiplayer: availability unknown -> unavailable ({})",
+          detail);
+    }
+  }
+}
+
+void ResetApiSessionLocked(Runtime& runtime, std::string status) {
+  const bool active_lobby = runtime.state.in_lobby;
+  if (runtime.input_initialized && runtime.input != nullptr &&
+      runtime.api.input_shutdown != nullptr) {
+    runtime.api.input_shutdown(runtime.input);
+  }
+  if (runtime.api_session_active && runtime.api.shutdown != nullptr) {
+    runtime.api.shutdown();
+  }
+
+  const bool library_found = runtime.state.library_found;
+  runtime.matchmaking = nullptr;
+  runtime.user = nullptr;
+  runtime.friends = nullptr;
+  runtime.networking = nullptr;
+  runtime.input = nullptr;
+  runtime.input_initialized = false;
+  runtime.api_session_active = false;
+  runtime.pipe = 0;
+  runtime.pending_lobby_list = 0;
+  runtime.pending_create = 0;
+  runtime.pending_join = 0;
+  runtime.requested_join_lobby = 0;
+  runtime.requested_password_hash = 0;
+  runtime.pending_server_name.clear();
+  runtime.pending_host_name.clear();
+  runtime.pending_map_name.clear();
+  runtime.pending_max_players = 8;
+  runtime.pending_privacy = 0;
+  runtime.pending_allow_late_join = true;
+  runtime.pending_password_hash = 0;
+  runtime.state = {};
+  runtime.state.library_found = library_found;
+  runtime.state.status = std::move(status);
+  runtime.initialize_retry_after =
+      std::chrono::steady_clock::now() + kInitializeRetryInterval;
+  runtime.service_check_after = {};
+  RecordAvailabilityLocked(runtime, false, runtime.state.status, active_lobby);
+}
+
 bool InitializeLocked(Runtime& runtime) {
   if (runtime.state.initialized) {
     return true;
@@ -1040,37 +1102,19 @@ bool InitializeLocked(Runtime& runtime) {
   }
   // SteamAPI_InitFlat can take tens of milliseconds when AppID 480 is
   // unavailable (for example while another local test client owns it).
-  // Cache a failed attempt instead of retrying that synchronous call every
-  // render frame.
-  runtime.initialize_retry_after = now + std::chrono::seconds(2);
+  // Retry from the availability monitor at a modest interval rather than
+  // stalling a rendered frame or spamming initialization.
+  runtime.initialize_retry_after = now + kInitializeRetryInterval;
   if (runtime.api.module == nullptr && !LoadApi(runtime)) {
     return false;
   }
   std::array<char, 1024> error{};
-  int init_result = runtime.api.init_flat(error.data());
-#if defined(_WIN32)
-  if (init_result != 0 && !IsSteamRunning()) {
-    REXLOG_INFO(
-        "steam-multiplayer: Steam is not running; starting the Steam client");
-    const auto launched = reinterpret_cast<std::intptr_t>(
-        ShellExecuteW(nullptr, L"open", L"steam://open/main", nullptr, nullptr,
-                      SW_SHOWNORMAL));
-    if (launched > 32) {
-      for (int attempt = 0; attempt < 60 && init_result != 0; ++attempt) {
-        Sleep(500);
-        error.fill('\0');
-        init_result = runtime.api.init_flat(error.data());
-      }
-    }
-  }
-#endif
+  const int init_result = runtime.api.init_flat(error.data());
   if (init_result != 0) {
-    runtime.state.status =
-        error[0] == '\0'
-            ? "SteamAPI initialization failed. Start Steam and sign in."
-            : std::string(error.data());
+    runtime.state.status = std::string(kUnavailableStatus);
     return false;
   }
+  runtime.api_session_active = true;
   runtime.matchmaking = runtime.api.matchmaking_interface();
   runtime.user = runtime.api.user_interface();
   runtime.friends = runtime.api.friends_interface();
@@ -1081,9 +1125,14 @@ bool InitializeLocked(Runtime& runtime) {
   if (runtime.matchmaking == nullptr || runtime.user == nullptr ||
       runtime.friends == nullptr || runtime.networking == nullptr ||
       runtime.pipe == 0) {
-    runtime.api.shutdown();
-    runtime.state.status =
-        "Steam initialized but required interfaces were unavailable.";
+    ResetApiSessionLocked(
+        runtime, "Steam initialized without required multiplayer services.");
+    return false;
+  }
+  runtime.state.local_steam_id = runtime.api.user_get_steam_id(runtime.user);
+  if (!runtime.api.user_b_logged_on(runtime.user) ||
+      runtime.state.local_steam_id == 0) {
+    ResetApiSessionLocked(runtime, "Sign in to Steam to use multiplayer.");
     return false;
   }
   if (runtime.input != nullptr && runtime.api.input_init != nullptr &&
@@ -1118,28 +1167,38 @@ bool InitializeLocked(Runtime& runtime) {
         "Spacewar's per-game controller setting may still be required");
   }
   runtime.api.manual_init();
-  runtime.state.local_steam_id = runtime.api.user_get_steam_id(runtime.user);
   const char* persona = runtime.api.friends_get_persona_name(runtime.friends);
   runtime.state.persona_name =
       persona == nullptr ? std::string{} : std::string(persona);
-  runtime.state.initialized = runtime.state.local_steam_id != 0;
-  if (runtime.state.initialized) {
-    runtime.initialize_retry_after = {};
-  }
-  runtime.state.status = runtime.state.initialized
-                             ? "Steam connected as " +
-                                   runtime.state.persona_name +
-                                   " using development AppID 480."
-                             : "Steam did not return a signed-in user.";
-  REXLOG_INFO("steam-multiplayer: initialized={} user={} persona='{}'",
-              runtime.state.initialized, runtime.state.local_steam_id,
-              runtime.state.persona_name);
-  return runtime.state.initialized;
+  runtime.state.initialized = true;
+  runtime.initialize_retry_after = {};
+  runtime.service_check_after = now + kServiceCheckInterval;
+  runtime.state.status =
+      runtime.state.persona_name.empty()
+          ? "Steam connected using development AppID 480."
+          : "Steam connected as " + runtime.state.persona_name +
+                " using development AppID 480.";
+  RecordAvailabilityLocked(
+      runtime, true,
+      "user=" + std::to_string(runtime.state.local_steam_id) + " persona='" +
+          runtime.state.persona_name + "'");
+  return true;
 }
 
-void TickLocked(Runtime& runtime) {
-  if (!InitializeLocked(runtime)) {
+void TickLocked(Runtime& runtime, bool allow_initialize) {
+  if (!runtime.state.initialized &&
+      (!allow_initialize || !InitializeLocked(runtime))) {
     return;
+  }
+  const auto now = std::chrono::steady_clock::now();
+  if (now >= runtime.service_check_after) {
+    runtime.service_check_after = now + kServiceCheckInterval;
+    if (!runtime.api.user_b_logged_on(runtime.user)) {
+      ResetApiSessionLocked(
+          runtime,
+          "Steam connection lost. Start Steam to use multiplayer.");
+      return;
+    }
   }
   runtime.api.manual_run_frame(runtime.pipe);
   CallbackMessage message;
@@ -1151,6 +1210,42 @@ void TickLocked(Runtime& runtime) {
   if (runtime.state.in_lobby) {
     UpdateLobbyMembership(runtime);
   }
+}
+
+void PrepareSteamRuntime(std::stop_token stop_token) {
+#if defined(_WIN32)
+  const auto install_root = ExecutableDirectory();
+  const auto library_path = install_root / "steam_api64.dll";
+  if (std::filesystem::is_regular_file(library_path)) {
+    std::scoped_lock lock(g_mutex);
+    g_runtime.state.library_found = true;
+    return;
+  }
+  {
+    std::scoped_lock lock(g_mutex);
+    g_runtime.state.library_found = false;
+    g_runtime.state.status =
+        "Installing the verified Steam multiplayer runtime...";
+  }
+  REXLOG_INFO(
+      "steam-multiplayer: runtime missing; downloading {} "
+      "(archive_sha256={} dll_sha256={})",
+      kSteamRuntimeUrl, kSteamRuntimeArchiveSha256, kSteamRuntimeDllSha256);
+  std::string status;
+  const bool installed =
+      BootstrapSteamRuntime(install_root, stop_token, status);
+  {
+    std::scoped_lock lock(g_mutex);
+    g_runtime.state.library_found = installed;
+    g_runtime.state.status =
+        installed ? std::string(kUnavailableStatus) : status;
+  }
+  if (!installed && !stop_token.stop_requested()) {
+    REXLOG_WARN("steam-multiplayer: {}", status);
+  }
+#else
+  (void)stop_token;
+#endif
 }
 
 }  // namespace
@@ -1165,20 +1260,60 @@ bool IsInitialized() {
   return g_runtime.state.initialized;
 }
 
+void StartAvailabilityMonitor() {
+  std::scoped_lock monitor_lock(g_monitor_mutex);
+  if (g_availability_monitor.joinable()) {
+    return;
+  }
+  {
+    std::scoped_lock lock(g_mutex);
+    if (g_runtime.state.status.empty()) {
+      g_runtime.state.status = std::string(kUnavailableStatus);
+    }
+    RecordAvailabilityLocked(g_runtime, false, g_runtime.state.status);
+  }
+  g_availability_monitor = std::jthread([](std::stop_token stop_token) {
+    PrepareSteamRuntime(stop_token);
+    while (!stop_token.stop_requested()) {
+      {
+        std::scoped_lock lock(g_mutex);
+        TickLocked(g_runtime, true);
+      }
+      for (int slice = 0;
+           slice < 10 && !stop_token.stop_requested(); ++slice) {
+        std::this_thread::sleep_for(
+            kAvailabilityMonitorInterval / 10);
+      }
+    }
+  });
+}
+
+void StopAvailabilityMonitor() {
+  std::jthread monitor;
+  {
+    std::scoped_lock lock(g_monitor_mutex);
+    if (!g_availability_monitor.joinable()) {
+      return;
+    }
+    g_availability_monitor.request_stop();
+    monitor = std::move(g_availability_monitor);
+  }
+  monitor.join();
+}
+
 void Tick() {
   std::scoped_lock lock(g_mutex);
-  TickLocked(g_runtime);
+  TickLocked(g_runtime, false);
 }
 
 State GetState() {
   std::scoped_lock lock(g_mutex);
-  InitializeLocked(g_runtime);
   return g_runtime.state;
 }
 
 void RefreshLobbies() {
   std::scoped_lock lock(g_mutex);
-  if (!InitializeLocked(g_runtime) || g_runtime.state.busy) {
+  if (!g_runtime.state.initialized || g_runtime.state.busy) {
     return;
   }
   g_runtime.api.add_lobby_string_filter(g_runtime.matchmaking, "cel_game",
@@ -1202,7 +1337,7 @@ bool HostLobby(const std::string& server_name, const std::string& host_name,
                std::uint32_t privacy, bool allow_late_join,
                std::uint64_t password_hash) {
   std::scoped_lock lock(g_mutex);
-  if (!InitializeLocked(g_runtime) || g_runtime.state.busy ||
+  if (!g_runtime.state.initialized || g_runtime.state.busy ||
       g_runtime.state.in_lobby) {
     return false;
   }
@@ -1227,7 +1362,7 @@ bool HostLobby(const std::string& server_name, const std::string& host_name,
 
 bool JoinLobby(std::uint64_t lobby_id, std::uint64_t password_hash) {
   std::scoped_lock lock(g_mutex);
-  if (!InitializeLocked(g_runtime) || g_runtime.state.busy ||
+  if (!g_runtime.state.initialized || g_runtime.state.busy ||
       g_runtime.state.in_lobby || lobby_id == 0) {
     return false;
   }
@@ -1270,6 +1405,7 @@ void LeaveLobby() {
 }
 
 void Shutdown() {
+  StopAvailabilityMonitor();
   std::scoped_lock lock(g_mutex);
   if (g_runtime.state.initialized && g_runtime.state.lobby_id != 0) {
     g_runtime.api.leave_lobby(g_runtime.matchmaking, g_runtime.state.lobby_id);
@@ -1278,7 +1414,7 @@ void Shutdown() {
       g_runtime.api.input_shutdown != nullptr) {
     g_runtime.api.input_shutdown(g_runtime.input);
   }
-  if (g_runtime.state.initialized && g_runtime.api.shutdown) {
+  if (g_runtime.api_session_active && g_runtime.api.shutdown) {
     g_runtime.api.shutdown();
   }
 #if defined(_WIN32)

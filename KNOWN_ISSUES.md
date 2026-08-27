@@ -29,8 +29,9 @@ This is an experimental preview rather than a finished standalone game engine.
 - Internet multiplayer is an App 480 development preview. Its first launch
   needs GitHub access to acquire the pinned Steam runtime and a running,
   signed-in Steam client. If setup fails, inspect
-  `.cel-steam/bootstrap.log`; ordinary gameplay and the localhost multiplayer
-  fallback remain available.
+  `.cel-steam/bootstrap.log`; ordinary offline and single-player gameplay
+  remain available, while the Multiplayer tab stays disabled until Steamworks
+  connects.
 - Remote skeletal animation can retain a small, rapid movement jitter even
   when packet delivery is stable. Root position, rotation, and independent
   player animation are functional, but this presentation defect remains open.

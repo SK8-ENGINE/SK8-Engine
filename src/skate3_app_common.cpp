@@ -15,6 +15,7 @@
 #include "skate3_scoring.h"
 #include "skate3_screenshot.h"
 #include "skate3_shader_disasm.h"
+#include "skate3_steam_backend.h"
 #include "skate3_title_update_installer.h"
 #include "skate3_user_settings.h"
 #include "skate3_vanilla_ui/skate3_ui_asset_cache.h"
@@ -1288,6 +1289,10 @@ void Skate3BaseApp::OnPostSetup() {
       }
     }
   }
+
+  // Steam is optional for process startup. Begin low-frequency availability
+  // monitoring only after the app and its input system are fully usable.
+  skate3::multiplayer::steam::StartAvailabilityMonitor();
 }
 
 void Skate3BaseApp::OnShutdown() {

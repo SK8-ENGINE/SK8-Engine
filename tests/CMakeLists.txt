@@ -329,6 +329,29 @@ add_test(
   COMMAND skate3_multiplayer_lifecycle_tests
 )
 
+add_executable(skate3_steam_availability_tests
+  skate3_steam_availability_tests.cpp
+)
+
+target_include_directories(skate3_steam_availability_tests PRIVATE
+  ${CMAKE_CURRENT_LIST_DIR}/../src
+  ${CMAKE_CURRENT_LIST_DIR}/../third_party/rexglue-sdk/include
+)
+target_compile_features(skate3_steam_availability_tests PRIVATE cxx_std_23)
+
+if(MSVC)
+  target_compile_options(
+    skate3_steam_availability_tests PRIVATE /W4 /permissive- /utf-8)
+else()
+  target_compile_options(
+    skate3_steam_availability_tests PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
+add_test(
+  NAME skate3_steam_availability_tests
+  COMMAND skate3_steam_availability_tests
+)
+
 add_executable(skate3_multiplayer_worker_tests
   skate3_multiplayer_worker_tests.cpp
 )
