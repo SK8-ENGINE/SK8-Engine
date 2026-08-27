@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.1.0-preview.15 - 2026-08-27
+
+- Added lossless SKATE v15 packages with Zstandard-compressed sections,
+  bounded decoding, a lossless v12-v14 repacker, and validator coverage for
+  compressed and malformed packages.
+- Added editable visual-mesh chunking for very large Blender maps, preserving
+  their complete presentation data while avoiding oversized runtime GPU
+  allocations.
+- Added package-authored default dynamic-lighting metadata. Blender maps
+  default to dynamic lighting on, while authors can explicitly ship a map
+  with it off when baked lightmaps are the intended presentation.
+- Embedded exact retail collision archives in preservation-focused packages
+  and restored native collision selection for maps such as Skate 2 imports.
+- Fixed owned-map exposure, quick-drop object suppression, generated and
+  hand-authored grind lifetime, and smoother generated grind chains.
+- Hardened Blender import/export validation, material handling, visible
+  fixture emission, collision planning, grind generation, and large-map
+  preparation through Owned World Authoring 1.15.0.
+- Added the portable `sk8-auto-map` agent workflow and complete source-only
+  Blender map toolkit to Windows packages alongside the installable addon,
+  format documentation, and vanilla-map extraction tools.
+
 ## 0.1.0-preview.14 - 2026-08-24
 
 - Added the preservation-first vanilla-map extraction and Blender conversion

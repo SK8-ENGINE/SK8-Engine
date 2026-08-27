@@ -16,8 +16,11 @@ import struct
 import sys
 import zlib
 
-from compression import zstd
 import numpy
+try:
+    from compression import zstd
+except ImportError:
+    zstd = None
 
 from analyze_skate import Reader, PackageError
 
@@ -31,6 +34,10 @@ STORAGE_ZSTD_RGBA_FILTER = 3
 STORAGE_ZSTD_VERTEX_SOA = 4
 STORAGE_ZSTD_INDEX_DELTA = 5
 STORAGE_ZSTD_COLLISION_INDEXED = 6
+STORAGE_DEFLATE_RGBA_FILTER = 7
+STORAGE_DEFLATE_VERTEX_SOA = 8
+STORAGE_DEFLATE_INDEX_DELTA = 9
+STORAGE_DEFLATE_COLLISION_INDEXED = 10
 STORAGE_TEXTURE_REFERENCE = 11
 VERTEX_BYTES = 56
 COLLISION_BYTES = 48
@@ -47,10 +54,13 @@ def write_storage_record(stream, method: int, payload: bytes) -> None:
 
 
 def best_plain_storage(decoded: bytes) -> tuple[int, bytes]:
-    candidates = (
-        (STORAGE_ZSTD, zstd.compress(decoded, level=10)),
+    candidates = [
         (STORAGE_DEFLATE, zlib.compress(decoded, level=9)),
-    )
+    ]
+    if zstd is not None:
+        candidates.append(
+            (STORAGE_ZSTD, zstd.compress(decoded, level=10))
+        )
     method, payload = min(candidates, key=lambda item: len(item[1]))
     return (
         (STORAGE_RAW, decoded)
@@ -62,17 +72,26 @@ def best_plain_storage(decoded: bytes) -> tuple[int, bytes]:
 def best_transformed_storage(
     decoded: bytes,
     transformed: bytes,
-    method: int,
+    *,
+    zstd_method: int,
+    deflate_method: int,
 ) -> tuple[int, bytes]:
-    transformed_payload = (
-        struct.pack("<I", len(transformed))
-        + zstd.compress(transformed, level=10)
-    )
-    candidates = (
-        (method, transformed_payload),
-        (STORAGE_ZSTD, zstd.compress(decoded, level=10)),
+    prefix = struct.pack("<I", len(transformed))
+    candidates = [
+        (
+            deflate_method,
+            prefix + zlib.compress(transformed, level=9),
+        ),
         (STORAGE_DEFLATE, zlib.compress(decoded, level=9)),
-    )
+    ]
+    if zstd is not None:
+        candidates.extend((
+            (
+                zstd_method,
+                prefix + zstd.compress(transformed, level=10),
+            ),
+            (STORAGE_ZSTD, zstd.compress(decoded, level=10)),
+        ))
     selected = min(candidates, key=lambda item: len(item[1]))
     return (
         (STORAGE_RAW, decoded)
@@ -360,7 +379,8 @@ def repack(
                 method, payload = best_transformed_storage(
                     rgba8,
                     filtered_rgba8(rgba8, width, height),
-                    STORAGE_ZSTD_RGBA_FILTER,
+                    zstd_method=STORAGE_ZSTD_RGBA_FILTER,
+                    deflate_method=STORAGE_DEFLATE_RGBA_FILTER,
                 )
                 write_storage_record(output, method, payload)
         stats["textures"] = output.tell() - texture_start
@@ -371,7 +391,8 @@ def repack(
         method, payload = best_transformed_storage(
             vertex_bytes,
             vertex_soa(vertex_bytes),
-            STORAGE_ZSTD_VERTEX_SOA,
+            zstd_method=STORAGE_ZSTD_VERTEX_SOA,
+            deflate_method=STORAGE_DEFLATE_VERTEX_SOA,
         )
         write_storage_record(output, method, payload)
         stats["vertices"] = len(payload) + 8
@@ -382,7 +403,8 @@ def repack(
         method, payload = best_transformed_storage(
             index_bytes,
             index_delta_varints(index_bytes),
-            STORAGE_ZSTD_INDEX_DELTA,
+            zstd_method=STORAGE_ZSTD_INDEX_DELTA,
+            deflate_method=STORAGE_DEFLATE_INDEX_DELTA,
         )
         write_storage_record(output, method, payload)
         stats["indices"] = len(payload) + 8
@@ -393,7 +415,8 @@ def repack(
         method, payload = best_transformed_storage(
             collision_bytes,
             indexed_collision(collision_bytes),
-            STORAGE_ZSTD_COLLISION_INDEXED,
+            zstd_method=STORAGE_ZSTD_COLLISION_INDEXED,
+            deflate_method=STORAGE_DEFLATE_COLLISION_INDEXED,
         )
         write_storage_record(output, method, payload)
         stats["collision"] = len(payload) + 8

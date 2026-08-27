@@ -144,6 +144,9 @@ class Reader {
   }
 
   std::vector<std::uint8_t> ByteVector(std::size_t size) {
+    if (size > Remaining()) {
+      throw std::runtime_error("SKATE package is truncated");
+    }
     std::vector<std::uint8_t> result(size);
     if (size != 0) {
       Bytes(result.data(), size);
@@ -180,6 +183,10 @@ class Reader {
     if (offset_ != bytes_.size()) {
       throw std::runtime_error("SKATE package has trailing bytes");
     }
+  }
+
+  std::size_t Remaining() const {
+    return bytes_.size() - offset_;
   }
 
  private:
@@ -486,6 +493,30 @@ std::vector<std::uint8_t> DecodeStoredPayload(
   std::uint32_t transformed_size = 0;
   std::memcpy(
       &transformed_size, payload.bytes.data(), sizeof(transformed_size));
+  std::uint64_t maximum_transformed_size = payload.expected_size;
+  switch (payload.method) {
+    case kStorageZstdRgbaFilter:
+    case kStorageDeflateRgbaFilter:
+      maximum_transformed_size += kMaximumTextureDimension + 8u;
+      break;
+    case kStorageZstdIndexDelta:
+    case kStorageDeflateIndexDelta:
+      maximum_transformed_size =
+          (std::uint64_t(payload.expected_size) + 3u) / 4u * 5u;
+      break;
+    case kStorageZstdCollisionIndexed:
+    case kStorageDeflateCollisionIndexed:
+      maximum_transformed_size =
+          (std::uint64_t(payload.expected_size) + 47u) / 48u * 56u + 4u;
+      break;
+    default:
+      break;
+  }
+  if (transformed_size > maximum_transformed_size) {
+    throw std::runtime_error(
+        std::string("SKATE ") + label +
+        " transformed size exceeds the format limit");
+  }
   const std::span<const std::uint8_t> compressed(
       payload.bytes.data() + sizeof(transformed_size),
       payload.bytes.size() - sizeof(transformed_size));

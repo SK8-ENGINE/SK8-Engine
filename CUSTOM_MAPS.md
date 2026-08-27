@@ -29,10 +29,11 @@ The Maps tab always shows and opens the exact folder currently in use.
 
 ## Package compatibility
 
-The runtime accepts little-endian SKATE v1-v14 packages. Current Blender
-exports use v14 and can contain:
+The runtime accepts little-endian SKATE v1-v15 packages. Current Blender
+exports use v15 and can contain:
 
-- chunked visual geometry and embedded image textures;
+- chunked visual geometry and embedded image textures with bounded lossless
+  raw, DEFLATE, or Zstandard storage;
 - albedo, normal, ORM, emissive and baked-indirect maps;
 - opaque, alpha-cutout and alpha-blended materials;
 - independent collision geometry;
@@ -40,7 +41,10 @@ exports use v14 and can contain:
 - grind paths;
 - contact-driven hinged rigid doors;
 - ordinary Blender Point, Spot, Area, and Sun lights;
-- spawn, sky, day/night, weather, water, mirror and moving-light metadata.
+- spawn, sky, day/night, weather, water, mirror, moving-light, and default
+  dynamic-lighting metadata;
+- optional exact embedded retail collision archives for
+  preservation-focused conversions;
 - stable per-object identity, render/collision ownership, transforms, and
   grind associations used by the in-game editor.
 - opt-in Box3D static and dynamic bodies with per-object shapes, density,

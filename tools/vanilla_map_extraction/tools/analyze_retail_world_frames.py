@@ -181,14 +181,15 @@ def analyze(root: Path) -> dict[str, object]:
                 groups[f"shader:{mesh.get('shader_name', '<none>')}"].append(
                     measurements
                 )
-                groups[
-                    "layout:"
-                    f"{mesh.get('vertex_stride', 0)}/"
-                    f"{mesh['retail_world_frame'].get(
-                        'tangent_offset',
-                        mesh['retail_world_frame'].get('binormal_offset', -1),
-                    )}"
-                ].append(measurements)
+                world_frame = mesh["retail_world_frame"]
+                frame_offset = world_frame.get(
+                    "tangent_offset",
+                    world_frame.get("binormal_offset", -1),
+                )
+                layout = (
+                    f"layout:{mesh.get('vertex_stride', 0)}/{frame_offset}"
+                )
+                groups[layout].append(measurements)
     summaries = {
         key: _summary(rows)
         for key, rows in sorted(groups.items())

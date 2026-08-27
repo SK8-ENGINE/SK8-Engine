@@ -1,8 +1,13 @@
 cmake_minimum_required(VERSION 3.25)
 
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
-  project(skate3_multiplayer_tests LANGUAGES CXX)
+  project(skate3_multiplayer_tests LANGUAGES C CXX)
   include(CTest)
+  set(SKATE_OWNED_WORLD_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+  add_subdirectory(
+    ../owned/world
+    ${CMAKE_CURRENT_BINARY_DIR}/owned-world
+  )
   set(SNAPPY_BUILD_TESTS OFF CACHE BOOL "" FORCE)
   set(SNAPPY_BUILD_BENCHMARKS OFF CACHE BOOL "" FORCE)
   set(SNAPPY_INSTALL OFF CACHE BOOL "" FORCE)

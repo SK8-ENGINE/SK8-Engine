@@ -13,6 +13,28 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+function Get-PortableRelativePath {
+    param(
+        [Parameter(Mandatory)][string]$BasePath,
+        [Parameter(Mandatory)][string]$TargetPath
+    )
+
+    $baseFull = [System.IO.Path]::GetFullPath($BasePath)
+    if (-not $baseFull.EndsWith(
+            [System.IO.Path]::DirectorySeparatorChar.ToString())) {
+        $baseFull += [System.IO.Path]::DirectorySeparatorChar
+    }
+    $targetFull = [System.IO.Path]::GetFullPath($TargetPath)
+    $baseUri = [System.Uri]::new($baseFull)
+    $targetUri = [System.Uri]::new($targetFull)
+    if ($baseUri.Scheme -ne $targetUri.Scheme) {
+        throw "Cannot relativize paths on different schemes."
+    }
+    return [System.Uri]::UnescapeDataString(
+        $baseUri.MakeRelativeUri($targetUri).ToString()
+    ).Replace('/', [System.IO.Path]::DirectorySeparatorChar)
+}
+
 $repoRoot = [System.IO.Path]::GetFullPath(
     (Join-Path $PSScriptRoot '..')
 )
@@ -112,6 +134,9 @@ New-Item -ItemType Directory -Path (
     Join-Path $stageRoot 'Blender Map Tools'
 ) -Force | Out-Null
 New-Item -ItemType Directory -Path (
+    Join-Path $stageRoot 'Blender Map Tools\Source Tools'
+) -Force | Out-Null
+New-Item -ItemType Directory -Path (
     Join-Path $stageRoot 'Vanilla Map Extraction Tools'
 ) -Force | Out-Null
 
@@ -150,6 +175,16 @@ Copy-Item -LiteralPath (
 ) -Destination (
     Join-Path $stageRoot 'LICENSE-Box3D.txt'
 )
+Copy-Item -LiteralPath (
+    Join-Path $repoRoot 'third_party\zlib\LICENSE'
+) -Destination (
+    Join-Path $stageRoot 'LICENSE-zlib.txt'
+)
+Copy-Item -LiteralPath (
+    Join-Path $repoRoot 'third_party\zstd\LICENSE'
+) -Destination (
+    Join-Path $stageRoot 'LICENSE-zstd.txt'
+)
 Copy-Item -LiteralPath (Join-Path $repoRoot 'release\maps\README.txt') `
     -Destination (Join-Path $stageRoot 'maps\README.txt')
 foreach ($bundledMapFile in @(
@@ -177,6 +212,25 @@ Copy-Item -LiteralPath (
 ) -Destination (
     Join-Path $stageRoot 'Blender Map Tools\SKATE_FORMAT.md'
 )
+
+$blenderToolsSource = Join-Path $repoRoot 'tools\blender_owned_map'
+$blenderToolsStage = Join-Path $stageRoot 'Blender Map Tools\Source Tools'
+$portableSourceExtensions = @(
+    '.py', '.ps1', '.json', '.md', '.toml', '.yaml', '.yml'
+)
+Get-ChildItem -LiteralPath $blenderToolsSource -Recurse -File |
+    Where-Object {
+        $_.Extension.ToLowerInvariant() -in $portableSourceExtensions
+    } |
+    ForEach-Object {
+        $relative = Get-PortableRelativePath `
+            -BasePath $blenderToolsSource -TargetPath $_.FullName
+        $destination = Join-Path $blenderToolsStage $relative
+        New-Item -ItemType Directory -Path (
+            Split-Path -Parent $destination
+        ) -Force | Out-Null
+        Copy-Item -LiteralPath $_.FullName -Destination $destination
+    }
 
 $extractionSource = Join-Path $repoRoot 'tools\vanilla_map_extraction'
 $extractionStage = Join-Path $stageRoot 'Vanilla Map Extraction Tools'
@@ -219,8 +273,9 @@ $allowedFirstPartyMapFiles = @(
 )
 $stagedFiles = Get-ChildItem -LiteralPath $stageRoot -Recurse -File
 foreach ($file in $stagedFiles) {
-    $relative = [System.IO.Path]::GetRelativePath(
-        $stageRoot, $file.FullName
+    $relative = (
+        Get-PortableRelativePath `
+            -BasePath $stageRoot -TargetPath $file.FullName
     ).Replace('\', '/')
     $isAllowedFirstPartyMap =
         $allowedFirstPartyMapFiles -contains $relative
@@ -232,8 +287,9 @@ foreach ($file in $stagedFiles) {
 }
 
 $checksums = foreach ($file in $stagedFiles | Sort-Object FullName) {
-    $relative = [System.IO.Path]::GetRelativePath(
-        $stageRoot, $file.FullName
+    $relative = (
+        Get-PortableRelativePath `
+            -BasePath $stageRoot -TargetPath $file.FullName
     ).Replace('\', '/')
     $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $file.FullName).Hash
     "$hash  $relative"

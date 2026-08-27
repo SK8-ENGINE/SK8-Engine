@@ -68,6 +68,12 @@ Authoring addon and SKATE documentation. Install the zip in Blender, then
 open 3D View > Sidebar > Skate 3 Map to prepare, validate, and export maps
 without running scripts.
 
+Its "Source Tools" subfolder contains the reviewed standalone map utilities,
+addon source, regression tests, and portable sk8-auto-map agent workflow.
+Give that workflow's SKILL.md and a Blender file to a compatible coding agent
+when you want duplicate-aware material, collision, lighting, spawn, and grind
+preparation. The source Blender file is never overwritten.
+
 Only distribute maps and assets that you have permission to distribute.
 See CUSTOM_MAPS.md for the complete map workflow.
 

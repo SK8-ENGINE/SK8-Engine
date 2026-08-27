@@ -10,7 +10,7 @@ SCENE_SHADER = ROOT / "src" / "native" / "shaders" / "scene.hlsl"
 
 
 class RuntimeOwnedHdrContractTests(unittest.TestCase):
-    def test_owned_world_writes_scene_linear_hdr(self) -> None:
+    def test_owned_world_keeps_additive_lighting_scene_linear(self) -> None:
         shader = SCENE_SHADER.read_text(encoding="utf-8")
         branch = re.search(
             r"if\s*\(cam_pos\.w\s*<\s*-40\.5.*?"
@@ -22,18 +22,21 @@ class RuntimeOwnedHdrContractTests(unittest.TestCase):
         self.assertIsNotNone(branch, "owned-world shader branch is missing")
         body = branch.group("body")
         self.assertIn(
-            "lit += emissive_color * emissive_intensity;",
+            "scene_linear_additive += "
+            "emissive_color * emissive_intensity;",
             body,
         )
         self.assertIn(
-            "return ToneOut(max(lit, 0.0), output_alpha, false);",
+            "PassGamma(max(lit, 0.0)) + "
+            "max(scene_linear_additive, 0.0)",
             body,
         )
         self.assertNotRegex(
             body,
-            r"return\s+float4\s*\(\s*PassGamma\s*\(\s*max\s*\(\s*lit",
-            "Blender-linear owned lighting must not be inverse-tonemapped "
-            "before bloom",
+            r"PassGamma\s*\(\s*(?:max\s*\(\s*)?"
+            r"(?:scene_linear_additive|lit\s*\+\s*scene_linear_additive)",
+            "Blender emission and local-light radiance must remain "
+            "scene-linear for bloom and tone mapping",
         )
 
     def test_legacy_gamma_inverse_would_amplify_neon(self) -> None:

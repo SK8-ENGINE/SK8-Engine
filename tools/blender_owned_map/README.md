@@ -105,6 +105,24 @@ The zip contains the complete SKATE exporter. End users do not need the
 repository's Python files and do not need to use Blender's scripting
 workspace.
 
+## Lossless package repacker
+
+`repack_skate_v15.py` converts an existing SKATE v12-v14 package to v15
+without changing its decoded materials, textures, geometry, collision,
+authored features, or extension payloads. It can also set the map's initial
+Dynamic Lighting preference:
+
+```powershell
+python .\repack_skate_v15.py input.skate output.skate `
+  --dynamic-lighting-off
+```
+
+The repacker requires NumPy. Zstandard support is optional: when Python does
+not provide `compression.zstd`, it compares the same reversible transforms
+using DEFLATE and still produces a valid lossless SKATE v15 package. Run
+`analyze_skate.py` on the result to inspect its version, section sizes, and
+counts.
+
 ## Existing Blender map: one-click workflow
 
 An ordinary `.blend` file does not need to be rebuilt around SKATE

@@ -16,7 +16,9 @@ Before publishing a source or binary revision:
 2. Confirm `generated/`, `game/`, runtime data, retail media, DLC, saves,
    `.skate` packages, Blender scenes, export caches, logs and screenshots are
    untracked.
-3. Run the owned-world unit tests and Blender addon workflow test.
+3. Run the owned-world and standalone protocol/runtime CTest suites, the
+   vanilla-map extraction Python suite, Python source compilation, and all
+   five Blender addon/agent workflow tests.
 4. Build the Windows Release target from a recursive clean clone.
 5. Package with the script below and inspect the complete staged file list.
 6. Confirm `NOTICE.md`, `LICENSE-PROJECT.md`, `KNOWN_ISSUES.md`, and checksums
@@ -65,7 +67,8 @@ The packager creates a zip containing only:
 - the first-party Blender Feature Park `.skate` map and its self-contained
   editable `.blend` source;
 - project licensing, notices, changelog, and known issues;
-- the Blender addon and format documentation;
+- the Blender addon, format documentation, complete source-only map toolkit,
+  regression tests, and portable `sk8-auto-map` agent workflow;
 - the source-only vanilla-map extraction, Blender conversion, validation,
   schemas, and tests, without retail inputs or generated outputs;
 - a release-facing `maps` folder for additional packages; and

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise SKATE14/MOBJ3 validation and legacy object compatibility."""
+"""Exercise SKATE15, MOBJ3 validation, and legacy object compatibility."""
 
 from __future__ import annotations
 
@@ -15,6 +15,7 @@ import zlib
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "tools" / "blender_owned_map"))
 from analyze_skate import PackageError, analyze_package  # noqa: E402
+from repack_skate_v15 import repack  # noqa: E402
 
 
 def require(condition: bool, message: str) -> None:
@@ -189,7 +190,7 @@ def main() -> int:
         for index in root["grind_indices"]
     }
     require(
-        editable_map_analysis["version"] == 14
+        editable_map_analysis["version"] == 15
         and len(editable_map_analysis["map_objects"]) > 1
         and editable_map_analysis["counts"]["grind_rails"] > 3
         and editable_map_grind_indices
@@ -198,7 +199,7 @@ def main() -> int:
             root["physics"]["type"] == 0
             for root in editable_map_analysis["map_objects"]
         ),
-        "editable SKATE14 map lost broad owned grind coverage "
+        "editable SKATE15 map lost broad owned grind coverage "
         "or has unexpected object physics",
     )
     for package_path, profile in (
@@ -219,6 +220,60 @@ def main() -> int:
             completed.returncode == 0,
             f"runtime validator rejected package {package_path}: "
             f"{completed.stderr}",
+        )
+
+    object_v14 = analyze_package(sample, include_payloads=True)
+    with tempfile.TemporaryDirectory() as temporary:
+        repacked_path = Path(temporary) / "object_v15.skate"
+        repack(
+            sample,
+            repacked_path,
+            dynamic_lighting=False,
+        )
+        object_v15 = analyze_package(
+            repacked_path, include_payloads=True
+        )
+        preserved_integrity = (
+            "materials_sha256",
+            "decoded_textures_sha256",
+            "expanded_visual_triangles_sha256",
+            "expanded_visual_triangles_1e6_sha256",
+            "collision_sha256",
+            "grind_rails_sha256",
+        )
+        require(
+            object_v15["version"] == 15
+            and not object_v15[
+                "dynamic_lighting_enabled_by_default"
+            ]
+            and object_v15["counts"] == object_v14["counts"]
+            and object_v15["_materials"] == object_v14["_materials"]
+            and object_v15["_vertex_bytes"]
+            == object_v14["_vertex_bytes"]
+            and object_v15["_indices"] == object_v14["_indices"]
+            and object_v15["_collision_bytes"]
+            == object_v14["_collision_bytes"]
+            and object_v15["map_objects"]
+            == object_v14["map_objects"]
+            and object_v15["texture_dimensions"]
+            == object_v14["texture_dimensions"]
+            and all(
+                object_v15["integrity"][key]
+                == object_v14["integrity"][key]
+                for key in preserved_integrity
+            ),
+            "lossless SKATE15 repack changed decoded map content",
+        )
+        runtime_v15 = subprocess.run(
+            [str(validator), str(repacked_path), "--compile-world"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        require(
+            runtime_v15.returncode == 0
+            and "dynamic_lighting_default=off" in runtime_v15.stdout,
+            "runtime rejected the lossless SKATE15 repack",
         )
 
     package = sample.read_bytes()
@@ -251,6 +306,14 @@ def main() -> int:
         repack_mobj(package, tag_offset, payload[:-1]),
         validator,
         "truncated physics record",
+    )
+
+    oversized_storage = bytearray(package)
+    struct.pack_into("<I", oversized_storage, tag_offset + 16, 0xFFFFFFFF)
+    expect_rejected(
+        bytes(oversized_storage),
+        validator,
+        "oversized stored payload",
     )
 
     glass_analysis = analyze_package(glass_sample)
@@ -320,8 +383,8 @@ def main() -> int:
 
     print(
         "BOX3D_PACKAGE_TEST_PASS "
-        "roots=11 dynamic=10 glass_shards=48 malformed_cases=7 "
-        "legacy_skate=12 legacy_skateobj=12"
+        "roots=11 dynamic=10 glass_shards=48 malformed_cases=8 "
+        "legacy_skate=12 legacy_skateobj=12 v15_repack=lossless"
     )
     return 0
 
