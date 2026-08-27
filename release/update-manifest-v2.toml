@@ -1,4 +1,4 @@
-# Reviewed public release consumed by the in-game updater.
+# Reviewed public release consumed by preview.17 and newer.
 # Package-Windows-Release.ps1 generates the replacement for each release.
 version = "0.1.0-preview.15"
 asset_url = "https://github.com/SK8-ENGINE/SK8-Engine/releases/download/v0.1.0-preview.15/Skate3CustomEngineLayer-0.1.0-preview.15-Windows.zip"

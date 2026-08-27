@@ -23,9 +23,13 @@ Before publishing a source or binary revision:
 5. Package with the script below and inspect the complete staged file list.
 6. Confirm `NOTICE.md`, `LICENSE-PROJECT.md`, `KNOWN_ISSUES.md`, and checksums
    are present in the archive.
-7. Upload the archive, then copy the generated `out/packages/update-manifest.toml`
-   to `release/update-manifest.toml` on the public default branch. Do not
-   advertise an asset until its uploaded size and SHA-256 match the manifest.
+7. Upload the archive, then copy the generated
+   `out/packages/update-manifest.toml` to
+   `release/update-manifest-v2.toml` on the public default branch. The legacy
+   `release/update-manifest.toml` is intentionally frozen at preview.15
+   because that updater crashes before it can install a newer executable. Do
+   not advertise an asset until its uploaded size and SHA-256 match the
+   current v2 manifest.
 
 ## Windows binary package
 
@@ -42,10 +46,12 @@ source files before staging it, so the release always contains the same
 self-contained GUI/exporter code as the repository.
 
 It also emits `update-manifest.toml` beside the archive. The in-game updater
-reads the reviewed copy under `release/` from the public default branch,
+in preview.17 and newer reads the reviewed
+`release/update-manifest-v2.toml` copy from the public default branch,
 downloads only GitHub-hosted assets, verifies the exact size and SHA-256, and
 then overlays release-owned files. It preserves `game`, `saves`,
-`settings.toml`, `active_map.txt`, and user-added map files.
+`settings.toml`, `active_map.txt`, and user-added map files. Preview.15 and
+preview.16 users need one manual install of preview.17.
 
 For the canonical research workspace's existing build directory:
 

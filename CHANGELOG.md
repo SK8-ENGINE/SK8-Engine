@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.1.0-preview.17 - 2026-08-27
+
+- Fixed the Windows release updater crashing with stack-overflow exception
+  `0xc00000fd` immediately after downloading an update. Archive hashing now
+  uses heap storage and has a worker-thread regression test against both a
+  deterministic fixture and the complete release archive.
+- Moved fixed clients to a v2 updater manifest while freezing the legacy
+  preview.15 channel. Preview.15 and preview.16 therefore require one manual
+  update to preview.17; future in-game updates work normally.
+- Rebuilt from the exact preview.17 tag so the executable reports the same
+  version as the archive and updater manifest.
+
 ## 0.1.0-preview.16 - 2026-08-27
 
 - Fixed severe host-only multiplayer lag beginning as soon as a Steam lobby

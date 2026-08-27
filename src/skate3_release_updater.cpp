@@ -17,7 +17,7 @@
 #include <rex/logging.h>
 #include <toml++/toml.hpp>
 
-#include "third_party/rexglue-sdk/thirdparty/crypto/sha256.h"
+#include "skate3_release_update_hash.h"
 
 #if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
@@ -35,7 +35,7 @@ namespace {
 
 constexpr std::string_view kDefaultManifestUrl =
     "https://raw.githubusercontent.com/SK8-ENGINE/"
-    "SK8-Engine/main/release/update-manifest.toml";
+    "SK8-Engine/main/release/update-manifest-v2.toml";
 constexpr std::uint64_t kMaximumManifestBytes = 64u * 1024u;
 constexpr std::uint64_t kMaximumReleaseBytes =
     2ull * 1024ull * 1024ull * 1024ull;
@@ -58,23 +58,6 @@ bool IsSha256(std::string_view value) {
   return value.size() == 64 &&
          std::all_of(value.begin(), value.end(),
                      [](unsigned char c) { return std::isxdigit(c) != 0; });
-}
-
-std::string Sha256OfFile(const std::filesystem::path &path) {
-  std::ifstream input(path, std::ios::binary);
-  if (!input) {
-    return {};
-  }
-  sha256::SHA256 hasher;
-  std::array<char, 1024 * 1024> buffer{};
-  while (input) {
-    input.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
-    const auto count = input.gcount();
-    if (count > 0) {
-      hasher.add(buffer.data(), static_cast<std::size_t>(count));
-    }
-  }
-  return input.eof() ? hasher.getHash() : std::string{};
 }
 
 std::optional<UpdateManifest> ParseManifest(std::string_view text,
@@ -664,7 +647,7 @@ private:
       SetFailure("The downloaded release has the wrong size.");
       return;
     }
-    if (Lower(Sha256OfFile(archive)) != manifest->sha256) {
+    if (Lower(release_update::Sha256OfFile(archive)) != manifest->sha256) {
       SetFailure("The downloaded release failed its SHA-256 integrity check.");
       return;
     }

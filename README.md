@@ -1,7 +1,7 @@
 # Skate 3 Custom Engine Layer
 
 > **New here?** Download the
-> **[current Windows release (preview.16)](https://github.com/SK8-ENGINE/SK8-Engine/releases/download/v0.1.0-preview.16/Skate3CustomEngineLayer-0.1.0-preview.16-Windows.zip)**
+> **[current Windows release (preview.17)](https://github.com/SK8-ENGINE/SK8-Engine/releases/download/v0.1.0-preview.17/Skate3CustomEngineLayer-0.1.0-preview.17-Windows.zip)**
 > and follow the [five-step setup guide](#download-and-first-start).
 > Do not download GitHub's automatic **Source code** zip.
 
@@ -24,8 +24,8 @@ render paths exist upstream, but the Custom Engine Layer has not been properly
 validated on Vulkan, Linux, or macOS yet.
 
 1. Download
-   [`Skate3CustomEngineLayer-0.1.0-preview.16-Windows.zip`](https://github.com/SK8-ENGINE/SK8-Engine/releases/download/v0.1.0-preview.16/Skate3CustomEngineLayer-0.1.0-preview.16-Windows.zip)
-   from the [preview.16 Releases page](https://github.com/SK8-ENGINE/SK8-Engine/releases/tag/v0.1.0-preview.16).
+   [`Skate3CustomEngineLayer-0.1.0-preview.17-Windows.zip`](https://github.com/SK8-ENGINE/SK8-Engine/releases/download/v0.1.0-preview.17/Skate3CustomEngineLayer-0.1.0-preview.17-Windows.zip)
+   from the [preview.17 Releases page](https://github.com/SK8-ENGINE/SK8-Engine/releases/tag/v0.1.0-preview.17).
    Do not download GitHub's automatic **Source code** zip.
 2. Extract the entire zip to a normal folder you control.
 3. Run `skate3.exe`.
@@ -69,6 +69,12 @@ Update Custom Engine Layer**. The verified release is installed after the
 game closes, while retail game data, saves, settings, and user maps are left
 in place. The downloaded release also refreshes the standalone Blender addon
 zip; users remain in control of installing it into Blender.
+
+Preview.15 and preview.16 require one manual update to preview.17 because
+their updater crashes while verifying a downloaded archive. Extract
+preview.17 over the existing installation with the game closed, preserving
+the existing `game`, `maps`, `saves`, and settings files. In-game updates work
+normally from preview.17 onward.
 
 ## Features at a glance
 
