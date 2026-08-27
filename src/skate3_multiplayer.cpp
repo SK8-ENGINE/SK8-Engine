@@ -73,7 +73,7 @@ REXCVAR_DEFINE_BOOL(
     "gameplay authority.")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 REXCVAR_DEFINE_BOOL(
-    skate3_multiplayer_replication_worker, false, "Skate 3",
+    skate3_multiplayer_replication_worker, true, "Skate 3",
     "Run the negotiated multiplayer transport, packet processing, send "
     "scheduling, reassembly, interpolation, and relevance work on a "
     "background replication worker. Local capture and prepared remote "

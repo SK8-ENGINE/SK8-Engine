@@ -54,6 +54,27 @@ $archivePath = [System.IO.Path]::GetFullPath(
 $addonBuildScript = Join-Path (
     Join-Path $repoRoot 'tools\blender_owned_map'
 ) 'Build-Addon.ps1'
+$defaultObjectCategories = @(
+    'Branded',
+    'DMO_Barriers',
+    'DMO_Bins',
+    'DMO_Boxes',
+    'DMO_Misc',
+    'DMO_Rails',
+    'DMO_Ramps',
+    'DMO_Tables',
+    'DownTown',
+    'Foliage',
+    'Hubbas',
+    'Mega',
+    'Misc',
+    'OTS',
+    'Plaza',
+    'PreMade',
+    'Rails',
+    'Street',
+    'Vert'
+)
 
 if (-not $stageRoot.StartsWith(
         $outputRoot + [System.IO.Path]::DirectorySeparatorChar,
@@ -130,6 +151,13 @@ if (Test-Path -LiteralPath $archivePath) {
 New-Item -ItemType Directory -Path $stageRoot -Force | Out-Null
 New-Item -ItemType Directory -Path (Join-Path $stageRoot 'maps') -Force |
     Out-Null
+$objectsRoot = Join-Path $stageRoot 'objects'
+New-Item -ItemType Directory -Path $objectsRoot -Force | Out-Null
+foreach ($category in $defaultObjectCategories) {
+    New-Item -ItemType Directory -Path (
+        Join-Path $objectsRoot $category
+    ) -Force | Out-Null
+}
 New-Item -ItemType Directory -Path (
     Join-Path $stageRoot 'Blender Map Tools'
 ) -Force | Out-Null
@@ -261,7 +289,7 @@ foreach ($directory in @('blender', 'schemas', 'tests', 'tools')) {
 $forbiddenExtensions = @(
     '.iso', '.xex', '.xexp', '.skate', '.blend', '.blend1', '.big',
     '.stfs', '.sav', '.log', '.dmp', '.png', '.jpg', '.jpeg', '.exr',
-    '.dds', '.pyc'
+    '.dds', '.pyc', '.skateobj'
 )
 $forbiddenNames = @(
     'default.xex', 'default.xexp', 'EAWebkit.xex', 'EAWebkit.xexp',
@@ -300,6 +328,25 @@ $checksums | Set-Content -LiteralPath (
 
 Compress-Archive -LiteralPath $stageRoot -DestinationPath $archivePath `
     -CompressionLevel Optimal
+
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+$archive = [System.IO.Compression.ZipFile]::OpenRead($archivePath)
+try {
+    $archiveEntries = [System.Collections.Generic.HashSet[string]]::new(
+        [StringComparer]::OrdinalIgnoreCase
+    )
+    foreach ($entry in $archive.Entries) {
+        [void]$archiveEntries.Add($entry.FullName)
+    }
+    foreach ($category in $defaultObjectCategories) {
+        $expectedEntry = "$archiveBase/objects/$category/"
+        if (-not $archiveEntries.Contains($expectedEntry)) {
+            throw "Release archive is missing object category: $category"
+        }
+    }
+} finally {
+    $archive.Dispose()
+}
 
 $archiveHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $archivePath).Hash
 $archiveSize = (Get-Item -LiteralPath $archivePath).Length

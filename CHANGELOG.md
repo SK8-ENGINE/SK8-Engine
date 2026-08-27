@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.1.0-preview.16 - 2026-08-27
+
+- Fixed severe host-only multiplayer lag beginning as soon as a Steam lobby
+  was created. Replication and Steam callback processing now use the existing
+  background worker by default, while lobby membership is cached and refreshed
+  on events with a bounded periodic fallback instead of being queried from the
+  renderer every frame.
+- Restored the release-facing `objects` library beside `maps` and
+  `skate3.exe`. Fresh packages include the established vanilla object category
+  folders, and **Build / repair defaults** extracts supported objects from the
+  user's installed game data directly into those categories.
+- Made every immediate `objects` subfolder a user-defined spawner category and
+  removed the obsolete AppData and special `Custom` folder assumptions.
+
 ## 0.1.0-preview.15 - 2026-08-27
 
 - Added lossless SKATE v15 packages with Zstandard-compressed sections,

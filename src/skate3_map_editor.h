@@ -12,8 +12,7 @@ namespace skate3::map_editor {
 void SetWindowHandle(void* window);
 void ConfigureObjectLibrary(
     std::filesystem::path game_data_root,
-    std::filesystem::path user_object_root,
-    std::filesystem::path legacy_object_root = {});
+    std::filesystem::path object_library_root);
 void Toggle();
 void SetActive(bool active);
 bool Active();

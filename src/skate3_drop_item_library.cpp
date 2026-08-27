@@ -33,11 +33,10 @@ bool Discover(
     return false;
   }
   std::error_code filesystem_error;
-  std::filesystem::create_directories(
-      root / kCustomCategory, filesystem_error);
+  std::filesystem::create_directories(root, filesystem_error);
   if (filesystem_error) {
     error =
-        "could not create the object library Custom folder: " +
+        "could not create the object library folder: " +
         filesystem_error.message();
     return false;
   }
@@ -97,13 +96,6 @@ bool Discover(
   std::sort(
       categories.begin(), categories.end(),
       [](const Category& left, const Category& right) {
-        const bool left_custom =
-            Fold(left.name) == Fold(kCustomCategory);
-        const bool right_custom =
-            Fold(right.name) == Fold(kCustomCategory);
-        if (left_custom != right_custom) {
-          return !left_custom;
-        }
         return Fold(left.name) < Fold(right.name);
       });
   return true;

@@ -30,6 +30,18 @@ refresh the list, choose a package, and select Load Selected Map.
 The session restarts automatically to load every map resource cleanly.
 The Maps tab can also open the exact folder in File Explorer.
 
+OBJECT LIBRARY
+--------------
+
+The included objects folder lives beside maps and skate3.exe. Its immediate
+subfolder names are the categories shown by the object spawner. Create any new
+subfolder to add your own category, then put .skateobj files directly inside.
+
+Press G during gameplay to open the map editor and E to open the object
+spawner. Select Build / repair defaults to extract the supported vanilla park
+objects from your own installed game files into their included category
+folders. No retail object files are included in this release.
+
 UPDATES
 -------
 

@@ -79,14 +79,16 @@ AppID and follow Valve's setup and redistributable requirements.
   packet whose claimed role does not match its Steam lobby member.
 - The fallback backend uses non-blocking localhost UDP with the same packets,
   roles, interpolation, and full-fidelity routing.
-- The visual-check launcher enables the first protocol-v11-compatible
-  replication worker. The render thread publishes its newest immutable local
-  capture through a latest-wins mailbox and consumes immutable prepared remote
-  presentations; transport polling, validation, reassembly, send scheduling,
-  interpolation, recipient fan-out, and network telemetry run on the worker.
+- The protocol-v11-compatible replication worker is enabled by default. The
+  render thread publishes its newest immutable local capture through a
+  latest-wins mailbox and consumes immutable prepared remote presentations;
+  Steam callback processing, transport polling, validation, reassembly, send
+  scheduling, interpolation, recipient fan-out, and network telemetry run on
+  the worker. Steam lobby membership is cached, refreshed immediately when
+  membership changes, and polled only as a bounded fallback rather than from
+  the renderer every frame.
   One-shot peer retirements accumulate until consumed rather than being overwritten by
-  a newer presentation. The worker remains disabled by default outside this
-  controlled validation path.
+  a newer presentation.
 - Installed remote appearances now retain their weighted palette-row masks,
   canonical remaps, board-piece classification, and validated animation-track
   ordinals. Steady rendering no longer rescans every clothing mesh's packed

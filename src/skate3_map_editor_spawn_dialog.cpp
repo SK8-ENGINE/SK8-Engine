@@ -109,14 +109,14 @@ void MapEditorSpawnDialog::OnDraw(ImGuiIO& io) {
     }
   }
   ImGui::TextDisabled(
-      "Generated assets stay in local user data. Put personal "
-      ".skateobj files in objects/Custom.");
+      "Objects stay in the objects folder beside maps. Each "
+      "subfolder name is a category.");
   ImGui::Separator();
 
   if (entries.empty()) {
     ImGui::TextWrapped(
         "No valid .skateobj files are available yet. Build the default "
-        "library above or add files to the Custom folder.");
+        "library above or add files to any category folder.");
   } else {
     ImGui::SetNextItemWidth(-62.0f);
     ImGui::InputTextWithHint(

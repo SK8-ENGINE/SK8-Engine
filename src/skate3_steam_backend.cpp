@@ -58,6 +58,7 @@ constexpr std::string_view kSteamRuntimeDllSha256 =
     "eb17909a76668cf9ae0b92a618a34a50f6c73d3a6787cb4dd8ce36a8b10bfb75";
 constexpr auto kServiceCheckInterval = std::chrono::seconds(1);
 constexpr auto kAvailabilityMonitorInterval = std::chrono::seconds(1);
+constexpr auto kLobbyMembershipRefreshInterval = std::chrono::seconds(1);
 constexpr std::string_view kUnavailableStatus =
     "Start Steam to use multiplayer.";
 
@@ -270,6 +271,8 @@ struct Runtime {
   availability::Tracker availability;
   availability::CheckGate availability_checks;
   std::chrono::steady_clock::time_point service_check_after{};
+  std::chrono::steady_clock::time_point membership_refresh_after{};
+  std::vector<Peer> lobby_peers;
 };
 
 std::mutex g_mutex;
@@ -649,7 +652,7 @@ int SteamLobbyType(std::uint32_t privacy) {
   }
 }
 
-std::vector<Peer> LobbyPeersLocked(Runtime& runtime) {
+std::vector<Peer> QueryLobbyPeersLocked(Runtime& runtime) {
   std::vector<Peer> peers;
   if (!runtime.state.in_lobby || runtime.state.lobby_id == 0) {
     return peers;
@@ -742,6 +745,8 @@ void UpdateLobbyMembership(Runtime& runtime) {
     runtime.state.lobby_map_name.clear();
     runtime.state.lobby_players = 0;
     runtime.state.lobby_max_players = 0;
+    runtime.membership_refresh_after = {};
+    runtime.lobby_peers.clear();
     return;
   }
   runtime.state.host_steam_id =
@@ -760,13 +765,16 @@ void UpdateLobbyMembership(Runtime& runtime) {
                0));
   runtime.state.lobby_max_players =
       ParseU32(LobbyData(runtime, runtime.state.lobby_id, "max_players"), 8);
+  runtime.lobby_peers = QueryLobbyPeersLocked(runtime);
   runtime.state.local_role = 0;
-  for (const Peer& peer : LobbyPeersLocked(runtime)) {
+  for (const Peer& peer : runtime.lobby_peers) {
     if (peer.steam_id == runtime.state.local_steam_id) {
       runtime.state.local_role = peer.role;
       break;
     }
   }
+  runtime.membership_refresh_after =
+      std::chrono::steady_clock::now() + kLobbyMembershipRefreshInterval;
 }
 
 void PopulateLobbyList(Runtime& runtime, std::uint32_t count) {
@@ -1199,7 +1207,7 @@ void TickLocked(Runtime& runtime, bool allow_initialize) {
     runtime.api.manual_free_last(runtime.pipe);
     message = {};
   }
-  if (runtime.state.in_lobby) {
+  if (runtime.state.in_lobby && now >= runtime.membership_refresh_after) {
     UpdateLobbyMembership(runtime);
   }
 }
@@ -1402,6 +1410,8 @@ void LeaveLobby() {
   g_runtime.state.lobby_map_name.clear();
   g_runtime.state.lobby_players = 0;
   g_runtime.state.lobby_max_players = 0;
+  g_runtime.membership_refresh_after = {};
+  g_runtime.lobby_peers.clear();
   g_runtime.state.status = g_runtime.state.initialized
                                ? "Steam connected; not in a lobby."
                                : g_runtime.state.status;
@@ -1446,7 +1456,7 @@ std::uint64_t HostSteamId() {
 
 std::vector<Peer> LobbyPeers() {
   std::scoped_lock lock(g_mutex);
-  return LobbyPeersLocked(g_runtime);
+  return g_runtime.lobby_peers;
 }
 
 bool SendPacketToPeer(std::uint64_t steam_id, const void* bytes,
@@ -1512,7 +1522,7 @@ std::vector<PeerTransportStatus> PeerTransportStatuses() {
       g_runtime.api.get_session_connection_info == nullptr) {
     return result;
   }
-  const auto peers = LobbyPeersLocked(g_runtime);
+  const auto& peers = g_runtime.lobby_peers;
   result.reserve(peers.size());
   for (const Peer& peer : peers) {
     if (peer.steam_id == 0 ||

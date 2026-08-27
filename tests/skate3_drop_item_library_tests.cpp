@@ -21,18 +21,26 @@ bool Touch(const std::filesystem::path& path) {
 }
 
 bool TestDiscovery(const std::filesystem::path& root) {
+  std::vector<skate3::drop_item_library::Category> categories;
+  std::string discovery_error;
+  if (!skate3::drop_item_library::Discover(
+          root, categories, discovery_error) ||
+      !std::filesystem::is_directory(root) || !categories.empty()) {
+    std::cerr << discovery_error << '\n';
+    return false;
+  }
   std::error_code error;
   std::filesystem::create_directories(root / "Rails", error);
   std::filesystem::create_directories(root / "Plaza" / "Nested", error);
+  std::filesystem::create_directories(root / "My Category", error);
   if (error ||
       !Touch(root / "Rails" / "rail_a.skateobj") ||
       !Touch(root / "Rails" / "rail_b.SKATEOBJ") ||
+      !Touch(root / "My Category" / "personal.skateobj") ||
       !Touch(root / "Plaza" / "not-an-object.txt") ||
       !Touch(root / "Plaza" / "Nested" / "ignored.skateobj")) {
     return false;
   }
-  std::vector<skate3::drop_item_library::Category> categories;
-  std::string discovery_error;
   if (!skate3::drop_item_library::Discover(
           root, categories, discovery_error)) {
     std::cerr << discovery_error << '\n';
@@ -43,10 +51,10 @@ bool TestDiscovery(const std::filesystem::path& root) {
       [](const auto& category) {
         return category.name == "Rails";
       });
-  const auto custom = std::find_if(
+  const auto personal = std::find_if(
       categories.begin(), categories.end(),
       [](const auto& category) {
-        return category.name == "Custom";
+        return category.name == "My Category";
       });
   const auto plaza = std::find_if(
       categories.begin(), categories.end(),
@@ -54,9 +62,10 @@ bool TestDiscovery(const std::filesystem::path& root) {
         return category.name == "Plaza";
       });
   return rails != categories.end() && rails->files.size() == 2 &&
-         custom != categories.end() && custom->files.empty() &&
+         personal != categories.end() && personal->files.size() == 1 &&
          plaza != categories.end() && plaza->files.empty() &&
-         categories.back().name == "Custom";
+         categories.size() == 3 &&
+         categories.front().name == "My Category";
 }
 
 bool TestRecipeParser() {
@@ -197,7 +206,7 @@ bool TestPackageRoundTrip(const std::filesystem::path& root) {
   object.grind_rail_indices = {0};
   asset.objects.push_back(std::move(object));
   const std::filesystem::path output =
-      root / "objects" / "Custom" / "round-trip.skateobj";
+      root / "objects" / "My Category" / "round-trip.skateobj";
   try {
     skate::world::SaveSkateObjectPackage(output, asset);
     const auto loaded =
@@ -286,9 +295,6 @@ int main(int argc, char** argv) {
     }
     std::size_t checked_assets = 0;
     for (const auto& category : categories) {
-      if (category.name == "Custom") {
-        continue;
-      }
       for (const auto& entry : category.files) {
         const std::filesystem::path& file = entry.path;
         const auto asset =

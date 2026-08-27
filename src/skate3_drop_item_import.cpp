@@ -2188,7 +2188,7 @@ Result ImportDefaults(
 
   std::error_code filesystem_error;
   std::filesystem::create_directories(
-      object_library_root / "Custom", filesystem_error);
+      object_library_root, filesystem_error);
   if (filesystem_error) {
     result.errors.push_back(
         "Could not create the local object library: " +
@@ -2197,7 +2197,6 @@ Result ImportDefaults(
     Report(callback, progress);
     return result;
   }
-
   const auto import_recipe =
       [&](const Recipe& recipe, const AssetIndex& index) {
         for (const Item& item : recipe.items) {

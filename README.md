@@ -1,7 +1,7 @@
 # Skate 3 Custom Engine Layer
 
 > **New here?** Download the
-> **[current Windows release (preview.15)](https://github.com/SK8-ENGINE/SK8-Engine/releases/download/v0.1.0-preview.15/Skate3CustomEngineLayer-0.1.0-preview.15-Windows.zip)**
+> **[current Windows release (preview.16)](https://github.com/SK8-ENGINE/SK8-Engine/releases/download/v0.1.0-preview.16/Skate3CustomEngineLayer-0.1.0-preview.16-Windows.zip)**
 > and follow the [five-step setup guide](#download-and-first-start).
 > Do not download GitHub's automatic **Source code** zip.
 
@@ -24,8 +24,8 @@ render paths exist upstream, but the Custom Engine Layer has not been properly
 validated on Vulkan, Linux, or macOS yet.
 
 1. Download
-   [`Skate3CustomEngineLayer-0.1.0-preview.15-Windows.zip`](https://github.com/SK8-ENGINE/SK8-Engine/releases/download/v0.1.0-preview.15/Skate3CustomEngineLayer-0.1.0-preview.15-Windows.zip)
-   from the [preview.15 Releases page](https://github.com/SK8-ENGINE/SK8-Engine/releases/tag/v0.1.0-preview.15).
+   [`Skate3CustomEngineLayer-0.1.0-preview.16-Windows.zip`](https://github.com/SK8-ENGINE/SK8-Engine/releases/download/v0.1.0-preview.16/Skate3CustomEngineLayer-0.1.0-preview.16-Windows.zip)
+   from the [preview.16 Releases page](https://github.com/SK8-ENGINE/SK8-Engine/releases/tag/v0.1.0-preview.16).
    Do not download GitHub's automatic **Source code** zip.
 2. Extract the entire zip to a normal folder you control.
 3. Run `skate3.exe`.
@@ -281,17 +281,19 @@ Ctrl for slow movement. LMB selects an authored map object; drag a coloured
 world-space axis arrow to move it, or drag one of the three rings to rotate it. Releasing LMB
 commits the pose. The selected object has a subtle cyan outer contour. The
 E key opens the spawn-object list, which groups `.skateobj` files in the
-current user's object library by their immediate parent folder. Use
+`objects` folder beside `skate3.exe` and `maps` by their immediate parent
+folder. Use
 **Build defaults from installed Skate 3** on first setup to convert the
 supported built-in drop items from your own local `game/data/content/parkassets.big`.
 The converter takes the category names and item membership from Skate 3's
 retail park-asset recipes, writes the resulting files only to the current
-user's object library, and can safely be rerun to reuse valid packages or
+installation's `objects` folder, and can safely be rerun to reuse valid packages or
 repair incomplete ones. No extracted game asset is bundled with the editor.
 Non-model recipe helpers such as teleport and spawner markers are reported
-as unsupported rather than emitted as unusable objects. Put personal files in
-the separate `Custom` folder; a file's folder is its category and the
-`.skateobj` format is unchanged. The list's **Refresh objects** button rescans
+as unsupported rather than emitted as unusable objects. Every immediate
+subfolder of `objects` is a category, so users can add any category simply by
+creating and naming a folder. The `.skateobj` format is unchanged. The
+list's **Refresh objects** button rescans
 all category folders without restarting;
 select an entry and click **Spawn selected** or press Enter to place it on the
 surface under the camera aim. Spawned render geometry, collision, and attached

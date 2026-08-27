@@ -55,7 +55,6 @@ std::vector<skate::world::SkateObjectAsset> g_spawn_assets;
 std::vector<SpawnObjectEntry> g_spawn_entries;
 std::filesystem::path g_game_data_root;
 std::filesystem::path g_object_library_root;
-std::filesystem::path g_legacy_object_library_root;
 bool g_spawn_assets_scanned = false;
 std::atomic<std::size_t> g_spawn_asset_count{0};
 std::atomic<bool> g_spawn_menu_visible{false};
@@ -138,29 +137,6 @@ void LoadSpawnAssetsLocked(bool force_refresh = false) {
         "map-editor: object library discovery failed root='{}': {}",
         g_object_library_root.string(), discovery_error);
     return;
-  }
-  if (!g_legacy_object_library_root.empty() &&
-      g_legacy_object_library_root != g_object_library_root) {
-    std::error_code legacy_error;
-    if (std::filesystem::is_directory(
-            g_legacy_object_library_root, legacy_error)) {
-      auto custom = std::find_if(
-          categories.begin(), categories.end(),
-          [](const drop_item_library::Category& category) {
-            return category.name == drop_item_library::kCustomCategory;
-          });
-      if (custom != categories.end()) {
-        for (const auto& entry :
-             std::filesystem::directory_iterator(
-                 g_legacy_object_library_root, legacy_error)) {
-          if (!legacy_error && entry.is_regular_file() &&
-              entry.path().extension() == ".skateobj") {
-            custom->files.push_back(
-                {drop_item_library::kCustomCategory, entry.path()});
-          }
-        }
-      }
-    }
   }
   for (const drop_item_library::Category& category : categories) {
     for (const drop_item_library::File& file : category.files) {
@@ -282,12 +258,10 @@ void SetWindowHandle(void* window) {
 
 void ConfigureObjectLibrary(
     std::filesystem::path game_data_root,
-    std::filesystem::path user_object_root,
-    std::filesystem::path legacy_object_root) {
+    std::filesystem::path object_library_root) {
   std::scoped_lock lock(g_mutex);
   g_game_data_root = std::move(game_data_root);
-  g_object_library_root = std::move(user_object_root);
-  g_legacy_object_library_root = std::move(legacy_object_root);
+  g_object_library_root = std::move(object_library_root);
   g_spawn_assets_scanned = false;
 }
 
@@ -408,7 +382,7 @@ bool StartDefaultLibraryImport() {
     std::scoped_lock lock(g_import_mutex);
     g_import_status.state = DefaultLibraryState::Failed;
     g_import_status.message =
-        "The editor's game-data or user-data path is not configured.";
+        "The editor's game-data or objects path is not configured.";
     g_import_status.errors = {g_import_status.message};
     return false;
   }
