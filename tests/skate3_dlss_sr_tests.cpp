@@ -31,6 +31,8 @@ void SettingsAndQualityMapping() {
   assert(ToSdkQuality(Mode::kBalanced) == SdkQuality::kBalanced);
   assert(ToSdkQuality(Mode::kPerformance) == SdkQuality::kMaxPerformance);
   assert(ToSdkQuality(Mode::kDlaa) == SdkQuality::kDlaa);
+  assert(ReasonText(UnavailableReason::kIdentity) ==
+         "DLSS application or custom-engine project identity is missing");
 }
 
 void RenderSizeUsesTheSdk() {

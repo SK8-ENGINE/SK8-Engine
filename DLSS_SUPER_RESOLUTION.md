@@ -73,20 +73,23 @@ libraries, symbols, and SDK tools are excluded.
 
 ## NVIDIA identity and release requirements
 
-Local development uses Streamline's documented custom-engine path with
-application ID `0`, a real engine name/version, and no invented project GUID.
-An NVIDIA-issued numeric application ID and project GUID can be supplied at
-configure time with `SKATE3_NVIDIA_APPLICATION_ID` and
-`SKATE3_NVIDIA_PROJECT_ID`.
+SK8 Engine uses NVIDIA NGX's documented `ProjectDesc` path for custom engines
+that have not received an NVIDIA application ID. The application ID remains
+`0`; the engine supplies its name/version and the stable engine-owned project
+ID `2dbb17e3-cfcb-5063-9d5f-e5247d36d3f2`. That UUID is deterministically
+derived with UUIDv5 from the canonical project URL
+`https://github.com/SK8-ENGINE/SK8-Engine`, so it identifies this engine and is
+not represented as an NVIDIA-issued ID. The official NGX definitions direct
+engines without an ID from an NVIDIA contact to use `ProjectDesc` with
+`NVSDK_NGX_ENGINE_TYPE_CUSTOM`.
 
-The Streamline core preferences document the custom engine plus engine-version
-identity as an alternative when an application ID is not supplied. However,
-the Streamline DLSS guide separately states that an NVIDIA-provided application
-ID is required for NGX components such as DLSS. The unregistered `0` value is
-therefore suitable only for checking the integration's graceful local failure
-path; real RTX image-quality validation and any public DLSS-enabled release
-require an ID issued by NVIDIA. This project never substitutes the SDK
-sample's ID or invents one.
+An NVIDIA-issued numeric application ID can still be supplied at configure
+time with `SKATE3_NVIDIA_APPLICATION_ID`. The project identity can be
+overridden with `SKATE3_NVIDIA_PROJECT_ID`, but it must not be empty when the
+application ID is `0`. This project never substitutes NVIDIA's SDK sample ID.
+An NVIDIA-issued application ID is therefore not required for this documented
+custom-engine validation path; NVIDIA coordination may still provide one for
+an application-specific release or service configuration.
 
 Before a public or commercial DLSS-enabled release, the distributor must also
 coordinate with NVIDIA, satisfy the DLSS object-code redistribution terms
@@ -96,4 +99,5 @@ NVIDIA as required by that license.
 See the official
 [Streamline programming guide](https://github.com/NVIDIA-RTX/Streamline/blob/v2.12.0/docs/ProgrammingGuide.md),
 [DLSS programming guide](https://github.com/NVIDIA-RTX/Streamline/blob/v2.12.0/docs/ProgrammingGuideDLSS.md),
+[NGX project-description definitions](https://github.com/NVIDIA/DLSS/blob/main/include/nvsdk_ngx_defs.h),
 and [DLSS license](https://github.com/NVIDIA/DLSS/blob/main/LICENSE.txt).

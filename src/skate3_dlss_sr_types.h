@@ -107,6 +107,7 @@ enum class UnavailableReason : std::uint8_t {
   kBackend,
   kMissingInterposer,
   kMissingPlugin,
+  kIdentity,
   kInitialization,
   kNonNvidia,
   kUnsupportedGpu,
@@ -131,6 +132,8 @@ constexpr std::string_view ReasonText(UnavailableReason reason) {
     return "Streamline interposer is absent";
   case UnavailableReason::kMissingPlugin:
     return "DLSS Super Resolution plugin is absent";
+  case UnavailableReason::kIdentity:
+    return "DLSS application or custom-engine project identity is missing";
   case UnavailableReason::kInitialization:
     return "Streamline initialization failed";
   case UnavailableReason::kNonNvidia:

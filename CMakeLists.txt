@@ -103,13 +103,19 @@ option(SKATE3_ENABLE_DLSS_SR
     OFF)
 set(SKATE3_STREAMLINE_SDK_ROOT "" CACHE PATH
     "Path to the official NVIDIA Streamline SDK 2.12.0 root")
-set(SKATE3_NVIDIA_PROJECT_ID "" CACHE STRING
-    "Optional NVIDIA-issued project GUID; empty uses Streamline's documented custom-engine development path")
+set(SKATE3_NVIDIA_PROJECT_ID "2dbb17e3-cfcb-5063-9d5f-e5247d36d3f2" CACHE STRING
+    "Stable SK8 Engine-owned NGX Project ID for NVIDIA's custom-engine ProjectDesc path")
 set(SKATE3_NVIDIA_APPLICATION_ID "0" CACHE STRING
-    "NVIDIA-issued numeric DLSS application ID; 0 keeps local development unregistered")
+    "Optional NVIDIA-issued numeric DLSS application ID; 0 uses the custom-engine ProjectDesc path")
 if(NOT SKATE3_NVIDIA_APPLICATION_ID MATCHES "^[0-9]+$")
     message(FATAL_ERROR
         "SKATE3_NVIDIA_APPLICATION_ID must be an NVIDIA-issued numeric ID or 0")
+endif()
+if(SKATE3_ENABLE_DLSS_SR AND
+   SKATE3_NVIDIA_PROJECT_ID STREQUAL "" AND
+   SKATE3_NVIDIA_APPLICATION_ID STREQUAL "0")
+    message(FATAL_ERROR
+        "DLSS requires SKATE3_NVIDIA_PROJECT_ID for the custom-engine ProjectDesc path when SKATE3_NVIDIA_APPLICATION_ID is 0")
 endif()
 
 if(SKATE3_ENABLE_DLSS_SR)

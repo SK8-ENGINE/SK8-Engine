@@ -203,6 +203,12 @@ void InitializeEarly(const std::filesystem::path &log_directory) {
   }
   const std::filesystem::path directory =
       std::filesystem::path(executable).parent_path();
+  constexpr const char *project_id = SKATE3_NVIDIA_PROJECT_ID;
+  if (SKATE3_NVIDIA_APPLICATION_ID == 0 && project_id[0] == '\0') {
+    g_status.unavailable_reason = UnavailableReason::kIdentity;
+    PublishStatusLocked();
+    return;
+  }
   for (const wchar_t *name : {L"sl.interposer.dll", L"sl.common.dll",
                               L"sl.dlss.dll", L"nvngx_dlss.dll"}) {
     if (!std::filesystem::exists(directory / name)) {
@@ -254,7 +260,6 @@ void InitializeEarly(const std::filesystem::path &log_directory) {
   preferences.numFeaturesToLoad = 1;
   preferences.engine = sl::EngineType::eCustom;
   preferences.engineVersion = SKATE3_DLSS_ENGINE_VERSION;
-  constexpr const char *project_id = SKATE3_NVIDIA_PROJECT_ID;
   preferences.projectId = project_id[0] != '\0' ? project_id : nullptr;
   preferences.applicationId = SKATE3_NVIDIA_APPLICATION_ID;
   preferences.renderAPI = sl::RenderAPI::eD3D12;
@@ -270,7 +275,7 @@ void InitializeEarly(const std::filesystem::path &log_directory) {
   REXLOG_INFO("DLSS SR: Streamline 2.12.0 initialized (D3D12, custom-engine "
               "identity, application-id={}, project-id={})",
               preferences.applicationId,
-              project_id[0] != '\0' ? "NVIDIA-issued" : "not supplied");
+              project_id[0] != '\0' ? "SK8 Engine-owned" : "not supplied");
 #endif
   PublishStatusLocked();
 }
