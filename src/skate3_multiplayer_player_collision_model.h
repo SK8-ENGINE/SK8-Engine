@@ -11,9 +11,10 @@
 
 namespace skate3::multiplayer::player_collision {
 
-// Match the established project-owned player capsule. Skate 3 map and board
-// transforms use metres, with Y as the vertical axis.
-inline constexpr float kPlayerProxyRadius = 0.52f;
+// Skate 3 map and board transforms use metres, with Y as the vertical axis.
+// A 30 cm body radius keeps shoulder-to-shoulder contact close to the rendered
+// skater instead of giving each player a metre-wide personal space bubble.
+inline constexpr float kPlayerProxyRadius = 0.30f;
 inline constexpr float kPlayerProxyLowerCenter = -0.20f;
 inline constexpr float kPlayerProxyUpperCenter = 1.25f;
 
@@ -27,10 +28,10 @@ inline constexpr std::uint64_t kOverlapGraceUs = 350'000;
 inline constexpr float kTeleportDistance = 3.0f;
 inline constexpr float kContactSlop = 0.02f;
 inline constexpr float kMaximumRemoteSpeed = 20.0f;
-inline constexpr float kMaximumCorrectionSpeed = 6.0f;
-inline constexpr float kMaximumTotalCorrectionSpeed = 8.0f;
-inline constexpr float kGraceCorrectionSpeed = 0.75f;
-inline constexpr float kMaximumEquivalentImpulse = 450.0f;
+inline constexpr float kMaximumCorrectionSpeed = 2.0f;
+inline constexpr float kMaximumTotalCorrectionSpeed = 3.0f;
+inline constexpr float kGraceCorrectionSpeed = 0.40f;
+inline constexpr float kMaximumEquivalentImpulse = 300.0f;
 inline constexpr float kFacingTestSpawnSpacing = 8.0f;
 
 enum class DisabledReason : std::uint8_t {
@@ -357,9 +358,9 @@ public:
           grace ? kGraceCorrectionSpeed : kMaximumCorrectionSpeed;
       const float contact_limit = speed_limit * step_seconds;
       const float velocity_response =
-          grace ? 0.0f : closing_speed * step_seconds * 0.35f;
+          grace ? 0.0f : closing_speed * step_seconds * 0.12f;
       float correction =
-          std::min(penetration * 0.55f + velocity_response, contact_limit);
+          std::min(penetration * 0.30f + velocity_response, contact_limit);
 
       const float used_total =
           std::sqrt(result.correction[0] * result.correction[0] +

@@ -189,6 +189,14 @@ void MaybeLog(std::uint64_t now_us) {
   return true;
 }
 
+void StoreProcessedTransform(std::uint8_t *base, std::uint32_t transform,
+                             const std::array<float, 16> &matrix) {
+  for (std::uint32_t component = 0; component < matrix.size(); ++component) {
+    REX_STORE_U32(transform + component * sizeof(float),
+                  std::bit_cast<std::uint32_t>(matrix[component]));
+  }
+}
+
 } // namespace
 
 void PublishRemotePresentation(const char *map_name,
@@ -339,9 +347,15 @@ void ApplyAfterPhysOut(PPCContext &ctx, std::uint8_t *base,
           Disable(DisabledReason::kGuestStateInvalid);
           return;
         }
+        // Skate alternates between two ProcessedPhysIn board transforms. If
+        // only the active one is seeded, the next state swap restores the old
+        // heading even though the rigid-body translation remains separated.
+        const std::uint32_t alternate_transform =
+            processed_phys_in + (transform_state == 3 ? 192u : 112u);
+        StoreProcessedTransform(base, alternate_transform, placement.transform);
         g_facing_test_spawn.applied = true;
         REXLOG_INFO("multiplayer-player-collision: facing-test-spawn role={} "
-                    "spacing={:.1f}m session={} map={:08X}",
+                    "spacing={:.1f}m buffers=2 session={} map={:08X}",
                     presentation.local_role, kFacingTestSpawnSpacing,
                     presentation.local_session, presentation.map_hash);
         return;

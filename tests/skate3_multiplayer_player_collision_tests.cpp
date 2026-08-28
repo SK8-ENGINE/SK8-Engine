@@ -64,7 +64,7 @@ LocalSample Local(float x, float y, float z, std::uint64_t observed_at_us,
 }
 
 void TestDimensionsAndCollisionLayers() {
-  ExpectNear(kPlayerProxyRadius, 0.52f, 1.0e-6f,
+  ExpectNear(kPlayerProxyRadius, 0.30f, 1.0e-6f,
              "player capsule radius drifted from the project scale");
   ExpectNear(kPlayerProxyLowerCenter, -0.20f, 1.0e-6f,
              "player capsule lower centre drifted from the project scale");
@@ -72,6 +72,12 @@ void TestDimensionsAndCollisionLayers() {
              "player capsule upper centre drifted from the project scale");
   Expect(kPlayerProxyUpperCenter > kPlayerProxyLowerCenter,
          "player capsule segment is inverted");
+  ExpectNear(kPlayerProxyUpperCenter - kPlayerProxyLowerCenter +
+                 kPlayerProxyRadius * 2.0f,
+             2.05f, 1.0e-6f,
+             "player capsule no longer matches standing skater height");
+  ExpectNear(kPlayerProxyRadius * 2.0f, 0.60f, 1.0e-6f,
+             "player capsule is wider than the rendered body");
   Expect(LayersCollide(kLocalPlayerLayer, kLocalPlayerMask, kRemotePlayerLayer,
                        kRemotePlayerMask),
          "local and remote player masks do not collide");
