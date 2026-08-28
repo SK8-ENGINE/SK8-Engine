@@ -23,6 +23,10 @@ The package must contain only the pinned production DLSS runtime and its
 notices. See DLSS_SUPER_RESOLUTION.md for exact versions, checksums, licensing,
 and the NVIDIA coordination required before public distribution.
 
+Private Streamline 2.13 / DLSS Neural Rendering preview binaries are never
+included in this archive. Their supplied bundle lacks complete redistribution
+terms. See DLSS_NEURAL_RENDERING_PREVIEW.md in the source tree.
+
 FIRST START
 -----------
 

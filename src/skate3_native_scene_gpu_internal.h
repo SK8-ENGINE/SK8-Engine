@@ -512,6 +512,9 @@ struct RendererState {
   nrhi::Texture* dlss_motion = nullptr;
   nrhi::Texture* dlss_output = nullptr;
   nrhi::TextureView* dlss_output_srv = nullptr;
+  // Optional Streamline 2.13 feature 1004 output. DLSS SR's output is its
+  // input, so these must remain distinct resources.
+  nrhi::Texture* dlss_nr_output = nullptr;
   uint32_t dlss_render_width = 0;
   uint32_t dlss_render_height = 0;
   uint32_t dlss_output_width = 0;

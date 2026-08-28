@@ -72,6 +72,7 @@ steam_api64.dll
 /Run-University-*.bat
 /Run-MapEditorVisualCheck.bat
 /Run-University*PerformanceCheck.bat
+/Run-DLSS5-VisualCheck.bat
 
 # Editor and CMake scratch
 /.vs/

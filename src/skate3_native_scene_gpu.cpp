@@ -297,6 +297,7 @@ struct DlssEvaluatePayload {
   ID3D12Resource* depth = nullptr;
   ID3D12Resource* motion = nullptr;
   ID3D12Resource* output = nullptr;
+  ID3D12Resource* neural_output = nullptr;
   skate3::dlss::RenderSize render{};
   skate3::dlss::RenderSize output_size{};
   skate3::dlss::CameraData camera{};
@@ -314,8 +315,43 @@ void ExecuteDlssEvaluate(ID3D12GraphicsCommandList* command_list,
   const skate3::dlss::TaggedResources resources{
       evaluation.color, evaluation.depth, evaluation.motion, evaluation.output,
       evaluation.render, evaluation.output_size};
-  skate3::dlss::Evaluate(command_list, resources, evaluation.camera,
-                         evaluation.plan);
+  if (!skate3::dlss::Evaluate(command_list, resources, evaluation.camera,
+                              evaluation.plan) ||
+      evaluation.neural_output == nullptr) {
+    return;
+  }
+  const skate3::dlss::NeuralTaggedResources neural_resources{
+      evaluation.output, evaluation.depth, evaluation.motion,
+      evaluation.neural_output, evaluation.render, evaluation.output_size};
+  if (!skate3::dlss::EvaluateNeuralRendering(
+          command_list, neural_resources, evaluation.plan)) {
+    return;
+  }
+
+  // Keep the rest of the renderer on the established DLSS SR output
+  // resource. A failed neural pass leaves that SR image untouched.
+  D3D12_RESOURCE_BARRIER barriers[2]{};
+  barriers[0].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+  barriers[0].Transition.pResource = evaluation.neural_output;
+  barriers[0].Transition.Subresource =
+      D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+  barriers[0].Transition.StateBefore =
+      D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+  barriers[0].Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+  barriers[1].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+  barriers[1].Transition.pResource = evaluation.output;
+  barriers[1].Transition.Subresource =
+      D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+  barriers[1].Transition.StateBefore =
+      D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+  barriers[1].Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
+  command_list->ResourceBarrier(2, barriers);
+  command_list->CopyResource(evaluation.output, evaluation.neural_output);
+  std::swap(barriers[0].Transition.StateBefore,
+            barriers[0].Transition.StateAfter);
+  std::swap(barriers[1].Transition.StateBefore,
+            barriers[1].Transition.StateAfter);
+  command_list->ResourceBarrier(2, barriers);
 }
 #endif
 
@@ -4974,9 +5010,15 @@ bool EnsureOutputSizedTargets(const NativeGuestOutputRenderContext& context) {
 
 bool EnsureDlssTargets(const NativeGuestOutputRenderContext& context,
                        uint32_t output_width, uint32_t output_height) {
+  bool neural_requested = false;
+#if SKATE3_ENABLE_DLSS_NR_PREVIEW
+  neural_requested =
+      g_r.dlss_active &&
+      skate3::dlss::RequestedNeuralSettings().enabled;
+#endif
   if (!g_r.dlss_active) {
     for (nrhi::Texture** texture :
-         {&g_r.dlss_motion, &g_r.dlss_output}) {
+         {&g_r.dlss_motion, &g_r.dlss_output, &g_r.dlss_nr_output}) {
       if (*texture != nullptr) {
         context.device->DestroyDeferred(*texture);
         *texture = nullptr;
@@ -4990,9 +5032,14 @@ bool EnsureDlssTargets(const NativeGuestOutputRenderContext& context,
     g_r.dlss_output_width = g_r.dlss_output_height = 0;
     return true;
   }
+  if (!neural_requested && g_r.dlss_nr_output != nullptr) {
+    context.device->DestroyDeferred(g_r.dlss_nr_output);
+    g_r.dlss_nr_output = nullptr;
+  }
   const bool rebuild =
       g_r.dlss_motion == nullptr || g_r.dlss_output == nullptr ||
       g_r.dlss_output_srv == nullptr ||
+      (neural_requested && g_r.dlss_nr_output == nullptr) ||
       g_r.dlss_render_width != context.guest_output_width ||
       g_r.dlss_render_height != context.guest_output_height ||
       g_r.dlss_output_width != output_width ||
@@ -5004,7 +5051,8 @@ bool EnsureDlssTargets(const NativeGuestOutputRenderContext& context,
     context.device->DestroyDeferred(g_r.dlss_output_srv);
     g_r.dlss_output_srv = nullptr;
   }
-  for (nrhi::Texture** texture : {&g_r.dlss_motion, &g_r.dlss_output}) {
+  for (nrhi::Texture** texture :
+       {&g_r.dlss_motion, &g_r.dlss_output, &g_r.dlss_nr_output}) {
     if (*texture != nullptr) {
       context.device->DestroyDeferred(*texture);
       *texture = nullptr;
@@ -5031,8 +5079,12 @@ bool EnsureDlssTargets(const NativeGuestOutputRenderContext& context,
     g_r.dlss_output_srv =
         context.device->CreateTextureView(g_r.dlss_output, view);
   }
+  if (neural_requested) {
+    g_r.dlss_nr_output = context.device->CreateTexture(output);
+  }
   if (g_r.dlss_motion == nullptr || g_r.dlss_output == nullptr ||
-      g_r.dlss_output_srv == nullptr) {
+      g_r.dlss_output_srv == nullptr ||
+      (neural_requested && g_r.dlss_nr_output == nullptr)) {
     REXLOG_ERROR("DLSS SR: temporal target allocation failed");
     return false;
   }
@@ -19203,6 +19255,13 @@ bool RenderScene(const NativeGuestOutputRenderContext& output_context,
     payload.output =
         rex::graphics::d3d12::NativeRhiD3D12GetTextureResource(
             g_r.dlss_output);
+#if SKATE3_ENABLE_DLSS_NR_PREVIEW
+    if (g_r.dlss_nr_output != nullptr) {
+      payload.neural_output =
+          rex::graphics::d3d12::NativeRhiD3D12GetTextureResource(
+              g_r.dlss_nr_output);
+    }
+#endif
     payload.render = dlss_plan.render;
     payload.output_size = dlss_plan.output;
     payload.camera = dlss_camera;

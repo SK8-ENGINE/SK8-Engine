@@ -127,6 +127,7 @@ source releases.
 | SKATE v15 binary specification | [SKATE Format](tools/blender_owned_map/SKATE_FORMAT.md) |
 | Building and packaging a release | [Release Guide](RELEASE.md) |
 | Optional NVIDIA DLSS Super Resolution | [DLSS Super Resolution](DLSS_SUPER_RESOLUTION.md) |
+| Private NVIDIA DLSS Neural Rendering preview | [DLSS Neural Rendering Preview](DLSS_NEURAL_RENDERING_PREVIEW.md) |
 | Multiplayer sessions and visual replication | [Multiplayer](MULTIPLAYER.md) |
 | Preview limitations | [Known Issues](KNOWN_ISSUES.md) |
 | Release history | [Changelog](CHANGELOG.md) |

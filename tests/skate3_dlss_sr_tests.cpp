@@ -1,4 +1,5 @@
 #include "skate3_dlss_sr_types.h"
+#include "skate3_dlss_nr_types.h"
 
 #include <cassert>
 #include <cmath>
@@ -81,6 +82,12 @@ void RequiredTagsAndLifecycle() {
   tags.motion = nullptr;
   assert(!tags.valid());
 
+  NeuralTaggedResources neural{&resources[3], &resources[1], &resources[2],
+                               &resources[0], {1280, 720}, {1920, 1080}};
+  assert(neural.valid());
+  neural.output = neural.input;
+  assert(!neural.valid());
+
   LifecycleTracker lifecycle;
   assert(lifecycle.state() == LifecycleState::kCold);
   lifecycle.Initialized(true);
@@ -95,6 +102,24 @@ void RequiredTagsAndLifecycle() {
   assert(lifecycle.state() == LifecycleState::kFailed);
 }
 
+void NeuralSettingsPolicy() {
+  assert(ClampNeuralStrength(-0.5) == 0.0f);
+  assert(ClampNeuralStrength(1.25) == 1.25f);
+  assert(ClampNeuralStrength(4.0) == 2.0f);
+  assert(ClampNeuralStyle(-1) == 0);
+  assert(ClampNeuralStyle(9) == 2);
+  assert(ClampNeuralPreset(-1) == 0);
+  assert(ClampNeuralPreset(9) == 3);
+  assert(ClampNeuralPerformanceMode(-1) == 0);
+  assert(ClampNeuralPerformanceMode(9) == 3);
+
+  NeuralSettings defaults;
+  assert(!defaults.enabled);
+  assert(defaults.intensity == 1.0f);
+  assert(defaults.skin_structure_strength == 1.0f);
+  assert(defaults.performance_mode == 3);
+}
+
 } // namespace
 
 int main() {
@@ -102,5 +127,6 @@ int main() {
   RenderSizeUsesTheSdk();
   JitterAndHistoryReset();
   RequiredTagsAndLifecycle();
+  NeuralSettingsPolicy();
   return 0;
 }

@@ -48,6 +48,16 @@ Exact runtime versions, checksums, official source links, and development
 identity requirements are documented in
 [DLSS_SUPER_RESOLUTION.md](DLSS_SUPER_RESOLUTION.md).
 
+An optional local-only DLSS Neural Rendering integration can consume
+NVIDIA-signed private Streamline 2.13 / NGX 310.8 artifacts supplied directly
+to an authorized NVIDIA developer. Those preview bundles are not committed or
+included in public packages. Because the supplied bundles do not contain the
+complete 2.13 SDK license and redistribution notices, this repository makes no
+redistribution claim for them and the release packager rejects preview-enabled
+builds. Exact private artifact hashes and the capability limitation are
+recorded in
+[DLSS_NEURAL_RENDERING_PREVIEW.md](DLSS_NEURAL_RENDERING_PREVIEW.md).
+
 No Skate 3 ISO, extracted retail files, title updates, DLC, saves, proprietary
 maps, or Electronic Arts assets are included. Users must provide their own
 legally obtained game copy. Map authors are responsible for the rights to

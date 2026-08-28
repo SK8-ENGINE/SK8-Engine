@@ -99,10 +99,13 @@ option(SKATE3_RUNTIME_TITLE_UPDATE
     "Compile TU3 runtime hooks when title-update files are staged outside the codegen root"
     OFF)
 option(SKATE3_ENABLE_DLSS_SR
-    "Enable NVIDIA DLSS Super Resolution through Streamline 2.12.0 (Windows D3D12 only)"
+    "Enable NVIDIA DLSS Super Resolution through Streamline (Windows D3D12 only)"
+    OFF)
+option(SKATE3_ENABLE_DLSS_NR_PREVIEW
+    "Enable the private Streamline 2.13 DLSS Neural Rendering preview after DLSS SR"
     OFF)
 set(SKATE3_STREAMLINE_SDK_ROOT "" CACHE PATH
-    "Path to the official NVIDIA Streamline SDK 2.12.0 root")
+    "Path to the NVIDIA Streamline SDK root")
 set(SKATE3_NVIDIA_PROJECT_ID "2dbb17e3-cfcb-5063-9d5f-e5247d36d3f2" CACHE STRING
     "Stable SK8 Engine-owned NGX Project ID for NVIDIA's custom-engine ProjectDesc path")
 set(SKATE3_NVIDIA_APPLICATION_ID "0" CACHE STRING
@@ -124,17 +127,32 @@ if(SKATE3_ENABLE_DLSS_SR)
     endif()
     if(NOT EXISTS "${SKATE3_STREAMLINE_SDK_ROOT}/include/sl.h")
         message(FATAL_ERROR
-            "SKATE3_STREAMLINE_SDK_ROOT must point to the official Streamline SDK 2.12.0")
+            "SKATE3_STREAMLINE_SDK_ROOT must point to a Streamline SDK root")
     endif()
     set(_SKATE3_SL_BIN "${SKATE3_STREAMLINE_SDK_ROOT}/bin/x64")
-    set(_SKATE3_SL_DLLS
-        sl.interposer.dll sl.common.dll sl.dlss.dll nvngx_dlss.dll)
-    set(_SKATE3_SL_SHA256
-        2a79db6857ae8c75bbd871a9489c48bc6a39f7fcc88b9b02afd53d0376cbec66
-        c57930ef5a8a3fe9be85efdf71a61d8107c1148e8a6aed456464547128f7f4ae
-        a997022d2b93601e0eefc3ddb3067c36df386dd3163ae71e11095191fb14f8e4
-        be6e434a94ca32499515eb62ca0e6c274526055d568d0426e4c652dcdfb6ee6e)
-    foreach(_index RANGE 0 3)
+    if(SKATE3_ENABLE_DLSS_NR_PREVIEW)
+        set(_SKATE3_SL_DLLS
+            sl.interposer.dll sl.common.dll sl.dlss.dll nvngx_dlss.dll
+            sl.dlss_nr.dll nvngx_dlssnr.dll)
+        set(_SKATE3_SL_SHA256
+            27b2190057994c0b287c2c5716953bf1586f6499ac12fbbb2092b9aaf8396570
+            a4b2b5acbe49fbc6d44dd432cac19cd53218f698b2539dc7ed0fb268c72cfc8d
+            1eb5fb3d6f01d340fe086d981cc2de4f18aa6d05ee276e5cf28ecd54818dcc8b
+            c85f971ce023c9f3492fc7455f0b01a24ba18ea39636407a846902c4360b0b7e
+            9f6672e5e0170dc118a3188d21bda187e1fc1aa3502895b21ab846d23165c11d
+            e16bcf15e16e13f527491cdf7845b2fe6521a738d8f7c9c721866a8496e1fc8e)
+    else()
+        set(_SKATE3_SL_DLLS
+            sl.interposer.dll sl.common.dll sl.dlss.dll nvngx_dlss.dll)
+        set(_SKATE3_SL_SHA256
+            2a79db6857ae8c75bbd871a9489c48bc6a39f7fcc88b9b02afd53d0376cbec66
+            c57930ef5a8a3fe9be85efdf71a61d8107c1148e8a6aed456464547128f7f4ae
+            a997022d2b93601e0eefc3ddb3067c36df386dd3163ae71e11095191fb14f8e4
+            be6e434a94ca32499515eb62ca0e6c274526055d568d0426e4c652dcdfb6ee6e)
+    endif()
+    list(LENGTH _SKATE3_SL_DLLS _SKATE3_SL_DLL_COUNT)
+    math(EXPR _SKATE3_SL_DLL_LAST "${_SKATE3_SL_DLL_COUNT} - 1")
+    foreach(_index RANGE 0 ${_SKATE3_SL_DLL_LAST})
         list(GET _SKATE3_SL_DLLS ${_index} _dll)
         list(GET _SKATE3_SL_SHA256 ${_index} _expected)
         set(_path "${_SKATE3_SL_BIN}/${_dll}")
@@ -147,6 +165,10 @@ if(SKATE3_ENABLE_DLSS_SR)
                 "Unexpected SHA-256 for ${_dll}: expected ${_expected}, got ${_actual}")
         endif()
     endforeach()
+endif()
+if(SKATE3_ENABLE_DLSS_NR_PREVIEW AND NOT SKATE3_ENABLE_DLSS_SR)
+    message(FATAL_ERROR
+        "SKATE3_ENABLE_DLSS_NR_PREVIEW requires SKATE3_ENABLE_DLSS_SR=ON")
 endif()
 
 if(NOT APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "AMD64|x86_64")
@@ -498,10 +520,19 @@ if(SKATE3_ENABLE_DLSS_SR)
         SKATE3_DLSS_ENGINE_VERSION="${SKATE3_FULL_VERSION}"
         SKATE3_NVIDIA_APPLICATION_ID=${SKATE3_NVIDIA_APPLICATION_ID}
         SKATE3_NVIDIA_PROJECT_ID="${SKATE3_NVIDIA_PROJECT_ID}")
+    if(SKATE3_ENABLE_DLSS_NR_PREVIEW)
+        target_compile_definitions(skate3 PRIVATE
+            SKATE3_ENABLE_DLSS_NR_PREVIEW=1)
+    else()
+        target_compile_definitions(skate3 PRIVATE
+            SKATE3_ENABLE_DLSS_NR_PREVIEW=0)
+    endif()
     target_include_directories(skate3 PRIVATE
         "${SKATE3_STREAMLINE_SDK_ROOT}/include")
 else()
-    target_compile_definitions(skate3 PRIVATE SKATE3_ENABLE_DLSS_SR=0)
+    target_compile_definitions(skate3 PRIVATE
+        SKATE3_ENABLE_DLSS_SR=0
+        SKATE3_ENABLE_DLSS_NR_PREVIEW=0)
 endif()
 if(NOT SKATE3_EFFECTIVE_TITLE_UPDATE_PACKAGE STREQUAL ""
    OR SKATE3_HAS_LOOSE_TITLE_UPDATE
@@ -589,6 +620,15 @@ if(SKATE3_ENABLE_DLSS_SR)
             "$<TARGET_FILE_DIR:skate3>/licenses/NVIDIA-Streamline"
         VERBATIM)
     add_dependencies(skate3 skate3_stage_dlss_runtime)
+    if(SKATE3_ENABLE_DLSS_NR_PREVIEW)
+        add_custom_target(skate3_stage_dlss_nr_preview
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${_SKATE3_SL_BIN}/sl.dlss_nr.dll"
+                "${_SKATE3_SL_BIN}/nvngx_dlssnr.dll"
+                "$<TARGET_FILE_DIR:skate3>"
+            VERBATIM)
+        add_dependencies(skate3 skate3_stage_dlss_nr_preview)
+    endif()
 endif()
 
 if(NOT SKATE3_EFFECTIVE_TITLE_UPDATE_PACKAGE STREQUAL "")
@@ -635,7 +675,7 @@ if(SKATE3_MULTIPLAYER_BUILD_TESTS)
 endif()
 
 option(SKATE3_DLSS_BUILD_TESTS
-    "Build focused non-GPU DLSS Super Resolution policy tests"
+    "Build focused non-GPU DLSS policy tests"
     OFF)
 if(SKATE3_DLSS_BUILD_TESTS)
     enable_testing()
@@ -643,4 +683,16 @@ if(SKATE3_DLSS_BUILD_TESTS)
     target_include_directories(skate3_dlss_sr_tests PRIVATE src)
     target_compile_features(skate3_dlss_sr_tests PRIVATE cxx_std_23)
     add_test(NAME skate3_dlss_sr_tests COMMAND skate3_dlss_sr_tests)
+    if(WIN32 AND SKATE3_ENABLE_DLSS_NR_PREVIEW)
+        add_executable(skate3_dlss_nr_api_smoke
+            tests/skate3_dlss_nr_api_smoke.cpp)
+        target_include_directories(skate3_dlss_nr_api_smoke PRIVATE
+            src
+            "${SKATE3_STREAMLINE_SDK_ROOT}/include")
+        target_compile_features(skate3_dlss_nr_api_smoke PRIVATE cxx_std_23)
+        target_link_libraries(skate3_dlss_nr_api_smoke PRIVATE d3d12 dxgi)
+        add_dependencies(skate3_dlss_nr_api_smoke
+            skate3_stage_dlss_runtime
+            skate3_stage_dlss_nr_preview)
+    endif()
 endif()

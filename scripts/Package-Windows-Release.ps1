@@ -107,6 +107,17 @@ if (Test-Path -LiteralPath $cmakeCache -PathType Leaf) {
         Select-String -LiteralPath $cmakeCache -SimpleMatch `
             'SKATE3_ENABLE_DLSS_SR:BOOL=ON'
     )
+    $dlssNrPreview = [bool](
+        Select-String -LiteralPath $cmakeCache -SimpleMatch `
+            'SKATE3_ENABLE_DLSS_NR_PREVIEW:BOOL=ON'
+    )
+    if ($dlssNrPreview) {
+        throw (
+            'Public packaging is disabled for the private Streamline 2.13 ' +
+            'DLSS Neural Rendering preview because complete redistribution ' +
+            'terms and notices were not supplied.'
+        )
+    }
 }
 if ($dlssEnabled) {
     foreach ($entry in $dlssRuntimeHashes.GetEnumerator()) {

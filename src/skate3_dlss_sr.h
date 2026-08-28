@@ -1,6 +1,7 @@
 #pragma once
 
 #include "skate3_dlss_sr_types.h"
+#include "skate3_dlss_nr_types.h"
 
 #include <array>
 #include <cstdint>
@@ -56,6 +57,13 @@ struct Status {
   std::uint64_t estimated_vram_bytes = 0;
   std::uint64_t evaluation_failures = 0;
   std::uint64_t history_resets = 0;
+  bool neural_requested = false;
+  bool neural_plugin_present = false;
+  bool neural_supported = false;
+  bool neural_active = false;
+  std::string neural_version;
+  std::string neural_detail;
+  std::uint64_t neural_evaluation_failures = 0;
 };
 
 void InitializeEarly(const std::filesystem::path &log_directory);
@@ -70,6 +78,10 @@ void NotifyFrameNotServed();
 bool Evaluate(ID3D12GraphicsCommandList *command_list,
               const TaggedResources &resources, const CameraData &camera,
               const FramePlan &plan);
+NeuralSettings RequestedNeuralSettings();
+bool EvaluateNeuralRendering(ID3D12GraphicsCommandList *command_list,
+                             const NeuralTaggedResources &resources,
+                             const FramePlan &plan);
 void ReleaseViewportResources();
 Status GetStatus();
 std::string StatusLine();

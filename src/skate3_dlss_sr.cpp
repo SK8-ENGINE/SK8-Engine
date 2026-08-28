@@ -17,6 +17,44 @@ REXCVAR_DEFINE_INT32(skate3_dlss_mode, 0, "Skate 3",
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 REXCVAR_DEFINE_STRING(skate3_dlss_status, "Off", "Skate 3",
                       "Read-only DLSS Super Resolution capability and sizing");
+REXCVAR_DEFINE_BOOL(skate3_dlss_neural_rendering, false, "Skate 3",
+                    "DLSS 5 Neural Rendering post-pass (private preview)");
+REXCVAR_DEFINE_DOUBLE(skate3_dlss_nr_intensity, 1.0, "Skate 3",
+                      "DLSS Neural Rendering intensity")
+    .range(0.0, 2.0)
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+REXCVAR_DEFINE_DOUBLE(skate3_dlss_nr_local_tone, 1.0, "Skate 3",
+                      "DLSS Neural Rendering local tone strength")
+    .range(0.0, 2.0)
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+REXCVAR_DEFINE_DOUBLE(skate3_dlss_nr_local_structure, 1.0, "Skate 3",
+                      "DLSS Neural Rendering local structure strength")
+    .range(0.0, 2.0)
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+REXCVAR_DEFINE_DOUBLE(skate3_dlss_nr_global_tone, 1.0, "Skate 3",
+                      "DLSS Neural Rendering global tone strength")
+    .range(0.0, 2.0)
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+REXCVAR_DEFINE_DOUBLE(skate3_dlss_nr_skin_structure, 1.0, "Skate 3",
+                      "DLSS Neural Rendering skin structure strength")
+    .range(0.0, 2.0)
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+REXCVAR_DEFINE_BOOL(skate3_dlss_nr_auto_mask, false, "Skate 3",
+                    "DLSS Neural Rendering automatic control mask");
+REXCVAR_DEFINE_INT32(skate3_dlss_nr_style, 0, "Skate 3",
+                     "DLSS Neural Rendering style (preview SDK enum)")
+    .range(0, 2)
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+REXCVAR_DEFINE_INT32(skate3_dlss_nr_preset, 0, "Skate 3",
+                     "DLSS Neural Rendering preset (preview SDK enum)")
+    .range(0, 3)
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+REXCVAR_DEFINE_INT32(skate3_dlss_nr_performance_mode, 3, "Skate 3",
+                     "DLSS Neural Rendering performance mode (preview SDK enum)")
+    .range(0, 3)
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+REXCVAR_DEFINE_STRING(skate3_dlss_nr_status, "Off", "Skate 3",
+                      "Read-only DLSS Neural Rendering capability");
 
 #if defined(_WIN32) && SKATE3_ENABLE_DLSS_SR
 #define WIN32_LEAN_AND_MEAN
@@ -25,6 +63,9 @@ REXCVAR_DEFINE_STRING(skate3_dlss_status, "Off", "Skate 3",
 
 #include <sl.h>
 #include <sl_dlss.h>
+#if SKATE3_ENABLE_DLSS_NR_PREVIEW
+#include "skate3_dlss_nr_private.h"
+#endif
 #endif
 
 namespace skate3::dlss {
@@ -36,6 +77,31 @@ HistoryTracker g_history;
 std::uint32_t g_jitter_index = 0;
 std::uint32_t g_frame_index = 0;
 bool g_evaluation_failed = false;
+
+NeuralSettings ReadNeuralSettings() {
+  NeuralSettings settings;
+  settings.enabled =
+      rex::cvar::Query<bool>("skate3_dlss_neural_rendering");
+  settings.intensity = ClampNeuralStrength(
+      rex::cvar::Query<double>("skate3_dlss_nr_intensity"));
+  settings.local_tone_strength = ClampNeuralStrength(
+      rex::cvar::Query<double>("skate3_dlss_nr_local_tone"));
+  settings.local_structure_strength = ClampNeuralStrength(
+      rex::cvar::Query<double>("skate3_dlss_nr_local_structure"));
+  settings.global_tone_strength = ClampNeuralStrength(
+      rex::cvar::Query<double>("skate3_dlss_nr_global_tone"));
+  settings.skin_structure_strength = ClampNeuralStrength(
+      rex::cvar::Query<double>("skate3_dlss_nr_skin_structure"));
+  settings.use_auto_mask =
+      rex::cvar::Query<bool>("skate3_dlss_nr_auto_mask");
+  settings.style =
+      ClampNeuralStyle(rex::cvar::Query<std::int32_t>("skate3_dlss_nr_style"));
+  settings.preset = ClampNeuralPreset(
+      rex::cvar::Query<std::int32_t>("skate3_dlss_nr_preset"));
+  settings.performance_mode = ClampNeuralPerformanceMode(
+      rex::cvar::Query<std::int32_t>("skate3_dlss_nr_performance_mode"));
+  return settings;
+}
 
 void PublishStatusLocked() {
   std::string value;
@@ -62,6 +128,21 @@ void PublishStatusLocked() {
     value += " (" + g_status.detail + ")";
   }
   rex::cvar::SetFlagByName("skate3_dlss_status", value);
+
+  std::string neural;
+  if (!g_status.neural_requested) {
+    neural = g_status.neural_supported ? "Off (available)" : "Off";
+  } else if (g_status.selected_mode == Mode::kOff) {
+    neural = "Unavailable: enable DLSS Super Resolution or DLAA first";
+  } else if (g_status.neural_active) {
+    neural = std::format("On: {}x{} pre-tonemap HDR", g_status.output.width,
+                         g_status.output.height);
+  } else if (!g_status.neural_detail.empty()) {
+    neural = "Unavailable: " + g_status.neural_detail;
+  } else {
+    neural = "Unavailable";
+  }
+  rex::cvar::SetFlagByName("skate3_dlss_nr_status", neural);
 }
 
 #if defined(_WIN32) && SKATE3_ENABLE_DLSS_SR
@@ -81,6 +162,9 @@ struct Api {
   PFun_slDLSSGetOptimalSettings *get_optimal_settings = nullptr;
   PFun_slDLSSSetOptions *set_options = nullptr;
   PFun_slDLSSGetState *get_state = nullptr;
+#if SKATE3_ENABLE_DLSS_NR_PREVIEW
+  sl::PFun_slDLSSNRSetOptions *set_neural_options = nullptr;
+#endif
 };
 
 Api g_api;
@@ -91,6 +175,13 @@ RenderSize g_configured_output{};
 sl::DLSSOptions g_options{};
 sl::FrameToken *g_frame_token = nullptr;
 std::chrono::steady_clock::time_point g_last_state_query{};
+#if SKATE3_ENABLE_DLSS_NR_PREVIEW
+sl::DLSSNROptions g_neural_options{};
+NeuralSettings g_configured_neural_settings{};
+bool g_neural_options_configured = false;
+bool g_neural_evaluation_failed = false;
+std::chrono::steady_clock::time_point g_last_neural_log{};
+#endif
 
 void RecordEvaluationFailureLocked(UnavailableReason reason,
                                    sl::Result result) {
@@ -191,6 +282,7 @@ void InitializeEarly(const std::filesystem::path &log_directory) {
   std::lock_guard lock(g_mutex);
   g_status = {};
   g_status.unavailable_reason = UnavailableReason::kBuildDisabled;
+  g_status.neural_requested = ReadNeuralSettings().enabled;
 #if defined(_WIN32) && SKATE3_ENABLE_DLSS_SR
   std::error_code directory_error;
   std::filesystem::create_directories(log_directory, directory_error);
@@ -221,6 +313,17 @@ void InitializeEarly(const std::filesystem::path &log_directory) {
       return;
     }
   }
+#if SKATE3_ENABLE_DLSS_NR_PREVIEW
+  g_status.neural_plugin_present =
+      std::filesystem::exists(directory / L"sl.dlss_nr.dll") &&
+      std::filesystem::exists(directory / L"nvngx_dlssnr.dll");
+  if (!g_status.neural_plugin_present) {
+    g_status.neural_detail =
+        "sl.dlss_nr.dll or nvngx_dlssnr.dll is absent";
+  }
+#else
+  g_status.neural_detail = "This build does not include the private preview";
+#endif
   const auto interposer = directory / L"sl.interposer.dll";
   g_api.module = LoadLibraryExW(interposer.c_str(), nullptr,
                                 LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR |
@@ -244,7 +347,13 @@ void InitializeEarly(const std::filesystem::path &log_directory) {
     return;
   }
 
-  const sl::Feature features[] = {sl::kFeatureDLSS};
+  std::array<sl::Feature, 2> features{sl::kFeatureDLSS, 0};
+  std::uint32_t feature_count = 1;
+#if SKATE3_ENABLE_DLSS_NR_PREVIEW
+  if (g_status.neural_plugin_present) {
+    features[feature_count++] = sl::kFeatureDLSS_NR;
+  }
+#endif
   const std::wstring plugin_path = directory.wstring();
   const wchar_t *plugin_paths[] = {plugin_path.c_str()};
   const std::wstring log_path = log_directory.wstring();
@@ -256,14 +365,20 @@ void InitializeEarly(const std::filesystem::path &log_directory) {
                       sl::PreferenceFlags::eDisableDebugText |
                       sl::PreferenceFlags::eUseManualHooking |
                       sl::PreferenceFlags::eUseFrameBasedResourceTagging;
-  preferences.featuresToLoad = features;
-  preferences.numFeaturesToLoad = 1;
+  preferences.featuresToLoad = features.data();
+  preferences.numFeaturesToLoad = feature_count;
   preferences.engine = sl::EngineType::eCustom;
   preferences.engineVersion = SKATE3_DLSS_ENGINE_VERSION;
   preferences.projectId = project_id[0] != '\0' ? project_id : nullptr;
   preferences.applicationId = SKATE3_NVIDIA_APPLICATION_ID;
   preferences.renderAPI = sl::RenderAPI::eD3D12;
-  if (g_api.init(preferences, sl::kSDKVersion) != sl::Result::eOk) {
+#if SKATE3_ENABLE_DLSS_NR_PREVIEW
+  constexpr std::uint64_t streamline_sdk_version =
+      sl::kSDKVersionDLSSNRPreview;
+#else
+  constexpr std::uint64_t streamline_sdk_version = sl::kSDKVersion;
+#endif
+  if (g_api.init(preferences, streamline_sdk_version) != sl::Result::eOk) {
     g_status.unavailable_reason = UnavailableReason::kInitialization;
     PublishStatusLocked();
     return;
@@ -271,9 +386,14 @@ void InitializeEarly(const std::filesystem::path &log_directory) {
   g_status.initialized = true;
   g_status.unavailable_reason = UnavailableReason::kNone;
   g_status.detail.clear();
+#if SKATE3_ENABLE_DLSS_NR_PREVIEW
+  g_status.streamline_version = "2.13.0";
+#else
   g_status.streamline_version = "2.12.0";
-  REXLOG_INFO("DLSS SR: Streamline 2.12.0 initialized (D3D12, custom-engine "
+#endif
+  REXLOG_INFO("DLSS SR: Streamline {} initialized (D3D12, custom-engine "
               "identity, application-id={}, project-id={})",
+              g_status.streamline_version,
               preferences.applicationId,
               project_id[0] != '\0' ? "SK8 Engine-owned" : "not supplied");
 #endif
@@ -285,6 +405,11 @@ void Shutdown() {
 #if defined(_WIN32) && SKATE3_ENABLE_DLSS_SR
   if (g_status.initialized && g_api.free_resources != nullptr) {
     g_api.free_resources(sl::kFeatureDLSS, g_viewport);
+#if SKATE3_ENABLE_DLSS_NR_PREVIEW
+    if (g_status.neural_plugin_present) {
+      g_api.free_resources(sl::kFeatureDLSS_NR, g_viewport);
+    }
+#endif
   }
   if (g_status.initialized && g_api.shutdown != nullptr) {
     g_api.shutdown();
@@ -298,6 +423,12 @@ void Shutdown() {
   g_evaluation_failed = false;
   g_configured_mode = Mode::kOff;
   g_configured_output = {};
+#if SKATE3_ENABLE_DLSS_NR_PREVIEW
+  g_neural_options = {};
+  g_configured_neural_settings = {};
+  g_neural_options_configured = false;
+  g_neural_evaluation_failed = false;
+#endif
 #endif
   g_history.Invalidate();
   g_status = {};
@@ -321,6 +452,26 @@ FramePlan BeginFrame(ID3D12Device *device, RenderSize output,
   plan.render = output;
   g_status.selected_mode = plan.mode;
   g_status.output = output;
+  g_status.neural_requested = ReadNeuralSettings().enabled;
+  g_status.neural_active = false;
+#if defined(_WIN32) && SKATE3_ENABLE_DLSS_SR && \
+    SKATE3_ENABLE_DLSS_NR_PREVIEW
+  if (!g_status.neural_requested) {
+    if (g_neural_options_configured) {
+      g_neural_options.mode = sl::DLSSNRMode::eOff;
+      if (g_api.set_neural_options != nullptr) {
+        g_api.set_neural_options(g_viewport, g_neural_options);
+      }
+      if (g_api.free_resources != nullptr &&
+          g_status.neural_plugin_present) {
+        g_api.free_resources(sl::kFeatureDLSS_NR, g_viewport);
+      }
+    }
+    g_neural_options_configured = false;
+    g_neural_evaluation_failed = false;
+    g_status.neural_detail.clear();
+  }
+#endif
   if (plan.mode == Mode::kOff) {
     g_history.Invalidate();
     g_jitter_index = 0;
@@ -338,6 +489,13 @@ FramePlan BeginFrame(ID3D12Device *device, RenderSize output,
   if (g_device != device) {
     if (g_device != nullptr) {
       g_api.free_resources(sl::kFeatureDLSS, g_viewport);
+#if SKATE3_ENABLE_DLSS_NR_PREVIEW
+      if (g_status.neural_plugin_present) {
+        g_api.free_resources(sl::kFeatureDLSS_NR, g_viewport);
+      }
+      g_neural_options_configured = false;
+      g_neural_evaluation_failed = false;
+#endif
       g_history.Invalidate();
     }
     if (g_api.set_d3d_device(device) != sl::Result::eOk) {
@@ -385,6 +543,46 @@ FramePlan BeginFrame(ID3D12Device *device, RenderSize output,
         sl::Result::eOk) {
       g_status.dlss_version = version.versionNGX.toStr();
     }
+#if SKATE3_ENABLE_DLSS_NR_PREVIEW
+    g_status.neural_supported = false;
+    g_api.set_neural_options = nullptr;
+    if (g_status.neural_plugin_present) {
+      const sl::Result neural_support =
+          g_api.is_feature_supported(sl::kFeatureDLSS_NR, adapter);
+      if (neural_support == sl::Result::eOk) {
+        function = nullptr;
+        if (g_api.get_feature_function(sl::kFeatureDLSS_NR,
+                                       "slDLSSNRSetOptions",
+                                       function) == sl::Result::eOk) {
+          g_api.set_neural_options =
+              reinterpret_cast<sl::PFun_slDLSSNRSetOptions *>(function);
+        }
+        if (g_api.set_neural_options != nullptr) {
+          g_status.neural_supported = true;
+          g_status.neural_detail.clear();
+          sl::FeatureVersion neural_version{};
+          if (g_api.get_feature_version(sl::kFeatureDLSS_NR,
+                                        neural_version) == sl::Result::eOk) {
+            g_status.neural_version = neural_version.versionNGX.toStr();
+          }
+          REXLOG_INFO(
+              "DLSS Neural Rendering: Streamline feature 1004 available, "
+              "NGX version={}",
+              g_status.neural_version.empty() ? "unknown"
+                                               : g_status.neural_version);
+        } else {
+          g_status.neural_detail = "slDLSSNRSetOptions is unavailable";
+        }
+      } else {
+        g_status.neural_detail =
+            neural_support == sl::Result::eErrorFeatureMissing
+                ? "NVIDIA rejected feature 1004 for this GPU, driver, or "
+                  "developer entitlement"
+                : std::format("feature 1004 support check failed ({})",
+                              static_cast<int>(neural_support));
+      }
+    }
+#endif
     g_status.supported = true;
     g_status.unavailable_reason = UnavailableReason::kNone;
     g_status.detail.clear();
@@ -570,6 +768,164 @@ bool Evaluate(ID3D12GraphicsCommandList *command_list,
 #endif
 }
 
+NeuralSettings RequestedNeuralSettings() {
+  return ReadNeuralSettings();
+}
+
+bool EvaluateNeuralRendering(ID3D12GraphicsCommandList *command_list,
+                             const NeuralTaggedResources &resources,
+                             const FramePlan &plan) {
+  std::lock_guard lock(g_mutex);
+  const NeuralSettings settings = ReadNeuralSettings();
+  g_status.neural_requested = settings.enabled;
+  g_status.neural_active = false;
+#if defined(_WIN32) && SKATE3_ENABLE_DLSS_SR && \
+    SKATE3_ENABLE_DLSS_NR_PREVIEW
+  if (!settings.enabled) {
+    if (g_neural_options_configured && g_api.set_neural_options != nullptr) {
+      g_neural_options.mode = sl::DLSSNRMode::eOff;
+      g_api.set_neural_options(g_viewport, g_neural_options);
+      g_api.free_resources(sl::kFeatureDLSS_NR, g_viewport);
+    }
+    g_neural_options_configured = false;
+    g_neural_evaluation_failed = false;
+    PublishStatusLocked();
+    return false;
+  }
+  if (!plan.active || !g_status.neural_plugin_present ||
+      !g_status.neural_supported || g_api.set_neural_options == nullptr) {
+    if (g_status.neural_detail.empty()) {
+      g_status.neural_detail =
+          !plan.active ? "DLSS SR or DLAA is not active"
+                       : "feature 1004 is unavailable on this system";
+    }
+    PublishStatusLocked();
+    return false;
+  }
+  if (g_neural_evaluation_failed) {
+    g_status.neural_detail =
+        "evaluation disabled until Neural Rendering is toggled Off";
+    PublishStatusLocked();
+    return false;
+  }
+  if (command_list == nullptr || g_frame_token == nullptr ||
+      !resources.valid()) {
+    ++g_status.neural_evaluation_failures;
+    g_status.neural_detail =
+        "required full-resolution color, depth, motion, or output is invalid";
+    g_neural_evaluation_failed = true;
+    PublishStatusLocked();
+    return false;
+  }
+
+  if (!g_neural_options_configured ||
+      settings != g_configured_neural_settings) {
+    g_neural_options = {};
+    g_neural_options.mode = sl::DLSSNRMode::eOn;
+    g_neural_options.intensity = settings.intensity;
+    g_neural_options.localToneStrength = settings.local_tone_strength;
+    g_neural_options.localStructureStrength =
+        settings.local_structure_strength;
+    g_neural_options.globalToneStrength = settings.global_tone_strength;
+    g_neural_options.style = settings.style;
+    g_neural_options.preset = settings.preset;
+    g_neural_options.useAutoMask =
+        settings.use_auto_mask ? sl::Boolean::eTrue : sl::Boolean::eFalse;
+    g_neural_options.skinStructureStrength =
+        settings.skin_structure_strength;
+    g_neural_options.performanceMode = settings.performance_mode;
+    const sl::Result options_result =
+        g_api.set_neural_options(g_viewport, g_neural_options);
+    if (options_result != sl::Result::eOk) {
+      ++g_status.neural_evaluation_failures;
+      g_status.neural_detail =
+          std::format("option setup failed ({})",
+                      static_cast<int>(options_result));
+      g_neural_evaluation_failed = true;
+      PublishStatusLocked();
+      return false;
+    }
+    g_configured_neural_settings = settings;
+    g_neural_options_configured = true;
+  }
+
+  constexpr std::uint32_t input_state =
+      D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+  sl::Resource input{sl::ResourceType::eTex2d,
+                     const_cast<void *>(resources.input), input_state};
+  sl::Resource depth{sl::ResourceType::eTex2d,
+                     const_cast<void *>(resources.depth), input_state};
+  sl::Resource motion{sl::ResourceType::eTex2d,
+                      const_cast<void *>(resources.motion), input_state};
+  sl::Resource output{sl::ResourceType::eTex2d,
+                      const_cast<void *>(resources.output), input_state};
+  const sl::Extent render_extent{0, 0, resources.render.width,
+                                 resources.render.height};
+  const sl::Extent output_extent{0, 0, resources.output_size.width,
+                                 resources.output_size.height};
+  const sl::ResourceTag tags[] = {
+      {&input, sl::kBufferTypeUpliftInputColor,
+       sl::ResourceLifecycle::eOnlyValidNow, &output_extent},
+      {&output, sl::kBufferTypeUpliftOutputColor,
+       sl::ResourceLifecycle::eOnlyValidNow, &output_extent},
+      {&depth, sl::kBufferTypeDepth, sl::ResourceLifecycle::eOnlyValidNow,
+       &render_extent},
+      {&motion, sl::kBufferTypeMotionVectors,
+       sl::ResourceLifecycle::eOnlyValidNow, &render_extent}};
+  sl::Result result = g_api.set_tag_for_frame(
+      *g_frame_token, g_viewport, tags,
+      static_cast<std::uint32_t>(std::size(tags)), command_list);
+  if (result == sl::Result::eOk) {
+    const sl::BaseStructure *inputs[] = {&g_viewport};
+    result = g_api.evaluate_feature(sl::kFeatureDLSS_NR, *g_frame_token,
+                                    inputs, 1, command_list);
+  }
+  if (result != sl::Result::eOk) {
+    ++g_status.neural_evaluation_failures;
+    g_status.neural_detail =
+        std::format("feature 1004 evaluation failed ({})",
+                    static_cast<int>(result));
+    g_neural_evaluation_failed = true;
+    if ((g_status.neural_evaluation_failures & 63u) == 1u) {
+      REXLOG_ERROR(
+          "DLSS Neural Rendering: disabled after evaluation failure {}",
+          static_cast<int>(result));
+    }
+    PublishStatusLocked();
+    return false;
+  }
+
+  g_status.neural_active = true;
+  g_status.neural_detail.clear();
+  const auto now = std::chrono::steady_clock::now();
+  if (g_last_neural_log == std::chrono::steady_clock::time_point{} ||
+      now - g_last_neural_log >= std::chrono::seconds(5)) {
+    g_last_neural_log = now;
+    REXLOG_INFO(
+        "DLSS Neural Rendering: feature=1004, {}x{}, intensity={:.2f}, "
+        "tone={:.2f}/{:.2f}, structure={:.2f}/{:.2f}, auto-mask={}, "
+        "style={}, reset={}, failures={}",
+        resources.output_size.width, resources.output_size.height,
+        settings.intensity, settings.local_tone_strength,
+        settings.global_tone_strength, settings.local_structure_strength,
+        settings.skin_structure_strength, settings.use_auto_mask ? 1 : 0,
+        settings.style, plan.reset ? 1 : 0,
+        g_status.neural_evaluation_failures);
+  }
+  PublishStatusLocked();
+  return true;
+#else
+  if (settings.enabled) {
+    g_status.neural_detail = "This build does not include the private preview";
+  }
+  (void)command_list;
+  (void)resources;
+  (void)plan;
+  PublishStatusLocked();
+  return false;
+#endif
+}
+
 void ReleaseViewportResources() {
   std::lock_guard lock(g_mutex);
 #if defined(_WIN32) && SKATE3_ENABLE_DLSS_SR
@@ -577,6 +933,14 @@ void ReleaseViewportResources() {
       g_configured_mode != Mode::kOff) {
     g_api.free_resources(sl::kFeatureDLSS, g_viewport);
   }
+#if SKATE3_ENABLE_DLSS_NR_PREVIEW
+  if (g_status.initialized && g_api.free_resources != nullptr &&
+      g_status.neural_plugin_present) {
+    g_api.free_resources(sl::kFeatureDLSS_NR, g_viewport);
+  }
+  g_neural_options_configured = false;
+  g_neural_evaluation_failed = false;
+#endif
   g_configured_mode = Mode::kOff;
   g_configured_output = {};
   g_evaluation_failed = false;
