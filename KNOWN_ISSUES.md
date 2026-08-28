@@ -39,6 +39,11 @@ This is an experimental preview rather than a finished standalone game engine.
   skating. Their final procedural transforms are replicated independently
   from the canonical body skeleton; the major wheel/hat separation is fixed,
   but this smaller wheel presentation defect remains open.
+- A non-owner joining multiplayer should start from the unmodified loaded map.
+  The owner replays its ordered live-editor state to late joiners, but the
+  current runtime cannot delete unrelated unsaved objects that the joining
+  client dropped locally before entering the lobby. Reloading the map clears
+  that local-only state.
 
 When reporting a problem, include the map name, GPU, driver version, selected
 Graphics API and Renderer, framerate cap, controller backend, and the latest

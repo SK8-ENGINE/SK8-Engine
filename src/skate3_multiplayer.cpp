@@ -1,5 +1,6 @@
 #include "skate3_multiplayer.h"
 
+#include "skate3_map_editor.h"
 #include "skate3_multiplayer_bandwidth.h"
 #include "skate3_multiplayer_interpolation.h"
 #include "skate3_multiplayer_lifecycle.h"
@@ -14,6 +15,7 @@
 #include "skate3_multiplayer_protocol_v12_delta.h"
 #include "skate3_multiplayer_protocol_v12_live.h"
 #include "skate3_multiplayer_protocol_v12_lossless.h"
+#include "skate3_multiplayer_protocol_v12_map_edit.h"
 #include "skate3_multiplayer_protocol_v12_predictive_delta.h"
 #include "skate3_multiplayer_protocol_v12_root.h"
 #include "skate3_multiplayer_protocol_v12_snappy.h"
@@ -24,6 +26,8 @@
 #include "skate3_multiplayer_worker.h"
 #include "skate3_steam_backend.h"
 #include "skate3_trick_pipeline.h"
+
+#include <skate/world/skate_object_package.h>
 
 #include <algorithm>
 #include <array>
@@ -36,6 +40,7 @@
 #include <cstdint>
 #include <cstring>
 #include <deque>
+#include <future>
 #include <iterator>
 #include <memory>
 #include <mutex>
@@ -233,21 +238,18 @@ using protocol::SequenceNewer;
 using protocol::SequenceNewerOrEqual;
 
 struct NetworkTuning {
-  std::int32_t pose_rate =
-      bandwidth::kRootSnapshotRateHz;
-  std::int32_t animation_rate =
-      bandwidth::kAnimationSnapshotRateHz;
-  std::int32_t interpolation_ms =
-      bandwidth::kMinimumInterpolationDelayMs;
+  std::int32_t pose_rate = bandwidth::kRootSnapshotRateHz;
+  std::int32_t animation_rate = bandwidth::kAnimationSnapshotRateHz;
+  std::int32_t interpolation_ms = bandwidth::kMinimumInterpolationDelayMs;
   bool full_fidelity = true;
 };
 
 NetworkTuning ResolveNetworkTuning(std::size_t participant_count) {
   NetworkTuning tuning;
-  tuning.pose_rate = std::clamp(
-      REXCVAR_GET(skate3_multiplayer_local_send_rate), 10, 120);
-  tuning.animation_rate = std::clamp(
-      REXCVAR_GET(skate3_multiplayer_local_animation_rate), 10, 60);
+  tuning.pose_rate =
+      std::clamp(REXCVAR_GET(skate3_multiplayer_local_send_rate), 10, 120);
+  tuning.animation_rate =
+      std::clamp(REXCVAR_GET(skate3_multiplayer_local_animation_rate), 10, 60);
   tuning.interpolation_ms = std::clamp(
       REXCVAR_GET(skate3_multiplayer_local_interpolation_ms), 0, 250);
   tuning.full_fidelity = topology::FullFidelitySession(
@@ -416,6 +418,7 @@ struct PeerControlState {
   Clock::time_point last_v12_advertisement_received{};
   protocol_v12::PeerGenerationState v12_generation;
   protocol_v12::ReceiveHistory v12_control_receive_history;
+  protocol_v12::ReceiveHistory map_edit_receive_history;
   protocol_v12::SenderBaselineState v12_sender_baseline;
   std::unordered_map<std::uint32_t, QuantizedAnimationFrame>
       v12_offered_animation_keyframes;
@@ -425,6 +428,7 @@ struct PeerControlState {
   bool v12_capability_acknowledged = false;
   bool v12_animation_started = false;
   bool v12_force_animation_keyframe = false;
+  bool map_snapshot_queued = false;
   std::uint64_t pending_appearance = 0;
   AppearanceDeliveryState pending_appearance_state =
       AppearanceDeliveryState::kUnknown;
@@ -435,6 +439,51 @@ struct PeerControlState {
   Clock::time_point last_appearance_request_sent{};
   std::uint64_t last_appearance_request_received = 0;
   Clock::time_point last_appearance_request_received_at{};
+};
+
+struct AuthoritySpawnRecord {
+  std::uint16_t source_role = 0;
+  std::uint64_t request_id = 0;
+  std::uint64_t authority_revision = 0;
+  std::array<float, 3> position{};
+  std::shared_ptr<const std::vector<std::uint8_t>> package;
+};
+
+struct RetiredAppearanceRecord {
+  std::uint32_t session = 0;
+  std::uint64_t identity = 0;
+};
+
+struct MapOutboundCommand {
+  enum class Kind {
+    kControl,
+    kSpawn,
+  };
+
+  Kind kind = Kind::kControl;
+  protocol_v12::MapEditControl control;
+  protocol_v12::MapEditSpawnType spawn_type =
+      protocol_v12::MapEditSpawnType::kSpawnRequest;
+  std::uint16_t source_role = 0;
+  std::uint64_t request_id = 0;
+  std::uint64_t authority_revision = 0;
+  std::uint64_t snapshot_id = 0;
+  std::array<float, 3> position{};
+  std::shared_ptr<const std::vector<std::uint8_t>> package;
+  std::uint64_t content_hash = 0;
+  std::uint32_t next_fragment = 0;
+};
+
+struct PendingMapSpawnDecode {
+  protocol_v12::Envelope envelope;
+  protocol_v12::MapEditSpawnHeader header;
+  std::shared_ptr<const std::vector<std::uint8_t>> package;
+  std::future<std::shared_ptr<const skate::world::SkateObjectAsset>> future;
+};
+
+struct DeferredMapEditControl {
+  protocol_v12::Envelope envelope;
+  protocol_v12::MapEditControl control;
 };
 
 std::int64_t PresentationDelayMicroseconds(const RemotePeerState &peer,
@@ -540,6 +589,16 @@ struct TelemetrySnapshot {
   std::uint64_t sent_v12_pose_controls = 0;
   std::uint64_t received_v12_pose_controls = 0;
   std::uint64_t rejected_v12_pose_controls = 0;
+  std::uint64_t sent_map_edit_controls = 0;
+  std::uint64_t received_map_edit_controls = 0;
+  std::uint64_t sent_map_edit_fragments = 0;
+  std::uint64_t received_map_edit_fragments = 0;
+  std::uint64_t sent_map_edit_bytes = 0;
+  std::uint64_t received_map_edit_bytes = 0;
+  std::uint64_t rejected_map_edit_packets = 0;
+  std::uint64_t completed_map_edit_spawns = 0;
+  std::uint64_t sent_map_snapshots = 0;
+  std::uint64_t received_map_snapshots = 0;
   std::uint64_t sent_v12_baseline_reports = 0;
   std::uint64_t received_v12_baseline_reports = 0;
   std::uint64_t sent_v12_baseline_requests = 0;
@@ -1776,6 +1835,7 @@ public:
     telemetry_.role = role;
     if (!enabled || role == 0) {
       ShutdownLocked();
+      map_editor::SetMultiplayerSyncState(false, 0, 0);
       DrainRemotePeerRetirements(out_retirements);
       telemetry_.remote_visible = false;
       out_remotes.clear();
@@ -1785,11 +1845,13 @@ public:
     const std::int32_t base_port =
         REXCVAR_GET(skate3_multiplayer_local_base_port);
     if (!(steam_active ? EnsureSteam(role) : EnsureSocket(role, base_port))) {
+      map_editor::SetMultiplayerSyncState(false, 0, 0);
       DrainRemotePeerRetirements(out_retirements);
       telemetry_.remote_visible = false;
       out_remotes.clear();
       return false;
     }
+    EnsureMapEditorSync(static_cast<std::uint16_t>(role));
 
     const auto now = Clock::now();
     // Packet interpolation uses a transport-neutral monotonic capture
@@ -1829,10 +1891,14 @@ public:
                                      ? local_appearance->identity
                                      : 0;
     ReceivePackets(now, map_hash, v12_compatibility);
+    CompletePendingMapSpawnDecodes();
     PrunePeers(now);
     DrainRemotePeerRetirements(out_retirements);
     SendCapabilityAdvertisements(now, map_hash, v12_compatibility,
                                  static_cast<std::uint32_t>(role));
+    ProcessLocalMapEditorEvents();
+    QueuePendingMapSnapshots();
+    DrainMapEditOutbound();
     SendPendingAppearanceControls(now, map_hash,
                                   static_cast<std::uint32_t>(role));
     const std::int32_t send_rate = network_tuning_.pose_rate;
@@ -2062,6 +2128,23 @@ public:
         << telemetry_.received_v12_pose_controls
         << " multiplayer_rejected_v12_pose_controls="
         << telemetry_.rejected_v12_pose_controls
+        << " multiplayer_tx_map_edit_controls="
+        << telemetry_.sent_map_edit_controls
+        << " multiplayer_rx_map_edit_controls="
+        << telemetry_.received_map_edit_controls
+        << " multiplayer_tx_map_edit_fragments="
+        << telemetry_.sent_map_edit_fragments
+        << " multiplayer_rx_map_edit_fragments="
+        << telemetry_.received_map_edit_fragments
+        << " multiplayer_tx_map_edit_bytes=" << telemetry_.sent_map_edit_bytes
+        << " multiplayer_rx_map_edit_bytes="
+        << telemetry_.received_map_edit_bytes
+        << " multiplayer_rejected_map_edit_packets="
+        << telemetry_.rejected_map_edit_packets
+        << " multiplayer_completed_map_edit_spawns="
+        << telemetry_.completed_map_edit_spawns
+        << " multiplayer_tx_map_snapshots=" << telemetry_.sent_map_snapshots
+        << " multiplayer_rx_map_snapshots=" << telemetry_.received_map_snapshots
         << " multiplayer_tx_v12_baseline_reports="
         << telemetry_.sent_v12_baseline_reports
         << " multiplayer_rx_v12_baseline_reports="
@@ -2141,8 +2224,7 @@ public:
         << telemetry_.v12_snappy_raw_bytes
         << " multiplayer_v12_snappy_wire_bytes="
         << telemetry_.v12_snappy_wire_bytes
-        << " multiplayer_v12_snappy_attempts="
-        << telemetry_.v12_snappy_attempts
+        << " multiplayer_v12_snappy_attempts=" << telemetry_.v12_snappy_attempts
         << " multiplayer_v12_snappy_encode_ns="
         << telemetry_.v12_snappy_encode_ns
         << " multiplayer_v12_snappy_encode_max_ns="
@@ -2217,38 +2299,35 @@ private:
       const auto statuses = steam::PeerTransportStatuses();
       telemetry_.transport_status_peers =
           static_cast<std::uint32_t>(statuses.size());
-      for (const auto& status : statuses) {
+      for (const auto &status : statuses) {
         telemetry_.transport_max_ping_ms =
             std::max(telemetry_.transport_max_ping_ms, status.ping_ms);
-        telemetry_.transport_max_jitter_us =
-            std::max(telemetry_.transport_max_jitter_us,
-                     status.maximum_jitter_us);
-        telemetry_.transport_pending_unreliable_bytes = std::max(
-            telemetry_.transport_pending_unreliable_bytes,
-            status.pending_unreliable_bytes);
-        telemetry_.transport_pending_reliable_bytes = std::max(
-            telemetry_.transport_pending_reliable_bytes,
-            status.pending_reliable_bytes);
+        telemetry_.transport_max_jitter_us = std::max(
+            telemetry_.transport_max_jitter_us, status.maximum_jitter_us);
+        telemetry_.transport_pending_unreliable_bytes =
+            std::max(telemetry_.transport_pending_unreliable_bytes,
+                     status.pending_unreliable_bytes);
+        telemetry_.transport_pending_reliable_bytes =
+            std::max(telemetry_.transport_pending_reliable_bytes,
+                     status.pending_reliable_bytes);
         telemetry_.transport_max_queue_time_us = std::max(
             telemetry_.transport_max_queue_time_us, status.queue_time_us);
         const auto role = steam_role_by_id_.find(status.steam_id);
         REXLOG_INFO(
-            "multiplayer-transport: role={} peer_role={} backend=steam-messages "
+            "multiplayer-transport: role={} peer_role={} "
+            "backend=steam-messages "
             "state={} ping_ms={} quality={:.3f}/{:.3f} "
             "rate={:.1f}/{:.1f}KiB/s packets={:.1f}/{:.1f}pps "
             "send_capacity={:.1f}KiB/s pending={}/{}B unacked={}B "
             "queue_ms={:.3f} jitter_ms={:.3f}",
-            bound_role_,
-            role == steam_role_by_id_.end() ? 0u : role->second,
+            bound_role_, role == steam_role_by_id_.end() ? 0u : role->second,
             status.state, status.ping_ms, status.local_quality,
-            status.remote_quality,
-            status.outbound_bytes_per_second / 1024.0f,
+            status.remote_quality, status.outbound_bytes_per_second / 1024.0f,
             status.inbound_bytes_per_second / 1024.0f,
             status.outbound_packets_per_second,
             status.inbound_packets_per_second,
             status.send_rate_bytes_per_second / 1024.0f,
-            status.pending_unreliable_bytes,
-            status.pending_reliable_bytes,
+            status.pending_unreliable_bytes, status.pending_reliable_bytes,
             status.sent_unacked_reliable_bytes,
             static_cast<double>(status.queue_time_us) / 1000.0,
             static_cast<double>(status.maximum_jitter_us) / 1000.0);
@@ -2258,12 +2337,10 @@ private:
         "multiplayer-fanout: role={} prepare_passes={} shared_reuses={} "
         "targets={} reuse_percent={:.2f}",
         bound_role_, telemetry_.animation_prepare_passes,
-        telemetry_.animation_shared_reuses,
-        telemetry_.animation_fanout_targets,
+        telemetry_.animation_shared_reuses, telemetry_.animation_fanout_targets,
         telemetry_.animation_fanout_targets == 0
             ? 0.0
-            : 100.0 *
-                  static_cast<double>(telemetry_.animation_shared_reuses) /
+            : 100.0 * static_cast<double>(telemetry_.animation_shared_reuses) /
                   static_cast<double>(telemetry_.animation_fanout_targets));
     REXLOG_INFO(
         "multiplayer-compression: role={} snappy_groups={} "
@@ -2271,12 +2348,9 @@ private:
         "encode_ns={} encode_max_ns={}",
         bound_role_, telemetry_.sent_v12_snappy_groups,
         telemetry_.received_v12_snappy_groups,
-        telemetry_.rejected_v12_snappy_groups,
-        telemetry_.v12_snappy_raw_bytes,
-        telemetry_.v12_snappy_wire_bytes,
-        telemetry_.v12_snappy_attempts,
-        telemetry_.v12_snappy_encode_ns,
-        telemetry_.v12_snappy_encode_max_ns);
+        telemetry_.rejected_v12_snappy_groups, telemetry_.v12_snappy_raw_bytes,
+        telemetry_.v12_snappy_wire_bytes, telemetry_.v12_snappy_attempts,
+        telemetry_.v12_snappy_encode_ns, telemetry_.v12_snappy_encode_max_ns);
     const double seconds =
         std::chrono::duration<double>(now - last_rate_log_).count();
     const auto per_second = [seconds](std::uint64_t current,
@@ -2558,6 +2632,7 @@ private:
     bool reset = outbound_animation_keyframes_.erase(role) != 0;
     reset |= outbound_appearance_.erase(role) != 0;
     reset |= peer_control_.erase(role) != 0;
+    reset |= map_edit_outbound_.erase(role) != 0;
     if (!reset) {
       return;
     }
@@ -2728,6 +2803,14 @@ private:
         newest = std::max(newest, peer.animation_samples.back().received_at);
       }
       if (newest != Clock::time_point{} && now - newest > kForgetPeerAfter) {
+        if (peer.appearance.identity != 0) {
+          retired_appearances_[iterator->first] = {
+              peer.session,
+              peer.appearance.identity,
+          };
+        } else {
+          retired_appearances_.erase(iterator->first);
+        }
         QueueRemotePeerRetirement(iterator->first, peer.session);
         ForgetPeerGeneration(iterator->first, "remote timeout");
         iterator = remote_peers_.erase(iterator);
@@ -2974,6 +3057,420 @@ private:
     return found != steam_role_by_id_.end() && found->second == sender_role;
   }
 
+  bool MapEditReadyForRole(std::uint32_t target_role) const {
+    if (!V12RealtimeReadyForRole(target_role)) {
+      return false;
+    }
+    const auto control = peer_control_.find(target_role);
+    return control != peer_control_.end() &&
+           (control->second.v12_negotiated_features &
+            protocol_v12::kFeatureLiveMapEditing) != 0;
+  }
+
+  static map_editor::MultiplayerTransform
+  MapTransformFromControl(const protocol_v12::MapEditControl &control) {
+    map_editor::MultiplayerTransform transform;
+    transform.object_id = control.object_id;
+    std::copy_n(control.translation, 3, transform.translation.begin());
+    std::copy_n(control.basis, 9, transform.basis.begin());
+    return transform;
+  }
+
+  bool MapEditGenerationCurrent(
+      const protocol_v12::Envelope &envelope) const {
+    const auto peer_control = peer_control_.find(envelope.sender_role);
+    const auto peer = remote_peers_.find(envelope.sender_role);
+    return peer_control != peer_control_.end() && peer != remote_peers_.end() &&
+           peer->second.session == envelope.sender_session &&
+           peer_control->second.v12_generation.Matches(
+               envelope.sender_role, envelope.sender_session) &&
+           (peer_control->second.v12_negotiated_features &
+            protocol_v12::kFeatureLiveMapEditing) != 0;
+  }
+
+  static protocol_v12::MapEditControl
+  MakeMapTransformControl(protocol_v12::MapEditControlType type,
+                          std::uint16_t source_role, std::uint64_t request_id,
+                          std::uint64_t authority_revision,
+                          std::uint64_t snapshot_id,
+                          const map_editor::MultiplayerTransform &transform) {
+    protocol_v12::MapEditControl control;
+    control.type = type;
+    control.source_role = source_role;
+    control.object_id = transform.object_id;
+    control.request_id = request_id;
+    control.authority_revision = authority_revision;
+    control.snapshot_id = snapshot_id;
+    std::copy_n(transform.translation.begin(), 3, control.translation);
+    std::copy_n(transform.basis.begin(), 9, control.basis);
+    return control;
+  }
+
+  void QueueMapControl(std::uint32_t target_role,
+                       protocol_v12::MapEditControl control) {
+    MapOutboundCommand command;
+    command.kind = MapOutboundCommand::Kind::kControl;
+    command.control = std::move(control);
+    auto &queue = map_edit_outbound_[target_role];
+    const bool preview =
+        command.control.type ==
+            protocol_v12::MapEditControlType::kTransformPreviewRequest ||
+        command.control.type ==
+            protocol_v12::MapEditControlType::kTransformPreviewApply;
+    if (preview) {
+      const auto existing = std::find_if(
+          queue.begin(), queue.end(),
+          [&command](const MapOutboundCommand &candidate) {
+            return candidate.kind == MapOutboundCommand::Kind::kControl &&
+                   candidate.control.type == command.control.type &&
+                   candidate.control.object_id == command.control.object_id;
+          });
+      if (existing != queue.end()) {
+        *existing = std::move(command);
+        return;
+      }
+    }
+    queue.push_back(std::move(command));
+  }
+
+  void QueueMapSpawn(std::uint32_t target_role,
+                     protocol_v12::MapEditSpawnType type,
+                     std::uint16_t source_role, std::uint64_t request_id,
+                     std::uint64_t authority_revision,
+                     std::uint64_t snapshot_id,
+                     const std::array<float, 3> &position,
+                     std::shared_ptr<const std::vector<std::uint8_t>> package) {
+    if (package == nullptr || package->empty() ||
+        package->size() > protocol_v12::kMaximumMapEditPackageBytes) {
+      ++telemetry_.rejected_map_edit_packets;
+      return;
+    }
+    MapOutboundCommand command;
+    command.kind = MapOutboundCommand::Kind::kSpawn;
+    command.spawn_type = type;
+    command.source_role = source_role;
+    command.request_id = request_id;
+    command.authority_revision = authority_revision;
+    command.snapshot_id = snapshot_id;
+    command.position = position;
+    command.package = std::move(package);
+    command.content_hash = protocol_v12::MapEditContentHash(*command.package);
+    map_edit_outbound_[target_role].push_back(std::move(command));
+  }
+
+  void BroadcastMapControl(const protocol_v12::MapEditControl &control) {
+    for (const std::uint32_t target_role : ControlTargetRoles()) {
+      const auto peer = peer_control_.find(target_role);
+      if (!MapEditReadyForRole(target_role) || peer == peer_control_.end() ||
+          !peer->second.map_snapshot_queued) {
+        continue;
+      }
+      QueueMapControl(target_role, control);
+    }
+  }
+
+  void BroadcastMapSpawn(const AuthoritySpawnRecord &record,
+                         std::uint64_t snapshot_id = 0) {
+    for (const std::uint32_t target_role : ControlTargetRoles()) {
+      const auto peer = peer_control_.find(target_role);
+      if (!MapEditReadyForRole(target_role) || peer == peer_control_.end() ||
+          !peer->second.map_snapshot_queued) {
+        continue;
+      }
+      QueueMapSpawn(target_role, protocol_v12::MapEditSpawnType::kSpawnApply,
+                    record.source_role, record.request_id,
+                    record.authority_revision, snapshot_id, record.position,
+                    record.package);
+    }
+  }
+
+  bool ApplyValidatedMapEditControl(
+      const protocol_v12::Envelope &envelope,
+      const protocol_v12::MapEditControl &control) {
+    const bool request =
+        control.type ==
+            protocol_v12::MapEditControlType::kTransformPreviewRequest ||
+        control.type ==
+            protocol_v12::MapEditControlType::kTransformCommitRequest;
+    const bool apply =
+        control.type ==
+            protocol_v12::MapEditControlType::kTransformPreviewApply ||
+        control.type == protocol_v12::MapEditControlType::kTransformCommitApply;
+    if (request) {
+      if (bound_role_ != 1 || control.source_role != envelope.sender_role) {
+        return false;
+      }
+      const bool committed =
+          control.type ==
+          protocol_v12::MapEditControlType::kTransformCommitRequest;
+      const std::uint64_t revision =
+          committed ? ++map_authority_revision_ : map_authority_revision_;
+      const map_editor::MultiplayerTransform transform =
+          MapTransformFromControl(control);
+      if (!map_editor::QueueReplicatedTransform(transform, committed,
+                                                session_id_, revision)) {
+        return false;
+      }
+      const auto type =
+          committed ? protocol_v12::MapEditControlType::kTransformCommitApply
+                    : protocol_v12::MapEditControlType::kTransformPreviewApply;
+      BroadcastMapControl(MakeMapTransformControl(type, control.source_role,
+                                                  control.request_id, revision,
+                                                  0, transform));
+      return true;
+    }
+    if (apply) {
+      if (envelope.sender_role != 1 || bound_role_ == 1) {
+        return false;
+      }
+      const bool committed =
+          control.type ==
+          protocol_v12::MapEditControlType::kTransformCommitApply;
+      if (committed && control.authority_revision == 0) {
+        return false;
+      }
+      if (!map_editor::QueueReplicatedTransform(
+              MapTransformFromControl(control), committed,
+              envelope.sender_session, control.authority_revision)) {
+        return false;
+      }
+      map_authority_revision_ =
+          std::max(map_authority_revision_, control.authority_revision);
+      return true;
+    }
+    if (envelope.sender_role != 1 || bound_role_ == 1) {
+      return false;
+    }
+    if (control.type == protocol_v12::MapEditControlType::kSnapshotBegin) {
+      receiving_map_snapshot_id_ = control.snapshot_id;
+      ++telemetry_.received_map_snapshots;
+    } else if (receiving_map_snapshot_id_ != control.snapshot_id) {
+      return false;
+    } else {
+      receiving_map_snapshot_id_ = 0;
+    }
+    map_authority_revision_ =
+        std::max(map_authority_revision_, control.authority_revision);
+    return true;
+  }
+
+  bool ReceiveMapEditControl(const std::byte *bytes, int received_bytes,
+                             const PacketEndpoint &sender) {
+    const auto reject = [this]() {
+      ++telemetry_.rejected_map_edit_packets;
+      ++telemetry_.rejected_packets;
+      return false;
+    };
+    if (bytes == nullptr || received_bytes <= 0 ||
+        (!using_steam_ &&
+         !topology::DirectLocalMeshEnabled(ConfiguredLocalPeerCount()))) {
+      return reject();
+    }
+    const auto packet = std::span<const std::uint8_t>(
+        reinterpret_cast<const std::uint8_t *>(bytes),
+        static_cast<std::size_t>(received_bytes));
+    protocol_v12::Envelope envelope;
+    protocol_v12::MapEditControl control;
+    if (!protocol_v12::DecodeEnvelope(packet, envelope) ||
+        !protocol_v12::DecodeMapEditControl(
+            packet.subspan(protocol_v12::kEnvelopeBytes), control) ||
+        !protocol_v12::MapEditControlEnvelopeShapeValid(envelope, control) ||
+        !SteamSenderValid(envelope.sender_role, sender) ||
+        envelope.sender_role == static_cast<std::uint16_t>(bound_role_) ||
+        envelope.sender_session == session_id_) {
+      return reject();
+    }
+    const auto peer_control = peer_control_.find(envelope.sender_role);
+    const auto peer = remote_peers_.find(envelope.sender_role);
+    if (peer_control == peer_control_.end() || peer == remote_peers_.end() ||
+        peer->second.session != envelope.sender_session ||
+        !peer_control->second.v12_generation.Matches(envelope.sender_role,
+                                                     envelope.sender_session) ||
+        (peer_control->second.v12_negotiated_features &
+         protocol_v12::kFeatureLiveMapEditing) == 0) {
+      return reject();
+    }
+    const protocol_v12::ReceiveDisposition disposition =
+        peer_control->second.map_edit_receive_history.Observe(
+            envelope.sequence);
+    if (disposition == protocol_v12::ReceiveDisposition::kDuplicate ||
+        disposition == protocol_v12::ReceiveDisposition::kTooOld) {
+      return true;
+    }
+
+    if (!pending_map_spawn_decodes_.empty()) {
+      if (deferred_map_edit_controls_.size() >= 1024) {
+        return reject();
+      }
+      deferred_map_edit_controls_.push_back({envelope, control});
+    } else {
+      if (!ApplyValidatedMapEditControl(envelope, control)) {
+        return reject();
+      }
+    }
+    ++telemetry_.received_packets;
+    ++telemetry_.received_map_edit_controls;
+    telemetry_.received_map_edit_bytes += packet.size();
+    return true;
+  }
+
+  bool ReceiveMapEditSpawn(const std::byte *bytes, int received_bytes,
+                           const PacketEndpoint &sender) {
+    const auto reject = [this]() {
+      ++telemetry_.rejected_map_edit_packets;
+      ++telemetry_.rejected_packets;
+      return false;
+    };
+    if (bytes == nullptr || received_bytes <= 0 ||
+        (!using_steam_ &&
+         !topology::DirectLocalMeshEnabled(ConfiguredLocalPeerCount()))) {
+      return reject();
+    }
+    const auto packet = std::span<const std::uint8_t>(
+        reinterpret_cast<const std::uint8_t *>(bytes),
+        static_cast<std::size_t>(received_bytes));
+    protocol_v12::Envelope envelope;
+    protocol_v12::MapEditSpawnHeader header;
+    std::span<const std::uint8_t> fragment;
+    if (!protocol_v12::DecodeMapEditSpawnDatagram(packet, envelope, header,
+                                                  fragment) ||
+        !SteamSenderValid(envelope.sender_role, sender) ||
+        envelope.sender_role == static_cast<std::uint16_t>(bound_role_) ||
+        envelope.sender_session == session_id_) {
+      return reject();
+    }
+    const auto peer_control = peer_control_.find(envelope.sender_role);
+    const auto peer = remote_peers_.find(envelope.sender_role);
+    if (peer_control == peer_control_.end() || peer == remote_peers_.end() ||
+        peer->second.session != envelope.sender_session ||
+        !peer_control->second.v12_generation.Matches(envelope.sender_role,
+                                                     envelope.sender_session) ||
+        (peer_control->second.v12_negotiated_features &
+         protocol_v12::kFeatureLiveMapEditing) == 0) {
+      return reject();
+    }
+    if ((header.type == protocol_v12::MapEditSpawnType::kSpawnRequest &&
+         (bound_role_ != 1 || header.source_role != envelope.sender_role)) ||
+        (header.type == protocol_v12::MapEditSpawnType::kSpawnApply &&
+         (bound_role_ == 1 || envelope.sender_role != 1 ||
+          header.authority_revision == 0))) {
+      return reject();
+    }
+
+    protocol_v12::MapEditReassemblyResult result = map_spawn_reassembler_.Push(
+        envelope, header, fragment, NowMicroseconds());
+    ++telemetry_.received_packets;
+    ++telemetry_.received_map_edit_fragments;
+    telemetry_.received_map_edit_bytes += packet.size();
+    if (result.disposition ==
+            protocol_v12::MapEditReassemblyDisposition::kStored ||
+        result.disposition ==
+            protocol_v12::MapEditReassemblyDisposition::kDuplicate) {
+      return true;
+    }
+    if (result.disposition !=
+            protocol_v12::MapEditReassemblyDisposition::kComplete ||
+        !result.completed.has_value()) {
+      return reject();
+    }
+
+    if (pending_map_spawn_decodes_.size() >= 4) {
+      return reject();
+    }
+    auto package = std::make_shared<const std::vector<std::uint8_t>>(
+        std::move(result.completed->package));
+    PendingMapSpawnDecode pending;
+    pending.envelope = envelope;
+    pending.header = header;
+    pending.package = package;
+    pending.future = std::async(std::launch::async, [package]() {
+      return std::make_shared<const skate::world::SkateObjectAsset>(
+          skate::world::LoadSkateObjectPackage(
+              std::span<const std::uint8_t>(*package)));
+    });
+    pending_map_spawn_decodes_.push_back(std::move(pending));
+    return true;
+  }
+
+  bool CompleteDecodedMapSpawn(
+      const protocol_v12::Envelope &envelope,
+      const protocol_v12::MapEditSpawnHeader &header,
+      std::shared_ptr<const std::vector<std::uint8_t>> package,
+      std::shared_ptr<const skate::world::SkateObjectAsset> asset) {
+    if (!MapEditGenerationCurrent(envelope)) {
+      return false;
+    }
+    map_editor::MultiplayerSpawn spawn;
+    spawn.position = {
+        header.position[0],
+        header.position[1],
+        header.position[2],
+    };
+    spawn.package = package;
+    if (header.type == protocol_v12::MapEditSpawnType::kSpawnRequest) {
+      const std::uint64_t revision = ++map_authority_revision_;
+      if (!map_editor::QueueReplicatedSpawn(asset, spawn, session_id_,
+                                            revision)) {
+        return false;
+      }
+      AuthoritySpawnRecord record;
+      record.source_role = header.source_role;
+      record.request_id = header.request_id;
+      record.authority_revision = revision;
+      record.position = spawn.position;
+      record.package = package;
+      map_authority_spawns_.push_back(record);
+      BroadcastMapSpawn(record);
+    } else {
+      if (!map_editor::QueueReplicatedSpawn(asset, spawn,
+                                            envelope.sender_session,
+                                            header.authority_revision)) {
+        return false;
+      }
+      map_authority_revision_ =
+          std::max(map_authority_revision_, header.authority_revision);
+    }
+    ++telemetry_.completed_map_edit_spawns;
+    return true;
+  }
+
+  void CompletePendingMapSpawnDecodes() {
+    while (!pending_map_spawn_decodes_.empty()) {
+      PendingMapSpawnDecode &pending = pending_map_spawn_decodes_.front();
+      if (pending.future.wait_for(std::chrono::seconds(0)) !=
+          std::future_status::ready) {
+        break;
+      }
+      try {
+        const auto asset = pending.future.get();
+        if (!CompleteDecodedMapSpawn(pending.envelope, pending.header,
+                                     pending.package, asset)) {
+          ++telemetry_.rejected_map_edit_packets;
+          ++telemetry_.rejected_packets;
+        }
+      } catch (const std::exception &error) {
+        ++telemetry_.rejected_map_edit_packets;
+        ++telemetry_.rejected_packets;
+        REXLOG_WARN("multiplayer-map-edit: rejected replicated .skateobj: {}",
+                    error.what());
+      }
+      pending_map_spawn_decodes_.pop_front();
+    }
+    if (!pending_map_spawn_decodes_.empty()) {
+      return;
+    }
+    while (!deferred_map_edit_controls_.empty()) {
+      DeferredMapEditControl deferred =
+          std::move(deferred_map_edit_controls_.front());
+      deferred_map_edit_controls_.pop_front();
+      if (!MapEditGenerationCurrent(deferred.envelope) ||
+          !ApplyValidatedMapEditControl(deferred.envelope, deferred.control)) {
+        ++telemetry_.rejected_map_edit_packets;
+        ++telemetry_.rejected_packets;
+      }
+    }
+  }
+
   void ProcessReceivedPacket(
       Clock::time_point now, std::uint32_t map_hash,
       const protocol_v12::live::CompatibilityIdentity &v12_compatibility,
@@ -3006,6 +3503,17 @@ private:
         }
       } else if (envelope.kind == protocol_v12::MessageKind::kPoseControl) {
         if (ReceiveV12PoseControl(now, bytes, received, sender)) {
+          RegisterPeer(envelope.sender_role, envelope.sender_session, sender,
+                       now, nullptr);
+        }
+      } else if (envelope.kind == protocol_v12::MessageKind::kMapEditControl) {
+        if (ReceiveMapEditControl(bytes, received, sender)) {
+          RegisterPeer(envelope.sender_role, envelope.sender_session, sender,
+                       now, nullptr);
+        }
+      } else if (envelope.kind ==
+                 protocol_v12::MessageKind::kMapEditSpawnChunk) {
+        if (ReceiveMapEditSpawn(bytes, received, sender)) {
           RegisterPeer(envelope.sender_role, envelope.sender_session, sender,
                        now, nullptr);
         }
@@ -3238,17 +3746,14 @@ private:
     std::vector<std::uint16_t> words;
     std::vector<std::uint8_t> unpacked;
     std::vector<std::uint8_t> snappy_unpacked;
-    protocol_v12::PoseGroupEncoding effective_encoding =
-        completed.encoding;
+    protocol_v12::PoseGroupEncoding effective_encoding = completed.encoding;
     std::span<const std::uint8_t> effective_bytes(completed.bytes);
-    if (completed.encoding ==
-        protocol_v12::PoseGroupEncoding::kSnappyV1) {
+    if (completed.encoding == protocol_v12::PoseGroupEncoding::kSnappyV1) {
       if (!protocol_v12::DecodeSnappyPoseGroup(
               completed.bytes, effective_encoding, snappy_unpacked) ||
           !protocol_v12::AnimationPoseGroupEncodingAllowed(
               effective_encoding,
-              completed.kind ==
-                  protocol_v12::MessageKind::kPoseBaseline)) {
+              completed.kind == protocol_v12::MessageKind::kPoseBaseline)) {
         ++telemetry_.rejected_v12_snappy_groups;
         return reject();
       }
@@ -3284,9 +3789,8 @@ private:
               effective_bytes, baselines, root_position, root_bone, words);
         } else if (effective_encoding ==
                    protocol_v12::PoseGroupEncoding::kBlockDeltaV1) {
-          animation_decoded =
-              protocol_v12::DecodeBlockPackedAnimationDelta(
-                  effective_bytes, baselines, root_position, root_bone, words);
+          animation_decoded = protocol_v12::DecodeBlockPackedAnimationDelta(
+              effective_bytes, baselines, root_position, root_bone, words);
         } else {
           animation_decoded = protocol_v12::DecodeSemanticAnimationDelta(
               effective_bytes, baselines, root_position, root_bone, words);
@@ -3294,8 +3798,7 @@ private:
       }
     } else {
       const std::span<const std::uint8_t> animation_bytes =
-          effective_encoding ==
-                  protocol_v12::PoseGroupEncoding::kBitPackedV1
+          effective_encoding == protocol_v12::PoseGroupEncoding::kBitPackedV1
               ? (protocol_v12::DecodeLosslessBytes(effective_bytes, unpacked)
                      ? std::span<const std::uint8_t>(unpacked)
                      : std::span<const std::uint8_t>())
@@ -3307,9 +3810,8 @@ private:
     protocol_v12::PoseGroupHeader decoded_header = header;
     decoded_header.encoding = effective_encoding;
     if (!animation_decoded ||
-        !protocol_v12::AnimationWordStreamMatchesPoseGroup(completed.kind,
-                                                           decoded_header,
-                                                           words)) {
+        !protocol_v12::AnimationWordStreamMatchesPoseGroup(
+            completed.kind, decoded_header, words)) {
       return reject();
     }
     const std::uint32_t group_mask = 1u << completed.group_id;
@@ -3553,6 +4055,9 @@ private:
       control.v12_sender_baseline.ActivateGeneration(session_id_);
       control.v12_offered_animation_keyframes.clear();
       control.v12_force_animation_keyframe = false;
+      control.map_snapshot_queued = false;
+      control.map_edit_receive_history.Clear();
+      map_edit_outbound_.erase(envelope.sender_role);
     }
     control.v12_negotiated_features = negotiated;
     control.last_v12_advertisement_received = now;
@@ -3718,6 +4223,15 @@ private:
     if (peer.session == sender_session) {
       return;
     }
+    std::uint64_t appearance_to_recover = 0;
+    if (const auto retired = retired_appearances_.find(role);
+        retired != retired_appearances_.end()) {
+      appearance_to_recover =
+          lifecycle::RetiredAppearanceIdentityForReconnect(
+              retired->second.session, retired->second.identity,
+              sender_session);
+      retired_appearances_.erase(retired);
+    }
     QueueRemotePeerRetirement(role, peer.session);
     if (peer_generations_.ObserveProcessSession(role, sender_session)) {
       ResetOutboundPeerState(role, "process session changed");
@@ -3727,6 +4241,12 @@ private:
     peer.session = sender_session;
     peer.v12_pose_receiver.ActivateGeneration(static_cast<std::uint16_t>(role),
                                               sender_session);
+    if (appearance_to_recover != 0) {
+      QueueAppearanceRequest(role, appearance_to_recover);
+      REXLOG_INFO("multiplayer: recovering retired appearance role={} "
+                  "session={} id={:016X}",
+                  role, sender_session, appearance_to_recover);
+    }
   }
 
   bool ReceivePosePacket(Clock::time_point now, std::uint32_t map_hash,
@@ -4144,6 +4664,16 @@ private:
         telemetry_.sent_animation_bytes += packet_bytes;
         ++telemetry_.sent_animation_unreliable_fragments;
         ++telemetry_.sent_v12_animation_fragments;
+      } else if (envelope.kind == protocol_v12::MessageKind::kMapEditControl &&
+                 (traffic_class == OutboundTrafficClass::kControl ||
+                  traffic_class == OutboundTrafficClass::kRealtime)) {
+        ++telemetry_.sent_map_edit_controls;
+        telemetry_.sent_map_edit_bytes += packet_bytes;
+      } else if (envelope.kind ==
+                     protocol_v12::MessageKind::kMapEditSpawnChunk &&
+                 traffic_class == OutboundTrafficClass::kAppearance) {
+        ++telemetry_.sent_map_edit_fragments;
+        telemetry_.sent_map_edit_bytes += packet_bytes;
       } else {
         ++telemetry_.delivery_policy_errors;
       }
@@ -4342,6 +4872,306 @@ private:
     return control != peer_control_.end() &&
            (control->second.v12_negotiated_features &
             protocol_v12::kFeaturePoseGroups) != 0;
+  }
+
+  void EnsureMapEditorSync(std::uint16_t role) {
+    if (role == map_sync_role_ && session_id_ == map_sync_local_session_) {
+      return;
+    }
+    map_sync_role_ = role;
+    map_sync_local_session_ = session_id_;
+    map_authority_revision_ = 0;
+    map_authority_request_id_ = 0;
+    map_snapshot_id_ = 0;
+    receiving_map_snapshot_id_ = 0;
+    map_edit_send_sequence_ = 0;
+    map_authority_spawns_.clear();
+    map_edit_outbound_.clear();
+    map_spawn_reassembler_.Reset();
+    pending_map_spawn_decodes_.clear();
+    deferred_map_edit_controls_.clear();
+    for (auto &[peer_role, control] : peer_control_) {
+      (void)peer_role;
+      control.map_snapshot_queued = false;
+      control.map_edit_receive_history.Clear();
+    }
+    map_editor::SetMultiplayerSyncState(true, role, session_id_);
+    if (role == 1) {
+      const map_editor::MultiplayerEditSnapshot snapshot =
+          map_editor::CaptureMultiplayerEditSnapshot();
+      for (const map_editor::MultiplayerSpawn &spawn : snapshot.spawns) {
+        if (spawn.package == nullptr || spawn.package->empty() ||
+            spawn.package->size() > protocol_v12::kMaximumMapEditPackageBytes) {
+          continue;
+        }
+        AuthoritySpawnRecord record;
+        record.source_role = 1;
+        record.request_id = ++map_authority_request_id_;
+        record.authority_revision = ++map_authority_revision_;
+        record.position = spawn.position;
+        record.package = spawn.package;
+        map_authority_spawns_.push_back(std::move(record));
+      }
+    }
+  }
+
+  void ProcessLocalMapEditorEvents() {
+    if (bound_role_ <= 0 || session_id_ == 0) {
+      return;
+    }
+    if (bound_role_ != 1 && !MapEditReadyForRole(1)) {
+      return;
+    }
+    for (map_editor::MultiplayerEditEvent &event :
+         map_editor::DrainMultiplayerEditEvents()) {
+      if (event.source_role != static_cast<std::uint16_t>(bound_role_)) {
+        ++telemetry_.rejected_map_edit_packets;
+        continue;
+      }
+      if (bound_role_ == 1) {
+        if (event.kind == map_editor::MultiplayerEditKind::kSpawn) {
+          if (event.spawn.package == nullptr || event.spawn.package->empty() ||
+              event.spawn.package->size() >
+                  protocol_v12::kMaximumMapEditPackageBytes) {
+            ++telemetry_.rejected_map_edit_packets;
+            continue;
+          }
+          AuthoritySpawnRecord record;
+          record.source_role = event.source_role;
+          record.request_id = event.request_id;
+          record.authority_revision = ++map_authority_revision_;
+          record.position = event.spawn.position;
+          record.package = event.spawn.package;
+          map_authority_spawns_.push_back(record);
+          BroadcastMapSpawn(record);
+          continue;
+        }
+        const bool committed =
+            event.kind == map_editor::MultiplayerEditKind::kTransformCommit;
+        const auto type =
+            committed
+                ? protocol_v12::MapEditControlType::kTransformCommitApply
+                : protocol_v12::MapEditControlType::kTransformPreviewApply;
+        const std::uint64_t revision =
+            committed ? ++map_authority_revision_ : map_authority_revision_;
+        BroadcastMapControl(MakeMapTransformControl(type, event.source_role,
+                                                    event.request_id, revision,
+                                                    0, event.transform));
+        continue;
+      }
+
+      if (event.kind == map_editor::MultiplayerEditKind::kSpawn) {
+        QueueMapSpawn(1, protocol_v12::MapEditSpawnType::kSpawnRequest,
+                      event.source_role, event.request_id, 0, 0,
+                      event.spawn.position, event.spawn.package);
+      } else {
+        const auto type =
+            event.kind == map_editor::MultiplayerEditKind::kTransformCommit
+                ? protocol_v12::MapEditControlType::kTransformCommitRequest
+                : protocol_v12::MapEditControlType::kTransformPreviewRequest;
+        QueueMapControl(1, MakeMapTransformControl(type, event.source_role,
+                                                   event.request_id, 0, 0,
+                                                   event.transform));
+      }
+    }
+  }
+
+  void QueuePendingMapSnapshots() {
+    if (bound_role_ != 1) {
+      return;
+    }
+    for (const std::uint32_t target_role : ControlTargetRoles()) {
+      auto peer = peer_control_.find(target_role);
+      if (peer == peer_control_.end() || peer->second.map_snapshot_queued ||
+          !MapEditReadyForRole(target_role)) {
+        continue;
+      }
+      const map_editor::MultiplayerEditSnapshot snapshot =
+          map_editor::CaptureMultiplayerEditSnapshot();
+      if (!snapshot.transforms.empty() && map_authority_revision_ == 0) {
+        map_authority_revision_ = 1;
+      }
+      const std::uint64_t snapshot_id = ++map_snapshot_id_;
+      protocol_v12::MapEditControl begin;
+      begin.type = protocol_v12::MapEditControlType::kSnapshotBegin;
+      begin.source_role = 1;
+      begin.authority_revision = map_authority_revision_;
+      begin.snapshot_id = snapshot_id;
+      QueueMapControl(target_role, begin);
+      for (const AuthoritySpawnRecord &record : map_authority_spawns_) {
+        QueueMapSpawn(target_role, protocol_v12::MapEditSpawnType::kSpawnApply,
+                      record.source_role, record.request_id,
+                      record.authority_revision, snapshot_id, record.position,
+                      record.package);
+      }
+      for (const map_editor::MultiplayerTransform &transform :
+           snapshot.transforms) {
+        QueueMapControl(
+            target_role,
+            MakeMapTransformControl(
+                protocol_v12::MapEditControlType::kTransformCommitApply, 1,
+                ++map_authority_request_id_, map_authority_revision_,
+                snapshot_id, transform));
+      }
+      protocol_v12::MapEditControl end;
+      end.type = protocol_v12::MapEditControlType::kSnapshotEnd;
+      end.source_role = 1;
+      end.authority_revision = map_authority_revision_;
+      end.snapshot_id = snapshot_id;
+      QueueMapControl(target_role, end);
+      peer->second.map_snapshot_queued = true;
+      ++telemetry_.sent_map_snapshots;
+      REXLOG_INFO("multiplayer-map-edit: queued snapshot={} target={} "
+                  "revision={} spawns={} transforms={}",
+                  snapshot_id, target_role, map_authority_revision_,
+                  map_authority_spawns_.size(), snapshot.transforms.size());
+    }
+  }
+
+  bool SendMapEditControl(std::uint32_t target_role,
+                          const protocol_v12::MapEditControl &control) {
+    PacketEndpoint target;
+    if (!ResolveDirectControlTarget(target_role, target)) {
+      return false;
+    }
+    std::array<std::uint8_t, protocol_v12::kEnvelopeBytes +
+                                 protocol_v12::kMapEditControlPayloadBytes>
+        packet{};
+    protocol_v12::Envelope envelope;
+    envelope.kind = protocol_v12::MessageKind::kMapEditControl;
+    const bool preview =
+        control.type ==
+            protocol_v12::MapEditControlType::kTransformPreviewRequest ||
+        control.type ==
+            protocol_v12::MapEditControlType::kTransformPreviewApply;
+    envelope.flags =
+        preview ? protocol_v12::kFlagExpires : protocol_v12::kFlagReliable;
+    envelope.payload_bytes = protocol_v12::kMapEditControlPayloadBytes;
+    envelope.sender_role = static_cast<std::uint16_t>(bound_role_);
+    envelope.stream_id = protocol_v12::kMapEditStreamId;
+    envelope.sender_session = session_id_;
+    envelope.sequence = ++map_edit_send_sequence_;
+    envelope.sender_time_us = NowMicroseconds();
+    const auto peer = peer_control_.find(target_role);
+    if (peer != peer_control_.end() &&
+        peer->second.map_edit_receive_history.initialized()) {
+      envelope.acknowledged_sequence =
+          peer->second.map_edit_receive_history.latest();
+      envelope.receive_history =
+          peer->second.map_edit_receive_history.history();
+    }
+    if (!protocol_v12::EncodeEnvelope(envelope, packet) ||
+        !protocol_v12::EncodeMapEditControl(
+            control, std::span<std::uint8_t>(packet).subspan(
+                         protocol_v12::kEnvelopeBytes))) {
+      ++telemetry_.delivery_policy_errors;
+      return false;
+    }
+    return SendBytes(packet.data(), static_cast<int>(packet.size()), target,
+                     preview ? OutboundTrafficClass::kRealtime
+                             : OutboundTrafficClass::kControl,
+                     /*relayed=*/false);
+  }
+
+  bool SendMapEditSpawnFragment(std::uint32_t target_role,
+                                MapOutboundCommand &command) {
+    if (command.package == nullptr || command.package->empty()) {
+      return false;
+    }
+    PacketEndpoint target;
+    if (!ResolveDirectControlTarget(target_role, target)) {
+      return false;
+    }
+    const std::uint32_t total_bytes =
+        static_cast<std::uint32_t>(command.package->size());
+    const std::uint32_t fragment_count =
+        protocol_v12::MapEditSpawnFragmentCount(total_bytes);
+    if (fragment_count == 0 || command.next_fragment >= fragment_count) {
+      return false;
+    }
+    protocol_v12::MapEditSpawnHeader header;
+    header.type = command.spawn_type;
+    header.source_role = command.source_role;
+    header.request_id = command.request_id;
+    header.authority_revision = command.authority_revision;
+    header.snapshot_id = command.snapshot_id;
+    header.total_bytes = total_bytes;
+    header.fragment_index = command.next_fragment;
+    header.fragment_count = fragment_count;
+    header.fragment_offset =
+        protocol_v12::MapEditSpawnFragmentOffset(command.next_fragment);
+    header.fragment_bytes = protocol_v12::MapEditSpawnFragmentByteCount(
+        total_bytes, command.next_fragment);
+    header.content_hash = command.content_hash;
+    std::copy_n(command.position.begin(), 3, header.position);
+
+    protocol_v12::Envelope envelope;
+    envelope.kind = protocol_v12::MessageKind::kMapEditSpawnChunk;
+    envelope.flags = protocol_v12::kFlagReliable;
+    envelope.payload_bytes =
+        protocol_v12::kMapEditSpawnHeaderBytes + header.fragment_bytes;
+    envelope.sender_role = static_cast<std::uint16_t>(bound_role_);
+    envelope.stream_id = protocol_v12::kMapEditStreamId;
+    envelope.sender_session = session_id_;
+    envelope.sequence = ++map_edit_send_sequence_;
+    envelope.sender_time_us = NowMicroseconds();
+    const std::size_t packet_bytes =
+        protocol_v12::kEnvelopeBytes + envelope.payload_bytes;
+    std::array<std::uint8_t, protocol_v12::kMaximumDatagramBytes> packet{};
+    if (!protocol_v12::EncodeMapEditSpawnDatagram(
+            envelope, header, *command.package,
+            std::span<std::uint8_t>(packet).first(packet_bytes))) {
+      ++telemetry_.delivery_policy_errors;
+      return false;
+    }
+    if (!SendBytes(packet.data(), static_cast<int>(packet_bytes), target,
+                   OutboundTrafficClass::kAppearance,
+                   /*relayed=*/false)) {
+      return false;
+    }
+    ++command.next_fragment;
+    return true;
+  }
+
+  void DrainMapEditOutbound() {
+    // One MTU-safe package fragment per peer per 4 ms worker tick caps a
+    // full eight-player session near 2.2 MiB/s aggregate. Object transfer
+    // therefore cannot recreate the host-saturating burst behavior that the
+    // player/appearance scheduler was designed to avoid.
+    constexpr std::size_t kPacketsPerPeerPerTick = 1;
+    for (auto queue = map_edit_outbound_.begin();
+         queue != map_edit_outbound_.end();) {
+      std::size_t sent = 0;
+      while (sent < kPacketsPerPeerPerTick && !queue->second.empty()) {
+        MapOutboundCommand &command = queue->second.front();
+        bool success = false;
+        bool complete = false;
+        if (command.kind == MapOutboundCommand::Kind::kControl) {
+          success = SendMapEditControl(queue->first, command.control);
+          complete = success;
+        } else {
+          success = SendMapEditSpawnFragment(queue->first, command);
+          if (success) {
+            const std::uint32_t fragment_count =
+                protocol_v12::MapEditSpawnFragmentCount(
+                    static_cast<std::uint32_t>(command.package->size()));
+            complete = command.next_fragment >= fragment_count;
+          }
+        }
+        if (!success) {
+          break;
+        }
+        ++sent;
+        if (complete) {
+          queue->second.pop_front();
+        }
+      }
+      if (queue->second.empty()) {
+        queue = map_edit_outbound_.erase(queue);
+      } else {
+        ++queue;
+      }
+    }
   }
 
   bool SendV12RootSnapshot(const PosePacket &source,
@@ -5008,9 +5838,8 @@ private:
                     Clock::now() - predictive_started)
                     .count());
             telemetry_.v12_predictive_delta_encode_ns += predictive_ns;
-            telemetry_.v12_predictive_delta_encode_max_ns =
-                std::max(telemetry_.v12_predictive_delta_encode_max_ns,
-                         predictive_ns);
+            telemetry_.v12_predictive_delta_encode_max_ns = std::max(
+                telemetry_.v12_predictive_delta_encode_max_ns, predictive_ns);
 
             if (!exact_delta_selected && block_bytes != 0 &&
                 protocol_v12::LosslessPackingWorthwhile(
@@ -5085,27 +5914,24 @@ private:
             const auto snappy_started = Clock::now();
             ++telemetry_.v12_snappy_attempts;
             std::vector<std::uint8_t> snappy;
-            const std::size_t uncompressed_bytes =
-                frame.v12_group_bytes.size();
+            const std::size_t uncompressed_bytes = frame.v12_group_bytes.size();
             if (protocol_v12::EncodeSnappyPoseGroup(
                     frame.v12_encoding, frame.v12_group_bytes, snappy) &&
                 protocol_v12::LosslessPackingWorthwhile(
                     uncompressed_bytes, snappy.size(),
                     protocol_v12::kMaximumPoseFragmentBytes)) {
               frame.v12_group_bytes = std::move(snappy);
-              frame.v12_encoding =
-                  protocol_v12::PoseGroupEncoding::kSnappyV1;
+              frame.v12_encoding = protocol_v12::PoseGroupEncoding::kSnappyV1;
               telemetry_.v12_snappy_raw_bytes += uncompressed_bytes;
-              telemetry_.v12_snappy_wire_bytes +=
-                  frame.v12_group_bytes.size();
+              telemetry_.v12_snappy_wire_bytes += frame.v12_group_bytes.size();
             }
             const std::uint64_t snappy_ns = static_cast<std::uint64_t>(
                 std::chrono::duration_cast<std::chrono::nanoseconds>(
                     Clock::now() - snappy_started)
                     .count());
             telemetry_.v12_snappy_encode_ns += snappy_ns;
-            telemetry_.v12_snappy_encode_max_ns = std::max(
-                telemetry_.v12_snappy_encode_max_ns, snappy_ns);
+            telemetry_.v12_snappy_encode_max_ns =
+                std::max(telemetry_.v12_snappy_encode_max_ns, snappy_ns);
           }
         }
         prepared_frames.push_back(std::move(frame));
@@ -5611,6 +6437,18 @@ private:
     send_sequence_ = 0;
     animation_send_sequence_ = 0;
     v12_control_sequence_ = 0;
+    map_edit_send_sequence_ = 0;
+    map_sync_role_ = 0;
+    map_sync_local_session_ = 0;
+    map_authority_revision_ = 0;
+    map_authority_request_id_ = 0;
+    map_snapshot_id_ = 0;
+    receiving_map_snapshot_id_ = 0;
+    map_authority_spawns_.clear();
+    map_edit_outbound_.clear();
+    map_spawn_reassembler_.Reset();
+    pending_map_spawn_decodes_.clear();
+    deferred_map_edit_controls_.clear();
     outbound_animation_keyframes_.clear();
     outbound_appearance_.clear();
     peer_control_.clear();
@@ -5618,6 +6456,7 @@ private:
     peer_transport_generations_.clear();
     next_peer_transport_generation_ = 1;
     remote_peers_.clear();
+    retired_appearances_.clear();
 #if defined(_WIN32)
     host_peers_.clear();
 #endif
@@ -5641,6 +6480,7 @@ private:
     telemetry_.incomplete_appearance_bytes = 0;
     telemetry_.capability_peers = 0;
     telemetry_.v12_capability_peers = 0;
+    map_editor::SetMultiplayerSyncState(false, 0, 0);
   }
 
   std::mutex mutex_;
@@ -5658,6 +6498,19 @@ private:
   std::uint32_t send_sequence_ = 0;
   std::uint32_t animation_send_sequence_ = 0;
   std::uint32_t v12_control_sequence_ = 0;
+  std::uint32_t map_edit_send_sequence_ = 0;
+  std::uint16_t map_sync_role_ = 0;
+  std::uint32_t map_sync_local_session_ = 0;
+  std::uint64_t map_authority_revision_ = 0;
+  std::uint64_t map_authority_request_id_ = 0;
+  std::uint64_t map_snapshot_id_ = 0;
+  std::uint64_t receiving_map_snapshot_id_ = 0;
+  std::vector<AuthoritySpawnRecord> map_authority_spawns_;
+  std::unordered_map<std::uint32_t, std::deque<MapOutboundCommand>>
+      map_edit_outbound_;
+  protocol_v12::MapEditSpawnReassembler map_spawn_reassembler_;
+  std::deque<PendingMapSpawnDecode> pending_map_spawn_decodes_;
+  std::deque<DeferredMapEditControl> deferred_map_edit_controls_;
   std::unordered_map<std::uint32_t, QuantizedAnimationFrame>
       outbound_animation_keyframes_;
   std::unordered_map<std::uint32_t, lifecycle::OutboundAppearanceState>
@@ -5673,6 +6526,8 @@ private:
   Clock::time_point last_appearance_send_{};
   Clock::time_point last_rate_log_{};
   std::unordered_map<std::uint32_t, RemotePeerState> remote_peers_;
+  std::unordered_map<std::uint32_t, RetiredAppearanceRecord>
+      retired_appearances_;
   std::vector<RemotePeerRetirement> pending_remote_retirements_;
 #if defined(_WIN32)
   std::unordered_map<std::uint32_t, HostPeer> host_peers_;

@@ -59,9 +59,9 @@ void TestConstantsAndMessageKind() {
   Envelope envelope = ControlEnvelope();
   Expect(EnvelopeShapeValid(envelope),
          "pose-control message kind was not accepted by envelope");
-  envelope.kind = static_cast<MessageKind>(8);
+  envelope.kind = static_cast<MessageKind>(10);
   Expect(!EnvelopeShapeValid(envelope),
-         "unknown message kind after pose control was accepted");
+         "unknown message kind after map edit was accepted");
 }
 
 void TestPoseControlGoldenBytesAndRoundTrip() {

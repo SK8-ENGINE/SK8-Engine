@@ -2,7 +2,9 @@
 
 #include "skate/world/world_map.h"
 
+#include <cstdint>
 #include <filesystem>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -28,19 +30,18 @@ SkateObjectAsset ExtractSkateObjectAsset(MapDefinition package);
 // Reassigns prefab-local break groups above every group already present in
 // the destination map. This keeps separately spawned copies independent
 // while preserving grouping between roots inside one prefab instance.
-void RemapSkateObjectBreakGroups(
-    SkateObjectAsset& asset, const MapDefinition& destination);
+void RemapSkateObjectBreakGroups(SkateObjectAsset &asset,
+                                 const MapDefinition &destination);
 
 // Loads a .skateobj file using the shared SKATE package decoder, then enforces
 // the object-profile restrictions.
-SkateObjectAsset LoadSkateObjectPackage(
-    const std::filesystem::path& path);
+SkateObjectAsset LoadSkateObjectPackage(const std::filesystem::path &path);
+SkateObjectAsset LoadSkateObjectPackage(std::span<const std::uint8_t> bytes);
 
 // Writes one portable SKATE14/MOBJ3 prefab package atomically. Geometry and
 // collision remain local to each root object while origins and grind rails
 // are relative to the package pivot, matching LoadSkateObjectPackage().
-void SaveSkateObjectPackage(
-    const std::filesystem::path& path,
-    const SkateObjectAsset& asset);
+void SaveSkateObjectPackage(const std::filesystem::path &path,
+                            const SkateObjectAsset &asset);
 
-}  // namespace skate::world
+} // namespace skate::world

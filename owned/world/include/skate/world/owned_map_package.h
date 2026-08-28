@@ -2,7 +2,9 @@
 
 #include "skate/world/world_map.h"
 
+#include <cstdint>
 #include <filesystem>
+#include <span>
 #include <string>
 
 namespace skate::world {
@@ -17,14 +19,17 @@ constexpr bool IsSupportedOwnedMapPackageVersion(int version) {
 // Packages are renderer-neutral: one file contains visual triangles with
 // UV0/UV1, embedded RGBA8 textures, independent collision triangles, grind
 // paths, and spawn/environment metadata.
-MapDefinition LoadOwnedMapPackage(const std::filesystem::path& path);
+MapDefinition LoadOwnedMapPackage(const std::filesystem::path &path);
+// Decodes the same package contract directly from trusted caller-owned
+// bytes. Multiplayer uses this after bounded, hashed fragment reassembly so
+// a replicated .skateobj never needs to become a persistent user file.
+MapDefinition LoadOwnedMapPackage(std::span<const std::uint8_t> bytes);
 
 // Losslessly expands a package-backed texture on demand. The encoded payload
 // remains available so renderers can release the large RGBA allocation after
 // uploading it and recreate it later if their GPU cache evicts the texture.
-bool DecodeOwnedMapTexture(
-    const ImageTexture& texture,
-    std::string* error = nullptr);
-void ReleaseOwnedMapTexturePixels(const ImageTexture& texture);
+bool DecodeOwnedMapTexture(const ImageTexture &texture,
+                           std::string *error = nullptr);
+void ReleaseOwnedMapTexturePixels(const ImageTexture &texture);
 
-}  // namespace skate::world
+} // namespace skate::world

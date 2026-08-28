@@ -116,8 +116,11 @@ $runtime = if (Test-Path -LiteralPath $builtRuntime -PathType Leaf) {
 }
 $gameRoot = Join-Path $SourceInstallRoot 'game'
 $mapsRoot = Join-Path $SourceInstallRoot 'maps'
+$objectsRoot = Join-Path $SourceInstallRoot 'objects'
 
-foreach ($required in @($executable, $runtime, $gameRoot, $mapsRoot)) {
+foreach ($required in @(
+        $executable, $runtime, $gameRoot, $mapsRoot, $objectsRoot
+    )) {
     if (-not (Test-Path -LiteralPath $required)) {
         throw "Local multiplayer source is missing: $required"
     }
@@ -161,6 +164,7 @@ foreach ($role in 1..$Clients) {
     ) -Force | Out-Null
     Ensure-Junction -Path (Join-Path $root 'game') -Target $gameRoot
     Ensure-Junction -Path (Join-Path $root 'maps') -Target $mapsRoot
+    Ensure-Junction -Path (Join-Path $root 'objects') -Target $objectsRoot
 
     # Seed each isolated portable client with the user's existing profile once.
     # The two copies can then save concurrently without sharing writable data.
@@ -216,7 +220,10 @@ foreach ($client in $stagedClients) {
 }
 
 Write-Host ''
-Write-Host "$Clients clients use the same game and maps read-only through junctions."
+Write-Host (
+    "$Clients clients use the same game, maps, and object library " +
+    'read-only through junctions.'
+)
 Write-Host 'Their settings, caches, logs, and saves are isolated under:'
 Write-Host "  $clientRoot"
 Write-Host 'Client 1 is the logical host; nearby peers use the real animated skater and board.'

@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.1.0-preview.18 - 2026-08-28
+
+- Added real-time multiplayer replication for live map-editor translation and
+  rotation previews, reliable final transforms, and object-drop operations.
+- Kept player movement and presentation direct P2P while using the lobby owner
+  only to order mutable-map operations deterministically.
+- Replicated the actual bounded, hashed, validated `.skateobj` package so
+  spawned geometry, collision, physics, materials, textures, grind rails, and
+  late-join snapshots agree across peers.
+- Added background package decoding, rate-limited fragment transfer, mutation
+  telemetry, protocol/reassembly coverage, and two-client editor test tooling.
+- Prevented the initial object-library scan from stalling the multiplayer
+  worker, and made retired custom skater appearances recover automatically
+  after a same-session peer timeout.
+- Updated the local multiplayer launcher to share the release-facing `objects`
+  library alongside `game` and `maps`.
+
 ## 0.1.0-preview.17 - 2026-08-27
 
 - Fixed the Windows release updater crashing with stack-overflow exception
