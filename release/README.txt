@@ -25,7 +25,9 @@ and the NVIDIA coordination required before public distribution.
 
 Private Streamline 2.13 / DLSS Neural Rendering preview binaries are never
 included in this archive. Their supplied bundle lacks complete redistribution
-terms. See DLSS_NEURAL_RENDERING_PREVIEW.md in the source tree.
+terms. Authorized testers can read the included
+DLSS_NEURAL_RENDERING_PREVIEW.md guide; ReShade, RenoDX, and private NVIDIA
+files remain local-only.
 
 FIRST START
 -----------
@@ -46,6 +48,11 @@ refresh the list, choose a package, and select Load Selected Map.
 
 The session restarts automatically to load every map resource cleanly.
 The Maps tab can also open the exact folder in File Explorer.
+
+Select Vanilla Mode to restart into Alex's native renderer using the retail
+University world's streaming, collision, GrindData, splines, shadows, and
+gameplay data. No retail map is included. Selecting a custom map later restores
+the saved custom-world profile.
 
 OBJECT LIBRARY
 --------------

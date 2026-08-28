@@ -1,7 +1,7 @@
 # Skate 3 Custom Engine Layer
 
 > **New here?** Download the
-> **[current Windows release (preview.17)](https://github.com/SK8-ENGINE/SK8-Engine/releases/download/v0.1.0-preview.17/Skate3CustomEngineLayer-0.1.0-preview.17-Windows.zip)**
+> **[current Windows release (preview.18)](https://github.com/SK8-ENGINE/SK8-Engine/releases/download/v0.1.0-preview.18/Skate3CustomEngineLayer-0.1.0-preview.18-Windows.zip)**
 > and follow the [five-step setup guide](#download-and-first-start).
 > Do not download GitHub's automatic **Source code** zip.
 
@@ -24,8 +24,8 @@ render paths exist upstream, but the Custom Engine Layer has not been properly
 validated on Vulkan, Linux, or macOS yet.
 
 1. Download
-   [`Skate3CustomEngineLayer-0.1.0-preview.17-Windows.zip`](https://github.com/SK8-ENGINE/SK8-Engine/releases/download/v0.1.0-preview.17/Skate3CustomEngineLayer-0.1.0-preview.17-Windows.zip)
-   from the [preview.17 Releases page](https://github.com/SK8-ENGINE/SK8-Engine/releases/tag/v0.1.0-preview.17).
+   [`Skate3CustomEngineLayer-0.1.0-preview.18-Windows.zip`](https://github.com/SK8-ENGINE/SK8-Engine/releases/download/v0.1.0-preview.18/Skate3CustomEngineLayer-0.1.0-preview.18-Windows.zip)
+   from the [preview.18 Releases page](https://github.com/SK8-ENGINE/SK8-Engine/releases/tag/v0.1.0-preview.18).
    Do not download GitHub's automatic **Source code** zip.
 2. Extract the entire zip to a normal folder you control.
 3. Run `skate3.exe`.
@@ -88,6 +88,12 @@ normally from preview.17 onward.
 - **Custom renderer and world controls:** custom maps support PBR materials,
   baked and dynamic lighting, local lights, shadows, day/night palettes, and
   world settings for time, sun, sky, ambient light, and lighting balance.
+- **Vanilla Mode:** the Maps menu can restart into Alex's native renderer with
+  the retail University world, collision, GrindData, splines, shadows, and
+  gameplay authority while preserving custom-map settings.
+- **NVIDIA DLSS Super Resolution:** the Windows D3D12 release supports Off,
+  Quality, Balanced, Performance, and DLAA with safe fallback on unsupported
+  GPUs, drivers, backends, or missing plugins.
 - **Live map editor and custom objects:** press **G** during gameplay to enter
   the editor and **E** to browse placeable objects. Shareable `.skateobj`
   packages can carry their own rendering, collision, materials, grind rails,

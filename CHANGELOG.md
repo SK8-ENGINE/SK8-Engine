@@ -2,6 +2,28 @@
 
 ## 0.1.0-preview.18 - 2026-08-28
 
+- Added NVIDIA DLSS Super Resolution and DLAA to the Windows DirectX 12
+  renderer using the pinned official Streamline 2.12 runtime. Quality,
+  Balanced, Performance, and DLAA use NVIDIA-selected render sizes; Off and
+  unsupported systems retain the existing renderer without requiring NVIDIA
+  hardware or DLLs.
+- Added real scene color, depth, motion vectors, camera matrices, temporal
+  jitter/history resets, dynamic-object history, mip bias, pre-tonemap
+  evaluation, post-upscale UI, capability reporting, timing, diagnostics, and
+  non-GPU regression coverage for DLSS.
+- Fixed distance-dependent DLSS texture crawl and long-session skater
+  stutter by improving temporal matrix precision, stable history ownership,
+  and exact render/output resource tagging.
+- Added an always-available **Vanilla Mode** to the Maps menu. It restarts
+  into Alex's native renderer with retail University streaming, collision,
+  GrindData, splines, and gameplay authority while preserving the custom-map
+  profile for later use.
+- Restored Vanilla Mode's native exposure, baked presentation, static and
+  character shadows, player/NPC/board shadow reception, collision, grinds,
+  and clean switching back to `.skate` worlds.
+- Added documentation and build hooks for an authorized private DLSS Neural
+  Rendering preview, deliberately limited to the validated DLAA-only path.
+  Private NVIDIA preview binaries, ReShade, and RenoDX are not distributed.
 - Added real-time multiplayer replication for live map-editor translation and
   rotation previews, reliable final transforms, and object-drop operations.
 - Kept player movement and presentation direct P2P while using the lobby owner

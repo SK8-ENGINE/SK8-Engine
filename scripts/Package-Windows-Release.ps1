@@ -265,6 +265,11 @@ Copy-Item -LiteralPath (
 ) -Destination (
     Join-Path $stageRoot 'DLSS_SUPER_RESOLUTION.md'
 )
+Copy-Item -LiteralPath (
+    Join-Path $repoRoot 'DLSS_NEURAL_RENDERING_PREVIEW.md'
+) -Destination (
+    Join-Path $stageRoot 'DLSS_NEURAL_RENDERING_PREVIEW.md'
+)
 foreach ($document in @(
     'LICENSE-PROJECT.md',
     'NOTICE.md',
