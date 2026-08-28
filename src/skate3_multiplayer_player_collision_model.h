@@ -24,6 +24,13 @@ inline constexpr std::uint32_t kPlayerProxyHemisphereSegments = 3;
 inline constexpr std::uint64_t kRemoteSampleStaleUs = 1'500'000;
 inline constexpr float kFacingTestSpawnSpacing = 8.0f;
 
+[[nodiscard]] inline constexpr bool
+HasValidPlayerCollisionState(std::uint32_t board_state_flags) {
+  // The low three bits describe off-board states such as walking. They are
+  // still ordinary playable states and must retain player collision.
+  return board_state_flags != 0xFFFFFFFFu;
+}
+
 enum class DisabledReason : std::uint8_t {
   kNone = 0,
   kMultiplayerInactive,

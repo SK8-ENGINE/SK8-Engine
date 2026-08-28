@@ -55,6 +55,21 @@ RemoteProxySample Remote(std::uint32_t role, float x, float y, float z,
   };
 }
 
+void TestPlayableBoardStatesRemainCollidable() {
+  Expect(HasValidPlayerCollisionState(0u),
+         "on-board player state was rejected");
+  Expect(HasValidPlayerCollisionState(1u),
+         "walking player state was rejected");
+  Expect(HasValidPlayerCollisionState(2u),
+         "air-offboard player state was rejected");
+  Expect(HasValidPlayerCollisionState(4u),
+         "offboard player state was rejected");
+  Expect(HasValidPlayerCollisionState(7u),
+         "combined offboard player state was rejected");
+  Expect(!HasValidPlayerCollisionState(0xFFFFFFFFu),
+         "missing player state was accepted");
+}
+
 void TestNativeCapsuleGeometry() {
   ExpectNear(kPlayerProxyRadius, 0.30f, 1.0e-6f,
              "player capsule radius drifted from the project scale");
@@ -282,6 +297,7 @@ void TestDisabledStateClearsImmediately() {
 } // namespace
 
 int main() {
+  TestPlayableBoardStatesRemainCollidable();
   TestNativeCapsuleGeometry();
   TestFacingTwoPlayerSpawnPlacement();
   TestCreateUpdateRemoveAndSelfFiltering();

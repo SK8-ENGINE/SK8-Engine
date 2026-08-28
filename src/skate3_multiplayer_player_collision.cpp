@@ -235,8 +235,8 @@ void PublishRemotePresentation(const char *map_name,
       sample.map_hash = next.map_hash;
       sample.observed_at_us = now_us;
       sample.spatial_valid = true;
-      sample.playing = remote.pose.board_state_flags != 0xFFFFFFFFu &&
-                       (remote.pose.board_state_flags & 0x7u) == 0;
+      sample.playing =
+          HasValidPlayerCollisionState(remote.pose.board_state_flags);
       for (std::size_t component = 0; component < 3; ++component) {
         sample.position[component] =
             map_render_origin[component] + remote.pose.position[component];
@@ -286,8 +286,7 @@ void ApplyAfterPhysOut(PPCContext &ctx, std::uint8_t *base,
   trick_pipeline::LiveSpatialSnapshot spatial;
   if (!trick_pipeline::CurrentLiveSpatialSnapshot(spatial) ||
       spatial.phys_out != phys_out ||
-      spatial.board_state_flags == 0xFFFFFFFFu ||
-      (spatial.board_state_flags & 0x7u) != 0) {
+      !HasValidPlayerCollisionState(spatial.board_state_flags)) {
     Disable(ctx, base, DisabledReason::kLocalNotPlaying);
     return;
   }
