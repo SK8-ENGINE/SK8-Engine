@@ -1,18 +1,23 @@
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <iosfwd>
+#include <memory>
 #include <string>
 #include <vector>
 
+namespace skate::world {
+struct SkateObjectAsset;
+}
+
 namespace skate3::map_editor {
 
-void SetWindowHandle(void* window);
-void ConfigureObjectLibrary(
-    std::filesystem::path game_data_root,
-    std::filesystem::path object_library_root);
+void SetWindowHandle(void *window);
+void ConfigureObjectLibrary(std::filesystem::path game_data_root,
+                            std::filesystem::path object_library_root);
 void Toggle();
 void SetActive(bool active);
 bool Active();
@@ -28,6 +33,54 @@ std::vector<SpawnObjectEntry> SpawnObjectEntries();
 // instances remain independent in the current world.
 bool RefreshSpawnObjects();
 bool QueueSpawnObject(std::size_t asset_index);
+
+enum class MultiplayerEditKind {
+  kTransformPreview,
+  kTransformCommit,
+  kSpawn,
+};
+
+struct MultiplayerTransform {
+  std::uint32_t object_id = 0;
+  std::array<float, 3> translation{};
+  std::array<float, 9> basis{
+      1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f,
+  };
+};
+
+struct MultiplayerSpawn {
+  std::array<float, 3> position{};
+  std::shared_ptr<const std::vector<std::uint8_t>> package;
+};
+
+struct MultiplayerEditEvent {
+  MultiplayerEditKind kind = MultiplayerEditKind::kTransformPreview;
+  std::uint16_t source_role = 0;
+  std::uint64_t request_id = 0;
+  MultiplayerTransform transform;
+  MultiplayerSpawn spawn;
+};
+
+struct MultiplayerEditSnapshot {
+  std::vector<MultiplayerSpawn> spawns;
+  std::vector<MultiplayerTransform> transforms;
+};
+
+// The replication worker owns session sequencing. The editor owns only
+// thread-safe mutation queues and applies received changes on the native
+// collision/emulation thread.
+void SetMultiplayerSyncState(bool active, std::uint16_t local_role,
+                             std::uint32_t local_session);
+bool MultiplayerSyncActive();
+std::vector<MultiplayerEditEvent> DrainMultiplayerEditEvents();
+MultiplayerEditSnapshot CaptureMultiplayerEditSnapshot();
+bool QueueReplicatedTransform(const MultiplayerTransform &transform,
+                              bool committed, std::uint32_t authority_session,
+                              std::uint64_t authority_revision);
+bool QueueReplicatedSpawn(
+    std::shared_ptr<const skate::world::SkateObjectAsset> asset,
+    MultiplayerSpawn spawn, std::uint32_t authority_session,
+    std::uint64_t authority_revision);
 
 enum class DefaultLibraryState {
   NotStarted,
@@ -61,7 +114,7 @@ bool HasInputFocus();
 // Called from the free-camera owner. Holding RMB captures/hides the cursor;
 // release restores it immediately. While held this recentres the cursor and
 // returns raw radians to compose into camera look.
-bool ConsumeMouseLook(double& yaw_radians, double& pitch_radians);
+bool ConsumeMouseLook(double &yaw_radians, double &pitch_radians);
 
 // Samples the authoritative local board state once per mechanics frame and
 // emits transition telemetry, including rapid off-board -> on-board returns.
@@ -75,15 +128,14 @@ void UpdateInteraction(const float view[16], const float projection[16],
 // orthonormal basis). Rendering adds the installed map-world origin; native
 // collision and grind paths use the same pose and revision.
 bool ObjectTransform(std::size_t index, float out_translation[3],
-                     std::uint64_t* out_revision = nullptr);
+                     std::uint64_t *out_revision = nullptr);
 bool ObjectTransform(std::size_t index, float out_translation[3],
-                     float out_basis[9],
-                     std::uint64_t* out_revision = nullptr);
+                     float out_basis[9], std::uint64_t *out_revision = nullptr);
 
 bool IsSelected(std::size_t index);
 std::size_t SelectedObject();
 int ActiveGizmoHandle();
 std::uint64_t TransformCommitSerial();
-void AppendTelemetry(std::ostream& out);
+void AppendTelemetry(std::ostream &out);
 
-}  // namespace skate3::map_editor
+} // namespace skate3::map_editor

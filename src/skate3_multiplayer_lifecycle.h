@@ -81,6 +81,16 @@ RemoteAppearanceTextureObjectKey(std::uint8_t slot, std::uint32_t role,
          installed_session == retired_session;
 }
 
+[[nodiscard]] constexpr std::uint64_t
+RetiredAppearanceIdentityForReconnect(
+    std::uint32_t retired_session, std::uint64_t retired_identity,
+    std::uint32_t observed_session) {
+  return retired_session != 0 && retired_identity != 0 &&
+                 retired_session == observed_session
+             ? retired_identity
+             : 0;
+}
+
 [[nodiscard]] constexpr bool
 CanBeginAppearanceAssembly(std::size_t other_incomplete_bytes,
                            std::size_t requested_bytes) {

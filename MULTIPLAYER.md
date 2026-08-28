@@ -34,6 +34,34 @@ monitor the live service state so a later disconnect degrades safely. Same-PC
 discovery remains an explicit development/test mode rather than an automatic
 user-facing fallback.
 
+## Live map editing and object drops
+
+The live map editor and object dropper replicate in real time for negotiated
+protocol-v12 peers on the same custom map:
+
+- gizmo translation and rotation previews remain low-latency transient
+  traffic, while the released transform is committed reliably;
+- a drop sends the actual validated `.skateobj` package, not a local menu
+  index, so custom geometry, collision, materials, textures, physics, and
+  authored grind rails remain identical even when another player's object
+  library is arranged differently;
+- packages are limited to 64 MiB, fragmented below the 1,200-byte transport
+  boundary, hashed before decoding, and decoded away from the renderer and
+  replication worker;
+- the lobby owner orders only map mutations and replays ordered drops plus
+  final transforms to late joiners. Player movement, animation, and appearance
+  continue travelling directly between peers; role 1 does not become a
+  gameplay-packet relay;
+- received world mutations enter a bounded queue and are installed by the
+  existing native collision/emulation update, keeping renderer, collision,
+  physics, and grind state on the same object revision.
+
+For the current preview, form or join the lobby before making local edits on a
+non-owner client. The owner may edit before another player joins because its
+state is the snapshot source. A joining client that already has unrelated
+unsaved local drops cannot remove those extra runtime objects without the
+normal map-reload restart.
+
 ## Steam / Spacewar boundary
 
 SteamDB's App 480 charts page reports how many users are running Valve's
@@ -267,7 +295,8 @@ animation.
 
 It stages two ignored portable roots under `out\local-multiplayer`, gives each
 client independent writable user data, and junctions the legally supplied
-`game` directory and user `maps` directory rather than duplicating them.
+`game` directory plus the user's `maps` and `objects` directories rather than
+duplicating them.
 Direct boot is enabled for this developer test; add `-NoDirectBoot` to use the
 normal frontend.
 

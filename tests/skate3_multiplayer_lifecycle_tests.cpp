@@ -19,6 +19,8 @@ using skate3::multiplayer::lifecycle::
 using skate3::multiplayer::lifecycle::OutboundAppearanceState;
 using skate3::multiplayer::lifecycle::PeerGenerationTracker;
 using skate3::multiplayer::lifecycle::RemoteAppearanceRetirementMatches;
+using skate3::multiplayer::lifecycle::
+    RetiredAppearanceIdentityForReconnect;
 using skate3::multiplayer::lifecycle::RemoteAppearanceMeshKey;
 using skate3::multiplayer::lifecycle::RemoteAppearanceTextureObjectKey;
 using skate3::multiplayer::lifecycle::NextRemoteAppearanceResourceSlot;
@@ -232,6 +234,13 @@ void TestRemoteAppearanceGenerationRetirement() {
          "uninitialized appearance must not match a retirement");
   Expect(!RemoteAppearanceRetirementMatches(111, 0),
          "invalid retirement must not release renderer resources");
+  Expect(
+      RetiredAppearanceIdentityForReconnect(
+          111, 0x123456789ABCDEF0ull, 111) == 0x123456789ABCDEF0ull,
+      "same-session reconnect should request the retired appearance again");
+  Expect(RetiredAppearanceIdentityForReconnect(
+             111, 0x123456789ABCDEF0ull, 222) == 0,
+         "new process session must not inherit a retired appearance");
 }
 
 void TestLocalPresentationCaptureOwnership() {
