@@ -423,9 +423,9 @@ struct PeerControlState {
   std::unordered_map<std::uint32_t, QuantizedAnimationFrame>
       v12_offered_animation_keyframes;
   std::uint64_t v12_negotiated_features = 0;
-  std::uint32_t last_v12_capability_sequence_sent = 0;
+  protocol_v12::CapabilityAcknowledgementState
+      v12_capability_acknowledgement;
   std::uint32_t v12_animation_send_sequence = 0;
-  bool v12_capability_acknowledged = false;
   bool v12_animation_started = false;
   bool v12_force_animation_keyframe = false;
   bool map_snapshot_queued = false;
@@ -2840,7 +2840,7 @@ private:
     telemetry_.v12_capability_peers = static_cast<std::uint32_t>(std::count_if(
         peer_control_.begin(), peer_control_.end(), [](const auto &entry) {
           return entry.second.v12_generation.active() &&
-                 entry.second.v12_capability_acknowledged &&
+                 entry.second.v12_capability_acknowledgement.acknowledged() &&
                  entry.second.v12_negotiated_features != 0;
         }));
   }
@@ -4035,17 +4035,15 @@ private:
 
     const std::uint64_t negotiated = protocol_v12::NegotiateFeatureBits(
         protocol_v12::live::kAdvertisedFeatureBits, capabilities.feature_bits);
-    const bool was_acknowledged = control.v12_capability_acknowledged;
-    if (control.last_v12_capability_sequence_sent != 0 &&
-        protocol_v12::SequenceAcknowledged(
-            control.last_v12_capability_sequence_sent,
-            envelope.acknowledged_sequence, envelope.receive_history)) {
-      control.v12_capability_acknowledged = true;
-    }
+    const bool was_acknowledged =
+        control.v12_capability_acknowledgement.acknowledged();
+    (void)control.v12_capability_acknowledgement.Observe(
+        envelope.acknowledged_sequence, envelope.receive_history);
     (void)control.v12_control_receive_history.Observe(envelope.sequence);
     const bool changed =
         control.v12_negotiated_features != negotiated ||
-        was_acknowledged != control.v12_capability_acknowledged ||
+        was_acknowledged !=
+            control.v12_capability_acknowledgement.acknowledged() ||
         activation == protocol_v12::GenerationActivation::kFirst ||
         activation == protocol_v12::GenerationActivation::kReplaced;
     if (activation == protocol_v12::GenerationActivation::kFirst ||
@@ -4070,7 +4068,7 @@ private:
           "multiplayer-v12: peer role={} session={} negotiated=0x{:016X} "
           "ack={} datagram={} groups={}",
           envelope.sender_role, envelope.sender_session, negotiated,
-          control.v12_capability_acknowledged ? 1 : 0,
+          control.v12_capability_acknowledgement.acknowledged() ? 1 : 0,
           capabilities.maximum_datagram_bytes,
           capabilities.maximum_pose_groups);
     }
@@ -4859,7 +4857,7 @@ private:
     return control != peer_control_.end() && peer != remote_peers_.end() &&
            control->second.v12_generation.Matches(
                static_cast<std::uint16_t>(target_role), peer->second.session) &&
-           control->second.v12_capability_acknowledged &&
+           control->second.v12_capability_acknowledgement.acknowledged() &&
            (control->second.v12_negotiated_features &
             protocol_v12::kFeatureExplicitLittleEndian) != 0;
   }
@@ -5429,7 +5427,7 @@ private:
         SendBytes(packet.data(), static_cast<int>(packet.size()), target,
                   OutboundTrafficClass::kControl, /*relayed=*/false);
     if (sent) {
-      control.last_v12_capability_sequence_sent = envelope.sequence;
+      control.v12_capability_acknowledgement.RecordSent(envelope.sequence);
     }
     return sent;
   }

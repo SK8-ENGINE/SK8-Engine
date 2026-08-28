@@ -70,6 +70,27 @@ void TestReceiveHistoryRollover() {
          "rollover duplicate was not detected");
 }
 
+void TestCapabilityAcknowledgementTracksOutstandingAdvertisements() {
+  CapabilityAcknowledgementState state;
+  state.RecordSent(1);
+  Expect(!state.Observe(0, 0),
+         "unacknowledged capability advertisement activated v12");
+
+  // Both peers may advertise in the same worker tick. The next advertisement
+  // then acknowledges sequence 1 after sequence 2 has already been sent.
+  state.RecordSent(2);
+  Expect(state.Observe(1, 0),
+         "one-behind lockstep acknowledgement did not activate v12");
+  Expect(state.acknowledged(),
+         "capability acknowledgement did not latch");
+
+  state.Clear();
+  state.RecordSent(10);
+  state.RecordSent(11);
+  Expect(state.Observe(11, 0),
+         "newer delivered advertisement did not survive an earlier loss");
+}
+
 GenerationIdentity Generation(
     std::uint16_t role, std::uint32_t session) {
   return GenerationIdentity{
@@ -343,6 +364,7 @@ void TestSenderUsesOnlyDecodedBaselineReports() {
 int main() {
   TestReceiveHistoryLossReorderAndDuplicates();
   TestReceiveHistoryRollover();
+  TestCapabilityAcknowledgementTracksOutstandingAdvertisements();
   TestValidatedGenerationActivation();
   TestGroupedBaselineRecovery();
   TestPoseReorderGenerationAndValidation();
