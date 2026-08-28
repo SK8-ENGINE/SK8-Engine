@@ -7,6 +7,7 @@
 #include "skate3_custom_trick.h"
 #include "skate3_input_history_watch.h"
 #include "skate3_input_lab.h"
+#include "skate3_multiplayer_player_collision.h"
 #include "skate3_trick_overrides.h"
 #include "skate3_trick_types.h"
 #include "generated/skate3_blender_pose_override.h"
@@ -3605,6 +3606,8 @@ OwnedWorldCollisionBridgeScope::OwnedWorldCollisionBridgeScope(
       phys_out_(ctx.r4.u32) {}
 
 OwnedWorldCollisionBridgeScope::~OwnedWorldCollisionBridgeScope() {
+  multiplayer::player_collision::ApplyAfterPhysOut(
+      ctx_, base_, controller_, phys_out_);
   mechanics_sandbox::ApplyOwnedWorldCollisionAfterPhysOut(
       ctx_, base_, controller_, phys_out_);
 }

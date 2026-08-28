@@ -7,6 +7,7 @@
 #include "skate3_multiplayer_local_topology.h"
 #include "skate3_multiplayer_motion_trace.h"
 #include "skate3_multiplayer_outbound_scheduler.h"
+#include "skate3_multiplayer_player_collision.h"
 #include "skate3_multiplayer_playback_clock.h"
 #include "skate3_multiplayer_pose_curve.h"
 #include "skate3_multiplayer_protocol.h"
@@ -1714,6 +1715,19 @@ RemotePose InterpolatePose(const RemotePose &first, const RemotePose &second,
   return result;
 }
 
+bool PoseCollisionDiscontinuity(const RemotePose &first,
+                                const RemotePose &second) {
+  float distance_squared = 0.0f;
+  for (std::size_t component = 0; component < 3; ++component) {
+    const float delta =
+        second.position[component] - first.position[component];
+    distance_squared += delta * delta;
+  }
+  return distance_squared >
+         player_collision::kTeleportDistance *
+             player_collision::kTeleportDistance;
+}
+
 RemotePose ExtrapolatePose(const RemotePose &previous, const RemotePose &latest,
                            float intervals_ahead) {
   RemotePose result;
@@ -1972,6 +1986,9 @@ public:
       RemotePlayer remote;
       remote.role = remote_role;
       remote.session = peer.session;
+      remote.receiver_role = static_cast<std::uint32_t>(bound_role_);
+      remote.receiver_session = session_id_;
+      remote.presentation_map_hash = map_hash;
       if (!SmoothRemote(remote_role, peer, now, remote.pose)) {
         continue;
       }
@@ -6204,6 +6221,9 @@ private:
                       : static_cast<float>(elapsed) / static_cast<float>(span);
         out = InterpolatePose(peer.samples[index - 1].pose,
                               peer.samples[index].pose, amount);
+        out.collision_discontinuity =
+            PoseCollisionDiscontinuity(peer.samples[index - 1].pose,
+                                       peer.samples[index].pose);
         return true;
       }
     }
@@ -6790,9 +6810,12 @@ bool TickLocalVisuals(const char *map_name, const float map_render_origin[3],
   // destruction stops and joins the worker before destroying runtime state.
   (void)ActiveRuntime();
   if (REXCVAR_GET(skate3_multiplayer_replication_worker)) {
-    return ActiveReplicationWorker().Tick(map_name, map_render_origin,
-                                          local_animation, local_appearance,
-                                          out_presentation);
+    const bool have_remote_players = ActiveReplicationWorker().Tick(
+        map_name, map_render_origin, local_animation, local_appearance,
+        out_presentation);
+    player_collision::PublishRemotePresentation(
+        map_name, map_render_origin, out_presentation);
+    return have_remote_players;
   }
 
   ActiveReplicationWorker().Stop();
@@ -6806,10 +6829,15 @@ bool TickLocalVisuals(const char *map_name, const float map_render_origin[3],
   out_presentation.players = std::make_shared<const std::vector<RemotePlayer>>(
       std::move(remote_players));
   out_presentation.retirements = std::move(retirements);
+  player_collision::PublishRemotePresentation(
+      map_name, map_render_origin, out_presentation);
   return have_remote_players;
 }
 
-void AppendTelemetry(std::ostream &out) { ActiveRuntime().Append(out); }
+void AppendTelemetry(std::ostream &out) {
+  ActiveRuntime().Append(out);
+  player_collision::AppendTelemetry(out);
+}
 
 void ReportRemoteAppearanceInstalled(std::uint32_t role, std::uint32_t session,
                                      std::uint64_t appearance_id) {
