@@ -220,6 +220,10 @@ constexpr std::string_view kUserDirectoryName = "skate3";
 constexpr std::string_view kSettingsFilename = "settings.toml";
 constexpr std::string_view kMapsDirectoryName = "maps";
 constexpr std::string_view kActiveMapFilename = "active_map.txt";
+constexpr std::string_view kVanillaModeSelection =
+    "vanilla:university";
+constexpr std::string_view kVanillaModeDisplayName =
+    "Vanilla Mode (University)";
 
 std::filesystem::path AbsoluteMapPath(const std::filesystem::path &path) {
   if (path.empty()) {
@@ -356,6 +360,71 @@ void SetEnvironmentMapPath(const std::filesystem::path &path) {
 bool SaveSelectedMap(const std::filesystem::path &maps_path,
                      const std::filesystem::path &package_path);
 
+std::string ReadSelectedMap(const std::filesystem::path &maps_path) {
+  std::ifstream selected_file(maps_path / kActiveMapFilename);
+  std::string selected;
+  std::getline(selected_file, selected);
+  return selected;
+}
+
+bool VanillaModeSelected(const std::filesystem::path &maps_path) {
+  return ReadSelectedMap(maps_path) == kVanillaModeSelection;
+}
+
+void SetWorldModeCvar(std::string_view name, std::string_view value) {
+  if (!rex::cvar::SetFlagByName(name, value)) {
+    REXLOG_WARN("Could not apply world mode cvar {}={}", name, value);
+  }
+}
+
+void ApplyVanillaModeProfile() {
+  // Keep Alex's native scene renderer, but restore retail authority over the
+  // world and gameplay data. In particular, merely disabling the mechanics
+  // sandbox is insufficient: the native-collision replacement otherwise
+  // continues suppressing retail GrindData registration during startup.
+  SetWorldModeCvar("skate3_native_render_scene", "true");
+  SetWorldModeCvar("skate3_mechanics_sandbox", "false");
+  SetWorldModeCvar("skate3_mechanics_sandbox_native_collision", "false");
+  SetWorldModeCvar(
+      "skate3_mechanics_sandbox_native_collision_replace_retail", "false");
+  SetWorldModeCvar(
+      "skate3_mechanics_sandbox_native_collision_retail_only", "true");
+  SetWorldModeCvar("skate3_mechanics_sandbox_native_grinds", "false");
+  SetWorldModeCvar("skate3_native_render_scene_splines", "true");
+  SetWorldModeCvar("skate3_native_render_scene_sun_override", "false");
+
+  // Select Alex's complete native shadow path even if the persisted custom-map
+  // profile disabled one of its gates.
+  SetWorldModeCvar("skate3_native_render_scene_shadows", "true");
+  SetWorldModeCvar("skate3_native_render_scene_shadow_static_casters", "true");
+  SetWorldModeCvar("skate3_native_render_scene_shadow_caster_parity", "true");
+  SetWorldModeCvar("skate3_native_render_scene_shadow_static_strength", "1.0");
+
+  // DLSS SR and Neural Rendering remain governed by the user's persisted
+  // graphics settings and the normal runtime capability checks.
+}
+
+void ApplyCustomWorldProfile() {
+  SetWorldModeCvar("skate3_mechanics_sandbox", "true");
+  SetWorldModeCvar("skate3_mechanics_sandbox_native_collision", "true");
+  SetWorldModeCvar(
+      "skate3_mechanics_sandbox_native_collision_replace_retail", "true");
+  SetWorldModeCvar(
+      "skate3_mechanics_sandbox_native_collision_retail_only", "false");
+  SetWorldModeCvar("skate3_mechanics_sandbox_native_grinds", "true");
+}
+
+void ApplySelectedWorldMode(const std::filesystem::path &maps_path) {
+  if (VanillaModeSelected(maps_path)) {
+    ApplyVanillaModeProfile();
+    REXLOG_INFO(
+        "Vanilla Mode active: Alex native renderer with retail world, "
+        "collision, GrindData and splines; custom world rendering disabled");
+  } else {
+    ApplyCustomWorldProfile();
+  }
+}
+
 void ConfigureMapsFolder(const std::filesystem::path &maps_path) {
   std::error_code ec;
   std::filesystem::create_directories(maps_path, ec);
@@ -367,9 +436,13 @@ void ConfigureMapsFolder(const std::filesystem::path &maps_path) {
   if (!EnvironmentMapPath().empty()) {
     return;
   }
-  std::ifstream selected_file(maps_path / kActiveMapFilename);
-  std::string selected_path;
-  std::getline(selected_file, selected_path);
+  const std::string selected_path = ReadSelectedMap(maps_path);
+  if (selected_path == kVanillaModeSelection) {
+    SetEnvironmentMapPath({});
+    REXLOG_INFO(
+        "Restored Vanilla Mode selection; no .skate package will be loaded");
+    return;
+  }
   const auto package_path = AbsoluteMapPath(selected_path);
   if (!package_path.empty() && IsSkatePackage(package_path) &&
       IsSupportedSkatePackage(package_path) &&
@@ -447,10 +520,23 @@ bool SaveSelectedMap(const std::filesystem::path &maps_path,
   return output.good();
 }
 
+bool SaveVanillaModeSelection(const std::filesystem::path &maps_path) {
+  std::error_code ec;
+  std::filesystem::create_directories(maps_path, ec);
+  if (ec) {
+    return false;
+  }
+  std::ofstream output(maps_path / kActiveMapFilename,
+                       std::ios::binary | std::ios::trunc);
+  output << kVanillaModeSelection << '\n';
+  return output.good();
+}
+
 rex::ui::SimpleMapState
 DiscoverCustomMaps(const std::filesystem::path &maps_path) {
   rex::ui::SimpleMapState state;
   state.maps_folder = maps_path;
+  state.vanilla_mode = VanillaModeSelected(maps_path);
   auto active_path = EnvironmentMapPath();
   if (active_path.empty()) {
     active_path = AbsoluteMapPath("owned_maps/blender_bake_showcase.skate");
@@ -476,7 +562,8 @@ DiscoverCustomMaps(const std::filesystem::path &maps_path) {
     }
     map.compatible = header.supported;
     map.compatibility_note = header.issue;
-    map.active = SameMapFile(map.package_path, active_path);
+    map.active = !state.vanilla_mode &&
+                 SameMapFile(map.package_path, active_path);
     state.maps.push_back(std::move(map));
   }
   std::sort(state.maps.begin(), state.maps.end(),
@@ -491,7 +578,9 @@ DiscoverCustomMaps(const std::filesystem::path &maps_path) {
       break;
     }
   }
-  if (state.active_name.empty() && !active_path.empty()) {
+  if (state.vanilla_mode) {
+    state.active_name = std::string(kVanillaModeDisplayName);
+  } else if (state.active_name.empty() && !active_path.empty()) {
     state.active_name = ReadSkateDisplayName(active_path);
     if (state.active_name.empty()) {
       state.active_name = rex::path_to_utf8(active_path.stem());
@@ -875,6 +964,7 @@ void Skate3BaseApp::OnConfigurePaths(rex::PathConfig &paths) {
   ConfigureMapsFolder(maps_path_);
   config_path_ = paths.config_path;
   LoadAndNormalizeSimpleSettings(user_settings_path_, config_path_);
+  ApplySelectedWorldMode(maps_path_);
   Skate3InitializeFieldOfViewOverride();
   ApplyUltrawideVideoDefaults();
   DisableActiveDebugDiagnostics();
@@ -951,6 +1041,7 @@ Skate3BaseApp::OnFinalizePaths(const rex::PathConfig &defaults,
     skate3::ApplyProfileCvars(*profile);
     ApplyDemoPathProfileOverride();
   }
+  ApplySelectedWorldMode(maps_path_);
 
   const bool has_config_file = std::filesystem::exists(defaults.config_path);
   const bool has_game_path =
@@ -1444,6 +1535,19 @@ void Skate3BaseApp::ToggleSimpleSettings() {
   auto leave_multiplayer = []() { skate3::multiplayer::LeaveSession(); };
   auto load_maps = [this]() { return DiscoverCustomMaps(maps_path_); };
   auto activate_map = [this](const std::filesystem::path &package_path) {
+    if (package_path.empty()) {
+      if (!SaveVanillaModeSelection(maps_path_)) {
+        REXLOG_WARN("Could not save Vanilla Mode selection");
+        return;
+      }
+      SetEnvironmentMapPath({});
+      ApplyVanillaModeProfile();
+      REXLOG_INFO(
+          "Vanilla Mode selected; restarting with Alex native renderer and "
+          "retail world, collision, GrindData and splines");
+      RestartGame();
+      return;
+    }
     std::error_code ec;
     if (!IsSkatePackage(package_path) ||
         !std::filesystem::is_regular_file(package_path, ec) || ec) {
@@ -1463,6 +1567,7 @@ void Skate3BaseApp::ToggleSimpleSettings() {
       return;
     }
     SetEnvironmentMapPath(package_path);
+    ApplyCustomWorldProfile();
     REXLOG_INFO("Custom map selected; restarting into '{}'",
                 package_path.string());
     RestartGame();

@@ -4,6 +4,7 @@
 // Shared GPU state lives in skate3_native_scene_gpu_internal.h.
 
 #include "skate3_native_scene.h"
+#include "skate3_mechanics_sandbox.h"
 
 #include "generated/skate3_init.h"
 
@@ -83,6 +84,7 @@ REXCVAR_DECLARE(int32_t, skate3_native_render_scene_ssr_debug);
 REXCVAR_DECLARE(double, skate3_native_render_scene_ssr_intensity);
 REXCVAR_DECLARE(int32_t, skate3_native_render_scene_ssr_steps);
 REXCVAR_DECLARE(double, skate3_native_render_scene_ssr_thickness);
+REXCVAR_DECLARE(double, skate3_native_render_scene_vanilla_exposure);
 
 #if (defined(REX_HAS_D3D12) && REX_HAS_D3D12) || (defined(REX_HAS_VULKAN) && REX_HAS_VULKAN)
 
@@ -1269,7 +1271,10 @@ bool ApplyVolumetricPass(const NativeGuestOutputRenderContext& context,
   // Haze tint: the frame's captured linear fog color folded through the
   // scene exposure: the fully-fogged xe value, so the haze always matches
   // the game's own atmosphere (and fades out at night with it).
-  const float expo = scene.sky_sun[5] > 0.0f ? scene.sky_sun[5] : 2.5f;
+  const float expo =
+      !skate3::mechanics_sandbox::VisualMapEnabled()
+          ? float(REXCVAR_GET(skate3_native_render_scene_vanilla_exposure))
+          : (scene.sky_sun[5] > 0.0f ? scene.sky_sun[5] : 2.5f);
   const float haze_int =
       haze_want ? float(REXCVAR_GET(skate3_native_render_scene_haze_intensity))
                 : 0.0f;

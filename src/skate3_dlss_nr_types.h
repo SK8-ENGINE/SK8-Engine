@@ -61,6 +61,13 @@ constexpr std::uint32_t ClampNeuralPerformanceMode(std::int32_t value) {
   return static_cast<std::uint32_t>(std::clamp(value, 0, 3));
 }
 
+// The validated preview path is full-resolution DLAA only. The private
+// runtime and the independently tested interoperability add-on do not retain
+// a valid low-resolution guide contract in SR quality modes.
+constexpr bool NeuralRenderingModeSupported(Mode mode) {
+  return mode == Mode::kDlaa;
+}
+
 struct NeuralTaggedResources {
   const void *input = nullptr;
   const void *depth = nullptr;

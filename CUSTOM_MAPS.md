@@ -27,6 +27,24 @@ the playable package. If no local `maps` folder is present, the game uses:
 
 The Maps tab always shows and opens the exact folder currently in use.
 
+## Vanilla Mode
+
+The Maps page always includes **Vanilla Mode**, even when no `.skate` package
+is installed. Selecting it restarts into Alex's native renderer while giving
+the retail game authority over University streaming, collision, GrindData,
+grind splines, and gameplay data. It does not convert University to a
+`.skate` package and does not distribute any retail map data.
+
+Vanilla Mode disables custom-world rendering, custom collision replacement,
+owned-world grinds, and dynamic world lighting. It restores the native shadow
+and spline paths needed by the retail map. Ordinary graphics settings,
+including supported DLSS modes, remain available. Selecting a custom map
+later restores the custom-world profile and restarts cleanly.
+
+The selection is persisted in the active maps folder's `active_map.txt`.
+Users should switch modes through the menu rather than editing that file.
+Existing custom renderer settings are preserved while Vanilla Mode is active.
+
 ## Package compatibility
 
 The runtime accepts little-endian SKATE v1-v15 packages. Current Blender

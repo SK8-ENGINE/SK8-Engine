@@ -150,6 +150,7 @@ REXCVAR_DECLARE(bool, skate3_native_render_scene_tex_mips);
 REXCVAR_DECLARE(bool, skate3_native_render_scene_tex_revalidate);
 REXCVAR_DECLARE(bool, skate3_native_render_scene_transparents);
 REXCVAR_DECLARE(bool, skate3_native_render_scene_world_v2);
+REXCVAR_DECLARE(double, skate3_native_render_scene_vanilla_exposure);
 REXCVAR_DECLARE(double, skate3_menu_blur_sigma);
 REXCVAR_DECLARE(double, skate3_native_render_scene_2d_sharp);
 REXCVAR_DECLARE(double, skate3_native_render_scene_bloom_intensity);
@@ -199,27 +200,30 @@ namespace skate3::native_scene {
 namespace {
 
 using Matrix4 = std::array<float, 16>;
+using Matrix4d = std::array<double, 16>;
 
 Matrix4 MatrixMultiply(const Matrix4& a, const Matrix4& b) {
   Matrix4 result{};
   for (int row = 0; row < 4; ++row) {
     for (int column = 0; column < 4; ++column) {
+      double sum = 0.0;
       for (int inner = 0; inner < 4; ++inner) {
-        result[row * 4 + column] +=
-            a[row * 4 + inner] * b[inner * 4 + column];
+        sum += double(a[row * 4 + inner]) *
+               double(b[inner * 4 + column]);
       }
+      result[row * 4 + column] = float(sum);
     }
   }
   return result;
 }
 
-bool MatrixInverse(const Matrix4& source, Matrix4& inverse) {
-  float augmented[4][8] = {};
+bool MatrixInverseDouble(const Matrix4& source, Matrix4d& inverse) {
+  double augmented[4][8] = {};
   for (int row = 0; row < 4; ++row) {
     for (int column = 0; column < 4; ++column) {
-      augmented[row][column] = source[row * 4 + column];
+      augmented[row][column] = double(source[row * 4 + column]);
     }
-    augmented[row][row + 4] = 1.0f;
+    augmented[row][row + 4] = 1.0;
   }
   for (int column = 0; column < 4; ++column) {
     int pivot = column;
@@ -229,7 +233,7 @@ bool MatrixInverse(const Matrix4& source, Matrix4& inverse) {
         pivot = row;
       }
     }
-    if (std::fabs(augmented[pivot][column]) < 1.0e-9f) {
+    if (std::fabs(augmented[pivot][column]) < 1.0e-12) {
       return false;
     }
     if (pivot != column) {
@@ -237,15 +241,15 @@ bool MatrixInverse(const Matrix4& source, Matrix4& inverse) {
         std::swap(augmented[pivot][entry], augmented[column][entry]);
       }
     }
-    const float scale = 1.0f / augmented[column][column];
-    for (float& entry : augmented[column]) {
+    const double scale = 1.0 / augmented[column][column];
+    for (double& entry : augmented[column]) {
       entry *= scale;
     }
     for (int row = 0; row < 4; ++row) {
       if (row == column) {
         continue;
       }
-      const float factor = augmented[row][column];
+      const double factor = augmented[row][column];
       for (int entry = 0; entry < 8; ++entry) {
         augmented[row][entry] -= factor * augmented[column][entry];
       }
@@ -254,6 +258,44 @@ bool MatrixInverse(const Matrix4& source, Matrix4& inverse) {
   for (int row = 0; row < 4; ++row) {
     for (int column = 0; column < 4; ++column) {
       inverse[row * 4 + column] = augmented[row][column + 4];
+    }
+  }
+  return true;
+}
+
+bool MatrixInverse(const Matrix4& source, Matrix4& inverse) {
+  Matrix4d precise_inverse{};
+  if (!MatrixInverseDouble(source, precise_inverse)) {
+    return false;
+  }
+  for (std::size_t index = 0; index < inverse.size(); ++index) {
+    inverse[index] = float(precise_inverse[index]);
+  }
+  return true;
+}
+
+// Compose inverse(lhs) * rhs without first rounding the large inverse
+// view-projection translation back to float. Static-world DLSS motion uses
+// this near-identity transform; rounding before the camera translations
+// cancel makes the error grow with distance from the map origin and appears
+// as texture crawl even though the geometry itself is stationary.
+bool MatrixInverseMultiply(const Matrix4& lhs, const Matrix4& rhs,
+                           Matrix4& result) {
+  Matrix4d inverse{};
+  if (!MatrixInverseDouble(lhs, inverse)) {
+    return false;
+  }
+  for (int row = 0; row < 4; ++row) {
+    for (int column = 0; column < 4; ++column) {
+      double sum = 0.0;
+      for (int inner = 0; inner < 4; ++inner) {
+        sum += inverse[row * 4 + inner] *
+               double(rhs[inner * 4 + column]);
+      }
+      if (!std::isfinite(sum)) {
+        return false;
+      }
+      result[row * 4 + column] = float(sum);
     }
   }
   return true;
@@ -5014,6 +5056,7 @@ bool EnsureDlssTargets(const NativeGuestOutputRenderContext& context,
 #if SKATE3_ENABLE_DLSS_NR_PREVIEW
   neural_requested =
       g_r.dlss_active &&
+      skate3::dlss::RequestedMode() == skate3::dlss::Mode::kDlaa &&
       skate3::dlss::RequestedNeuralSettings().enabled;
 #endif
   if (!g_r.dlss_active) {
@@ -15744,16 +15787,25 @@ bool RenderScene(const NativeGuestOutputRenderContext& output_context,
   Matrix4 dlss_clip_to_previous{};
   Matrix4 dlss_previous_to_clip{};
   Matrix4 dlss_inverse_projection{};
-  const bool dlss_matrices_valid =
+  bool dlss_matrices_valid =
       MatrixInverse(dlss_unjittered_view_projection,
                     dlss_inverse_view_projection) &&
       MatrixInverse(dlss_projection, dlss_inverse_projection);
   if (dlss_matrices_valid && s_dlss_previous_view_projection_valid) {
-    dlss_clip_to_previous =
-        MatrixMultiply(dlss_inverse_view_projection,
-                       s_dlss_previous_view_projection);
-    MatrixInverse(dlss_clip_to_previous, dlss_previous_to_clip);
-  } else {
+    const bool reprojection_valid =
+        MatrixInverseMultiply(dlss_unjittered_view_projection,
+                              s_dlss_previous_view_projection,
+                              dlss_clip_to_previous) &&
+        MatrixInverseMultiply(s_dlss_previous_view_projection,
+                              dlss_unjittered_view_projection,
+                              dlss_previous_to_clip);
+    if (!reprojection_valid) {
+      dlss_matrices_valid = false;
+      dlss_clip_to_previous = {};
+      dlss_previous_to_clip = {};
+    }
+  }
+  if (!dlss_matrices_valid || !s_dlss_previous_view_projection_valid) {
     for (int diagonal = 0; diagonal < 4; ++diagonal) {
       dlss_clip_to_previous[diagonal * 4 + diagonal] = 1.0f;
       dlss_previous_to_clip[diagonal * 4 + diagonal] = 1.0f;
@@ -16191,6 +16243,10 @@ bool RenderScene(const NativeGuestOutputRenderContext& output_context,
   }
 
   const bool use_depth = debug_mode != 4;
+  const bool vanilla_disc_world =
+      !skate3::mechanics_sandbox::VisualMapEnabled();
+  const float vanilla_exposure = float(
+      REXCVAR_GET(skate3_native_render_scene_vanilla_exposure));
   // Loading frames clear to black (the game's loading UI composes over
   // black); real scenes keep the sky-ish debug clear that shows through
   // undecoded holes.
@@ -16267,6 +16323,12 @@ bool RenderScene(const NativeGuestOutputRenderContext& output_context,
         RendererState::kShadowCbSlice;
     float* cb = reinterpret_cast<float*>(g_r.shadow_cb_cpu + cb_offset);
     std::memset(cb, 0, RendererState::kShadowCbSlice);
+    // owned_light_meta.y: -1 identifies a retained vanilla disc world.
+    // The owned-map block below overwrites it with 0/1 for its Dynamic
+    // Lighting state. The shader uses this three-state value to let vanilla
+    // ground receive player/NPC CSM shadows without forcing live lighting
+    // onto an owned map whose toggle is off.
+    cb[201] = -1.0f;
     if (shadow_ready) {
       std::memcpy(cb + 0, sh + 0, 4 * sizeof(float));    // sh_x   = PS c0
       std::memcpy(cb + 4, sh + 12, 4 * sizeof(float));   // sh_y   = PS c3
@@ -16517,7 +16579,9 @@ bool RenderScene(const NativeGuestOutputRenderContext& output_context,
       // Exposure and the retained-character material multiplier still come
       // from the captured game frame (outside the compact 36-float owned
       // row block).
-      cb[31] = scene.shadow_rows[40];  // scene exposure (PS c10.x)
+      cb[31] = vanilla_disc_world
+                   ? vanilla_exposure
+                   : scene.shadow_rows[40];  // scene exposure (PS c10.x)
       cb[32] = scene.shadow_rows[45];  // material multiplier (PS c11.y)
       cb[33] = scene.family_rows[0];  // tree lightmap scale (tree PS c0.x)
       cb[34] = scene.family_rows[1];  // tree lightmap floor (tree PS c0.y)
@@ -16541,7 +16605,9 @@ bool RenderScene(const NativeGuestOutputRenderContext& output_context,
       cb[44] = scene.dynobj_rows[0];  // sun dir (PS c9)
       cb[45] = scene.dynobj_rows[1];
       cb[46] = scene.dynobj_rows[2];
-      cb[47] = scene.dynobj_rows[3];  // scene exposure (c13.x)
+      cb[47] = vanilla_disc_world
+                   ? vanilla_exposure
+                   : scene.dynobj_rows[3];  // scene exposure (c13.x)
       cb[48] = scene.dynobj_rows[4];  // flat ambient rgb (c15.xyz)
       cb[49] = scene.dynobj_rows[5];
       cb[50] = scene.dynobj_rows[6];
@@ -17441,6 +17507,11 @@ bool RenderScene(const NativeGuestOutputRenderContext& output_context,
         g_r.bone_ring_offset = offset + 512u;
         if (valid_character_lighting) {
           std::memcpy(temporal, item.char_rows, sizeof(item.char_rows));
+          if (vanilla_disc_world) {
+            // Canonical CH row 1 is ch_key; w is the captured material
+            // exposure shared by player, NPC, hair and vehicle families.
+            temporal[1 * 4 + 3] = vanilla_exposure;
+          }
         }
         if (g_r.dlss_active) {
           temporal[18 * 4] =
@@ -18058,7 +18129,9 @@ bool RenderScene(const NativeGuestOutputRenderContext& output_context,
       constants[45] = scene.sky_sun[4];  // overlay.y = pre-tone multiplier
       constants[46] = 0.0f;
       constants[47] = 0.0f;
-      constants[49] = scene.sky_sun[5];  // misc.y = scene exposure
+      constants[49] = vanilla_disc_world
+                          ? vanilla_exposure
+                          : scene.sky_sun[5];  // misc.y = scene exposure
     }
     // SSR: record reflective items, env fams 5/6/13 on their exact branch
     // with live spec masks (the reflection mask rides t4.z), plus water,

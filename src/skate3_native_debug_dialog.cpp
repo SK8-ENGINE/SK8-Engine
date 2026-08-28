@@ -27,6 +27,7 @@ REXCVAR_DECLARE(bool, skate3_native_render);
 // Hot-reload feature gates (skate3_native_scene.cpp).
 REXCVAR_DECLARE(bool, skate3_native_render_scene);
 REXCVAR_DECLARE(bool, skate3_native_render_scene_lightmaps);
+REXCVAR_DECLARE(double, skate3_native_render_scene_vanilla_exposure);
 REXCVAR_DECLARE(bool, skate3_native_render_scene_macro);
 REXCVAR_DECLARE(bool, skate3_native_render_scene_decals);
 REXCVAR_DECLARE(bool, skate3_native_render_scene_transparents);
@@ -815,6 +816,16 @@ void DrawShadowsSection() {
 }
 
 void DrawWorldShadingSection() {
+  REXCVAR_SET(
+      skate3_native_render_scene_vanilla_exposure,
+      CvarSlider(
+          "Vanilla disc exposure",
+          REXCVAR_GET(skate3_native_render_scene_vanilla_exposure),
+          0.25f, 4.0f, "%.3f",
+          "Native-render exposure for retained vanilla disc maps only. "
+          "University reports 1.125 before the no-readback safety pin "
+          "forces the guest state to its 2.5 zone maximum. Owned .skate "
+          "maps are unaffected."));
   REXCVAR_SET(skate3_native_render_scene_lightmaps,
               CvarCheckbox("Lightmaps", REXCVAR_GET(skate3_native_render_scene_lightmaps),
                            "Baked lighting atlas sample x2 on world materials"));
