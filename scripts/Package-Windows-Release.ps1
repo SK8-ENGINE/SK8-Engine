@@ -439,7 +439,7 @@ try {
         [StringComparer]::OrdinalIgnoreCase
     )
     foreach ($entry in $archive.Entries) {
-        [void]$archiveEntries.Add($entry.FullName)
+        [void]$archiveEntries.Add($entry.FullName.Replace('\', '/'))
     }
     foreach ($category in $defaultObjectCategories) {
         $expectedEntry = "$archiveBase/objects/$category/"
