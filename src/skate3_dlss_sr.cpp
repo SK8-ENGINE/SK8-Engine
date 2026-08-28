@@ -18,7 +18,7 @@ REXCVAR_DEFINE_INT32(skate3_dlss_mode, 0, "Skate 3",
 REXCVAR_DEFINE_STRING(skate3_dlss_status, "Off", "Skate 3",
                       "Read-only DLSS Super Resolution capability and sizing");
 REXCVAR_DEFINE_BOOL(skate3_dlss_neural_rendering, false, "Skate 3",
-                    "DLSS 5 Neural Rendering post-pass (private preview)");
+                    "DLSS 5 Neural Rendering DLAA post-pass (private preview)");
 REXCVAR_DEFINE_DOUBLE(skate3_dlss_nr_intensity, 1.0, "Skate 3",
                       "DLSS Neural Rendering intensity")
     .range(0.0, 2.0)
@@ -132,8 +132,8 @@ void PublishStatusLocked() {
   std::string neural;
   if (!g_status.neural_requested) {
     neural = g_status.neural_supported ? "Off (available)" : "Off";
-  } else if (g_status.selected_mode == Mode::kOff) {
-    neural = "Unavailable: enable DLSS Super Resolution or DLAA first";
+  } else if (!NeuralRenderingModeSupported(g_status.selected_mode)) {
+    neural = "Unavailable: select DLAA; Neural Rendering is DLAA-only";
   } else if (g_status.neural_active) {
     neural = std::format("On: {}x{} pre-tonemap HDR", g_status.output.width,
                          g_status.output.height);
@@ -713,20 +713,13 @@ bool Evaluate(ID3D12GraphicsCommandList *command_list,
                                  resources.output_size.height};
   const sl::ResourceTag tags[] = {
       {&color, sl::kBufferTypeScalingInputColor,
-       sl::ResourceLifecycle::eOnlyValidNow, &render_extent},
+       sl::ResourceLifecycle::eValidUntilEvaluate, &render_extent},
       {&output, sl::kBufferTypeScalingOutputColor,
-       sl::ResourceLifecycle::eOnlyValidNow, &output_extent},
-      {&depth, sl::kBufferTypeDepth, sl::ResourceLifecycle::eOnlyValidNow,
-       &render_extent},
+       sl::ResourceLifecycle::eValidUntilEvaluate, &output_extent},
+      {&depth, sl::kBufferTypeDepth,
+       sl::ResourceLifecycle::eValidUntilEvaluate, &render_extent},
       {&motion, sl::kBufferTypeMotionVectors,
-       sl::ResourceLifecycle::eOnlyValidNow, &render_extent}};
-  const sl::Result tag_result = g_api.set_tag_for_frame(
-      *g_frame_token, g_viewport, tags,
-      static_cast<std::uint32_t>(std::size(tags)), command_list);
-  if (tag_result != sl::Result::eOk) {
-    RecordEvaluationFailureLocked(UnavailableReason::kResources, tag_result);
-    return false;
-  }
+       sl::ResourceLifecycle::eValidUntilEvaluate, &render_extent}};
   sl::Constants constants{};
   CopyMatrix(camera.projection, constants.cameraViewToClip);
   CopyMatrix(camera.inverse_projection, constants.clipToCameraView);
@@ -758,9 +751,17 @@ bool Evaluate(ID3D12GraphicsCommandList *command_list,
                                   constants_result);
     return false;
   }
-  const sl::BaseStructure *inputs[] = {&g_viewport};
+  // Keep the tags local to this evaluation. Besides binding the resources to
+  // the exact command list where DLSS consumes them, this preserves the
+  // render/output subrect dimensions in the NGX evaluation parameters. That
+  // distinction is essential when render resolution is below output
+  // resolution (Quality/Balanced/Performance) and is invisible in DLAA where
+  // both extents happen to match.
+  const sl::BaseStructure *inputs[] = {
+      &g_viewport, &tags[0], &tags[1], &tags[2], &tags[3]};
   const sl::Result result = g_api.evaluate_feature(
-      sl::kFeatureDLSS, *g_frame_token, inputs, 1, command_list);
+      sl::kFeatureDLSS, *g_frame_token, inputs,
+      static_cast<std::uint32_t>(std::size(inputs)), command_list);
   if (result != sl::Result::eOk) {
     RecordEvaluationFailureLocked(UnavailableReason::kEvaluation, result);
     return false;
@@ -816,11 +817,24 @@ bool EvaluateNeuralRendering(ID3D12GraphicsCommandList *command_list,
     PublishStatusLocked();
     return false;
   }
+  if (!NeuralRenderingModeSupported(plan.mode)) {
+    if (g_neural_options_configured && g_api.set_neural_options != nullptr) {
+      g_neural_options.mode = sl::DLSSNRMode::eOff;
+      g_api.set_neural_options(g_viewport, g_neural_options);
+      g_api.free_resources(sl::kFeatureDLSS_NR, g_viewport);
+    }
+    g_neural_options_configured = false;
+    g_neural_evaluation_failed = false;
+    g_status.neural_detail =
+        "select DLAA; Neural Rendering is DLAA-only";
+    PublishStatusLocked();
+    return false;
+  }
   if (!plan.active || !g_status.neural_plugin_present ||
       !g_status.neural_supported || g_api.set_neural_options == nullptr) {
     if (g_status.neural_detail.empty()) {
       g_status.neural_detail =
-          !plan.active ? "DLSS SR or DLAA is not active"
+          !plan.active ? "DLAA is not active"
                        : "feature 1004 is unavailable on this system";
     }
     PublishStatusLocked();

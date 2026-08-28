@@ -121,6 +121,11 @@ void NeuralSettingsPolicy() {
   assert(ClampNeuralPreset(9) == 3);
   assert(ClampNeuralPerformanceMode(-1) == 0);
   assert(ClampNeuralPerformanceMode(9) == 3);
+  assert(NeuralRenderingModeSupported(Mode::kDlaa));
+  assert(!NeuralRenderingModeSupported(Mode::kQuality));
+  assert(!NeuralRenderingModeSupported(Mode::kBalanced));
+  assert(!NeuralRenderingModeSupported(Mode::kPerformance));
+  assert(!NeuralRenderingModeSupported(Mode::kOff));
 
   NeuralSettings defaults;
   assert(!defaults.enabled);

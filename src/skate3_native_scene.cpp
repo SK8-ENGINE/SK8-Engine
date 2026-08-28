@@ -74,6 +74,14 @@ REXCVAR_DEFINE_BOOL(skate3_native_render_scene_lightmaps, true, "Skate 3",
                     "sun/shadow/AO structure), and the texture payload revalidation "
                     "re-decodes pages that were captured before composition.")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
+REXCVAR_DEFINE_DOUBLE(
+    skate3_native_render_scene_vanilla_exposure, 1.125, "Skate 3",
+    "Native-render exposure used only for retained vanilla disc worlds. "
+    "University's own exposure evaluator reports 1.125 before the global "
+    "no-readback safety hook pins the guest state to its 2.5 zone maximum. "
+    "Owned .skate worlds keep their existing captured/dynamic exposure.")
+    .range(0.25, 4.0)
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
 REXCVAR_DEFINE_DOUBLE(skate3_menu_blur_sigma, 9.0, "Skate 3",
                       "Settings-menu backdrop gaussian sigma, in 1080p pixels (matches "
                       "the menu design's blur radius; scales with output "

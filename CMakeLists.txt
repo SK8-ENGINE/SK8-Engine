@@ -102,7 +102,7 @@ option(SKATE3_ENABLE_DLSS_SR
     "Enable NVIDIA DLSS Super Resolution through Streamline (Windows D3D12 only)"
     OFF)
 option(SKATE3_ENABLE_DLSS_NR_PREVIEW
-    "Enable the private Streamline 2.13 DLSS Neural Rendering preview after DLSS SR"
+    "Enable the private Streamline 2.13 DLSS Neural Rendering DLAA post-pass"
     OFF)
 set(SKATE3_STREAMLINE_SDK_ROOT "" CACHE PATH
     "Path to the NVIDIA Streamline SDK root")

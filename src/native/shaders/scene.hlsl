@@ -997,8 +997,16 @@ float4 ShadePixel(VSOut i) {
       // atlas (SampleCsmShadow bias/cascade conventions; the soft variant
       // adds the contact-hardening filter when PCSS is enabled), min'd
       // with the native static sun-shadow term.
+      // owned_light_meta.y is staged as -1 for a retained vanilla disc
+      // world, 0 for an owned world with dynamic lighting disabled, and 1
+      // for an owned world with it enabled. Vanilla still needs the live
+      // CSM: it contains the player/NPC/board casters that must darken the
+      // baked ground. Keep the separate mat_tint.z gate for owned maps so
+      // their Dynamic Lighting toggle continues to control live shadows.
+      bool receive_live_shadow =
+          owned_light_meta.y < -0.5 || mat_tint.z > 0.5;
       float s =
-          mat_tint.z > 0.5
+          receive_live_shadow
               ? min(
                     SampleCsmShadowSoft(
                         i.rpos + cam_pos.xyz, 0.0, i.nrm, i.pos.xy),
