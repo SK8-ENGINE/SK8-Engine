@@ -13,9 +13,9 @@
 namespace skate3::multiplayer::player_collision {
 
 // Skate 3 map and board transforms use metres, with Y as the vertical axis.
-// A 30 cm body radius keeps shoulder-to-shoulder contact close to the rendered
-// skater instead of giving each player a metre-wide personal space bubble.
-inline constexpr float kPlayerProxyRadius = 0.30f;
+// A 36 cm body radius covers the rendered skater and board-contact envelope
+// without giving each player a metre-wide personal space bubble.
+inline constexpr float kPlayerProxyRadius = 0.36f;
 inline constexpr float kPlayerProxyLowerCenter = -0.20f;
 inline constexpr float kPlayerProxyUpperCenter = 1.25f;
 inline constexpr std::uint32_t kPlayerProxyRadialSegments = 12;
@@ -29,6 +29,25 @@ HasValidPlayerCollisionState(std::uint32_t board_state_flags) {
   // The low three bits describe off-board states such as walking. They are
   // still ordinary playable states and must retain player collision.
   return board_state_flags != 0xFFFFFFFFu;
+}
+
+[[nodiscard]] inline std::array<float, 3>
+ResolvePlayerCollisionWorldPosition(
+    const std::array<float, 3> &map_origin,
+    const std::array<float, 3> &pose_local_position,
+    const std::array<float, 3> &animation_root_world_position,
+    bool rendered_from_animation) {
+  if (rendered_from_animation &&
+      std::isfinite(animation_root_world_position[0]) &&
+      std::isfinite(animation_root_world_position[1]) &&
+      std::isfinite(animation_root_world_position[2])) {
+    return animation_root_world_position;
+  }
+  return {
+      map_origin[0] + pose_local_position[0],
+      map_origin[1] + pose_local_position[1],
+      map_origin[2] + pose_local_position[2],
+  };
 }
 
 enum class DisabledReason : std::uint8_t {

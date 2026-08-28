@@ -237,10 +237,15 @@ void PublishRemotePresentation(const char *map_name,
       sample.spatial_valid = true;
       sample.playing =
           HasValidPlayerCollisionState(remote.pose.board_state_flags);
-      for (std::size_t component = 0; component < 3; ++component) {
-        sample.position[component] =
-            map_render_origin[component] + remote.pose.position[component];
-      }
+      sample.position = ResolvePlayerCollisionWorldPosition(
+          {map_render_origin[0], map_render_origin[1],
+           map_render_origin[2]},
+          {remote.pose.position[0], remote.pose.position[1],
+           remote.pose.position[2]},
+          {remote.animation.root_position[0],
+           remote.animation.root_position[1],
+           remote.animation.root_position[2]},
+          !remote.animation.tracks.empty());
       if (Finite3(sample.position.data())) {
         next.samples.push_back(sample);
       }

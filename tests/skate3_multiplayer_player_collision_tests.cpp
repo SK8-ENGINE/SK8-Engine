@@ -70,8 +70,31 @@ void TestPlayableBoardStatesRemainCollidable() {
          "missing player state was accepted");
 }
 
+void TestCollisionPositionMatchesRenderedRoot() {
+  const std::array<float, 3> origin{100.0f, 200.0f, 300.0f};
+  const std::array<float, 3> pose_local{1.0f, 2.0f, 3.0f};
+  const std::array<float, 3> animation_world{104.0f, 205.0f, 306.0f};
+
+  const auto animated = ResolvePlayerCollisionWorldPosition(
+      origin, pose_local, animation_world, true);
+  Expect(animated == animation_world,
+         "capsule did not follow the rendered animation root");
+
+  const auto pose_fallback = ResolvePlayerCollisionWorldPosition(
+      origin, pose_local, animation_world, false);
+  Expect(pose_fallback == std::array<float, 3>{101.0f, 202.0f, 303.0f},
+         "simple rendered proxy did not use the pose-root position");
+
+  std::array<float, 3> invalid_animation = animation_world;
+  invalid_animation[0] = std::nanf("");
+  const auto invalid_fallback = ResolvePlayerCollisionWorldPosition(
+      origin, pose_local, invalid_animation, true);
+  Expect(invalid_fallback == pose_fallback,
+         "invalid animation root did not fall back to the pose root");
+}
+
 void TestNativeCapsuleGeometry() {
-  ExpectNear(kPlayerProxyRadius, 0.30f, 1.0e-6f,
+  ExpectNear(kPlayerProxyRadius, 0.36f, 1.0e-6f,
              "player capsule radius drifted from the project scale");
   ExpectNear(kPlayerProxyLowerCenter, -0.20f, 1.0e-6f,
              "player capsule lower centre drifted from the project scale");
@@ -81,10 +104,10 @@ void TestNativeCapsuleGeometry() {
          "player capsule segment is inverted");
   ExpectNear(kPlayerProxyUpperCenter - kPlayerProxyLowerCenter +
                  kPlayerProxyRadius * 2.0f,
-             2.05f, 1.0e-6f,
+             2.17f, 1.0e-6f,
              "player capsule no longer matches standing skater height");
-  ExpectNear(kPlayerProxyRadius * 2.0f, 0.60f, 1.0e-6f,
-             "player capsule is wider than the rendered body");
+  ExpectNear(kPlayerProxyRadius * 2.0f, 0.72f, 1.0e-6f,
+             "player capsule diameter drifted from the intended fit");
 
   const std::vector<CapsuleTriangle> triangles =
       BuildPlayerCapsuleTriangles();
@@ -298,6 +321,7 @@ void TestDisabledStateClearsImmediately() {
 
 int main() {
   TestPlayableBoardStatesRemainCollidable();
+  TestCollisionPositionMatchesRenderedRoot();
   TestNativeCapsuleGeometry();
   TestFacingTwoPlayerSpawnPlacement();
   TestCreateUpdateRemoveAndSelfFiltering();
