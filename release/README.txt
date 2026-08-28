@@ -10,6 +10,19 @@ rendering, physics and Blender-to-SKATE layer.
 This is a Windows/D3D12 preview. Read KNOWN_ISSUES.md before distributing or
 reporting a problem.
 
+DLSS SUPER RESOLUTION
+---------------------
+
+When this package includes the optional official NVIDIA runtime, Settings >
+Graphics offers DLSS Off, Quality, Balanced, Performance, and DLAA on the
+DirectX 12 backend. Off is the default. Unsupported or non-NVIDIA hardware,
+old drivers, and missing plugins fall back to the normal renderer without a
+startup error. Vulkan is not supported by this DLSS integration.
+
+The package must contain only the pinned production DLSS runtime and its
+notices. See DLSS_SUPER_RESOLUTION.md for exact versions, checksums, licensing,
+and the NVIDIA coordination required before public distribution.
+
 FIRST START
 -----------
 

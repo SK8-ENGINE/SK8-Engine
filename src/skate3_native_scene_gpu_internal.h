@@ -503,6 +503,19 @@ struct RendererState {
   nrhi::Texture* depth = nullptr;
   uint32_t depth_width = 0;
   uint32_t depth_height = 0;
+  // DLSS SR D3D12-only temporal resources. Motion is normalized
+  // previous-minus-current window displacement at render resolution; output
+  // is full-resolution HDR and idles as a pixel-shader resource.
+  bool dlss_active = false;
+  bool dlss_pipeline_active = false;
+  float dlss_mip_lod_bias = 0.0f;
+  nrhi::Texture* dlss_motion = nullptr;
+  nrhi::Texture* dlss_output = nullptr;
+  nrhi::TextureView* dlss_output_srv = nullptr;
+  uint32_t dlss_render_width = 0;
+  uint32_t dlss_render_height = 0;
+  uint32_t dlss_output_width = 0;
+  uint32_t dlss_output_height = 0;
   // Cached guest-output texture identity (context.guest_output) for change
   // detection: the presenter recreates the output image on resize.
   nrhi::Texture* rtv_resource = nullptr;
@@ -1139,7 +1152,8 @@ bool ApplyVolumetricPass(const NativeGuestOutputRenderContext& context,
 void ApplyHdrPost(const NativeGuestOutputRenderContext& context,
                   nrhi::Cmd* cmd, const nrhi::Viewport& viewport,
                   const nrhi::Rect& scissor, bool loading_native,
-                  uint64_t frame_number);
+                  uint64_t frame_number, nrhi::Texture* source_texture,
+                  nrhi::TextureView* source_view);
 bool ApplyMenuBlurPass(const NativeGuestOutputRenderContext& context, nrhi::Cmd* cmd,
                        float target_sigma, bool output_in_guest_output_state);
 bool ApplyVanillaUiBackdropPass(

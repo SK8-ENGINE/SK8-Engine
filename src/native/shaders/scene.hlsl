@@ -54,7 +54,19 @@ cbuffer CH : register(b2) {
   float4 ch_ks;     // rgb = key spec color, w = power (0 = spec rows absent)
   float4 ch_rs;     // rgb = rim spec color, w = power
   float4 ch_rim;    // rgb = rim light color, w = key-spec fresnel power
+  // DLSS temporal payload. xy = current jitter in NDC, z = temporal mode
+  // (0 static/current-clip transform, 1 rigid previous MVP, 2 skinned
+  // previous palette + previous view-projection), w = previous-palette row
+  // offset relative to the currently bound StructuredBuffer view.
+  float4 temporal_meta;
+  row_major float4x4 temporal_matrix;
+  float4 temporal_lod;  // x = NVIDIA-recommended global material mip bias
 };
+#ifdef DLSS_MOTION
+// Apply the documented DLSS render-resolution mip bias exactly once to
+// implicit material samples. Explicit SampleLevel calls remain explicit.
+#define Sample(...) SampleBias(__VA_ARGS__, temporal_lod.x)
+#endif
 Texture2D<float4> diffuse : register(t0);
 Texture2D<float4> lightmap : register(t1);
 Texture2D<float4> macro : register(t3);
@@ -141,6 +153,10 @@ struct VSOut {
   // tangent handedness sign. Rides the static meshes' otherwise-unused
   // blend-weight bytes (see DecodeMesh).
   float4 tanb : TEXCOORD5;
+#ifdef DLSS_MOTION
+  float4 current_clip : TEXCOORD6;
+  float4 previous_clip : TEXCOORD7;
+#endif
 };
 VSOut vs_main(float3 p : POSITION, float2 uv : TEXCOORD0, float2 uv2 : TEXCOORD1,
               float4 bw : BLENDWEIGHT0, uint4 bi : BLENDINDICES0,
@@ -180,6 +196,29 @@ VSOut vs_main(float3 p : POSITION, float2 uv : TEXCOORD0, float2 uv2 : TEXCOORD1
   }
   float3 authored_world_position = mul(mp, world).xyz;
   o.pos = mul(mp, mvp);
+#ifdef DLSS_MOTION
+  float4 current_unjittered = o.pos;
+  current_unjittered.xy -= temporal_meta.xy * current_unjittered.w;
+  o.current_clip = current_unjittered;
+  if (temporal_meta.z > 1.5 && is_skinned) {
+    float3 previous_skinned = float3(0, 0, 0);
+    uint previous_base = (uint)max(temporal_meta.w, 0.0);
+    [unroll] for (int k = 0; k < 4; ++k) {
+      uint row = previous_base + bi[k] * 3u;
+      previous_skinned +=
+          bw[k] * float3(dot(float4(p, 1.0), bones[row]),
+                         dot(float4(p, 1.0), bones[row + 1]),
+                         dot(float4(p, 1.0), bones[row + 2]));
+    }
+    o.previous_clip =
+        mul(float4(previous_skinned / max(wsum, 0.001), 1.0),
+            temporal_matrix);
+  } else if (temporal_meta.z > 0.5) {
+    o.previous_clip = mul(float4(p, 1.0), temporal_matrix);
+  } else {
+    o.previous_clip = mul(current_unjittered, temporal_matrix);
+  }
+#endif
   // Presentation layers solve deliberately near-coplanar signs, markings,
   // LOD faces and decals in raster depth only. Moving a projected point
   // toward the camera along its own view ray leaves its screen coordinate
@@ -1385,7 +1424,29 @@ float4 ShadePixel(VSOut i) {
   }
   return float4(PassGamma(lit), 1.0);
 }
+#ifdef DLSS_MOTION
+struct ScenePSOutput {
+  float4 color : SV_Target0;
+  float2 motion : SV_Target1;
+};
+ScenePSOutput SceneOutput(VSOut i, float4 color) {
+  ScenePSOutput output;
+  output.color = color;
+  float2 current_ndc = i.current_clip.xy / max(abs(i.current_clip.w), 1e-7);
+  float2 previous_ndc =
+      i.previous_clip.xy / max(abs(i.previous_clip.w), 1e-7);
+  // Normalized window-space previous-minus-current displacement. Clip Y is
+  // up while window Y is down. Jitter is excluded by the VS payload.
+  output.motion =
+      float2((previous_ndc.x - current_ndc.x) * 0.5,
+             (current_ndc.y - previous_ndc.y) * 0.5);
+  return output;
+}
+ScenePSOutput ps_main(VSOut i) {
+#else
+float4 SceneOutput(VSOut i, float4 color) { return color; }
 float4 ps_main(VSOut i) : SV_Target {
+#endif
   int mask = ShowcaseMask(i.pos.x);
   // Dynamic-entities build-up layer (bit 512): entity draws (tint.a < 0,
   // staged CPU-side from DrawItem::dyn_entity) drop out entirely until the
@@ -1393,17 +1454,17 @@ float4 ps_main(VSOut i) : SV_Target {
   // so the world behind them renders as if they were never published.
   if (mask >= 0 && (mask & 512) == 0 && tint.a < -0.5) {
     clip(-1.0);
-    return float4(0.0, 0.0, 0.0, 0.0);
+    return SceneOutput(i, float4(0.0, 0.0, 0.0, 0.0));
   }
   float4 c = ShadePixel(i);
   // Blackout stage (bit 1024, the showcase's opening/closing bookends and
   // the recording cut marker): every draw renders black, keeping its own
   // alpha so coverage, alpha test and blend routing stay intact.
   if (mask >= 0 && (mask & 1024) != 0) {
-    return float4(0.0, 0.0, 0.0, c.a);
+    return SceneOutput(i, float4(0.0, 0.0, 0.0, c.a));
   }
   if (mask < 0 || (mask & 4) != 0) {
-    return c;  // showcase off, or the full material layer is revealed
+    return SceneOutput(i, c);  // showcase off, or full material is revealed
   }
   // Pre-material build-up looks replace the shaded rgb but keep the
   // branch's own alpha, so alpha tests, coverage channels, fades and blend
@@ -1414,7 +1475,7 @@ float4 ps_main(VSOut i) : SV_Target {
   // complete with the lighting layer and never receives cast shadows.
   bool sky = (cam_pos.w < -39.5 && cam_pos.w > -40.5) || tint.b > 0.0;
   if (sky && (mask & 2) != 0) {
-    return c;
+    return SceneOutput(i, c);
   }
   float3 n = dot(i.nrm, i.nrm) > 0.01
                  ? normalize(i.nrm)
@@ -1454,7 +1515,7 @@ float4 ps_main(VSOut i) : SV_Target {
     }
     float3 xe = (lin * ((1.0 + sh_fogc.a * f1) * sh_env.x) +
                  sh_fogc.rgb * f1) * sh_sun.w;
-    return ToneOut(xe, c.a, false);
+    return SceneOutput(i, ToneOut(xe, c.a, false));
   }
   float3 col;
   if ((mask & 2) != 0) {
@@ -1481,7 +1542,7 @@ float4 ps_main(VSOut i) : SV_Target {
   if (!sky && (mask & 8) != 0) {
     col *= s * 0.65 + 0.35;
   }
-  return float4(PassGamma(saturate(col)), c.a);
+  return SceneOutput(i, float4(PassGamma(saturate(col)), c.a));
 }
 // ---- SSR reflection G-buffer (consumed by ssr.hlsl ps_march) --------------
 // Rendered after the main pass from the frame's reflective items only (env

@@ -26,6 +26,7 @@
 
 #include "generated/skate3_init.h"
 #include "skate3_demo_path.h"
+#include "skate3_dlss_sr.h"
 #include "skate3_map_editor.h"
 #include "skate3_native_debug_dialog.h"
 #include "skate3_native_scene.h"
@@ -37,6 +38,9 @@
 
 #include <rex/cvar.h>
 #include <rex/graphics/native_guest_renderer.h>
+#if defined(_WIN32) && defined(REX_HAS_D3D12) && REX_HAS_D3D12
+#include <rex/graphics/d3d12/native_rhi_d3d12.h>
+#endif
 #include <rex/kernel/guest_presence.h>
 #include <rex/logging.h>
 
@@ -193,6 +197,127 @@ REXCVAR_DECLARE(std::string, skate3_native_render_snapshot_dir);
 
 namespace skate3::native_scene {
 namespace {
+
+using Matrix4 = std::array<float, 16>;
+
+Matrix4 MatrixMultiply(const Matrix4& a, const Matrix4& b) {
+  Matrix4 result{};
+  for (int row = 0; row < 4; ++row) {
+    for (int column = 0; column < 4; ++column) {
+      for (int inner = 0; inner < 4; ++inner) {
+        result[row * 4 + column] +=
+            a[row * 4 + inner] * b[inner * 4 + column];
+      }
+    }
+  }
+  return result;
+}
+
+bool MatrixInverse(const Matrix4& source, Matrix4& inverse) {
+  float augmented[4][8] = {};
+  for (int row = 0; row < 4; ++row) {
+    for (int column = 0; column < 4; ++column) {
+      augmented[row][column] = source[row * 4 + column];
+    }
+    augmented[row][row + 4] = 1.0f;
+  }
+  for (int column = 0; column < 4; ++column) {
+    int pivot = column;
+    for (int row = column + 1; row < 4; ++row) {
+      if (std::fabs(augmented[row][column]) >
+          std::fabs(augmented[pivot][column])) {
+        pivot = row;
+      }
+    }
+    if (std::fabs(augmented[pivot][column]) < 1.0e-9f) {
+      return false;
+    }
+    if (pivot != column) {
+      for (int entry = 0; entry < 8; ++entry) {
+        std::swap(augmented[pivot][entry], augmented[column][entry]);
+      }
+    }
+    const float scale = 1.0f / augmented[column][column];
+    for (float& entry : augmented[column]) {
+      entry *= scale;
+    }
+    for (int row = 0; row < 4; ++row) {
+      if (row == column) {
+        continue;
+      }
+      const float factor = augmented[row][column];
+      for (int entry = 0; entry < 8; ++entry) {
+        augmented[row][entry] -= factor * augmented[column][entry];
+      }
+    }
+  }
+  for (int row = 0; row < 4; ++row) {
+    for (int column = 0; column < 4; ++column) {
+      inverse[row * 4 + column] = augmented[row][column + 4];
+    }
+  }
+  return true;
+}
+
+Matrix4 MatrixFrom(const float* source) {
+  Matrix4 result{};
+  std::copy_n(source, 16, result.begin());
+  return result;
+}
+
+struct TemporalItemHistory {
+  Matrix4 mvp{};
+  std::vector<float> bones;
+  std::uint64_t generation = 0;
+};
+
+std::unordered_map<std::uint64_t, TemporalItemHistory> g_temporal_item_history;
+
+std::uint64_t TemporalItemKey(const DrawItem& item) {
+  if (item.lw_entity != 0) {
+    return 0x1000000000000000ull | item.lw_entity;
+  }
+  if (item.multiplayer_track_key != 0) {
+    return 0x2000000000000000ull | item.multiplayer_track_key;
+  }
+  if (item.ctx != 0) {
+    return 0x3000000000000000ull | item.ctx;
+  }
+  std::uint64_t key = 1469598103934665603ull;
+  for (std::uint32_t value :
+       {item.mesh, item.vb_obj, item.ib_obj, item.lw_entity}) {
+    key = (key ^ value) * 1099511628211ull;
+  }
+  return key;
+}
+
+#if defined(_WIN32) && defined(REX_HAS_D3D12) && REX_HAS_D3D12
+struct DlssEvaluatePayload {
+  ID3D12Resource* color = nullptr;
+  ID3D12Resource* depth = nullptr;
+  ID3D12Resource* motion = nullptr;
+  ID3D12Resource* output = nullptr;
+  skate3::dlss::RenderSize render{};
+  skate3::dlss::RenderSize output_size{};
+  skate3::dlss::CameraData camera{};
+  skate3::dlss::FramePlan plan{};
+};
+
+void ExecuteDlssEvaluate(ID3D12GraphicsCommandList* command_list,
+                         ID3D12GraphicsCommandList1*,
+                         const void* payload, size_t payload_size) {
+  if (payload_size != sizeof(DlssEvaluatePayload)) {
+    return;
+  }
+  const auto& evaluation =
+      *static_cast<const DlssEvaluatePayload*>(payload);
+  const skate3::dlss::TaggedResources resources{
+      evaluation.color, evaluation.depth, evaluation.motion, evaluation.output,
+      evaluation.render, evaluation.output_size};
+  skate3::dlss::Evaluate(command_list, resources, evaluation.camera,
+                         evaluation.plan);
+}
+#endif
 
 // Owned worlds expose one intentional lighting switch in their World menu.
 // Persisted low-level retained-renderer cvars must not silently disable live
@@ -3113,7 +3238,7 @@ bool EnsureRootSignature(const NativeGuestOutputRenderContext& context) {
     // from the guest PS bank (CaptureCharLighting), sliced out of the bone
     // upload ring per character draw.
     ld.params[9] = {nrhi::BindingParamKind::kConstantBuffer, 2, 1,
-                    nrhi::Visibility::kPixel};
+                    nrhi::Visibility::kAll};
     ld.static_sampler_count = 2;
     ld.static_samplers[0] = {/*s*/ 0, nrhi::Filter::kAnisotropic,
                              nrhi::AddressMode::kWrap, 8};
@@ -3166,7 +3291,7 @@ bool EnsureScenePsoFamily(const NativeGuestOutputRenderContext& context) {
   // split/mask gates in (swapped in only while a run is live). The variant
   // string is the canonical ";"-joined macro signature the offline SPIR-V
   // matrix uses.
-  nrhi::ShaderMacro ps_defs[3];
+  nrhi::ShaderMacro ps_defs[4];
   uint32_t ps_def_count = 0;
   if (g_r.hdr_active) {
     ps_defs[ps_def_count++] = {"HDR", "1"};
@@ -3174,15 +3299,25 @@ bool EnsureScenePsoFamily(const NativeGuestOutputRenderContext& context) {
   if (g_r.showcase_shaders) {
     ps_defs[ps_def_count++] = {"SHOWCASE", "1"};
   }
+  if (g_r.dlss_active) {
+    ps_defs[ps_def_count++] = {"DLSS_MOTION", "1"};
+  }
   ps_defs[ps_def_count] = {nullptr, nullptr};
-  char ps_variant[24];
-  std::snprintf(ps_variant, sizeof(ps_variant), "%s%s%s",
+  char ps_variant[64];
+  std::snprintf(ps_variant, sizeof(ps_variant), "%s%s%s%s%s",
                 g_r.hdr_active ? "HDR=1" : "",
                 g_r.hdr_active && g_r.showcase_shaders ? ";" : "",
-                g_r.showcase_shaders ? "SHOWCASE=1" : "");
+                g_r.showcase_shaders ? "SHOWCASE=1" : "",
+                (g_r.hdr_active || g_r.showcase_shaders) && g_r.dlss_active
+                    ? ";"
+                    : "",
+                g_r.dlss_active ? "DLSS_MOTION=1" : "");
+  const nrhi::ShaderMacro dlss_vs_defs[] = {
+      {"DLSS_MOTION", "1"}, {nullptr, nullptr}};
   nrhi::Shader* vs = device->CreateShader(
       MakeShaderDesc(nrhi::ShaderStage::kVertex, "scene.hlsl", kShaderSource,
-                     "vs_main", nullptr, ""));
+                     "vs_main", g_r.dlss_active ? dlss_vs_defs : nullptr,
+                     g_r.dlss_active ? "DLSS_MOTION=1" : ""));
   nrhi::Shader* ps = device->CreateShader(MakeShaderDesc(
       nrhi::ShaderStage::kPixel, "scene.hlsl", kShaderSource, "ps_main",
       ps_def_count != 0 ? ps_defs : nullptr, ps_variant));
@@ -3204,6 +3339,9 @@ bool EnsureScenePsoFamily(const NativeGuestOutputRenderContext& context) {
   pso.depth.write_enable = true;
   pso.depth.func = nrhi::CompareFunc::kLess;
   pso.rtv_format = scene_fmt;
+  pso.rtv_format_1 =
+      g_r.dlss_active ? nrhi::Format::kR32G32_FLOAT
+                      : nrhi::Format::kUnknown;
   pso.dsv_format = nrhi::Format::kD32_FLOAT;
   pso.sample_count = g_r.msaa;
   g_r.pso = device->CreateGraphicsPipeline(pso);
@@ -3266,6 +3404,7 @@ bool EnsureScenePsoFamily(const NativeGuestOutputRenderContext& context) {
   // depth-tested, so a partially occluded selection outlines slightly
   // differently, acceptable for the editor UI.
   pso.rtv_format = nrhi::Format::kR8_UNORM;
+  pso.rtv_format_1 = nrhi::Format::kUnknown;
   pso.sample_count = 1;
   g_r.pso_outline_mask = device->CreateGraphicsPipeline(pso);
   if (g_r.pso_outline_mask == nullptr) {
@@ -3273,6 +3412,9 @@ bool EnsureScenePsoFamily(const NativeGuestOutputRenderContext& context) {
     // outline pass disables itself
   }
   pso.rtv_format = scene_fmt;
+  pso.rtv_format_1 =
+      g_r.dlss_active ? nrhi::Format::kR32G32_FLOAT
+                      : nrhi::Format::kUnknown;
   pso.sample_count = g_r.msaa;
   device->DestroyDeferred(vs);
   device->DestroyDeferred(ps);
@@ -4830,6 +4972,80 @@ bool EnsureOutputSizedTargets(const NativeGuestOutputRenderContext& context) {
   return true;
 }
 
+bool EnsureDlssTargets(const NativeGuestOutputRenderContext& context,
+                       uint32_t output_width, uint32_t output_height) {
+  if (!g_r.dlss_active) {
+    for (nrhi::Texture** texture :
+         {&g_r.dlss_motion, &g_r.dlss_output}) {
+      if (*texture != nullptr) {
+        context.device->DestroyDeferred(*texture);
+        *texture = nullptr;
+      }
+    }
+    if (g_r.dlss_output_srv != nullptr) {
+      context.device->DestroyDeferred(g_r.dlss_output_srv);
+      g_r.dlss_output_srv = nullptr;
+    }
+    g_r.dlss_render_width = g_r.dlss_render_height = 0;
+    g_r.dlss_output_width = g_r.dlss_output_height = 0;
+    return true;
+  }
+  const bool rebuild =
+      g_r.dlss_motion == nullptr || g_r.dlss_output == nullptr ||
+      g_r.dlss_output_srv == nullptr ||
+      g_r.dlss_render_width != context.guest_output_width ||
+      g_r.dlss_render_height != context.guest_output_height ||
+      g_r.dlss_output_width != output_width ||
+      g_r.dlss_output_height != output_height;
+  if (!rebuild) {
+    return true;
+  }
+  if (g_r.dlss_output_srv != nullptr) {
+    context.device->DestroyDeferred(g_r.dlss_output_srv);
+    g_r.dlss_output_srv = nullptr;
+  }
+  for (nrhi::Texture** texture : {&g_r.dlss_motion, &g_r.dlss_output}) {
+    if (*texture != nullptr) {
+      context.device->DestroyDeferred(*texture);
+      *texture = nullptr;
+    }
+  }
+  nrhi::TextureDesc motion;
+  motion.width = context.guest_output_width;
+  motion.height = context.guest_output_height;
+  motion.format = nrhi::Format::kR32G32_FLOAT;
+  motion.usage = nrhi::kTextureUsageRenderTarget;
+  motion.initial_state = nrhi::ResourceState::kRenderTarget;
+  g_r.dlss_motion = context.device->CreateTexture(motion);
+
+  nrhi::TextureDesc output;
+  output.width = output_width;
+  output.height = output_height;
+  output.format = nrhi::Format::kR16G16B16A16_FLOAT;
+  output.usage = nrhi::kTextureUsageUnorderedAccess;
+  output.initial_state = nrhi::ResourceState::kPixelShaderResource;
+  g_r.dlss_output = context.device->CreateTexture(output);
+  if (g_r.dlss_output != nullptr) {
+    nrhi::TextureViewDesc view;
+    view.mip_levels = 1;
+    g_r.dlss_output_srv =
+        context.device->CreateTextureView(g_r.dlss_output, view);
+  }
+  if (g_r.dlss_motion == nullptr || g_r.dlss_output == nullptr ||
+      g_r.dlss_output_srv == nullptr) {
+    REXLOG_ERROR("DLSS SR: temporal target allocation failed");
+    return false;
+  }
+  g_r.dlss_render_width = context.guest_output_width;
+  g_r.dlss_render_height = context.guest_output_height;
+  g_r.dlss_output_width = output_width;
+  g_r.dlss_output_height = output_height;
+  REXLOG_INFO("DLSS SR: allocated motion {}x{} and output {}x{}",
+              g_r.dlss_render_width, g_r.dlss_render_height,
+              g_r.dlss_output_width, g_r.dlss_output_height);
+  return true;
+}
+
 bool EnsurePipeline(const NativeGuestOutputRenderContext& context) {
   if (g_r.failed) return false;
   nrhi::Device* device = context.device;
@@ -4844,9 +5060,10 @@ bool EnsurePipeline(const NativeGuestOutputRenderContext& context) {
   // output-sized targets). Hot cvar toggles rebuild everything below;
   // hdr_failed pins the classic path after a float-target failure.
   const bool hdr_want =
-      REXCVAR_GET(skate3_native_render_scene_hdr) && !g_r.hdr_failed;
+      (g_r.dlss_active || REXCVAR_GET(skate3_native_render_scene_hdr)) &&
+      !g_r.hdr_failed;
   const nrhi::Format hdr_fmt_want =
-      REXCVAR_GET(skate3_native_render_scene_hdr_packed)
+      !g_r.dlss_active && REXCVAR_GET(skate3_native_render_scene_hdr_packed)
           ? nrhi::Format::kR11G11B10_FLOAT
           : nrhi::Format::kR16G16B16A16_FLOAT;
   // MSAA level: the requested count, reduced to what the scene color format
@@ -4857,7 +5074,8 @@ bool EnsurePipeline(const NativeGuestOutputRenderContext& context) {
   // and follow).
   const nrhi::Format scene_fmt_want =
       hdr_want ? hdr_fmt_want : context.guest_output->format();
-  const int32_t msaa_req = REXCVAR_GET(skate3_native_render_scene_msaa);
+  const int32_t msaa_req =
+      g_r.dlss_active ? 1 : REXCVAR_GET(skate3_native_render_scene_msaa);
   uint32_t msaa_want = msaa_req >= 8   ? 8u
                        : msaa_req >= 4 ? 4u
                        : msaa_req >= 2 ? 2u
@@ -4867,6 +5085,7 @@ bool EnsurePipeline(const NativeGuestOutputRenderContext& context) {
       g_r.hdr_active != hdr_want ||
       (hdr_want && g_r.hdr_scene_format != hdr_fmt_want) ||
       g_r.msaa != msaa_want ||
+      g_r.dlss_pipeline_active != g_r.dlss_active ||
       g_r.showcase_shaders != g_r.showcase_shaders_want) {
     if (g_r.msaa != msaa_want && g_r.pfx_ready) {
       // The photo-postfx depth-pack pass is compiled against the depth
@@ -4883,6 +5102,7 @@ bool EnsurePipeline(const NativeGuestOutputRenderContext& context) {
     g_r.hdr_active = hdr_want;
     g_r.hdr_scene_format = hdr_fmt_want;
     g_r.msaa = msaa_want;
+    g_r.dlss_pipeline_active = g_r.dlss_active;
     g_r.showcase_shaders = g_r.showcase_shaders_want;
     if (!EnsureScenePsoFamily(context) || !EnsureResolvePso(context) ||
         !EnsureBlurPsos(context) || !EnsureOutlineEdgePso(context) ||
@@ -12555,7 +12775,10 @@ bool InstallRemoteAppearance(const NativeGuestOutputRenderContext& context,
 void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
                     nrhi::Cmd* cmd, const FrameScene& scene,
                     uint64_t frame_number, bool use_depth, bool shadow_ready,
-                    std::vector<DrawItem>* multiplayer_remote_items) {
+                    std::vector<DrawItem>* multiplayer_remote_items,
+                    const skate3::dlss::FramePlan& dlss_plan,
+                    const Matrix4& dlss_unjittered_view_projection,
+                    uint32_t bone_region) {
   if (multiplayer_remote_items != nullptr) {
     multiplayer_remote_items->clear();
   }
@@ -12679,6 +12902,58 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
       g_r.white.srv};
   cmd->SetTextures(8, t8_default, 6);
   cmd->SetPrimitiveTopology(nrhi::PrimitiveTopology::kTriangleList);
+
+  const auto bind_frame_temporal = [&]() {
+    cmd->SetConstantBuffer(9, g_r.bone_ring, bone_region);
+  };
+  const auto bind_rigid_temporal =
+      [&](std::uint64_t identity) {
+        if (!g_r.dlss_active) {
+          bind_frame_temporal();
+          return;
+        }
+        const uint32_t offset = (g_r.bone_ring_offset + 255u) & ~255u;
+        if (offset + 512u > RendererState::kBoneRegionSize) {
+          bind_frame_temporal();
+          return;
+        }
+        Matrix4 current_mvp{};
+        for (int row = 0; row < 4; ++row) {
+          for (int column = 0; column < 4; ++column) {
+            for (int inner = 0; inner < 4; ++inner) {
+              current_mvp[row * 4 + column] +=
+                  constants[row * 4 + inner] *
+                  dlss_unjittered_view_projection[inner * 4 + column];
+            }
+          }
+        }
+        Matrix4 previous_mvp = current_mvp;
+        const auto previous = g_temporal_item_history.find(identity);
+        if (!dlss_plan.reset &&
+            previous != g_temporal_item_history.end() &&
+            previous->second.generation + 1 == scene.generation) {
+          previous_mvp = previous->second.mvp;
+        }
+        float* temporal = reinterpret_cast<float*>(
+            g_r.bone_ring_cpu + bone_region + offset);
+        std::fill_n(temporal, 128, 0.0f);
+        temporal[18 * 4] =
+            2.0f * dlss_plan.jitter_pixels.x /
+            float(dlss_plan.render.width);
+        temporal[18 * 4 + 1] =
+            -2.0f * dlss_plan.jitter_pixels.y /
+            float(dlss_plan.render.height);
+        temporal[18 * 4 + 2] = 1.0f;
+        temporal[23 * 4] = dlss_plan.mip_lod_bias;
+        std::copy(previous_mvp.begin(), previous_mvp.end(),
+                  temporal + 19 * 4);
+        g_r.bone_ring_offset = offset + 512u;
+        cmd->SetConstantBuffer(9, g_r.bone_ring, bone_region + offset);
+        TemporalItemHistory& next = g_temporal_item_history[identity];
+        next.mvp = current_mvp;
+        next.bones.clear();
+        next.generation = scene.generation;
+      };
 
   const mechanics_sandbox::map::VisualWorld& world =
       mechanics_sandbox::map::ActiveVisualWorld();
@@ -13103,6 +13378,8 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
     set_world_basis(
         x_axis, y_axis, z_axis,
         {world_position[0], world_position[1], world_position[2]});
+    bind_rigid_temporal(0x4000000000000000ull |
+                        static_cast<std::uint64_t>(object_index));
     constants[39] = -41.25f;
     mesh->second.last_used_frame = frame_number;
     cmd->SetVertexBuffer(
@@ -13262,6 +13539,8 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
         set_world_basis(
               x_axis * 1.006f, y_axis * 1.006f, z_axis * 1.006f,
             {world_position[0], world_position[1], world_position[2]});
+        bind_rigid_temporal(0x4100000000000000ull |
+                            static_cast<std::uint64_t>(object_index));
         cmd->SetPipeline(g_r.pso_cullback);
         cmd->SetTexture(1, g_r.white.srv);
         cmd->SetTexture(2, g_r.white.srv);
@@ -13313,6 +13592,8 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
         const float scale = std::clamp(
             skate::world::Length(pivot - camera) * 0.12f, 0.3f, 8.0f);
         set_world_translation(pivot.x, pivot.y, pivot.z, scale);
+        bind_rigid_temporal(0x4200000000000000ull |
+                            static_cast<std::uint64_t>(selected));
         constants[39] = -41.25f;
         mesh->second.last_used_frame = frame_number;
         cmd->SetVertexBuffer(
@@ -13362,6 +13643,7 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
       const auto water_mesh = g_r.meshes.find(kSandboxWaterMesh);
       if (water_mesh != g_r.meshes.end()) {
         set_world_translation(origin[0], origin[1], origin[2]);
+        bind_rigid_temporal(0x4300000000000000ull);
         constants[39] = -43.0f;
         water_mesh->second.last_used_frame = frame_number;
         cmd->SetVertexBuffer(water_mesh->second.vb_view.buffer,
@@ -13398,6 +13680,7 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
         set_world_translation(origin[0] + pusher_position[0],
             origin[1] + pusher_position[1],
             origin[2] + pusher_position[2]);
+        bind_rigid_temporal(0x4400000000000000ull);
         constants[39] = -41.25f;
         pusher_mesh->second.last_used_frame = frame_number;
         cmd->SetVertexBuffer(pusher_mesh->second.vb_view.buffer,
@@ -13423,6 +13706,7 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
       }
     }
     set_world_translation(origin[0], origin[1], origin[2]);
+    bind_frame_temporal();
     constants[39] = -41.0f;
   }
 
@@ -13468,6 +13752,8 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
 
     set_world_translation(world_position[0], world_position[1],
                           world_position[2]);
+    bind_rigid_temporal(0x4500000000000000ull |
+                        static_cast<std::uint64_t>(object_index));
     // -41.25 keeps the owned material family while asking the pixel shader
     // to derive procedural coordinates from this object's local frame.
     // Static map draws remain at -41.0 and retain world-aligned materials.
@@ -13548,6 +13834,8 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
       continue;
     }
     set_world_basis(x_axis, door.hinge_axis, z_axis, translation);
+    bind_rigid_temporal(0x4600000000000000ull |
+                        static_cast<std::uint64_t>(door_index));
     constants[39] = -41.0f;
     mesh->second.last_used_frame = frame_number;
     cmd->SetVertexBuffer(
@@ -13647,6 +13935,7 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
   cmd->SetTexturePair(5, g_r.white.srv, g_r.white.srv);
   cmd->SetTextures(8, t8_default, 6);
   set_world_translation(origin[0], origin[1], origin[2]);
+  bind_frame_temporal();
 
   const auto multiplayer_perf_t0 = PerfClock::now();
   // Capture the local player's final rendered skeleton. This is downstream
@@ -14919,6 +15208,10 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
           origin[1] + remote_pose.position[1],
           origin[2] + remote_pose.position[2]};
           set_world_basis(remote_x, remote_y, remote_z, remote_position);
+      bind_rigid_temporal(
+          0x4700000000000000ull ^
+          (static_cast<std::uint64_t>(remote_player.role) << 32u) ^
+          remote_player.session);
       constants[39] = -41.25f;
       remote_mesh->second.last_used_frame = frame_number;
           cmd->SetVertexBuffer(remote_mesh->second.vb_view.buffer,
@@ -14943,6 +15236,7 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
         ++draw_calls;
       }
       set_world_translation(origin[0], origin[1], origin[2]);
+      bind_frame_temporal();
       constants[39] = -41.0f;
     }
     }
@@ -14981,6 +15275,8 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
         set_world_translation(
             origin[0] + light.position[0], origin[1] + light.position[1],
             origin[2] + light.position[2], light.source_radius);
+        bind_rigid_temporal(0x4800000000000000ull |
+                            static_cast<std::uint64_t>(light_index));
         constants[32] = 1.0f;
         constants[33] = 1.0f;
         constants[34] = 1.0f;
@@ -15023,6 +15319,7 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
       const auto mesh = g_r.meshes.find(kSandboxRainMesh);
       if (mesh != g_r.meshes.end()) {
         set_world_translation(origin[0], origin[1], origin[2]);
+        bind_rigid_temporal(0x4900000000000000ull);
         constants[32] = 0.62f;
         constants[33] = 0.66f;
         constants[34] = 0.71f;
@@ -15055,6 +15352,7 @@ void DrawSandboxMap(const NativeGuestOutputRenderContext& context,
     const auto mesh = g_r.meshes.find(kSandboxLightningMesh);
     if (mesh != g_r.meshes.end()) {
       set_world_translation(origin[0], origin[1], origin[2]);
+      bind_rigid_temporal(0x4A00000000000000ull);
       constants[32] = 1.0f;
       constants[33] = 1.0f;
       constants[34] = 1.0f;
@@ -15229,8 +15527,9 @@ void DrawSandboxSky(const NativeGuestOutputRenderContext& context,
   mechanics_sandbox::RecordSkyDraw(draw_calls);
 }
 
-bool RenderScene(const NativeGuestOutputRenderContext& context,
+bool RenderScene(const NativeGuestOutputRenderContext& output_context,
                  void* /*user_data*/) {
+  NativeGuestOutputRenderContext context = output_context;
   if (!SceneEnabled() ||
       (context.backend != NativeGuestOutputBackend::kD3D12 &&
        context.backend != NativeGuestOutputBackend::kVulkan)) {
@@ -15342,11 +15641,138 @@ bool RenderScene(const NativeGuestOutputRenderContext& context,
     }
     scene_ptr = g_scene;
   }
-  const FrameScene& scene = *scene_ptr;
+  const FrameScene& source_scene = *scene_ptr;
   skate3::mechanics_sandbox::RecordRenderStage(
       skate3::mechanics_sandbox::RenderStage::SceneReady);
 
+  const uint32_t dlss_output_width = context.guest_output_width;
+  const uint32_t dlss_output_height = context.guest_output_height;
+  skate3::dlss::FramePlan dlss_plan{};
+#if defined(_WIN32) && defined(REX_HAS_D3D12) && REX_HAS_D3D12
+  if (context.backend == NativeGuestOutputBackend::kD3D12) {
+    ID3D12Device* d3d_device =
+        rex::graphics::d3d12::NativeRhiD3D12GetDevice(context.device);
+    dlss_plan = skate3::dlss::BeginFrame(
+        d3d_device, {dlss_output_width, dlss_output_height},
+        source_scene.generation, source_scene.sample_time_us,
+        {source_scene.cam_pos[0], source_scene.cam_pos[1],
+         source_scene.cam_pos[2]},
+        rex::graphics::IsNativeGuestOutputActive());
+  } else if (skate3::dlss::RequestedMode() != skate3::dlss::Mode::kOff) {
+    rex::cvar::SetFlagByName(
+        "skate3_dlss_status",
+        "DLSS Super Resolution is available only on DirectX 12");
+  }
+#endif
+
+  // Keep the native/Off path on the renderer's immutable published scene.
+  // A private frame copy is needed only while DLSS applies temporal jitter.
+  std::unique_ptr<FrameScene> dlss_scene;
+  if (dlss_plan.active) {
+    dlss_scene = std::make_unique<FrameScene>(source_scene);
+    const float jitter_x =
+        2.0f * dlss_plan.jitter_pixels.x / float(dlss_plan.render.width);
+    const float jitter_y =
+        -2.0f * dlss_plan.jitter_pixels.y / float(dlss_plan.render.height);
+    for (int row = 0; row < 4; ++row) {
+      dlss_scene->view_proj[row * 4] +=
+          dlss_scene->view_proj[row * 4 + 3] * jitter_x;
+      dlss_scene->view_proj[row * 4 + 1] +=
+          dlss_scene->view_proj[row * 4 + 3] * jitter_y;
+    }
+  }
+  const FrameScene& scene = dlss_scene ? *dlss_scene : source_scene;
+
+  const Matrix4 dlss_unjittered_view_projection =
+      MatrixFrom(source_scene.view_proj);
+  const Matrix4 dlss_projection = MatrixFrom(source_scene.proj);
+  static Matrix4 s_dlss_previous_view_projection{};
+  static bool s_dlss_previous_view_projection_valid = false;
+  Matrix4 dlss_inverse_view_projection{};
+  Matrix4 dlss_clip_to_previous{};
+  Matrix4 dlss_previous_to_clip{};
+  Matrix4 dlss_inverse_projection{};
+  const bool dlss_matrices_valid =
+      MatrixInverse(dlss_unjittered_view_projection,
+                    dlss_inverse_view_projection) &&
+      MatrixInverse(dlss_projection, dlss_inverse_projection);
+  if (dlss_matrices_valid && s_dlss_previous_view_projection_valid) {
+    dlss_clip_to_previous =
+        MatrixMultiply(dlss_inverse_view_projection,
+                       s_dlss_previous_view_projection);
+    MatrixInverse(dlss_clip_to_previous, dlss_previous_to_clip);
+  } else {
+    for (int diagonal = 0; diagonal < 4; ++diagonal) {
+      dlss_clip_to_previous[diagonal * 4 + diagonal] = 1.0f;
+      dlss_previous_to_clip[diagonal * 4 + diagonal] = 1.0f;
+    }
+  }
+  skate3::dlss::CameraData dlss_camera{};
+  dlss_camera.projection = dlss_projection;
+  dlss_camera.inverse_projection = dlss_inverse_projection;
+  dlss_camera.view_projection = dlss_unjittered_view_projection;
+  dlss_camera.previous_view_projection =
+      s_dlss_previous_view_projection_valid
+          ? s_dlss_previous_view_projection
+          : dlss_unjittered_view_projection;
+  dlss_camera.clip_to_previous_clip = dlss_clip_to_previous;
+  dlss_camera.previous_clip_to_clip = dlss_previous_to_clip;
+  dlss_camera.position = {source_scene.cam_pos[0], source_scene.cam_pos[1],
+                          source_scene.cam_pos[2]};
+  if (dlss_matrices_valid) {
+    const Matrix4 view =
+        MatrixMultiply(dlss_unjittered_view_projection,
+                       dlss_inverse_projection);
+    Matrix4 inverse_view{};
+    if (MatrixInverse(view, inverse_view)) {
+      const auto normalized_row = [&](int row) {
+        std::array<float, 3> value{
+            inverse_view[row * 4], inverse_view[row * 4 + 1],
+            inverse_view[row * 4 + 2]};
+        const float length =
+            std::sqrt(value[0] * value[0] + value[1] * value[1] +
+                      value[2] * value[2]);
+        if (length > 1.0e-7f) {
+          for (float& component : value) {
+            component /= length;
+          }
+        }
+        return value;
+      };
+      dlss_camera.right = normalized_row(0);
+      dlss_camera.up = normalized_row(1);
+      dlss_camera.forward = normalized_row(2);
+    }
+  }
+  if (std::fabs(source_scene.proj[5]) > 1.0e-7f) {
+    dlss_camera.vertical_fov =
+        2.0f * std::atan(1.0f / source_scene.proj[5]);
+  }
+  if (std::fabs(source_scene.proj[0]) > 1.0e-7f) {
+    dlss_camera.aspect = source_scene.proj[5] / source_scene.proj[0];
+  }
+  if (std::fabs(source_scene.proj[10]) > 1.0e-7f) {
+    dlss_camera.near_plane =
+        -source_scene.proj[14] / source_scene.proj[10];
+  }
+  if (std::fabs(source_scene.proj[10] - 1.0f) > 1.0e-7f) {
+    dlss_camera.far_plane =
+        -source_scene.proj[14] / (source_scene.proj[10] - 1.0f);
+  }
+
+  g_r.dlss_active = dlss_plan.active;
+  g_r.dlss_mip_lod_bias = dlss_plan.mip_lod_bias;
+  if (dlss_plan.active) {
+    context.guest_output_width = dlss_plan.render.width;
+    context.guest_output_height = dlss_plan.render.height;
+  }
   if (!EnsurePipeline(context)) {
+    skate3::dlss::NotifyFrameNotServed();
+    return false;
+  }
+  if (!EnsureDlssTargets(context, dlss_output_width, dlss_output_height)) {
+    g_r.dlss_active = false;
+    skate3::dlss::NotifyFrameNotServed();
     return false;
   }
   skate3::mechanics_sandbox::RecordRenderStage(
@@ -15447,6 +15873,24 @@ bool RenderScene(const NativeGuestOutputRenderContext& context,
       upload_region_index * RendererState::kBoneRegionSize;
   g_r.bone_ring_offset = 0;
   g_r.ropa_ring_offset = 0;
+  if (g_r.dlss_active) {
+    if (dlss_plan.reset || !dlss_matrices_valid) {
+      g_temporal_item_history.clear();
+    }
+    float* temporal =
+        reinterpret_cast<float*>(g_r.bone_ring_cpu + bone_region);
+    std::fill_n(temporal, 128, 0.0f);
+    temporal[18 * 4] =
+        2.0f * dlss_plan.jitter_pixels.x / float(dlss_plan.render.width);
+    temporal[18 * 4 + 1] =
+        -2.0f * dlss_plan.jitter_pixels.y / float(dlss_plan.render.height);
+    std::copy(dlss_clip_to_previous.begin(), dlss_clip_to_previous.end(),
+              temporal + 19 * 4);
+    temporal[23 * 4] = dlss_plan.mip_lod_bias;
+    // Preserve the frame-default b2 block and keep later per-item CBV
+    // allocations from overwriting it.
+    g_r.bone_ring_offset = 512;
+  }
   {
     struct UploadRingTelemetry {
       std::chrono::steady_clock::time_point last_log{};
@@ -15716,22 +16160,28 @@ bool RenderScene(const NativeGuestOutputRenderContext& context,
     }
   }
   cmd->ClearRenderTarget(scene_color, clear_color);
+  if (g_r.dlss_active) {
+    const float zero_motion[4] = {};
+    cmd->ClearRenderTarget(g_r.dlss_motion, zero_motion);
+  }
   if (use_depth) {
     cmd->ClearDepth(g_r.depth, 1.0f);
-    cmd->SetRenderTargets(scene_color, g_r.depth);
+    cmd->SetRenderTargets(scene_color, g_r.depth,
+                          g_r.dlss_active ? g_r.dlss_motion : nullptr);
   } else {
-    cmd->SetRenderTargets(scene_color, nullptr);
+    cmd->SetRenderTargets(scene_color, nullptr,
+                          g_r.dlss_active ? g_r.dlss_motion : nullptr);
   }
 
-  const nrhi::Viewport viewport{0.0f,
-                                0.0f,
-                                float(context.guest_output_width),
-                                float(context.guest_output_height),
-                                0.0f,
-                                1.0f};
+  nrhi::Viewport viewport{0.0f,
+                          0.0f,
+                          float(context.guest_output_width),
+                          float(context.guest_output_height),
+                          0.0f,
+                          1.0f};
   cmd->SetViewport(viewport);
-  const nrhi::Rect scissor{0, 0, int32_t(context.guest_output_width),
-                           int32_t(context.guest_output_height)};
+  nrhi::Rect scissor{0, 0, int32_t(context.guest_output_width),
+                     int32_t(context.guest_output_height)};
   cmd->SetScissor(scissor);
   cmd->SetBindingLayout(g_r.layout);
   cmd->SetPipeline(use_depth ? g_r.pso : g_r.pso_nodepth);
@@ -16109,7 +16559,8 @@ bool RenderScene(const NativeGuestOutputRenderContext& context,
   DrawSandboxSky(context, cmd, scene, frame_number);
   std::vector<DrawItem> multiplayer_remote_items;
   DrawSandboxMap(context, cmd, scene, frame_number, use_depth, shadow_ready,
-      &multiplayer_remote_items);
+      &multiplayer_remote_items, dlss_plan,
+      dlss_unjittered_view_projection, bone_region);
   cmd->SetPipeline(use_depth ? g_r.pso : g_r.pso_nodepth);
 
   uint32_t drawn = 0;
@@ -16852,8 +17303,20 @@ bool RenderScene(const NativeGuestOutputRenderContext& context,
         mvp[r * 4 + c] = sum;
       }
     }
+    Matrix4 unjittered_mvp{};
+    for (int r = 0; r < 4; ++r) {
+      for (int c = 0; c < 4; ++c) {
+        for (int k = 0; k < 4; ++k) {
+          unjittered_mvp[r * 4 + c] +=
+              constants[r * 4 + k] *
+              dlss_unjittered_view_projection[k * 4 + c];
+        }
+      }
+    }
     // Bone palette upload for skinned items; tint.g flags skinning.
     bool bones_bound = false;
+    uint32_t bone_palette_offset = 0;
+    uint32_t bone_palette_bytes = 0;
     if (item.skinned && !item.bones.empty()) {
       const uint32_t bytes = uint32_t(item.bones.size() * sizeof(float));
       const uint32_t offset = (g_r.bone_ring_offset + 255u) & ~255u;
@@ -16863,6 +17326,8 @@ bool RenderScene(const NativeGuestOutputRenderContext& context,
         g_r.bone_ring_offset = offset + bytes;
         cmd->SetBufferSrv(3, g_r.bone_ring, bone_region + offset);
         bones_bound = true;
+        bone_palette_offset = offset;
+        bone_palette_bytes = bytes;
       }
     }
     if (!bones_bound) {
@@ -16907,19 +17372,89 @@ bool RenderScene(const NativeGuestOutputRenderContext& context,
     // char_rows[14*4+1] stays 0 when the capture failed validation, which
     // keeps the item on the legacy empirical shading.
     constants[39] = 0.0f;
-    if (debug_mode == 0 && item.char_family != 0 &&
-        item.char_rows[14 * 4 + 1] > 0.0f) {
+    const bool valid_character_lighting =
+        debug_mode == 0 && item.char_family != 0 &&
+        item.char_rows[14 * 4 + 1] > 0.0f;
+    const bool temporal_dynamic =
+        item.dyn_entity || item.dynobj != 0 || item.selected ||
+        item.skinned || item.ropa;
+    const bool needs_temporal_item = g_r.dlss_active && temporal_dynamic;
+    bool item_temporal_bound = false;
+    if (valid_character_lighting || needs_temporal_item) {
       const uint32_t offset = (g_r.bone_ring_offset + 255u) & ~255u;
-      // 18 float4 rows = 288 bytes -> a 512-byte slot keeps the next
-      // allocation 256-aligned (CBV offset requirement).
       if (offset + 512u <= RendererState::kBoneRegionSize) {
-        std::memcpy(g_r.bone_ring_cpu + bone_region + offset, item.char_rows,
-                    sizeof(item.char_rows));
+        float* temporal = reinterpret_cast<float*>(
+            g_r.bone_ring_cpu + bone_region + offset);
+        std::fill_n(temporal, 128, 0.0f);
         g_r.bone_ring_offset = offset + 512u;
+        if (valid_character_lighting) {
+          std::memcpy(temporal, item.char_rows, sizeof(item.char_rows));
+        }
+        if (g_r.dlss_active) {
+          temporal[18 * 4] =
+              2.0f * dlss_plan.jitter_pixels.x /
+              float(dlss_plan.render.width);
+          temporal[18 * 4 + 1] =
+              -2.0f * dlss_plan.jitter_pixels.y /
+              float(dlss_plan.render.height);
+          temporal[23 * 4] = dlss_plan.mip_lod_bias;
+
+          const std::uint64_t temporal_key = TemporalItemKey(item);
+          auto previous = g_temporal_item_history.find(temporal_key);
+          Matrix4 previous_matrix = dlss_clip_to_previous;
+          float temporal_mode = 0.0f;
+          float previous_palette_row = 0.0f;
+          if (temporal_dynamic &&
+              previous != g_temporal_item_history.end() &&
+              previous->second.generation + 1 == scene.generation &&
+              !dlss_plan.reset) {
+            previous_matrix = previous->second.mvp;
+            temporal_mode = 1.0f;
+            if (bones_bound && previous->second.bones.size() ==
+                                   item.bones.size()) {
+              const uint32_t previous_offset =
+                  (g_r.bone_ring_offset + 255u) & ~255u;
+              if (previous_offset + bone_palette_bytes <=
+                  RendererState::kBoneRegionSize) {
+                std::memcpy(g_r.bone_ring_cpu + bone_region + previous_offset,
+                            previous->second.bones.data(),
+                            bone_palette_bytes);
+                g_r.bone_ring_offset =
+                    previous_offset + bone_palette_bytes;
+                previous_palette_row =
+                    float((previous_offset - bone_palette_offset) /
+                          sizeof(float) / 4u);
+                previous_matrix =
+                    s_dlss_previous_view_projection_valid
+                        ? s_dlss_previous_view_projection
+                        : dlss_unjittered_view_projection;
+                temporal_mode = 2.0f;
+              }
+            }
+          }
+          temporal[18 * 4 + 2] = temporal_mode;
+          temporal[18 * 4 + 3] = previous_palette_row;
+          std::copy(previous_matrix.begin(), previous_matrix.end(),
+                    temporal + 19 * 4);
+
+          if (temporal_dynamic) {
+            TemporalItemHistory& next =
+                g_temporal_item_history[temporal_key];
+            next.mvp = unjittered_mvp;
+            next.bones = item.bones;
+            next.generation = scene.generation;
+          }
+        }
         cmd->SetConstantBuffer(9, g_r.bone_ring, bone_region + offset);
-        constants[39] = item.char_rows[14 * 4 + 1];
-        g_char_drawn.fetch_add(1, std::memory_order_relaxed);
+        item_temporal_bound = true;
+        if (valid_character_lighting) {
+          constants[39] = item.char_rows[14 * 4 + 1];
+          g_char_drawn.fetch_add(1, std::memory_order_relaxed);
+        }
       }
+    }
+    if (!item_temporal_bound) {
+      cmd->SetConstantBuffer(9, g_r.bone_ring, bone_region);
     }
     // cam_pos.w = -family selects the exact world-material branch. Gated on
     // the frame rows being captured (scene.shadow_valid carries the scene
@@ -18486,9 +19021,22 @@ bool RenderScene(const NativeGuestOutputRenderContext& context,
     }
   }
 
-  const bool outline_ready =
-      RenderOutlineMask(context, scene, viewport, scissor, msaa_on, scene_color,
-                        g_r.depth, use_depth);
+  const nrhi::Viewport outline_viewport{
+      0.0f, 0.0f, float(dlss_output_width), float(dlss_output_height),
+      0.0f, 1.0f};
+  const nrhi::Rect outline_scissor{
+      0, 0, int32_t(dlss_output_width), int32_t(dlss_output_height)};
+  const bool outline_ready = RenderOutlineMask(
+      output_context, scene,
+      g_r.dlss_active ? outline_viewport : viewport,
+      g_r.dlss_active ? outline_scissor : scissor, msaa_on, scene_color,
+      g_r.depth, use_depth);
+  if (g_r.dlss_active) {
+    cmd->SetViewport(viewport);
+    cmd->SetScissor(scissor);
+    cmd->SetRenderTargets(scene_color, use_depth ? g_r.depth : nullptr,
+                          g_r.dlss_motion);
+  }
 
   // ---- SSR reflection G-buffer (scene.hlsl ps_refl_gbuf) ----
   // Re-render the frame's reflective items (captured with their main-pass
@@ -18625,6 +19173,74 @@ bool RenderScene(const NativeGuestOutputRenderContext& context,
     post_ran = true;
   }
 
+  // ---- DLSS Super Resolution ---------------------------------------------
+  // NVIDIA's documented insertion point is near the beginning of
+  // post-processing. The low-resolution HDR scene already contains native
+  // geometry, transparents, AO and SSR here; bloom, tonemap, outlines and
+  // every HUD/menu/editor overlay remain output-resolution work.
+  nrhi::Texture* hdr_post_source = g_r.hdr_resolved;
+  nrhi::TextureView* hdr_post_source_view = g_r.hdr_srv;
+  cmd->ProfileRegion(nrhi::ProfileStage::kDlss);
+#if defined(_WIN32) && defined(REX_HAS_D3D12) && REX_HAS_D3D12
+  if (g_r.dlss_active && hdr_on && use_depth && dlss_matrices_valid) {
+    cmd->Barrier(g_r.hdr_resolved, nrhi::ResourceState::kRenderTarget,
+                 nrhi::ResourceState::kPixelShaderResource);
+    cmd->Barrier(g_r.depth, nrhi::ResourceState::kDepthWrite,
+                 nrhi::ResourceState::kPixelShaderResource);
+    cmd->Barrier(g_r.dlss_motion, nrhi::ResourceState::kRenderTarget,
+                 nrhi::ResourceState::kPixelShaderResource);
+    cmd->FlushBarriers();
+
+    DlssEvaluatePayload payload{};
+    payload.color =
+        rex::graphics::d3d12::NativeRhiD3D12GetTextureResource(
+            g_r.hdr_resolved);
+    payload.depth =
+        rex::graphics::d3d12::NativeRhiD3D12GetTextureResource(g_r.depth);
+    payload.motion =
+        rex::graphics::d3d12::NativeRhiD3D12GetTextureResource(
+            g_r.dlss_motion);
+    payload.output =
+        rex::graphics::d3d12::NativeRhiD3D12GetTextureResource(
+            g_r.dlss_output);
+    payload.render = dlss_plan.render;
+    payload.output_size = dlss_plan.output;
+    payload.camera = dlss_camera;
+    payload.plan = dlss_plan;
+    rex::graphics::d3d12::NativeRhiD3D12RecordExtension(
+        cmd, ExecuteDlssEvaluate, &payload, sizeof(payload));
+
+    // Streamline manual hooking changes command-list state. Resource states
+    // are tagged explicitly and restored to the NRHI steady states here;
+    // the HDR pass below re-establishes root signature, PSO and descriptors.
+    cmd->Barrier(g_r.hdr_resolved,
+                 nrhi::ResourceState::kPixelShaderResource,
+                 nrhi::ResourceState::kRenderTarget);
+    cmd->Barrier(g_r.depth, nrhi::ResourceState::kPixelShaderResource,
+                 nrhi::ResourceState::kDepthWrite);
+    cmd->Barrier(g_r.dlss_motion,
+                 nrhi::ResourceState::kPixelShaderResource,
+                 nrhi::ResourceState::kRenderTarget);
+    cmd->FlushBarriers();
+    hdr_post_source = g_r.dlss_output;
+    hdr_post_source_view = g_r.dlss_output_srv;
+    s_dlss_previous_view_projection = dlss_unjittered_view_projection;
+    s_dlss_previous_view_projection_valid = true;
+  }
+#endif
+
+  if (g_r.dlss_active) {
+    context.guest_output_width = dlss_output_width;
+    context.guest_output_height = dlss_output_height;
+    viewport = {0.0f, 0.0f, float(dlss_output_width),
+                float(dlss_output_height), 0.0f, 1.0f};
+    scissor = {0, 0, int32_t(dlss_output_width),
+               int32_t(dlss_output_height)};
+  } else {
+    s_dlss_previous_view_projection_valid = false;
+    g_temporal_item_history.clear();
+  }
+
   // ---- HDR post (hdr.hlsl: bloom pyramid + the extracted tonemap) ----
   // Bloom reads the AO-composited float scene; ps_tonemap applies the
   // game's shared tone chain once into the guest output, which every later
@@ -18632,7 +19248,8 @@ bool RenderScene(const NativeGuestOutputRenderContext& context,
   // classic path.
   cmd->ProfileRegion(nrhi::ProfileStage::kBloom);
   if (hdr_on) {
-    ApplyHdrPost(context, cmd, viewport, scissor, loading_native, frame_number);
+    ApplyHdrPost(context, cmd, viewport, scissor, loading_native, frame_number,
+                 hdr_post_source, hdr_post_source_view);
     post_ran = true;
     skate3::mechanics_sandbox::RecordRenderStage(
         skate3::mechanics_sandbox::RenderStage::HdrPostComplete);

@@ -98,6 +98,50 @@ option(SKATE3_CODEGEN_PATCHED_TITLE_UPDATE
 option(SKATE3_RUNTIME_TITLE_UPDATE
     "Compile TU3 runtime hooks when title-update files are staged outside the codegen root"
     OFF)
+option(SKATE3_ENABLE_DLSS_SR
+    "Enable NVIDIA DLSS Super Resolution through Streamline 2.12.0 (Windows D3D12 only)"
+    OFF)
+set(SKATE3_STREAMLINE_SDK_ROOT "" CACHE PATH
+    "Path to the official NVIDIA Streamline SDK 2.12.0 root")
+set(SKATE3_NVIDIA_PROJECT_ID "" CACHE STRING
+    "Optional NVIDIA-issued project GUID; empty uses Streamline's documented custom-engine development path")
+set(SKATE3_NVIDIA_APPLICATION_ID "0" CACHE STRING
+    "NVIDIA-issued numeric DLSS application ID; 0 keeps local development unregistered")
+if(NOT SKATE3_NVIDIA_APPLICATION_ID MATCHES "^[0-9]+$")
+    message(FATAL_ERROR
+        "SKATE3_NVIDIA_APPLICATION_ID must be an NVIDIA-issued numeric ID or 0")
+endif()
+
+if(SKATE3_ENABLE_DLSS_SR)
+    if(NOT WIN32)
+        message(FATAL_ERROR "SKATE3_ENABLE_DLSS_SR is supported only by the Windows D3D12 build")
+    endif()
+    if(NOT EXISTS "${SKATE3_STREAMLINE_SDK_ROOT}/include/sl.h")
+        message(FATAL_ERROR
+            "SKATE3_STREAMLINE_SDK_ROOT must point to the official Streamline SDK 2.12.0")
+    endif()
+    set(_SKATE3_SL_BIN "${SKATE3_STREAMLINE_SDK_ROOT}/bin/x64")
+    set(_SKATE3_SL_DLLS
+        sl.interposer.dll sl.common.dll sl.dlss.dll nvngx_dlss.dll)
+    set(_SKATE3_SL_SHA256
+        2a79db6857ae8c75bbd871a9489c48bc6a39f7fcc88b9b02afd53d0376cbec66
+        c57930ef5a8a3fe9be85efdf71a61d8107c1148e8a6aed456464547128f7f4ae
+        a997022d2b93601e0eefc3ddb3067c36df386dd3163ae71e11095191fb14f8e4
+        be6e434a94ca32499515eb62ca0e6c274526055d568d0426e4c652dcdfb6ee6e)
+    foreach(_index RANGE 0 3)
+        list(GET _SKATE3_SL_DLLS ${_index} _dll)
+        list(GET _SKATE3_SL_SHA256 ${_index} _expected)
+        set(_path "${_SKATE3_SL_BIN}/${_dll}")
+        if(NOT EXISTS "${_path}")
+            message(FATAL_ERROR "Required official Streamline runtime is missing: ${_path}")
+        endif()
+        file(SHA256 "${_path}" _actual)
+        if(NOT _actual STREQUAL _expected)
+            message(FATAL_ERROR
+                "Unexpected SHA-256 for ${_dll}: expected ${_expected}, got ${_actual}")
+        endif()
+    endforeach()
+endif()
 
 if(NOT APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "AMD64|x86_64")
     if(SKATE3_ENABLE_X86_64_V3)
@@ -293,6 +337,7 @@ set(SKATE3_COMMON_SOURCES
     src/skate3_draw_distance.cpp
     src/skate3_drop_item_import.cpp
     src/skate3_drop_item_library.cpp
+    src/skate3_dlss_sr.cpp
     src/skate3_fov.cpp
     src/skate3_function_coverage.cpp
     src/skate3_input_history_watch.cpp
@@ -441,6 +486,17 @@ if(WIN32)
     target_sources(skate3 PRIVATE ${SKATE3_RAYTRACED_MIRROR_HEADER})
 endif()
 target_compile_definitions(skate3 PRIVATE SKATE3_BUILD_CONFIG="$<CONFIG>")
+if(SKATE3_ENABLE_DLSS_SR)
+    target_compile_definitions(skate3 PRIVATE
+        SKATE3_ENABLE_DLSS_SR=1
+        SKATE3_DLSS_ENGINE_VERSION="${SKATE3_FULL_VERSION}"
+        SKATE3_NVIDIA_APPLICATION_ID=${SKATE3_NVIDIA_APPLICATION_ID}
+        SKATE3_NVIDIA_PROJECT_ID="${SKATE3_NVIDIA_PROJECT_ID}")
+    target_include_directories(skate3 PRIVATE
+        "${SKATE3_STREAMLINE_SDK_ROOT}/include")
+else()
+    target_compile_definitions(skate3 PRIVATE SKATE3_ENABLE_DLSS_SR=0)
+endif()
 if(NOT SKATE3_EFFECTIVE_TITLE_UPDATE_PACKAGE STREQUAL ""
    OR SKATE3_HAS_LOOSE_TITLE_UPDATE
    OR SKATE3_RUNTIME_TITLE_UPDATE)
@@ -510,6 +566,25 @@ add_custom_target(skate3_stage_runtime_library
 )
 add_dependencies(skate3 skate3_stage_runtime_library)
 
+if(SKATE3_ENABLE_DLSS_SR)
+    add_custom_target(skate3_stage_dlss_runtime
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${_SKATE3_SL_BIN}/sl.interposer.dll"
+            "${_SKATE3_SL_BIN}/sl.common.dll"
+            "${_SKATE3_SL_BIN}/sl.dlss.dll"
+            "${_SKATE3_SL_BIN}/nvngx_dlss.dll"
+            "$<TARGET_FILE_DIR:skate3>"
+        COMMAND ${CMAKE_COMMAND} -E make_directory
+            "$<TARGET_FILE_DIR:skate3>/licenses/NVIDIA-Streamline"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${SKATE3_STREAMLINE_SDK_ROOT}/license.txt"
+            "${SKATE3_STREAMLINE_SDK_ROOT}/3rd-party-licenses.md"
+            "${_SKATE3_SL_BIN}/nvngx_dlss.license.txt"
+            "$<TARGET_FILE_DIR:skate3>/licenses/NVIDIA-Streamline"
+        VERBATIM)
+    add_dependencies(skate3 skate3_stage_dlss_runtime)
+endif()
+
 if(NOT SKATE3_EFFECTIVE_TITLE_UPDATE_PACKAGE STREQUAL "")
     add_custom_target(skate3_stage_title_update_patches
         COMMAND ${CMAKE_COMMAND} -E make_directory
@@ -551,4 +626,15 @@ option(SKATE3_MULTIPLAYER_BUILD_TESTS
 if(SKATE3_MULTIPLAYER_BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests)
+endif()
+
+option(SKATE3_DLSS_BUILD_TESTS
+    "Build focused non-GPU DLSS Super Resolution policy tests"
+    OFF)
+if(SKATE3_DLSS_BUILD_TESTS)
+    enable_testing()
+    add_executable(skate3_dlss_sr_tests tests/skate3_dlss_sr_tests.cpp)
+    target_include_directories(skate3_dlss_sr_tests PRIVATE src)
+    target_compile_features(skate3_dlss_sr_tests PRIVATE cxx_std_23)
+    add_test(NAME skate3_dlss_sr_tests COMMAND skate3_dlss_sr_tests)
 endif()

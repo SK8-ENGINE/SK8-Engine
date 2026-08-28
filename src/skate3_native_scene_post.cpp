@@ -1566,7 +1566,8 @@ bool EnsureHdrPipeline(const NativeGuestOutputRenderContext& context) {
 void ApplyHdrPost(const NativeGuestOutputRenderContext& context,
                   nrhi::Cmd* cmd, const nrhi::Viewport& viewport,
                   const nrhi::Rect& scissor, bool loading_native,
-                  uint64_t frame_number) {
+                  uint64_t frame_number, nrhi::Texture* source_texture,
+                  nrhi::TextureView* source_view) {
   nrhi::Device* device = context.device;
   const uint32_t width = context.guest_output_width;
   const uint32_t height = context.guest_output_height;
@@ -1644,9 +1645,12 @@ void ApplyHdrPost(const NativeGuestOutputRenderContext& context,
     cmd->SetConstantBuffer(6, g_r.shadow_cb, cb_offset);
   }
   // The scene plane is the sampled source for the whole chain.
-  cmd->Barrier(g_r.hdr_resolved, nrhi::ResourceState::kRenderTarget,
-               nrhi::ResourceState::kPixelShaderResource);
-  cmd->FlushBarriers();
+  const bool source_is_scene = source_texture == g_r.hdr_resolved;
+  if (source_is_scene) {
+    cmd->Barrier(g_r.hdr_resolved, nrhi::ResourceState::kRenderTarget,
+                 nrhi::ResourceState::kPixelShaderResource);
+    cmd->FlushBarriers();
+  }
 
   float c[32] = {};
   // Rows 16-31 = the volumetric params ApplyVolumetricPass staged this
@@ -1695,7 +1699,7 @@ void ApplyHdrPost(const NativeGuestOutputRenderContext& context,
       cmd->SetScissor(sc);
       cmd->SetRenderTargets(g_r.bloom_tex[i], nullptr);
       cmd->SetPipeline(i == 0 ? g_r.pso_bloom_first : g_r.pso_bloom_down);
-      cmd->SetTexture(1, i == 0 ? g_r.hdr_srv : g_r.bloom_srv[i - 1]);
+      cmd->SetTexture(1, i == 0 ? source_view : g_r.bloom_srv[i - 1]);
       cmd->Draw(3, 0);
       cmd->Barrier(g_r.bloom_tex[i], nrhi::ResourceState::kRenderTarget,
                    nrhi::ResourceState::kPixelShaderResource);
@@ -1738,7 +1742,7 @@ void ApplyHdrPost(const NativeGuestOutputRenderContext& context,
   cmd->SetScissor(scissor);
   cmd->SetRenderTargets(context.guest_output, nullptr);
   cmd->SetPipeline(g_r.pso_tonemap);
-  cmd->SetTexture(1, g_r.hdr_srv);
+  cmd->SetTexture(1, source_view);
   cmd->SetTexture(2, bloom ? g_r.bloom_srv[0] : g_r.white.srv);
   // t2 = the fused AO multiplier plane (white = no AO this frame).
   cmd->SetTexture(3, g_r.ao_plane_in_psr ? g_r.ao_srv[0] : g_r.white.srv);
@@ -1750,8 +1754,10 @@ void ApplyHdrPost(const NativeGuestOutputRenderContext& context,
   cmd->Draw(3, 0);
 
   // Restore steady states.
-  cmd->Barrier(g_r.hdr_resolved, nrhi::ResourceState::kPixelShaderResource,
-               nrhi::ResourceState::kRenderTarget);
+  if (source_is_scene) {
+    cmd->Barrier(g_r.hdr_resolved, nrhi::ResourceState::kPixelShaderResource,
+                 nrhi::ResourceState::kRenderTarget);
+  }
   if (g_r.ao_plane_in_psr) {
     cmd->Barrier(g_r.ao_tex[0], nrhi::ResourceState::kPixelShaderResource,
                  nrhi::ResourceState::kRenderTarget);

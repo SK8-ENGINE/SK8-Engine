@@ -32,6 +32,22 @@ retained at `third_party/zlib/LICENSE` and `third_party/zstd/LICENSE` and
 copied into Windows release packages as `LICENSE-zlib.txt` and
 `LICENSE-zstd.txt`.
 
+Optional Windows DirectX 12 builds use
+[NVIDIA RTX Streamline](https://github.com/NVIDIA-RTX/Streamline), pinned to
+SDK release `v2.12.0`. The official SDK archive SHA-256 is
+`f5c0a3d870707dddc3570fb4bcd3655cf48a8a68c3a9d342910cfa21b77dcf48`.
+Streamline source and interface code are provided under the MIT License.
+DLSS is NVIDIA proprietary technology; `nvngx_dlss.dll` is redistributed only
+in object-code form under NVIDIA's DLSS license. A DLSS-enabled package keeps
+the SDK's `license.txt`, `3rd-party-licenses.md`, and
+`nvngx_dlss.license.txt` with the runtime. Development plugins, SDK samples,
+tools, symbols, and headers are not distributed. Before a public or
+commercial DLSS-enabled release, the distributor must comply with NVIDIA's
+notification, attribution, protective-terms, and trademark requirements.
+Exact runtime versions, checksums, official source links, and development
+identity requirements are documented in
+[DLSS_SUPER_RESOLUTION.md](DLSS_SUPER_RESOLUTION.md).
+
 No Skate 3 ISO, extracted retail files, title updates, DLC, saves, proprietary
 maps, or Electronic Arts assets are included. Users must provide their own
 legally obtained game copy. Map authors are responsible for the rights to

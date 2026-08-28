@@ -90,6 +90,54 @@ foreach ($required in @($executable, $runtime)) {
     }
 }
 
+$dlssEnabled = $false
+$dlssRuntimeHashes = [ordered]@{
+    'sl.interposer.dll' =
+        '2a79db6857ae8c75bbd871a9489c48bc6a39f7fcc88b9b02afd53d0376cbec66'
+    'sl.common.dll' =
+        'c57930ef5a8a3fe9be85efdf71a61d8107c1148e8a6aed456464547128f7f4ae'
+    'sl.dlss.dll' =
+        'a997022d2b93601e0eefc3ddb3067c36df386dd3163ae71e11095191fb14f8e4'
+    'nvngx_dlss.dll' =
+        'be6e434a94ca32499515eb62ca0e6c274526055d568d0426e4c652dcdfb6ee6e'
+}
+$cmakeCache = Join-Path $buildRoot 'CMakeCache.txt'
+if (Test-Path -LiteralPath $cmakeCache -PathType Leaf) {
+    $dlssEnabled = [bool](
+        Select-String -LiteralPath $cmakeCache -SimpleMatch `
+            'SKATE3_ENABLE_DLSS_SR:BOOL=ON'
+    )
+}
+if ($dlssEnabled) {
+    foreach ($entry in $dlssRuntimeHashes.GetEnumerator()) {
+        $path = Join-Path $buildRoot $entry.Key
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+            throw "DLSS-enabled build is missing official runtime: $path"
+        }
+        $actual = (
+            Get-FileHash -Algorithm SHA256 -LiteralPath $path
+        ).Hash.ToLowerInvariant()
+        if ($actual -ne $entry.Value) {
+            throw (
+                "Unexpected SHA-256 for $($entry.Key): " +
+                "expected $($entry.Value), got $actual"
+            )
+        }
+    }
+    $dlssLicenseRoot = Join-Path $buildRoot 'licenses\NVIDIA-Streamline'
+    foreach ($notice in @(
+        'license.txt',
+        '3rd-party-licenses.md',
+        'nvngx_dlss.license.txt'
+    )) {
+        $path = Join-Path $dlssLicenseRoot $notice
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+            throw "DLSS-enabled build is missing NVIDIA notice: $path"
+        }
+    }
+    Write-Host 'Verified pinned NVIDIA Streamline 2.12.0 DLSS runtime.'
+}
+
 $tuFunctionsPath = Join-Path $repoRoot 'config\skate3_tu_functions.toml'
 $registerPath = Join-Path $repoRoot 'generated\skate3_register.cpp'
 foreach ($required in @($tuFunctionsPath, $registerPath)) {
@@ -174,6 +222,24 @@ Copy-Item -LiteralPath $executable -Destination (
 Copy-Item -LiteralPath $runtime -Destination (
     Join-Path $stageRoot 'rexruntime.dll'
 )
+if ($dlssEnabled) {
+    foreach ($name in $dlssRuntimeHashes.Keys) {
+        Copy-Item -LiteralPath (Join-Path $buildRoot $name) -Destination (
+            Join-Path $stageRoot $name
+        )
+    }
+    $nvidiaLicenseStage = Join-Path $stageRoot 'licenses\NVIDIA-Streamline'
+    New-Item -ItemType Directory -Path $nvidiaLicenseStage -Force | Out-Null
+    foreach ($notice in @(
+        'license.txt',
+        '3rd-party-licenses.md',
+        'nvngx_dlss.license.txt'
+    )) {
+        Copy-Item -LiteralPath (
+            Join-Path $buildRoot "licenses\NVIDIA-Streamline\$notice"
+        ) -Destination (Join-Path $nvidiaLicenseStage $notice)
+    }
+}
 Copy-Item -LiteralPath (Join-Path $repoRoot 'release\README.txt') -Destination (
     Join-Path $stageRoot 'README.txt'
 )
@@ -182,6 +248,11 @@ Copy-Item -LiteralPath (Join-Path $repoRoot 'CUSTOM_MAPS.md') -Destination (
 )
 Copy-Item -LiteralPath (Join-Path $repoRoot 'MULTIPLAYER.md') -Destination (
     Join-Path $stageRoot 'MULTIPLAYER.md'
+)
+Copy-Item -LiteralPath (
+    Join-Path $repoRoot 'DLSS_SUPER_RESOLUTION.md'
+) -Destination (
+    Join-Path $stageRoot 'DLSS_SUPER_RESOLUTION.md'
 )
 foreach ($document in @(
     'LICENSE-PROJECT.md',
@@ -312,6 +383,22 @@ foreach ($file in $stagedFiles) {
         $forbiddenNames -contains $file.Name) {
         throw "Forbidden release payload detected: $($file.FullName)"
     }
+    if ($file.Extension -ieq '.dll' -and
+        ($file.Name.StartsWith(
+            'sl.',
+            [System.StringComparison]::OrdinalIgnoreCase
+        ) -or $file.Name -ieq 'nvngx_dlss.dll') -and
+        -not $dlssRuntimeHashes.Contains($file.Name)) {
+        throw "Unexpected NVIDIA/Streamline plugin in release: $relative"
+    }
+}
+
+if (-not $dlssEnabled) {
+    foreach ($name in $dlssRuntimeHashes.Keys) {
+        if (Test-Path -LiteralPath (Join-Path $stageRoot $name)) {
+            throw "DLSS runtime was staged by a build with DLSS disabled: $name"
+        }
+    }
 }
 
 $checksums = foreach ($file in $stagedFiles | Sort-Object FullName) {
@@ -342,6 +429,24 @@ try {
         $expectedEntry = "$archiveBase/objects/$category/"
         if (-not $archiveEntries.Contains($expectedEntry)) {
             throw "Release archive is missing object category: $category"
+        }
+    }
+    if ($dlssEnabled) {
+        foreach ($name in $dlssRuntimeHashes.Keys) {
+            if (-not $archiveEntries.Contains("$archiveBase/$name")) {
+                throw "DLSS-enabled archive is missing runtime: $name"
+            }
+        }
+        foreach ($notice in @(
+            'license.txt',
+            '3rd-party-licenses.md',
+            'nvngx_dlss.license.txt'
+        )) {
+            $entry =
+                "$archiveBase/licenses/NVIDIA-Streamline/$notice"
+            if (-not $archiveEntries.Contains($entry)) {
+                throw "DLSS-enabled archive is missing NVIDIA notice: $notice"
+            }
         }
     }
 } finally {

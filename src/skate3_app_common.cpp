@@ -2,6 +2,7 @@
 
 #include "skate3_custom_trick.h"
 #include "skate3_demo_path.h"
+#include "skate3_dlss_sr.h"
 #include "skate3_fov.h"
 #include "skate3_input_lab.h"
 #include "skate3_iso_installer.h"
@@ -877,6 +878,7 @@ void Skate3BaseApp::OnConfigurePaths(rex::PathConfig &paths) {
   Skate3InitializeFieldOfViewOverride();
   ApplyUltrawideVideoDefaults();
   DisableActiveDebugDiagnostics();
+  skate3::dlss::InitializeEarly(paths.user_data_root / "logs");
 }
 
 void Skate3BaseApp::OnConfigureFonts(ImFontAtlas *atlas) {
@@ -1299,6 +1301,7 @@ void Skate3BaseApp::OnPostSetup() {
 }
 
 void Skate3BaseApp::OnShutdown() {
+  skate3::dlss::Shutdown();
   rex::ui::UnregisterBind("bind_skate3_menu");
   rex::ui::UnregisterBind("bind_skate3_menu_alt");
   rex::ui::UnregisterBind("bind_skate3_vanilla_ui_prototype");
