@@ -31,6 +31,7 @@ inline constexpr float kMaximumCorrectionSpeed = 6.0f;
 inline constexpr float kMaximumTotalCorrectionSpeed = 8.0f;
 inline constexpr float kGraceCorrectionSpeed = 0.75f;
 inline constexpr float kMaximumEquivalentImpulse = 450.0f;
+inline constexpr float kFacingTestSpawnSpacing = 8.0f;
 
 enum class DisabledReason : std::uint8_t {
   kNone = 0,
@@ -103,6 +104,57 @@ struct ResolveResult {
   float maximum_contact_correction = 0.0f;
   float maximum_equivalent_impulse = 0.0f;
 };
+
+struct FacingTestSpawn {
+  std::array<float, 16> transform{};
+  bool valid = false;
+};
+
+[[nodiscard]] inline FacingTestSpawn
+BuildFacingTestSpawn(std::uint32_t local_role,
+                     const std::array<float, 16> &source) {
+  FacingTestSpawn result;
+  result.transform = source;
+  if (local_role < 1 || local_role > 2) {
+    return result;
+  }
+  for (const float component : source) {
+    if (!std::isfinite(component)) {
+      return result;
+    }
+  }
+
+  float heading_x = source[8];
+  float heading_z = source[10];
+  float heading_length =
+      std::sqrt(heading_x * heading_x + heading_z * heading_z);
+  if (heading_length < 1.0e-5f) {
+    // A nearly vertical forward axis is not a useful skating direction.
+    // Recover a horizontal forward heading from the board's right axis.
+    heading_x = -source[2];
+    heading_z = source[0];
+    heading_length = std::sqrt(heading_x * heading_x + heading_z * heading_z);
+  }
+  if (heading_length < 1.0e-5f) {
+    return result;
+  }
+  heading_x /= heading_length;
+  heading_z /= heading_length;
+
+  const float signed_half_spacing = local_role == 1
+                                        ? -kFacingTestSpawnSpacing * 0.5f
+                                        : kFacingTestSpawnSpacing * 0.5f;
+  result.transform[12] += heading_x * signed_half_spacing;
+  result.transform[14] += heading_z * signed_half_spacing;
+  if (local_role == 2) {
+    for (std::size_t component = 0; component < 3; ++component) {
+      result.transform[component] = -result.transform[component];
+      result.transform[8 + component] = -result.transform[8 + component];
+    }
+  }
+  result.valid = true;
+  return result;
+}
 
 [[nodiscard]] inline bool LayersCollide(std::uint32_t first_layer,
                                         std::uint32_t first_mask,

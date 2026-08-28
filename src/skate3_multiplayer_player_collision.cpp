@@ -5,6 +5,7 @@
 #include "skate3_mechanics_sandbox.h"
 #include "skate3_trick_pipeline.h"
 
+#include <rex/cvar.h>
 #include <rex/kernel/guest_presence.h>
 #include <rex/logging.h>
 #include <rex/ppc/context.h>
@@ -19,6 +20,14 @@
 #include <ostream>
 #include <string_view>
 #include <vector>
+
+REXCVAR_DEFINE_BOOL(
+    skate3_multiplayer_player_collision_test_spawn, false,
+    "Skate 3/Multiplayer",
+    "Two-client visual-check helper: place the two local skaters eight metres "
+    "apart facing one another once per multiplayer session and map. This is "
+    "disabled during normal play.")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
 namespace skate3::multiplayer::player_collision {
 namespace {
@@ -48,6 +57,15 @@ ProxySet g_proxies;
 std::uint64_t g_last_log_us = 0;
 std::uint64_t g_last_logged_contacts = 0;
 std::uint64_t g_last_logged_stale_cleanups = 0;
+
+struct FacingTestSpawnState {
+  std::uint32_t local_role = 0;
+  std::uint32_t local_session = 0;
+  std::uint32_t map_hash = 0;
+  bool applied = false;
+};
+
+FacingTestSpawnState g_facing_test_spawn;
 
 [[nodiscard]] std::uint64_t NowMicroseconds() {
   return static_cast<std::uint64_t>(
@@ -135,6 +153,40 @@ void MaybeLog(std::uint64_t now_us) {
   g_last_logged_contacts = counters.contacts;
   g_last_logged_stale_cleanups = counters.stale_cleanups;
   g_last_log_us = now_us;
+}
+
+[[nodiscard]] std::array<float, 16> LoadTransform(std::uint8_t *base,
+                                                  std::uint32_t transform) {
+  std::array<float, 16> matrix{};
+  for (std::uint32_t component = 0; component < matrix.size(); ++component) {
+    matrix[component] =
+        LoadGuestF32(base, transform + component * sizeof(float));
+  }
+  return matrix;
+}
+
+[[nodiscard]] bool StoreBoardTransform(PPCContext &ctx, std::uint8_t *base,
+                                       std::uint32_t skateboard,
+                                       std::uint32_t transform,
+                                       const std::array<float, 16> &matrix) {
+  const std::uint32_t skateboard_body = LoadGuestU32(base, skateboard + 12);
+  if (!IsGuestHeapAddress(skateboard_body) || ctx.r1.u32 < 512u) {
+    return false;
+  }
+  const std::uint32_t matrix_address = ctx.r1.u32 - 512u;
+  for (std::uint32_t component = 0; component < matrix.size(); ++component) {
+    REX_STORE_U32(matrix_address + component * sizeof(float),
+                  std::bit_cast<std::uint32_t>(matrix[component]));
+  }
+  PPCContext correction_ctx = ctx;
+  correction_ctx.r3.u64 = skateboard_body;
+  correction_ctx.r4.u64 = matrix_address;
+  sub_82C0B2C8(correction_ctx, base);
+  for (std::uint32_t component = 0; component < matrix.size(); ++component) {
+    REX_STORE_U32(transform + component * sizeof(float),
+                  std::bit_cast<std::uint32_t>(matrix[component]));
+  }
+  return true;
 }
 
 } // namespace
@@ -263,6 +315,40 @@ void ApplyAfterPhysOut(PPCContext &ctx, std::uint8_t *base,
   }
   const std::uint32_t transform =
       processed_phys_in + (transform_state == 3 ? 112u : 192u);
+  if (!REXCVAR_GET(skate3_multiplayer_player_collision_test_spawn)) {
+    g_facing_test_spawn = {};
+  } else if (presentation.local_role <= 2) {
+    const bool new_generation =
+        g_facing_test_spawn.local_role != presentation.local_role ||
+        g_facing_test_spawn.local_session != presentation.local_session ||
+        g_facing_test_spawn.map_hash != presentation.map_hash;
+    if (new_generation) {
+      g_facing_test_spawn = {
+          .local_role = presentation.local_role,
+          .local_session = presentation.local_session,
+          .map_hash = presentation.map_hash,
+          .applied = false,
+      };
+    }
+    if (!g_facing_test_spawn.applied) {
+      const FacingTestSpawn placement = BuildFacingTestSpawn(
+          presentation.local_role, LoadTransform(base, transform));
+      if (placement.valid) {
+        if (!StoreBoardTransform(ctx, base, skateboard, transform,
+                                 placement.transform)) {
+          Disable(DisabledReason::kGuestStateInvalid);
+          return;
+        }
+        g_facing_test_spawn.applied = true;
+        REXLOG_INFO("multiplayer-player-collision: facing-test-spawn role={} "
+                    "spacing={:.1f}m session={} map={:08X}",
+                    presentation.local_role, kFacingTestSpawnSpacing,
+                    presentation.local_session, presentation.map_hash);
+        return;
+      }
+    }
+  }
+
   LocalSample local;
   local.position = {
       LoadGuestF32(base, transform + 48),
@@ -301,32 +387,13 @@ void ApplyAfterPhysOut(PPCContext &ctx, std::uint8_t *base,
     return;
   }
 
-  float matrix[16] = {};
-  for (std::uint32_t component = 0; component < 16; ++component) {
-    matrix[component] =
-        LoadGuestF32(base, transform + component * sizeof(float));
-  }
+  std::array<float, 16> matrix = LoadTransform(base, transform);
   matrix[12] = result.corrected_position[0];
   matrix[13] = result.corrected_position[1];
   matrix[14] = result.corrected_position[2];
 
-  const std::uint32_t skateboard_body = LoadGuestU32(base, skateboard + 12);
-  if (!IsGuestHeapAddress(skateboard_body) || ctx.r1.u32 < 512u) {
+  if (!StoreBoardTransform(ctx, base, skateboard, transform, matrix)) {
     Disable(DisabledReason::kGuestStateInvalid);
-    return;
-  }
-  const std::uint32_t matrix_address = ctx.r1.u32 - 512u;
-  for (std::uint32_t component = 0; component < 16; ++component) {
-    REX_STORE_U32(matrix_address + component * sizeof(float),
-                  std::bit_cast<std::uint32_t>(matrix[component]));
-  }
-  PPCContext correction_ctx = ctx;
-  correction_ctx.r3.u64 = skateboard_body;
-  correction_ctx.r4.u64 = matrix_address;
-  sub_82C0B2C8(correction_ctx, base);
-  for (std::uint32_t component = 0; component < 16; ++component) {
-    REX_STORE_U32(transform + component * sizeof(float),
-                  std::bit_cast<std::uint32_t>(matrix[component]));
   }
 }
 

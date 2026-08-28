@@ -82,6 +82,43 @@ void TestDimensionsAndCollisionLayers() {
          "remote proxies collide with one another");
 }
 
+void TestFacingTwoPlayerSpawnPlacement() {
+  const std::array<float, 16> source = {
+      1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f,
+      0.0f, 0.0f, 1.0f, 0.0f, 7.0f, 2.0f, 9.0f, 1.0f,
+  };
+  const FacingTestSpawn first = BuildFacingTestSpawn(1, source);
+  const FacingTestSpawn second = BuildFacingTestSpawn(2, source);
+  Expect(first.valid && second.valid,
+         "valid two-player test spawn placement was rejected");
+  ExpectNear(first.transform[12], 7.0f, 1.0e-6f,
+             "client 1 drifted sideways during test placement");
+  ExpectNear(second.transform[12], 7.0f, 1.0e-6f,
+             "client 2 drifted sideways during test placement");
+  ExpectNear(first.transform[14], 5.0f, 1.0e-6f,
+             "client 1 was not moved behind the common spawn");
+  ExpectNear(second.transform[14], 13.0f, 1.0e-6f,
+             "client 2 was not moved ahead of the common spawn");
+  ExpectNear(second.transform[14] - first.transform[14],
+             kFacingTestSpawnSpacing, 1.0e-6f,
+             "test clients did not receive the intended separation");
+  ExpectNear(first.transform[8], -second.transform[8], 1.0e-6f,
+             "test clients do not face one another on the X axis");
+  ExpectNear(first.transform[10], -second.transform[10], 1.0e-6f,
+             "test clients do not face one another on the Z axis");
+  ExpectNear(first.transform[13], source[13], 1.0e-6f,
+             "test placement changed client 1 height");
+  ExpectNear(second.transform[13], source[13], 1.0e-6f,
+             "test placement changed client 2 height");
+  Expect(!BuildFacingTestSpawn(3, source).valid,
+         "test placement accepted a non-two-player role");
+
+  std::array<float, 16> invalid = source;
+  invalid[12] = std::nanf("");
+  Expect(!BuildFacingTestSpawn(1, invalid).valid,
+         "test placement accepted a non-finite transform");
+}
+
 void TestCreateUpdateRemoveAndSelfFiltering() {
   ProxySet proxies;
   const std::vector samples{
@@ -259,6 +296,7 @@ void TestDisabledStateClearsImmediately() {
 
 int main() {
   TestDimensionsAndCollisionLayers();
+  TestFacingTwoPlayerSpawnPlacement();
   TestCreateUpdateRemoveAndSelfFiltering();
   TestSessionReplacementAndMapTransitions();
   TestStaleAndNonPlayingCleanup();
