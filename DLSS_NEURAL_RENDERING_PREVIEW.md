@@ -114,6 +114,53 @@ performance validation requires the matching NVIDIA DLSS 5 preview/insider
 driver; replacing the application capability check with an unofficial bypass
 is not an acceptable integration.
 
+## Personal DLAA validation through a trusted RenoDX add-on
+
+An authorized developer can also perform a local, personal interoperability
+check with ReShade's add-on-enabled runtime and a separately obtained,
+trusted RenoDX DLSS 5 add-on. Neither ReShade nor the add-on is part of SK8,
+and neither binary is committed, packaged, downloaded, or redistributed by
+this repository. An `.addon64` file is executable code with the same access as
+the game process; use only a copy whose provenance and hash you have verified.
+
+The configuration validated on the development host was:
+
+- SK8's Windows DirectX 12 renderer;
+- the private Streamline 2.13 / NGX 310.8 runtime listed above;
+- ReShade 6.8.0's official add-on-enabled `ReShade64.dll`, installed beside
+  `skate3.exe` as `dxgi.dll`;
+- RenoDX DLSS 5 add-on version `v0.2026.827.2036`, API 18, SHA-256
+  `87aef9ddd937c7241e6bf8d8efea0045d63559135e254c60dab316db3d3a4aee`,
+  installed beside `skate3.exe` with its `.addon64` extension.
+
+To reproduce the successful path:
+
+1. Build SK8 with `SKATE3_ENABLE_DLSS_SR=ON` and
+   `SKATE3_ENABLE_DLSS_NR_PREVIEW=ON` using an authorized private SDK root.
+2. Install the official ReShade add-on-enabled runtime and the independently
+   trusted add-on beside that build's `skate3.exe`. Do not place these files in
+   the source tree or a release archive.
+3. Select DirectX 12 and **DLAA** in SK8's NVIDIA DLSS Super Resolution
+   setting. Keep SK8's separate **Neural Rendering** setting **Off**.
+4. Enable Neural Uplift in the RenoDX add-on and remain in gameplay long enough
+   for temporal history to settle.
+
+This path was confirmed by the add-on reporting successful feature-18
+evaluation through at least frame 60 with 2560x1440 input, guides, and output.
+The generic add-on is **not compatible with SK8's current low-resolution
+Quality, Balanced, or Performance resource layout**: it accepted the first
+transition frame and then rejected subsequent frames because its expected
+guide/output dimensions did not match. Use DLAA only. Do not work around the
+guard by fabricating or spatially resizing depth or motion vectors.
+
+ReShade or another DXGI proxy can intercept factory and swap-chain creation
+before Streamline observes them. SK8 therefore registers its D3D12 device
+immediately after creation and upgrades the created presentation interface
+through Streamline when the optional interposer is loaded. Without those two
+steps the add-on may appear in ReShade while never evaluating during presents.
+When no Streamline interposer is loaded, these checks are no-ops and the
+original renderer initialization remains unchanged.
+
 The normal custom-engine `ProjectDesc` path works for DLSS SR and no
 application ID has been invented. The available artifacts do not establish
 whether NVIDIA also requires an issued application ID or entitlement for

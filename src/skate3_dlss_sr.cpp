@@ -175,6 +175,10 @@ RenderSize g_configured_output{};
 sl::DLSSOptions g_options{};
 sl::FrameToken *g_frame_token = nullptr;
 std::chrono::steady_clock::time_point g_last_state_query{};
+constexpr GUID kStreamlineDeviceRegisteredGuid{
+    0x46e89a5a, 0xeba4, 0x4aa1,
+    {0x91, 0x42, 0x62, 0x28, 0x58, 0xb3, 0x50, 0x07}};
+constexpr std::uint32_t kStreamlineDeviceRegisteredMarker = 0x534C4453u;
 #if SKATE3_ENABLE_DLSS_NR_PREVIEW
 sl::DLSSNROptions g_neural_options{};
 NeuralSettings g_configured_neural_settings{};
@@ -498,10 +502,22 @@ FramePlan BeginFrame(ID3D12Device *device, RenderSize output,
 #endif
       g_history.Invalidate();
     }
-    if (g_api.set_d3d_device(device) != sl::Result::eOk) {
-      g_status.unavailable_reason = UnavailableReason::kDevice;
-      PublishStatusLocked();
-      return plan;
+    std::uint32_t registered_marker = 0;
+    UINT registered_marker_size = sizeof(registered_marker);
+    const bool registered_early =
+        SUCCEEDED(device->GetPrivateData(kStreamlineDeviceRegisteredGuid,
+                                         &registered_marker_size,
+                                         &registered_marker)) &&
+        registered_marker_size == sizeof(registered_marker) &&
+        registered_marker == kStreamlineDeviceRegisteredMarker;
+    if (!registered_early) {
+      if (g_api.set_d3d_device(device) != sl::Result::eOk) {
+        g_status.unavailable_reason = UnavailableReason::kDevice;
+        PublishStatusLocked();
+        return plan;
+      }
+    } else {
+      REXLOG_INFO("DLSS SR: using device registered during D3D12 initialization");
     }
     g_device = device;
     g_status.device_registered = true;
