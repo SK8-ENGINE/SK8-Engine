@@ -144,11 +144,8 @@ void MaybeLog(std::uint64_t now_us) {
     return;
   }
   REXLOG_INFO("multiplayer-player-collision: proxies={} contacts={} "
-              "max_correction={:.4f}m max_impulse={:.1f}Ns stale_cleanup={} "
-              "teleports={} disabled={}",
-              g_proxies.size(), counters.contacts, counters.maximum_correction,
-              counters.maximum_equivalent_impulse, counters.stale_cleanups,
-              counters.teleports,
+              "stale_cleanup={} disabled={}",
+              g_proxies.size(), counters.contacts, counters.stale_cleanups,
               DisabledReasonName(g_proxies.disabled_reason()));
   g_last_logged_contacts = counters.contacts;
   g_last_logged_stale_cleanups = counters.stale_cleanups;
@@ -235,7 +232,6 @@ void PublishRemotePresentation(const char *map_name,
       sample.map_hash = next.map_hash;
       sample.observed_at_us = now_us;
       sample.spatial_valid = true;
-      sample.discontinuity = remote.pose.collision_discontinuity;
       sample.playing = remote.pose.board_state_flags != 0xFFFFFFFFu &&
                        (remote.pose.board_state_flags & 0x7u) == 0;
       for (std::size_t component = 0; component < 3; ++component) {
@@ -369,16 +365,6 @@ void ApplyAfterPhysOut(PPCContext &ctx, std::uint8_t *base,
       LoadGuestF32(base, transform + 52),
       LoadGuestF32(base, transform + 56),
   };
-  local.observed_at_us =
-      spatial.sample_time_us != 0 ? spatial.sample_time_us : now_us;
-  static std::uint64_t previous_sample_time_us = 0;
-  if (previous_sample_time_us != 0 &&
-      local.observed_at_us > previous_sample_time_us) {
-    local.step_seconds =
-        static_cast<float>(local.observed_at_us - previous_sample_time_us) *
-        1.0e-6f;
-  }
-  previous_sample_time_us = local.observed_at_us;
 
   UpdateContext update;
   update.enabled = true;
@@ -424,14 +410,7 @@ void AppendTelemetry(std::ostream &out) {
       << " multiplayer_player_collision_removed=" << counters.removed
       << " multiplayer_player_collision_stale_cleanups="
       << counters.stale_cleanups
-      << " multiplayer_player_collision_teleports=" << counters.teleports
-      << " multiplayer_player_collision_contacts=" << counters.contacts
-      << " multiplayer_player_collision_grace_contacts="
-      << counters.grace_contacts
-      << " multiplayer_player_collision_max_correction="
-      << counters.maximum_correction
-      << " multiplayer_player_collision_max_impulse="
-      << counters.maximum_equivalent_impulse;
+      << " multiplayer_player_collision_contacts=" << counters.contacts;
 }
 
 } // namespace skate3::multiplayer::player_collision

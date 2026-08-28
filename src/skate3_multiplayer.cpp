@@ -1715,19 +1715,6 @@ RemotePose InterpolatePose(const RemotePose &first, const RemotePose &second,
   return result;
 }
 
-bool PoseCollisionDiscontinuity(const RemotePose &first,
-                                const RemotePose &second) {
-  float distance_squared = 0.0f;
-  for (std::size_t component = 0; component < 3; ++component) {
-    const float delta =
-        second.position[component] - first.position[component];
-    distance_squared += delta * delta;
-  }
-  return distance_squared >
-         player_collision::kTeleportDistance *
-             player_collision::kTeleportDistance;
-}
-
 RemotePose ExtrapolatePose(const RemotePose &previous, const RemotePose &latest,
                            float intervals_ahead) {
   RemotePose result;
@@ -6221,9 +6208,6 @@ private:
                       : static_cast<float>(elapsed) / static_cast<float>(span);
         out = InterpolatePose(peer.samples[index - 1].pose,
                               peer.samples[index].pose, amount);
-        out.collision_discontinuity =
-            PoseCollisionDiscontinuity(peer.samples[index - 1].pose,
-                                       peer.samples[index].pose);
         return true;
       }
     }

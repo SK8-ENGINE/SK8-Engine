@@ -18,11 +18,6 @@ struct RemotePose {
   float y_axis[3] = {0.0f, 1.0f, 0.0f};
   float z_axis[3] = {0.0f, 0.0f, 1.0f};
   std::uint32_t board_state_flags = 0xFFFFFFFFu;
-  // Receiver-local presentation metadata. This is never serialized. It
-  // marks an interpolation segment whose packet endpoints are far enough
-  // apart that a collision proxy must snap with overlap grace instead of
-  // sweeping through the world.
-  bool collision_discontinuity = false;
 };
 
 // Canonical model-to-world skeleton produced by Skate 3 before per-mesh bone

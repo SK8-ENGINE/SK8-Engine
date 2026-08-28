@@ -49,19 +49,11 @@ RemoteProxySample Remote(std::uint32_t role, float x, float y, float z,
       .position = {x, y, z},
       .observed_at_us = observed_at_us,
       .spatial_valid = true,
-      .discontinuity = false,
       .playing = true,
   };
 }
 
-LocalSample Local(float x, float y, float z, std::uint64_t observed_at_us,
-                  float step_seconds = 1.0f / 60.0f) {
-  return {
-      .position = {x, y, z},
-      .observed_at_us = observed_at_us,
-      .step_seconds = step_seconds,
-  };
-}
+LocalSample Local(float x, float y, float z) { return {.position = {x, y, z}}; }
 
 void TestDimensionsAndCollisionLayers() {
   ExpectNear(kPlayerProxyRadius, 0.30f, 1.0e-6f,
@@ -142,9 +134,6 @@ void TestCreateUpdateRemoveAndSelfFiltering() {
   const Proxy *proxy = proxies.Find(2);
   Expect(proxy != nullptr && proxy->position[0] == 2.5f,
          "remote presentation update did not move its proxy");
-  Expect(proxy != nullptr && proxy->velocity[0] > 4.9f &&
-             proxy->velocity[0] < 5.1f,
-         "remote proxy velocity did not use presentation cadence");
 
   proxies.Update(Context(100'002), {});
   Expect(proxies.size() == 0,
@@ -189,88 +178,49 @@ void TestStaleAndNonPlayingCleanup() {
   Expect(proxies.size() == 0, "non-playing peer created a collision proxy");
 }
 
-void TestTeleportSnapsAndStartsGrace() {
+void TestProxyPositionSnapsDirectly() {
   ProxySet proxies;
   const std::vector first{Remote(2, 0.0f, 0.0f, 0.0f, 1)};
   proxies.Update(Context(1), first);
 
-  RemoteProxySample teleported = Remote(2, 10.0f, 0.0f, 0.0f, 20'001);
-  teleported.discontinuity = true;
-  const std::vector jump{teleported};
+  const std::vector jump{Remote(2, 10.0f, 0.0f, 0.0f, 20'001)};
   proxies.Update(Context(20'001), jump);
   const Proxy *proxy = proxies.Find(2);
   Expect(proxy != nullptr && proxy->position[0] == 10.0f,
-         "teleport did not snap the proxy to the rendered player");
-  Expect(proxy != nullptr && proxy->velocity[0] == 0.0f &&
-             proxy->grace_until_us == 20'001 + kOverlapGraceUs,
-         "teleport swept velocity or omitted overlap grace");
-  Expect(proxies.counters().teleports == 1,
-         "teleport telemetry did not increment");
-
-  teleported.position[0] = 10.1f;
-  teleported.observed_at_us = 24'001;
-  const std::vector continuing_jump{teleported};
-  proxies.Update(Context(24'001), continuing_jump);
-  Expect(proxies.counters().teleports == 1 &&
-             proxies.Find(2)->grace_until_us == 24'001 + kOverlapGraceUs,
-         "one discontinuity segment spammed telemetry or lost grace");
+         "proxy did not snap directly to the rendered player");
 }
 
-void TestSpawnOverlapGraceAndDepenetration() {
+void TestSolidCapsuleOverlap() {
   ProxySet proxies;
   const std::vector remote{Remote(2, 0.0f, 0.0f, 0.0f, 1)};
   proxies.Update(Context(1), remote);
-  const ResolveResult spawn = proxies.Resolve(Local(0.0f, 0.0f, 0.0f, 1));
-  Expect(spawn.contacts == 1 && spawn.grace_contact,
-         "spawn overlap did not use grace contact");
-  Expect(spawn.maximum_contact_correction <=
-             kGraceCorrectionSpeed / 60.0f + 1.0e-6f,
-         "spawn overlap depenetrated too violently");
-  Expect(spawn.maximum_equivalent_impulse == 0.0f,
-         "spawn overlap generated an impulse during grace");
 
-  const std::vector settled_remote{Remote(2, 0.0f, 0.0f, 0.0f, 500'001)};
-  proxies.Update(Context(500'001), settled_remote);
-  const ResolveResult settled =
-      proxies.Resolve(Local(0.0f, 0.0f, 0.0f, 500'001));
-  Expect(settled.contacts == 1 && !settled.grace_contact,
-         "overlap remained permanently pinned in spawn grace");
-  Expect(settled.maximum_contact_correction <=
-             kMaximumCorrectionSpeed / 60.0f + 1.0e-6f,
-         "normal overlap correction exceeded its fixed-step bound");
-}
+  const ResolveResult contact = proxies.Resolve(Local(-0.5f, 0.0f, 0.0f));
+  Expect(contact.contacts == 1, "overlapping capsules did not contact");
+  ExpectNear(contact.correction[0], -0.04f, 1.0e-6f,
+             "solid contact did not split the minimum translation equally");
+  ExpectNear(contact.corrected_position[0], -0.54f, 1.0e-6f,
+             "solid contact produced the wrong blocked position");
+  ExpectNear(contact.correction[1], 0.0f, 1.0e-6f,
+             "solid contact moved the skater vertically");
 
-void TestBoundedClosingResponse() {
-  ProxySet proxies;
-  const std::vector remote_at_start{Remote(2, 0.0f, 0.0f, 0.0f, 1)};
-  proxies.Update(Context(1), remote_at_start);
-  (void)proxies.Resolve(Local(-2.0f, 0.0f, 0.0f, 1));
+  const ResolveResult touching = proxies.Resolve(Local(-0.581f, 0.0f, 0.0f));
+  Expect(touching.contacts == 0,
+         "capsules touching at the collision margin still overlapped");
 
-  const std::vector remote_next{Remote(2, 0.0f, 0.0f, 0.0f, 500'001)};
-  proxies.Update(Context(500'001), remote_next);
-  (void)proxies.Resolve(Local(-2.0f, 0.0f, 0.0f, 500'001));
-
-  const std::vector remote_contact{Remote(2, 0.0f, 0.0f, 0.0f, 516'668)};
-  proxies.Update(Context(516'668), remote_contact);
-  const ResolveResult impact =
-      proxies.Resolve(Local(-0.5f, 0.0f, 0.0f, 516'668));
-  Expect(impact.contacts == 1,
-         "representative closing skaters did not contact");
-  Expect(impact.maximum_contact_correction <=
-             kMaximumCorrectionSpeed / 60.0f + 1.0e-5f,
-         "closing response exceeded its per-step correction limit");
-  Expect(impact.maximum_equivalent_impulse > 0.0f &&
-             impact.maximum_equivalent_impulse <= kMaximumEquivalentImpulse,
-         "closing response impulse was absent or unbounded");
-  Expect(std::abs(impact.correction[1]) < 1.0e-6f,
-         "player collision launched the local skater vertically");
+  const ResolveResult coincident = proxies.Resolve(Local(0.0f, 0.0f, 0.0f));
+  Expect(coincident.contacts == 1,
+         "coincident capsules did not use a deterministic contact normal");
+  ExpectNear(std::hypot(coincident.correction[0], coincident.correction[2]),
+             0.29f, 1.0e-6f,
+             "coincident capsules did not split the minimum translation");
 }
 
 void TestVerticalSeparationAndPacketStall() {
   ProxySet proxies;
   std::vector remote{Remote(2, 0.0f, 3.0f, 0.0f, 1)};
   proxies.Update(Context(1), remote);
-  const ResolveResult vertical = proxies.Resolve(Local(0.0f, 0.0f, 0.0f, 1));
+  const ResolveResult vertical = proxies.Resolve(Local(0.0f, 0.0f, 0.0f));
   Expect(vertical.contacts == 0,
          "vertically separated capsules blocked one another");
 
@@ -306,9 +256,8 @@ int main() {
   TestCreateUpdateRemoveAndSelfFiltering();
   TestSessionReplacementAndMapTransitions();
   TestStaleAndNonPlayingCleanup();
-  TestTeleportSnapsAndStartsGrace();
-  TestSpawnOverlapGraceAndDepenetration();
-  TestBoundedClosingResponse();
+  TestProxyPositionSnapsDirectly();
+  TestSolidCapsuleOverlap();
   TestVerticalSeparationAndPacketStall();
   TestDisabledStateClearsImmediately();
 
