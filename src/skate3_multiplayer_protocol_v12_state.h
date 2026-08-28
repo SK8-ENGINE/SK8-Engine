@@ -70,6 +70,54 @@ class ReceiveHistory {
   std::uint32_t history_ = 0;
 };
 
+class CapabilityAcknowledgementState {
+ public:
+  // The envelope acknowledges its latest sequence plus 32 history bits.
+  static constexpr std::size_t kMaximumTrackedSequences = 33;
+
+  void RecordSent(std::uint32_t sequence) {
+    if (acknowledged_) {
+      return;
+    }
+    sent_sequences_[next_sequence_] = sequence;
+    next_sequence_ = (next_sequence_ + 1) % sent_sequences_.size();
+    tracked_sequence_count_ =
+        std::min(tracked_sequence_count_ + 1, sent_sequences_.size());
+  }
+
+  [[nodiscard]] bool Observe(std::uint32_t acknowledged_sequence,
+                             std::uint32_t receive_history) {
+    if (acknowledged_) {
+      return true;
+    }
+    for (std::size_t index = 0; index < tracked_sequence_count_; ++index) {
+      if (SequenceAcknowledged(sent_sequences_[index], acknowledged_sequence,
+                               receive_history)) {
+        acknowledged_ = true;
+        tracked_sequence_count_ = 0;
+        next_sequence_ = 0;
+        return true;
+      }
+    }
+    return false;
+  }
+
+  void Clear() {
+    sent_sequences_.fill(0);
+    tracked_sequence_count_ = 0;
+    next_sequence_ = 0;
+    acknowledged_ = false;
+  }
+
+  [[nodiscard]] bool acknowledged() const { return acknowledged_; }
+
+ private:
+  std::array<std::uint32_t, kMaximumTrackedSequences> sent_sequences_{};
+  std::size_t tracked_sequence_count_ = 0;
+  std::size_t next_sequence_ = 0;
+  bool acknowledged_ = false;
+};
+
 struct GenerationIdentity {
   std::uint16_t role = 0;
   std::uint32_t session = 0;
