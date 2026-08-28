@@ -18,8 +18,8 @@ void PublishRemotePresentation(const char *map_name,
                                const RemotePresentationFrame &presentation);
 
 // Emulation-thread consumer. This runs after the exact local player's
-// SkateboardController::FillPhysOut and applies only the minimum X/Z
-// translation needed to separate overlapping player capsules.
+// SkateboardController::FillPhysOut and keeps remote-player collision objects
+// in Skate's authoritative world collision collection.
 void ApplyAfterPhysOut(PPCContext &ctx, std::uint8_t *base,
                        std::uint32_t controller, std::uint32_t phys_out);
 

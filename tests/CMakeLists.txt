@@ -368,6 +368,8 @@ target_include_directories(
   skate3_multiplayer_player_collision_tests PRIVATE
   ${CMAKE_CURRENT_LIST_DIR}/../src
 )
+target_link_libraries(
+  skate3_multiplayer_player_collision_tests PRIVATE skate_owned_world)
 target_compile_features(
   skate3_multiplayer_player_collision_tests PRIVATE cxx_std_23)
 

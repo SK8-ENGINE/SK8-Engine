@@ -3606,9 +3606,9 @@ OwnedWorldCollisionBridgeScope::OwnedWorldCollisionBridgeScope(
       phys_out_(ctx.r4.u32) {}
 
 OwnedWorldCollisionBridgeScope::~OwnedWorldCollisionBridgeScope() {
-  multiplayer::player_collision::ApplyAfterPhysOut(
-      ctx_, base_, controller_, phys_out_);
   mechanics_sandbox::ApplyOwnedWorldCollisionAfterPhysOut(
+      ctx_, base_, controller_, phys_out_);
+  multiplayer::player_collision::ApplyAfterPhysOut(
       ctx_, base_, controller_, phys_out_);
 }
 

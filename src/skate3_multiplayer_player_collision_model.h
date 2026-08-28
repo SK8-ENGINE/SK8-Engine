@@ -8,6 +8,7 @@
 #include <map>
 #include <set>
 #include <span>
+#include <vector>
 
 namespace skate3::multiplayer::player_collision {
 
@@ -17,14 +18,10 @@ namespace skate3::multiplayer::player_collision {
 inline constexpr float kPlayerProxyRadius = 0.30f;
 inline constexpr float kPlayerProxyLowerCenter = -0.20f;
 inline constexpr float kPlayerProxyUpperCenter = 1.25f;
-
-inline constexpr std::uint32_t kLocalPlayerLayer = 1u << 8;
-inline constexpr std::uint32_t kRemotePlayerLayer = 1u << 9;
-inline constexpr std::uint32_t kLocalPlayerMask = kRemotePlayerLayer;
-inline constexpr std::uint32_t kRemotePlayerMask = kLocalPlayerLayer;
+inline constexpr std::uint32_t kPlayerProxyRadialSegments = 12;
+inline constexpr std::uint32_t kPlayerProxyHemisphereSegments = 3;
 
 inline constexpr std::uint64_t kRemoteSampleStaleUs = 1'500'000;
-inline constexpr float kContactSlop = 0.02f;
 inline constexpr float kFacingTestSpawnSpacing = 8.0f;
 
 enum class DisabledReason : std::uint8_t {
@@ -58,16 +55,10 @@ struct UpdateContext {
   DisabledReason disabled_reason = DisabledReason::kMultiplayerInactive;
 };
 
-struct LocalSample {
-  std::array<float, 3> position{};
-};
-
 struct Proxy {
   std::uint32_t role = 0;
   std::uint32_t session = 0;
   std::uint32_t map_hash = 0;
-  std::uint32_t layer = kRemotePlayerLayer;
-  std::uint32_t mask = kRemotePlayerMask;
   std::array<float, 3> position{};
 };
 
@@ -76,19 +67,111 @@ struct Counters {
   std::uint64_t updated = 0;
   std::uint64_t removed = 0;
   std::uint64_t stale_cleanups = 0;
-  std::uint64_t contacts = 0;
 };
 
-struct ResolveResult {
-  std::array<float, 3> corrected_position{};
-  std::array<float, 3> correction{};
-  std::uint32_t contacts = 0;
+struct CapsuleTriangle {
+  std::array<float, 3> a{};
+  std::array<float, 3> b{};
+  std::array<float, 3> c{};
+  std::array<float, 3> normal{};
 };
 
 struct FacingTestSpawn {
   std::array<float, 16> transform{};
   bool valid = false;
 };
+
+[[nodiscard]] inline std::vector<CapsuleTriangle>
+BuildPlayerCapsuleTriangles() {
+  struct Ring {
+    float y = 0.0f;
+    float radius = 0.0f;
+  };
+
+  constexpr float kPi = 3.14159265358979323846f;
+  std::vector<Ring> rings;
+  rings.reserve(kPlayerProxyHemisphereSegments * 2 + 2);
+  rings.push_back(
+      {kPlayerProxyLowerCenter - kPlayerProxyRadius, 0.0f});
+  for (std::uint32_t segment = 1;
+       segment <= kPlayerProxyHemisphereSegments; ++segment) {
+    const float angle =
+        -kPi * 0.5f +
+        kPi * 0.5f * static_cast<float>(segment) /
+            static_cast<float>(kPlayerProxyHemisphereSegments);
+    rings.push_back(
+        {kPlayerProxyLowerCenter + kPlayerProxyRadius * std::sin(angle),
+         kPlayerProxyRadius * std::cos(angle)});
+  }
+  rings.push_back({kPlayerProxyUpperCenter, kPlayerProxyRadius});
+  for (std::uint32_t segment = 1;
+       segment <= kPlayerProxyHemisphereSegments; ++segment) {
+    const float angle =
+        kPi * 0.5f * static_cast<float>(segment) /
+        static_cast<float>(kPlayerProxyHemisphereSegments);
+    rings.push_back(
+        {kPlayerProxyUpperCenter + kPlayerProxyRadius * std::sin(angle),
+         kPlayerProxyRadius * std::cos(angle)});
+  }
+
+  const auto point = [](const Ring &ring, std::uint32_t segment) {
+    constexpr float kTwoPi = 6.28318530717958647692f;
+    const float angle =
+        kTwoPi * static_cast<float>(segment) /
+        static_cast<float>(kPlayerProxyRadialSegments);
+    return std::array<float, 3>{
+        ring.radius * std::cos(angle), ring.y,
+        ring.radius * std::sin(angle)};
+  };
+  const auto triangle =
+      [](const std::array<float, 3> &a, const std::array<float, 3> &b,
+         const std::array<float, 3> &c) {
+        const std::array<float, 3> ab{
+            b[0] - a[0], b[1] - a[1], b[2] - a[2]};
+        const std::array<float, 3> ac{
+            c[0] - a[0], c[1] - a[1], c[2] - a[2]};
+        std::array<float, 3> normal{
+            ab[1] * ac[2] - ab[2] * ac[1],
+            ab[2] * ac[0] - ab[0] * ac[2],
+            ab[0] * ac[1] - ab[1] * ac[0]};
+        const float length = std::sqrt(
+            normal[0] * normal[0] + normal[1] * normal[1] +
+            normal[2] * normal[2]);
+        if (length > 0.0f) {
+          normal[0] /= length;
+          normal[1] /= length;
+          normal[2] /= length;
+        }
+        return CapsuleTriangle{a, b, c, normal};
+      };
+
+  std::vector<CapsuleTriangle> triangles;
+  triangles.reserve(
+      kPlayerProxyRadialSegments *
+      (kPlayerProxyHemisphereSegments * 4 + 2));
+  for (std::size_t ring = 0; ring + 1 < rings.size(); ++ring) {
+    const bool lower_pole = rings[ring].radius < 1.0e-6f;
+    const bool upper_pole = rings[ring + 1].radius < 1.0e-6f;
+    for (std::uint32_t segment = 0;
+         segment < kPlayerProxyRadialSegments; ++segment) {
+      const std::uint32_t next =
+          (segment + 1) % kPlayerProxyRadialSegments;
+      const auto lower = point(rings[ring], segment);
+      const auto lower_next = point(rings[ring], next);
+      const auto upper = point(rings[ring + 1], segment);
+      const auto upper_next = point(rings[ring + 1], next);
+      if (lower_pole) {
+        triangles.push_back(triangle(lower, upper, upper_next));
+      } else if (upper_pole) {
+        triangles.push_back(triangle(lower, upper, lower_next));
+      } else {
+        triangles.push_back(triangle(lower, upper, upper_next));
+        triangles.push_back(triangle(lower, upper_next, lower_next));
+      }
+    }
+  }
+  return triangles;
+}
 
 [[nodiscard]] inline FacingTestSpawn
 BuildFacingTestSpawn(std::uint32_t local_role,
@@ -134,13 +217,6 @@ BuildFacingTestSpawn(std::uint32_t local_role,
   }
   result.valid = true;
   return result;
-}
-
-[[nodiscard]] inline bool LayersCollide(std::uint32_t first_layer,
-                                        std::uint32_t first_mask,
-                                        std::uint32_t second_layer,
-                                        std::uint32_t second_mask) {
-  return (first_mask & second_layer) != 0 && (second_mask & first_layer) != 0;
 }
 
 class ProxySet {
@@ -229,70 +305,6 @@ public:
     }
   }
 
-  ResolveResult Resolve(const LocalSample &local) {
-    ResolveResult result;
-    result.corrected_position = local.position;
-    if (disabled_reason_ != DisabledReason::kNone || !Finite(local.position)) {
-      return result;
-    }
-
-    for (const auto &[role, proxy] : proxies_) {
-      if (!LayersCollide(kLocalPlayerLayer, kLocalPlayerMask, proxy.layer,
-                         proxy.mask)) {
-        continue;
-      }
-
-      const float local_lower =
-          result.corrected_position[1] + kPlayerProxyLowerCenter;
-      const float local_upper =
-          result.corrected_position[1] + kPlayerProxyUpperCenter;
-      const float remote_lower = proxy.position[1] + kPlayerProxyLowerCenter;
-      const float remote_upper = proxy.position[1] + kPlayerProxyUpperCenter;
-      const float vertical_gap = std::max(
-          {remote_lower - local_upper, local_lower - remote_upper, 0.0f});
-      const float combined_radius = kPlayerProxyRadius * 2.0f;
-      if (vertical_gap >= combined_radius) {
-        continue;
-      }
-      const float horizontal_contact_radius =
-          std::sqrt(std::max(0.0f, combined_radius * combined_radius -
-                                       vertical_gap * vertical_gap));
-      float delta_x = result.corrected_position[0] - proxy.position[0];
-      float delta_z = result.corrected_position[2] - proxy.position[2];
-      const float distance_squared = delta_x * delta_x + delta_z * delta_z;
-      const float distance = std::sqrt(distance_squared);
-      const float penetration =
-          horizontal_contact_radius - distance - kContactSlop;
-      if (penetration <= 0.0f) {
-        continue;
-      }
-
-      float normal_x = 0.0f;
-      float normal_z = 0.0f;
-      if (distance > 1.0e-5f) {
-        normal_x = delta_x / distance;
-        normal_z = delta_z / distance;
-      } else {
-        DeterministicFallbackNormal(local_role_, role, normal_x, normal_z);
-      }
-
-      // Both peers run the same solid-capsule test. Split the minimum
-      // translation equally, as an ordinary equal-mass contact would.
-      const float correction = penetration * 0.5f;
-
-      const float correction_x = normal_x * correction;
-      const float correction_z = normal_z * correction;
-      result.corrected_position[0] += correction_x;
-      result.corrected_position[2] += correction_z;
-      result.correction[0] += correction_x;
-      result.correction[2] += correction_z;
-      ++result.contacts;
-    }
-
-    counters_.contacts += result.contacts;
-    return result;
-  }
-
   void Disable(DisabledReason reason, bool stale_cleanup = false) {
     Clear(reason, stale_cleanup);
   }
@@ -306,26 +318,14 @@ public:
     const auto found = proxies_.find(role);
     return found == proxies_.end() ? nullptr : &found->second;
   }
+  [[nodiscard]] const std::map<std::uint32_t, Proxy> &proxies() const {
+    return proxies_;
+  }
 
 private:
   [[nodiscard]] static bool Finite(const std::array<float, 3> &value) {
     return std::isfinite(value[0]) && std::isfinite(value[1]) &&
            std::isfinite(value[2]);
-  }
-
-  static void DeterministicFallbackNormal(std::uint32_t local_role,
-                                          std::uint32_t remote_role,
-                                          float &out_x, float &out_z) {
-    const std::uint32_t pair_key =
-        std::min(local_role, remote_role) + std::max(local_role, remote_role);
-    const float direction = local_role < remote_role ? -1.0f : 1.0f;
-    if ((pair_key & 1u) == 0) {
-      out_x = direction;
-      out_z = 0.0f;
-    } else {
-      out_x = 0.0f;
-      out_z = direction;
-    }
   }
 
   void Clear(DisabledReason reason, bool stale_cleanup) {

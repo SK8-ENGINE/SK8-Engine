@@ -3,6 +3,7 @@
 #include "generated/skate3_init.h"
 #include "skate3_map_editor.h"
 #include "skate3_mechanics_sandbox.h"
+#include "skate3_native_collision.h"
 #include "skate3_trick_pipeline.h"
 
 #include <rex/cvar.h>
@@ -55,7 +56,6 @@ PublishedPresentation g_presentation;
 std::mutex g_model_mutex;
 ProxySet g_proxies;
 std::uint64_t g_last_log_us = 0;
-std::uint64_t g_last_logged_contacts = 0;
 std::uint64_t g_last_logged_stale_cleanups = 0;
 
 struct FacingTestSpawnState {
@@ -129,9 +129,13 @@ FacingTestSpawnState g_facing_test_spawn;
   return "unknown";
 }
 
-void Disable(DisabledReason reason, bool stale_cleanup = false) {
-  std::scoped_lock lock(g_model_mutex);
-  g_proxies.Disable(reason, stale_cleanup);
+void Disable(PPCContext &ctx, std::uint8_t *base, DisabledReason reason,
+             bool stale_cleanup = false) {
+  {
+    std::scoped_lock lock(g_model_mutex);
+    g_proxies.Disable(reason, stale_cleanup);
+  }
+  native_collision::UpdateMultiplayerPlayerColliders(ctx, base, {});
 }
 
 void MaybeLog(std::uint64_t now_us) {
@@ -139,15 +143,14 @@ void MaybeLog(std::uint64_t now_us) {
     return;
   }
   const Counters &counters = g_proxies.counters();
-  if (g_proxies.size() == 0 && counters.contacts == g_last_logged_contacts &&
+  if (g_proxies.size() == 0 &&
       counters.stale_cleanups == g_last_logged_stale_cleanups) {
     return;
   }
-  REXLOG_INFO("multiplayer-player-collision: proxies={} contacts={} "
-              "stale_cleanup={} disabled={}",
-              g_proxies.size(), counters.contacts, counters.stale_cleanups,
+  REXLOG_INFO("multiplayer-player-collision: proxies={} stale_cleanup={} "
+              "disabled={}",
+              g_proxies.size(), counters.stale_cleanups,
               DisabledReasonName(g_proxies.disabled_reason()));
-  g_last_logged_contacts = counters.contacts;
   g_last_logged_stale_cleanups = counters.stale_cleanups;
   g_last_log_us = now_us;
 }
@@ -263,20 +266,20 @@ void ApplyAfterPhysOut(PPCContext &ctx, std::uint8_t *base,
                        std::uint32_t controller, std::uint32_t phys_out) {
   const std::uint64_t now_us = NowMicroseconds();
   if (rex::kernel::guest_presence::GameplayContextValue() != 1) {
-    Disable(DisabledReason::kMenu);
+    Disable(ctx, base, DisabledReason::kMenu);
     return;
   }
   if (map_editor::Active()) {
-    Disable(DisabledReason::kMapEditor);
+    Disable(ctx, base, DisabledReason::kMapEditor);
     return;
   }
   if (!mechanics_sandbox::Active() || !mechanics_sandbox::VisualMapEnabled()) {
-    Disable(DisabledReason::kInvalidWorld);
+    Disable(ctx, base, DisabledReason::kInvalidWorld);
     return;
   }
   if (base == nullptr || controller == 0 || phys_out == 0 ||
       phys_out != trick_pipeline::CurrentLocalPhysOut()) {
-    Disable(DisabledReason::kGuestStateInvalid);
+    Disable(ctx, base, DisabledReason::kGuestStateInvalid);
     return;
   }
 
@@ -285,7 +288,7 @@ void ApplyAfterPhysOut(PPCContext &ctx, std::uint8_t *base,
       spatial.phys_out != phys_out ||
       spatial.board_state_flags == 0xFFFFFFFFu ||
       (spatial.board_state_flags & 0x7u) != 0) {
-    Disable(DisabledReason::kLocalNotPlaying);
+    Disable(ctx, base, DisabledReason::kLocalNotPlaying);
     return;
   }
 
@@ -295,7 +298,8 @@ void ApplyAfterPhysOut(PPCContext &ctx, std::uint8_t *base,
     presentation = g_presentation;
   }
   if (!presentation.enabled) {
-    Disable(presentation.world_valid ? DisabledReason::kMultiplayerInactive
+    Disable(ctx, base,
+            presentation.world_valid ? DisabledReason::kMultiplayerInactive
                                      : DisabledReason::kInvalidWorld);
     return;
   }
@@ -305,23 +309,25 @@ void ApplyAfterPhysOut(PPCContext &ctx, std::uint8_t *base,
           kMaximumPresentationAgeUs ||
       now_us - std::min(now_us, presentation.source_advanced_at_us) >
           kMaximumSourceAgeUs) {
-    Disable(DisabledReason::kPresentationStale, true);
+    Disable(ctx, base, DisabledReason::kPresentationStale, true);
     return;
   }
 
-  const std::uint32_t skateboard = LoadGuestU32(base, controller + 428);
-  const std::uint32_t processed_phys_in = LoadGuestU32(base, controller + 436);
-  const std::uint32_t transform_state = LoadGuestU32(base, controller + 448);
-  if (!IsGuestHeapAddress(skateboard) ||
-      !IsGuestHeapAddress(processed_phys_in) || transform_state > 4) {
-    Disable(DisabledReason::kGuestStateInvalid);
-    return;
-  }
-  const std::uint32_t transform =
-      processed_phys_in + (transform_state == 3 ? 112u : 192u);
   if (!REXCVAR_GET(skate3_multiplayer_player_collision_test_spawn)) {
     g_facing_test_spawn = {};
   } else if (presentation.local_role <= 2) {
+    const std::uint32_t skateboard = LoadGuestU32(base, controller + 428);
+    const std::uint32_t processed_phys_in =
+        LoadGuestU32(base, controller + 436);
+    const std::uint32_t transform_state =
+        LoadGuestU32(base, controller + 448);
+    if (!IsGuestHeapAddress(skateboard) ||
+        !IsGuestHeapAddress(processed_phys_in) || transform_state > 4) {
+      Disable(ctx, base, DisabledReason::kGuestStateInvalid);
+      return;
+    }
+    const std::uint32_t transform =
+        processed_phys_in + (transform_state == 3 ? 112u : 192u);
     const bool new_generation =
         g_facing_test_spawn.local_role != presentation.local_role ||
         g_facing_test_spawn.local_session != presentation.local_session ||
@@ -340,7 +346,7 @@ void ApplyAfterPhysOut(PPCContext &ctx, std::uint8_t *base,
       if (placement.valid) {
         if (!StoreBoardTransform(ctx, base, skateboard, transform,
                                  placement.transform)) {
-          Disable(DisabledReason::kGuestStateInvalid);
+          Disable(ctx, base, DisabledReason::kGuestStateInvalid);
           return;
         }
         // Skate alternates between two ProcessedPhysIn board transforms. If
@@ -354,17 +360,9 @@ void ApplyAfterPhysOut(PPCContext &ctx, std::uint8_t *base,
                     "spacing={:.1f}m buffers=2 session={} map={:08X}",
                     presentation.local_role, kFacingTestSpawnSpacing,
                     presentation.local_session, presentation.map_hash);
-        return;
       }
     }
   }
-
-  LocalSample local;
-  local.position = {
-      LoadGuestF32(base, transform + 48),
-      LoadGuestF32(base, transform + 52),
-      LoadGuestF32(base, transform + 56),
-  };
 
   UpdateContext update;
   update.enabled = true;
@@ -374,27 +372,23 @@ void ApplyAfterPhysOut(PPCContext &ctx, std::uint8_t *base,
   update.now_us = now_us;
   update.disabled_reason = DisabledReason::kNone;
 
-  ResolveResult result;
+  std::vector<native_collision::MultiplayerPlayerCollider> colliders;
   {
     std::scoped_lock lock(g_model_mutex);
     g_proxies.Update(update, presentation.samples);
-    result = g_proxies.Resolve(local);
+    colliders.reserve(g_proxies.size());
+    for (const auto &[role, proxy] : g_proxies.proxies()) {
+      native_collision::MultiplayerPlayerCollider collider;
+      collider.role = role;
+      std::copy(
+          proxy.position.begin(), proxy.position.end(),
+          std::begin(collider.world_position));
+      colliders.push_back(collider);
+    }
     MaybeLog(now_us);
   }
-  if (result.contacts == 0 || (!std::isfinite(result.corrected_position[0]) ||
-                               !std::isfinite(result.corrected_position[1]) ||
-                               !std::isfinite(result.corrected_position[2]))) {
-    return;
-  }
-
-  std::array<float, 16> matrix = LoadTransform(base, transform);
-  matrix[12] = result.corrected_position[0];
-  matrix[13] = result.corrected_position[1];
-  matrix[14] = result.corrected_position[2];
-
-  if (!StoreBoardTransform(ctx, base, skateboard, transform, matrix)) {
-    Disable(DisabledReason::kGuestStateInvalid);
-  }
+  native_collision::UpdateMultiplayerPlayerColliders(
+      ctx, base, colliders);
 }
 
 void AppendTelemetry(std::ostream &out) {
@@ -409,8 +403,7 @@ void AppendTelemetry(std::ostream &out) {
       << " multiplayer_player_collision_updated=" << counters.updated
       << " multiplayer_player_collision_removed=" << counters.removed
       << " multiplayer_player_collision_stale_cleanups="
-      << counters.stale_cleanups
-      << " multiplayer_player_collision_contacts=" << counters.contacts;
+      << counters.stale_cleanups;
 }
 
 } // namespace skate3::multiplayer::player_collision

@@ -1,5 +1,7 @@
 #include "skate3_multiplayer_player_collision_model.h"
 
+#include "skate/world/rw_collision_mesh.h"
+
 #include <cmath>
 #include <cstdint>
 #include <iostream>
@@ -53,9 +55,7 @@ RemoteProxySample Remote(std::uint32_t role, float x, float y, float z,
   };
 }
 
-LocalSample Local(float x, float y, float z) { return {.position = {x, y, z}}; }
-
-void TestDimensionsAndCollisionLayers() {
+void TestNativeCapsuleGeometry() {
   ExpectNear(kPlayerProxyRadius, 0.30f, 1.0e-6f,
              "player capsule radius drifted from the project scale");
   ExpectNear(kPlayerProxyLowerCenter, -0.20f, 1.0e-6f,
@@ -70,14 +70,77 @@ void TestDimensionsAndCollisionLayers() {
              "player capsule no longer matches standing skater height");
   ExpectNear(kPlayerProxyRadius * 2.0f, 0.60f, 1.0e-6f,
              "player capsule is wider than the rendered body");
-  Expect(LayersCollide(kLocalPlayerLayer, kLocalPlayerMask, kRemotePlayerLayer,
-                       kRemotePlayerMask),
-         "local and remote player masks do not collide");
-  Expect(!LayersCollide(kLocalPlayerLayer, 0, kRemotePlayerLayer,
-                        kRemotePlayerMask),
-         "a disabled local mask still collided");
-  Expect((kRemotePlayerMask & kRemotePlayerLayer) == 0,
-         "remote proxies collide with one another");
+
+  const std::vector<CapsuleTriangle> triangles =
+      BuildPlayerCapsuleTriangles();
+  Expect(triangles.size() ==
+             kPlayerProxyRadialSegments *
+                 kPlayerProxyHemisphereSegments * 4,
+         "native capsule has the wrong triangle count");
+  float minimum_y = INFINITY;
+  float maximum_y = -INFINITY;
+  float maximum_radius = 0.0f;
+  for (const CapsuleTriangle &triangle : triangles) {
+    const float normal_length =
+        std::hypot(triangle.normal[0], triangle.normal[1],
+                   triangle.normal[2]);
+    ExpectNear(normal_length, 1.0f, 1.0e-5f,
+               "native capsule contains a degenerate triangle");
+    const std::array<float, 3> center{
+        (triangle.a[0] + triangle.b[0] + triangle.c[0]) / 3.0f,
+        (triangle.a[1] + triangle.b[1] + triangle.c[1]) / 3.0f,
+        (triangle.a[2] + triangle.b[2] + triangle.c[2]) / 3.0f,
+    };
+    const float centerline_y =
+        std::clamp(center[1], kPlayerProxyLowerCenter,
+                   kPlayerProxyUpperCenter);
+    const float outward_dot =
+        triangle.normal[0] * center[0] +
+        triangle.normal[1] * (center[1] - centerline_y) +
+        triangle.normal[2] * center[2];
+    Expect(outward_dot > 0.0f,
+           "native capsule triangle faces inward");
+    for (const auto &vertex :
+         {triangle.a, triangle.b, triangle.c}) {
+      Expect(std::isfinite(vertex[0]) && std::isfinite(vertex[1]) &&
+                 std::isfinite(vertex[2]),
+             "native capsule contains a non-finite vertex");
+      minimum_y = std::min(minimum_y, vertex[1]);
+      maximum_y = std::max(maximum_y, vertex[1]);
+      maximum_radius =
+          std::max(maximum_radius, std::hypot(vertex[0], vertex[2]));
+    }
+  }
+  ExpectNear(minimum_y, kPlayerProxyLowerCenter - kPlayerProxyRadius,
+             1.0e-6f, "native capsule bottom is misplaced");
+  ExpectNear(maximum_y, kPlayerProxyUpperCenter + kPlayerProxyRadius,
+             1.0e-6f, "native capsule top is misplaced");
+  ExpectNear(maximum_radius, kPlayerProxyRadius, 1.0e-6f,
+             "native capsule width is incorrect");
+
+  skate::world::MapDefinition capsule;
+  capsule.name = "multiplayer_player_capsule_test";
+  for (const CapsuleTriangle &triangle : triangles) {
+    capsule.collision_triangles.push_back({
+        .a = {triangle.a[0], triangle.a[1], triangle.a[2]},
+        .b = {triangle.b[0], triangle.b[1], triangle.b[2]},
+        .c = {triangle.c[0], triangle.c[1], triangle.c[2]},
+        .normal = {
+            triangle.normal[0], triangle.normal[1], triangle.normal[2]},
+        .surface = 1,
+        .material = 1,
+    });
+  }
+  skate::world::RwCollisionBuildOptions options;
+  options.default_surface_id =
+      skate::world::EncodeRwSurfaceId(3, 1, 0);
+  options.material_surface_ids.emplace(1, options.default_surface_id);
+  const skate::world::RwCollisionBuildResult build =
+      skate::world::BuildRwCollisionMesh(capsule, options);
+  Expect(build.ok && !build.mesh.bytes.empty(),
+         "player capsule did not compile as native world collision");
+  Expect(build.mesh.triangle_count == triangles.size(),
+         "native collision compiler dropped capsule triangles");
 }
 
 void TestFacingTwoPlayerSpawnPlacement() {
@@ -190,41 +253,9 @@ void TestProxyPositionSnapsDirectly() {
          "proxy did not snap directly to the rendered player");
 }
 
-void TestSolidCapsuleOverlap() {
+void TestPacketStall() {
   ProxySet proxies;
-  const std::vector remote{Remote(2, 0.0f, 0.0f, 0.0f, 1)};
-  proxies.Update(Context(1), remote);
-
-  const ResolveResult contact = proxies.Resolve(Local(-0.5f, 0.0f, 0.0f));
-  Expect(contact.contacts == 1, "overlapping capsules did not contact");
-  ExpectNear(contact.correction[0], -0.04f, 1.0e-6f,
-             "solid contact did not split the minimum translation equally");
-  ExpectNear(contact.corrected_position[0], -0.54f, 1.0e-6f,
-             "solid contact produced the wrong blocked position");
-  ExpectNear(contact.correction[1], 0.0f, 1.0e-6f,
-             "solid contact moved the skater vertically");
-
-  const ResolveResult touching = proxies.Resolve(Local(-0.581f, 0.0f, 0.0f));
-  Expect(touching.contacts == 0,
-         "capsules touching at the collision margin still overlapped");
-
-  const ResolveResult coincident = proxies.Resolve(Local(0.0f, 0.0f, 0.0f));
-  Expect(coincident.contacts == 1,
-         "coincident capsules did not use a deterministic contact normal");
-  ExpectNear(std::hypot(coincident.correction[0], coincident.correction[2]),
-             0.29f, 1.0e-6f,
-             "coincident capsules did not split the minimum translation");
-}
-
-void TestVerticalSeparationAndPacketStall() {
-  ProxySet proxies;
-  std::vector remote{Remote(2, 0.0f, 3.0f, 0.0f, 1)};
-  proxies.Update(Context(1), remote);
-  const ResolveResult vertical = proxies.Resolve(Local(0.0f, 0.0f, 0.0f));
-  Expect(vertical.contacts == 0,
-         "vertically separated capsules blocked one another");
-
-  remote[0] = Remote(2, 1.0f, 0.0f, 0.0f, 100'001);
+  std::vector remote{Remote(2, 1.0f, 0.0f, 0.0f, 100'001)};
   proxies.Update(Context(100'001), remote);
   remote[0].observed_at_us = 600'001;
   proxies.Update(Context(600'001), remote);
@@ -251,14 +282,13 @@ void TestDisabledStateClearsImmediately() {
 } // namespace
 
 int main() {
-  TestDimensionsAndCollisionLayers();
+  TestNativeCapsuleGeometry();
   TestFacingTwoPlayerSpawnPlacement();
   TestCreateUpdateRemoveAndSelfFiltering();
   TestSessionReplacementAndMapTransitions();
   TestStaleAndNonPlayingCleanup();
   TestProxyPositionSnapsDirectly();
-  TestSolidCapsuleOverlap();
-  TestVerticalSeparationAndPacketStall();
+  TestPacketStall();
   TestDisabledStateClearsImmediately();
 
   if (g_failures != 0) {
