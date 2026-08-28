@@ -103,6 +103,15 @@ void RequiredTagsAndLifecycle() {
 }
 
 void NeuralSettingsPolicy() {
+  assert(NeuralSupportFailureText(NeuralSupportFailure::kPluginMissing) ==
+         "NVIDIA Neural Rendering plugin is unavailable");
+  assert(NeuralSupportFailureText(
+             NeuralSupportFailure::kPreviewDriverRequired)
+             .find("matching DLSS 5 preview driver") !=
+         std::string_view::npos);
+  assert(NeuralSupportFailureText(NeuralSupportFailure::kOther) ==
+         "NVIDIA feature 1004 failed its capability check");
+
   assert(ClampNeuralStrength(-0.5) == 0.0f);
   assert(ClampNeuralStrength(1.25) == 1.25f);
   assert(ClampNeuralStrength(4.0) == 2.0f);

@@ -406,7 +406,7 @@ void Shutdown() {
   if (g_status.initialized && g_api.free_resources != nullptr) {
     g_api.free_resources(sl::kFeatureDLSS, g_viewport);
 #if SKATE3_ENABLE_DLSS_NR_PREVIEW
-    if (g_status.neural_plugin_present) {
+    if (g_status.neural_supported) {
       g_api.free_resources(sl::kFeatureDLSS_NR, g_viewport);
     }
 #endif
@@ -574,12 +574,20 @@ FramePlan BeginFrame(ID3D12Device *device, RenderSize output,
           g_status.neural_detail = "slDLSSNRSetOptions is unavailable";
         }
       } else {
+        NeuralSupportFailure failure = NeuralSupportFailure::kOther;
+        if (neural_support == sl::Result::eErrorFeatureMissing) {
+          failure = NeuralSupportFailure::kPluginMissing;
+        } else if (neural_support ==
+                   sl::Result::eErrorFeatureNotSupported) {
+          // The signed 2.13 plugin logs NGX 0xBAD0000C here. NVIDIA's public
+          // NGX definitions identify that result as FAIL_OutOfDate.
+          failure = NeuralSupportFailure::kPreviewDriverRequired;
+        }
         g_status.neural_detail =
-            neural_support == sl::Result::eErrorFeatureMissing
-                ? "NVIDIA rejected feature 1004 for this GPU, driver, or "
-                  "developer entitlement"
-                : std::format("feature 1004 support check failed ({})",
-                              static_cast<int>(neural_support));
+            std::format("{} (Streamline result {})",
+                        NeuralSupportFailureText(failure),
+                        static_cast<int>(neural_support));
+        REXLOG_WARN("DLSS Neural Rendering: {}", g_status.neural_detail);
       }
     }
 #endif
@@ -935,7 +943,7 @@ void ReleaseViewportResources() {
   }
 #if SKATE3_ENABLE_DLSS_NR_PREVIEW
   if (g_status.initialized && g_api.free_resources != nullptr &&
-      g_status.neural_plugin_present) {
+      g_status.neural_supported) {
     g_api.free_resources(sl::kFeatureDLSS_NR, g_viewport);
   }
   g_neural_options_configured = false;

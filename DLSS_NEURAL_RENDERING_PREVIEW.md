@@ -100,14 +100,22 @@ Its Streamline log confirms that 2.13, host SDK version 2.13, and DLSS SR 310.8
 initialized, then reports:
 
 ```text
+ngxResult failed 0xbad0000c
 DLSS-NR feature is not supported. Please check if you have a valid
 nvngx_dlssnr.dll or your driver supports DLSS-NR.
 ```
 
-The DLL checksum and NVIDIA signature are valid, so final image and performance
-validation is blocked on NVIDIA enabling feature 1004 for the target
-GPU/driver/developer entitlement. The normal custom-engine `ProjectDesc` path
-works for DLSS SR and no application ID has been invented. The available
-artifacts do not establish whether NVIDIA requires an issued application ID
-for Neural Rendering release access; confirm that with the NVIDIA
-representative.
+NVIDIA's public NGX definitions decode `0xBAD0000C` as
+`NVSDK_NGX_Result_FAIL_OutOfDate`: the requested function requires a newer
+display driver or feature library. The supplied feature library is the signed
+310.8.0 file, while the development host is already running NVIDIA's latest
+public WHQL driver available on 2026-08-28 (610.74). Therefore final image and
+performance validation requires the matching NVIDIA DLSS 5 preview/insider
+driver; replacing the application capability check with an unofficial bypass
+is not an acceptable integration.
+
+The normal custom-engine `ProjectDesc` path works for DLSS SR and no
+application ID has been invented. The available artifacts do not establish
+whether NVIDIA also requires an issued application ID or entitlement for
+Neural Rendering release access; confirm that and obtain the matching headers,
+driver, and redistribution terms from the NVIDIA representative.

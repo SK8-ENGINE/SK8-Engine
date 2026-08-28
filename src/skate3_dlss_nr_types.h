@@ -4,8 +4,29 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <string_view>
 
 namespace skate3::dlss {
+
+enum class NeuralSupportFailure {
+  kPluginMissing,
+  kPreviewDriverRequired,
+  kOther,
+};
+
+constexpr std::string_view
+NeuralSupportFailureText(NeuralSupportFailure failure) {
+  switch (failure) {
+  case NeuralSupportFailure::kPluginMissing:
+    return "NVIDIA Neural Rendering plugin is unavailable";
+  case NeuralSupportFailure::kPreviewDriverRequired:
+    return "The NVIDIA preview runtime rejected the installed driver as "
+           "out-of-date; install the matching DLSS 5 preview driver";
+  case NeuralSupportFailure::kOther:
+    return "NVIDIA feature 1004 failed its capability check";
+  }
+  return "NVIDIA feature 1004 failed its capability check";
+}
 
 // DLSS Neural Rendering is an optional post-pass. It never makes DLSS SR
 // active by itself and therefore cannot disturb the native/Off path.
