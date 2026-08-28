@@ -65,7 +65,8 @@ cbuffer CH : register(b2) {
 #ifdef DLSS_MOTION
 // Apply the documented DLSS render-resolution mip bias exactly once to
 // implicit material samples. Explicit SampleLevel calls remain explicit.
-#define Sample(...) SampleBias(__VA_ARGS__, temporal_lod.x)
+#define Sample(sampler_state, coordinates) \
+  SampleBias(sampler_state, coordinates, temporal_lod.x)
 #endif
 Texture2D<float4> diffuse : register(t0);
 Texture2D<float4> lightmap : register(t1);
