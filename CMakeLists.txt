@@ -375,6 +375,7 @@ set(SKATE3_COMMON_SOURCES
     src/skate3_map_editor.cpp
     src/skate3_multiplayer.cpp
     src/skate3_multiplayer_assets.cpp
+    src/skate3_multiplayer_player_collision.cpp
     src/skate3_multiplayer_session.cpp
     src/skate3_steam_backend.cpp
     src/skate3_owned_world_boundary.cpp

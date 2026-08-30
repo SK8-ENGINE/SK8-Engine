@@ -8,6 +8,7 @@
 #include "skate3_input_history_watch.h"
 #include "skate3_map_editor.h"
 #include "skate3_mechanics_sandbox_map.h"
+#include "skate3_multiplayer_player_collision_model.h"
 #include "skate3_trick_pipeline.h"
 
 #include <algorithm>
@@ -123,6 +124,7 @@ constexpr std::size_t kOwnedCollisionGuaranteedMeshes = 24;
 constexpr std::size_t kOwnedCollisionHysteresisMeshes = 16;
 constexpr float kOwnedCollisionStreamRefreshDistance = 16.0f;
 constexpr std::size_t kMaximumHingedDoors = 32;
+constexpr std::size_t kMaximumMultiplayerRoles = 100;
 // University-style retail maps contain thousands of independently retained
 // presentation parts. Collision-bearing records are still constrained by the
 // native collection's 4096-entry capacity, but render-only/static-collision
@@ -272,6 +274,19 @@ std::atomic<std::uint32_t> g_kinematic_velocity_x_bits{0};
 std::atomic<std::uint32_t> g_kinematic_velocity_y_bits{0};
 std::atomic<std::uint32_t> g_kinematic_velocity_z_bits{0};
 std::atomic<bool> g_kinematic_pose_valid{false};
+std::array<std::atomic<std::uint32_t>, kMaximumMultiplayerRoles + 1>
+    g_multiplayer_mesh_addresses{};
+std::array<std::atomic<std::uint32_t>, kMaximumMultiplayerRoles + 1>
+    g_multiplayer_volume_addresses{};
+std::array<std::atomic<std::uint32_t>, kMaximumMultiplayerRoles + 1>
+    g_multiplayer_auxiliary_addresses{};
+std::array<std::atomic<std::uint32_t>, kMaximumMultiplayerRoles + 1>
+    g_multiplayer_matrix_addresses{};
+std::atomic<std::uint32_t> g_multiplayer_collider_count{0};
+std::atomic<std::uint64_t> g_multiplayer_collider_installs{0};
+std::atomic<std::uint64_t> g_multiplayer_collider_updates{0};
+std::atomic<std::uint64_t> g_multiplayer_collider_removals{0};
+std::atomic<std::uint64_t> g_multiplayer_collider_failures{0};
 std::atomic<DoorState> g_door_state{DoorState::Disabled};
 std::atomic<std::uint32_t> g_door_count{0};
 std::array<std::atomic<std::uint32_t>, kMaximumHingedDoors>
@@ -439,6 +454,34 @@ bool IsOwnedEditorMesh(std::uint32_t mesh) {
       static_cast<std::uint32_t>(kMaximumEditableObjects));
   for (std::uint32_t index = 0; index < count; ++index) {
     if (g_editor_mesh_addresses[index].load(
+            std::memory_order_acquire) == mesh) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool IsOwnedMultiplayerMesh(std::uint32_t mesh) {
+  if (mesh == 0) {
+    return false;
+  }
+  for (std::size_t role = 1; role <= kMaximumMultiplayerRoles; ++role) {
+    if (g_multiplayer_mesh_addresses[role].load(
+            std::memory_order_acquire) == mesh) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool IsOwnedMultiplayerEntry(std::uint32_t volume, std::uint32_t mesh) {
+  if (volume == 0 || mesh == 0) {
+    return false;
+  }
+  for (std::size_t role = 1; role <= kMaximumMultiplayerRoles; ++role) {
+    if (g_multiplayer_volume_addresses[role].load(
+            std::memory_order_acquire) == volume &&
+        g_multiplayer_mesh_addresses[role].load(
             std::memory_order_acquire) == mesh) {
       return true;
     }
@@ -903,6 +946,22 @@ void WriteEntryLocalBounds(
   StoreF32(base, entry + 160, door.local_max.x);
   StoreF32(base, entry + 164, door.local_max.y);
   StoreF32(base, entry + 168, door.local_max.z);
+}
+
+void WriteMultiplayerPlayerBounds(std::uint8_t *base,
+                                  std::uint32_t entry) {
+  constexpr float radius =
+      multiplayer::player_collision::kPlayerProxyRadius;
+  StoreF32(base, entry + 144, -radius);
+  StoreF32(
+      base, entry + 148,
+      multiplayer::player_collision::kPlayerProxyLowerCenter - radius);
+  StoreF32(base, entry + 152, -radius);
+  StoreF32(base, entry + 160, radius);
+  StoreF32(
+      base, entry + 164,
+      multiplayer::player_collision::kPlayerProxyUpperCenter + radius);
+  StoreF32(base, entry + 168, radius);
 }
 
 void WriteEntryLocalBounds(
@@ -1373,6 +1432,29 @@ skate::world::RwCollisionBuildResult CompileKinematicBox(
       std::move(builder).Build(), options);
 }
 
+skate::world::RwCollisionBuildResult CompileMultiplayerPlayerCapsule() {
+  skate::world::MapDefinition capsule;
+  capsule.name = "multiplayer_player_capsule";
+  for (const multiplayer::player_collision::CapsuleTriangle &triangle :
+       multiplayer::player_collision::BuildPlayerCapsuleTriangles()) {
+    capsule.collision_triangles.push_back({
+        .a = {triangle.a[0], triangle.a[1], triangle.a[2]},
+        .b = {triangle.b[0], triangle.b[1], triangle.b[2]},
+        .c = {triangle.c[0], triangle.c[1], triangle.c[2]},
+        .normal = {
+            triangle.normal[0], triangle.normal[1], triangle.normal[2]},
+        .surface = 1,
+        .material = 1,
+    });
+  }
+
+  skate::world::RwCollisionBuildOptions options;
+  options.default_surface_id =
+      skate::world::EncodeRwSurfaceId(3, 1, 0);
+  options.material_surface_ids.emplace(1, options.default_surface_id);
+  return skate::world::BuildRwCollisionMesh(capsule, options);
+}
+
 skate::world::RwCollisionBuildResult CompileHingedDoor(
     const skate::world::HingedDoor& door,
     const skate::world::MapDefinition& source) {
@@ -1652,7 +1734,8 @@ bool ExclusiveCollectionDrifted(std::uint8_t* base,
       }
     } else if (!IsOwnedKinematicEntry(volume, mesh) &&
                !IsOwnedDoorEntry(volume, mesh) &&
-               !IsOwnedEditorEntry(volume, mesh)) {
+               !IsOwnedEditorEntry(volume, mesh) &&
+               !IsOwnedMultiplayerEntry(volume, mesh)) {
       unexpected = true;
     }
   }
@@ -1720,7 +1803,8 @@ bool ReconcileExclusiveCollection(PPCContext& source,
             StaticSlot{entry_index, resource_index});
       }
     } else if (!IsOwnedKinematicEntry(volume, mesh) &&
-               !IsOwnedDoorEntry(volume, mesh)) {
+               !IsOwnedDoorEntry(volume, mesh) &&
+               !IsOwnedMultiplayerEntry(volume, mesh)) {
       has_non_owned_static = true;
     }
   }
@@ -1813,7 +1897,8 @@ bool ReconcileExclusiveCollection(PPCContext& source,
         owned_index == UINT32_MAX &&
         !IsOwnedKinematicEntry(volume, mesh) &&
         !IsOwnedDoorEntry(volume, mesh) &&
-        !IsOwnedEditorEntry(volume, mesh);
+        !IsOwnedEditorEntry(volume, mesh) &&
+        !IsOwnedMultiplayerEntry(volume, mesh);
     if (inactive_owned || unexpected_retail) {
       if (!IsGuestDataAddress(volume)) {
         return false;
@@ -1955,7 +2040,8 @@ void ObserveNativeLineWorker(std::uint32_t mesh) noexcept {
   }
   g_native_line_workers.fetch_add(1, std::memory_order_relaxed);
   const bool owned_static =
-      IsOwnedStaticMesh(mesh) || IsOwnedEditorMesh(mesh);
+      IsOwnedStaticMesh(mesh) || IsOwnedEditorMesh(mesh) ||
+      IsOwnedMultiplayerMesh(mesh);
   const bool owned_kinematic =
       mesh != 0 &&
       mesh == g_kinematic_mesh_address.load(std::memory_order_acquire);
@@ -1974,7 +2060,8 @@ void ObserveNativeBoxWorker(std::uint32_t mesh) noexcept {
   }
   g_native_box_workers.fetch_add(1, std::memory_order_relaxed);
   const bool owned_static =
-      IsOwnedStaticMesh(mesh) || IsOwnedEditorMesh(mesh);
+      IsOwnedStaticMesh(mesh) || IsOwnedEditorMesh(mesh) ||
+      IsOwnedMultiplayerMesh(mesh);
   const bool owned_kinematic =
       mesh != 0 &&
       mesh == g_kinematic_mesh_address.load(std::memory_order_acquire);
@@ -1993,7 +2080,8 @@ void ObserveNativeIteratorMesh(std::uint32_t mesh) noexcept {
   }
   g_native_iterators.fetch_add(1, std::memory_order_relaxed);
   const bool owned_static =
-      IsOwnedStaticMesh(mesh) || IsOwnedEditorMesh(mesh);
+      IsOwnedStaticMesh(mesh) || IsOwnedEditorMesh(mesh) ||
+      IsOwnedMultiplayerMesh(mesh);
   const bool owned_kinematic =
       mesh != 0 &&
       mesh == g_kinematic_mesh_address.load(std::memory_order_acquire);
@@ -2024,6 +2112,7 @@ void ObserveNativeQueryMesh(std::uint32_t mesh) noexcept {
   g_querying_mesh = mesh;
   g_querying_owned_mesh =
       IsOwnedStaticMesh(mesh) || IsOwnedEditorMesh(mesh) ||
+      IsOwnedMultiplayerMesh(mesh) ||
       g_querying_kinematic_mesh ||
       g_querying_door_index >= 0;
   if (g_querying_owned_mesh) {
@@ -2084,7 +2173,8 @@ bool PrepareKinematicQueryBatch(std::uint32_t batch,
                       .load(std::memory_order_acquire);
     const bool dynamic_editor =
         OwnedDynamicEditorIndex(volume, mesh) >= 0;
-    if (kinematic || door || dynamic_editor) {
+    const bool multiplayer = IsOwnedMultiplayerEntry(volume, mesh);
+    if (kinematic || door || dynamic_editor || multiplayer) {
       found_dynamic = true;
       found_dynamic_editor = found_dynamic_editor || dynamic_editor;
       if (record_line_telemetry) {
@@ -4135,6 +4225,298 @@ bool AllocateCollision(PPCContext &ctx, std::uint8_t *base,
   return true;
 }
 
+void ClearMultiplayerColliderSlot(std::uint32_t role) {
+  g_multiplayer_mesh_addresses[role].store(0, std::memory_order_release);
+  g_multiplayer_volume_addresses[role].store(0, std::memory_order_release);
+  g_multiplayer_auxiliary_addresses[role].store(
+      0, std::memory_order_release);
+  g_multiplayer_matrix_addresses[role].store(0, std::memory_order_release);
+}
+
+void RecordMultiplayerColliderFailure(std::string_view operation,
+                                      std::uint32_t role) {
+  const std::uint64_t failures =
+      g_multiplayer_collider_failures.fetch_add(
+          1, std::memory_order_relaxed) +
+      1;
+  if (failures <= 8 || (failures & 255u) == 0) {
+    REXLOG_ERROR(
+        "multiplayer-player-collision: native {} failed role={} failure={}",
+        operation, role, failures);
+  }
+}
+
+bool RemoveMultiplayerPlayerCollider(PPCContext &ctx, std::uint8_t *base,
+                                     std::uint32_t collection,
+                                     std::uint32_t role) {
+  const std::uint32_t auxiliary =
+      g_multiplayer_auxiliary_addresses[role].load(
+          std::memory_order_acquire);
+  const std::uint32_t volume =
+      g_multiplayer_volume_addresses[role].load(std::memory_order_acquire);
+  const std::uint32_t mesh =
+      g_multiplayer_mesh_addresses[role].load(std::memory_order_acquire);
+  if (volume == 0 && mesh == 0) {
+    ClearMultiplayerColliderSlot(role);
+    return true;
+  }
+
+  const std::uint32_t count = LoadU32(base, collection + 20);
+  const std::uint32_t read_entries = LoadU32(base, collection + 16);
+  const std::uint32_t write_entries = LoadU32(base, collection + 32);
+  const std::uint32_t read_index =
+      FindOwnedEntry(base, read_entries, count, volume, mesh);
+  const std::uint32_t write_index =
+      FindOwnedEntry(base, write_entries, count, volume, mesh);
+  if (read_index != UINT32_MAX || write_index != UINT32_MAX) {
+    if (read_index == UINT32_MAX || write_index == UINT32_MAX ||
+        read_index != write_index) {
+      return false;
+    }
+    PPCContext remove = ctx;
+    remove.r3.u64 = collection;
+    remove.r4.u64 = volume;
+    sub_82775FC8(remove, base);
+    const std::uint32_t count_after = LoadU32(base, collection + 20);
+    if (count_after + 1 != count) {
+      return false;
+    }
+    PublishWriteEntries(base, read_entries, write_entries, count_after);
+  }
+
+  if (IsGuestDataAddress(mesh)) {
+    REX_KERNEL_MEMORY()->SystemHeapFree(mesh);
+  }
+  if (IsGuestDataAddress(auxiliary)) {
+    REX_KERNEL_MEMORY()->SystemHeapFree(auxiliary);
+  }
+  ClearMultiplayerColliderSlot(role);
+  g_multiplayer_collider_removals.fetch_add(1, std::memory_order_relaxed);
+  REXLOG_INFO(
+      "multiplayer-player-collision: native capsule removed role={}", role);
+  return true;
+}
+
+bool InstallMultiplayerPlayerCollider(
+    PPCContext &ctx, std::uint8_t *base, std::uint32_t collection,
+    const MultiplayerPlayerCollider &collider) {
+  skate::world::RwCollisionBuildResult build;
+  try {
+    build = CompileMultiplayerPlayerCapsule();
+  } catch (...) {
+    return false;
+  }
+
+  AllocatedCollision allocation;
+  if (!AllocateCollision(ctx, base, build, allocation)) {
+    return false;
+  }
+  WriteMapTransform(base, allocation.matrix, collider.world_position);
+
+  const std::uint32_t capacity = LoadU32(base, collection + 8);
+  const std::uint32_t count = LoadU32(base, collection + 20);
+  const std::uint32_t read_entries = LoadU32(base, collection + 16);
+  const std::uint32_t write_entries = LoadU32(base, collection + 32);
+  if (count >= capacity || !IsGuestDataAddress(read_entries) ||
+      !IsGuestDataAddress(write_entries)) {
+    FreeAllocatedCollision(allocation);
+    return false;
+  }
+
+  PPCContext add = ctx;
+  add.r3.u64 = collection;
+  add.r4.u64 = allocation.volume;
+  add.r5.u64 = allocation.matrix;
+  add.r6.u64 = 0;
+  add.r7.u64 = 0;
+  sub_82775F58(add, base);
+  const std::uint32_t count_after = LoadU32(base, collection + 20);
+  const std::uint32_t write_entry =
+      write_entries + count * kCollectionEntrySize;
+  if (count_after != count + 1 ||
+      LoadU32(base, write_entry) != allocation.volume ||
+      LoadU32(base, write_entry + 4) != allocation.mesh) {
+    if (count_after == count) {
+      FreeAllocatedCollision(allocation);
+    }
+    return false;
+  }
+
+  PPCContext rebuild = ctx;
+  rebuild.r3.u64 = write_entry;
+  rebuild.r4.u64 = allocation.volume;
+  rebuild.r5.u64 = allocation.mesh;
+  rebuild.r6.u64 = allocation.matrix;
+  rebuild.r7.u64 = 0;
+  rebuild.r8.u64 = UINT32_MAX;
+  rebuild.r9.u64 = 0;
+  sub_8276CB18(rebuild, base);
+  WriteMultiplayerPlayerBounds(base, write_entry);
+  const std::uint32_t read_entry =
+      read_entries + count * kCollectionEntrySize;
+  if (read_entry != write_entry) {
+    std::memcpy(base + read_entry, base + write_entry,
+                kCollectionEntrySize);
+  }
+
+  g_multiplayer_auxiliary_addresses[collider.role].store(
+      allocation.auxiliary, std::memory_order_relaxed);
+  g_multiplayer_matrix_addresses[collider.role].store(
+      allocation.matrix, std::memory_order_relaxed);
+  g_multiplayer_volume_addresses[collider.role].store(
+      allocation.volume, std::memory_order_relaxed);
+  g_multiplayer_mesh_addresses[collider.role].store(
+      allocation.mesh, std::memory_order_release);
+  g_multiplayer_collider_installs.fetch_add(1, std::memory_order_relaxed);
+  g_collection_count_after.store(count_after, std::memory_order_release);
+  REXLOG_INFO(
+      "multiplayer-player-collision: native capsule installed role={} "
+      "radius={:.2f}m triangles={}",
+      collider.role, multiplayer::player_collision::kPlayerProxyRadius,
+      build.mesh.triangle_count);
+  return true;
+}
+
+bool MoveMultiplayerPlayerCollider(
+    PPCContext &ctx, std::uint8_t *base, std::uint32_t collection,
+    const MultiplayerPlayerCollider &collider) {
+  const std::uint32_t volume =
+      g_multiplayer_volume_addresses[collider.role].load(
+          std::memory_order_acquire);
+  const std::uint32_t mesh =
+      g_multiplayer_mesh_addresses[collider.role].load(
+          std::memory_order_acquire);
+  const std::uint32_t matrix =
+      g_multiplayer_matrix_addresses[collider.role].load(
+          std::memory_order_acquire);
+  const std::uint32_t count = LoadU32(base, collection + 20);
+  const std::uint32_t read_entries = LoadU32(base, collection + 16);
+  const std::uint32_t write_entries = LoadU32(base, collection + 32);
+  const std::uint32_t read_index =
+      FindOwnedEntry(base, read_entries, count, volume, mesh);
+  const std::uint32_t write_index =
+      FindOwnedEntry(base, write_entries, count, volume, mesh);
+  if (!IsGuestDataAddress(volume) || !IsGuestDataAddress(mesh) ||
+      !IsGuestDataAddress(matrix) || read_index == UINT32_MAX ||
+      write_index == UINT32_MAX || read_index != write_index) {
+    return false;
+  }
+
+  WriteMapTransform(base, matrix, collider.world_position);
+  const std::uint32_t write_entry =
+      write_entries + write_index * kCollectionEntrySize;
+  PPCContext rebuild = ctx;
+  rebuild.r3.u64 = write_entry;
+  rebuild.r4.u64 = volume;
+  rebuild.r5.u64 = mesh;
+  rebuild.r6.u64 = matrix;
+  rebuild.r7.u64 = 0;
+  rebuild.r8.u64 = UINT32_MAX;
+  rebuild.r9.u64 = 0;
+  sub_8276CB18(rebuild, base);
+  WriteMultiplayerPlayerBounds(base, write_entry);
+  const std::uint32_t read_entry =
+      read_entries + read_index * kCollectionEntrySize;
+  if (read_entry != write_entry) {
+    std::memcpy(base + read_entry, base + write_entry,
+                kCollectionEntrySize);
+  }
+  g_multiplayer_collider_updates.fetch_add(1, std::memory_order_relaxed);
+  return true;
+}
+
+void UpdateMultiplayerPlayerColliders(
+    PPCContext &ctx, std::uint8_t *base,
+    std::span<const MultiplayerPlayerCollider> colliders) noexcept {
+  if (base == nullptr) {
+    return;
+  }
+
+  const State state = g_state.load(std::memory_order_acquire);
+  const bool world_ready =
+      Enabled() &&
+      (state == State::InstalledAdditive ||
+       state == State::InstalledExclusive ||
+       state == State::ReplacementFailed || state == State::RetailOnly);
+  const std::uint32_t collection =
+      g_collection.load(std::memory_order_acquire);
+  if (!IsGuestDataAddress(collection)) {
+    return;
+  }
+
+  std::scoped_lock lock(g_install_mutex);
+  WaitForCollectionJobs(ctx, base, collection);
+  const std::uint32_t capacity = LoadU32(base, collection + 8);
+  const std::uint32_t read_entries = LoadU32(base, collection + 16);
+  const std::uint32_t write_entries = LoadU32(base, collection + 32);
+  if (capacity == 0 || capacity > kMaximumReasonableCollectionCapacity ||
+      !IsGuestDataAddress(read_entries) ||
+      !IsGuestDataAddress(write_entries)) {
+    return;
+  }
+
+  std::array<bool, kMaximumMultiplayerRoles + 1> desired{};
+  std::array<MultiplayerPlayerCollider, kMaximumMultiplayerRoles + 1>
+      by_role{};
+  if (world_ready) {
+    for (const MultiplayerPlayerCollider &collider : colliders) {
+      if (collider.role < 1 ||
+          collider.role > kMaximumMultiplayerRoles ||
+          desired[collider.role] ||
+          !std::isfinite(collider.world_position[0]) ||
+          !std::isfinite(collider.world_position[1]) ||
+          !std::isfinite(collider.world_position[2])) {
+        continue;
+      }
+      desired[collider.role] = true;
+      by_role[collider.role] = collider;
+    }
+  }
+
+  for (std::uint32_t role = 1; role <= kMaximumMultiplayerRoles; ++role) {
+    const bool installed =
+        g_multiplayer_mesh_addresses[role].load(
+            std::memory_order_acquire) != 0;
+    if (installed && !desired[role] &&
+        !RemoveMultiplayerPlayerCollider(ctx, base, collection, role)) {
+      RecordMultiplayerColliderFailure("remove", role);
+    }
+  }
+  for (std::uint32_t role = 1; role <= kMaximumMultiplayerRoles; ++role) {
+    if (!desired[role]) {
+      continue;
+    }
+    const bool installed =
+        g_multiplayer_mesh_addresses[role].load(
+            std::memory_order_acquire) != 0;
+    if (installed &&
+        MoveMultiplayerPlayerCollider(
+            ctx, base, collection, by_role[role])) {
+      continue;
+    }
+    if (installed &&
+        !RemoveMultiplayerPlayerCollider(ctx, base, collection, role)) {
+      RecordMultiplayerColliderFailure("replace-remove", role);
+      continue;
+    }
+    if (!InstallMultiplayerPlayerCollider(
+            ctx, base, collection, by_role[role])) {
+      RecordMultiplayerColliderFailure("install", role);
+    }
+  }
+
+  std::uint32_t installed_count = 0;
+  for (std::uint32_t role = 1; role <= kMaximumMultiplayerRoles; ++role) {
+    installed_count +=
+        g_multiplayer_mesh_addresses[role].load(
+            std::memory_order_acquire) != 0
+            ? 1u
+            : 0u;
+  }
+  g_multiplayer_collider_count.store(
+      installed_count, std::memory_order_release);
+}
+
 skate::world::RwCollisionBuildResult
 CompileRetailResourceFallback(const skate::world::MapDefinition &source,
                               std::uint16_t resource_index,
@@ -6168,6 +6550,16 @@ void AppendTelemetry(std::ostream& out) {
       << g_kinematic_last_update_frame.load(std::memory_order_acquire)
       << " sandbox_kinematic_updates="
       << g_kinematic_updates.load(std::memory_order_relaxed)
+      << " multiplayer_player_collision_native_count="
+      << g_multiplayer_collider_count.load(std::memory_order_acquire)
+      << " multiplayer_player_collision_native_installs="
+      << g_multiplayer_collider_installs.load(std::memory_order_relaxed)
+      << " multiplayer_player_collision_native_updates="
+      << g_multiplayer_collider_updates.load(std::memory_order_relaxed)
+      << " multiplayer_player_collision_native_removals="
+      << g_multiplayer_collider_removals.load(std::memory_order_relaxed)
+      << " multiplayer_player_collision_native_failures="
+      << g_multiplayer_collider_failures.load(std::memory_order_relaxed)
       << " sandbox_hinged_door_count="
       << g_door_count.load(std::memory_order_acquire)
       << " sandbox_hinged_door_state="

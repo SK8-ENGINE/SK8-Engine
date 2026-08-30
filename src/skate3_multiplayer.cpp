@@ -7,6 +7,7 @@
 #include "skate3_multiplayer_local_topology.h"
 #include "skate3_multiplayer_motion_trace.h"
 #include "skate3_multiplayer_outbound_scheduler.h"
+#include "skate3_multiplayer_player_collision.h"
 #include "skate3_multiplayer_playback_clock.h"
 #include "skate3_multiplayer_pose_curve.h"
 #include "skate3_multiplayer_protocol.h"
@@ -1972,6 +1973,9 @@ public:
       RemotePlayer remote;
       remote.role = remote_role;
       remote.session = peer.session;
+      remote.receiver_role = static_cast<std::uint32_t>(bound_role_);
+      remote.receiver_session = session_id_;
+      remote.presentation_map_hash = map_hash;
       if (!SmoothRemote(remote_role, peer, now, remote.pose)) {
         continue;
       }
@@ -6790,9 +6794,12 @@ bool TickLocalVisuals(const char *map_name, const float map_render_origin[3],
   // destruction stops and joins the worker before destroying runtime state.
   (void)ActiveRuntime();
   if (REXCVAR_GET(skate3_multiplayer_replication_worker)) {
-    return ActiveReplicationWorker().Tick(map_name, map_render_origin,
-                                          local_animation, local_appearance,
-                                          out_presentation);
+    const bool have_remote_players = ActiveReplicationWorker().Tick(
+        map_name, map_render_origin, local_animation, local_appearance,
+        out_presentation);
+    player_collision::PublishRemotePresentation(
+        map_name, map_render_origin, out_presentation);
+    return have_remote_players;
   }
 
   ActiveReplicationWorker().Stop();
@@ -6806,10 +6813,15 @@ bool TickLocalVisuals(const char *map_name, const float map_render_origin[3],
   out_presentation.players = std::make_shared<const std::vector<RemotePlayer>>(
       std::move(remote_players));
   out_presentation.retirements = std::move(retirements);
+  player_collision::PublishRemotePresentation(
+      map_name, map_render_origin, out_presentation);
   return have_remote_players;
 }
 
-void AppendTelemetry(std::ostream &out) { ActiveRuntime().Append(out); }
+void AppendTelemetry(std::ostream &out) {
+  ActiveRuntime().Append(out);
+  player_collision::AppendTelemetry(out);
+}
 
 void ReportRemoteAppearanceInstalled(std::uint32_t role, std::uint32_t session,
                                      std::uint64_t appearance_id) {

@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <iosfwd>
+#include <span>
 
 struct PPCContext;
 
@@ -110,6 +111,18 @@ void UpdateEditableObjects(PPCContext& ctx,
                            std::uint8_t* base) noexcept;
 void UpdateHingedDoors(PPCContext& ctx,
                        std::uint8_t* base) noexcept;
+
+struct MultiplayerPlayerCollider {
+  std::uint32_t role = 0;
+  float world_position[3] = {};
+};
+
+// Registers each remote skater as an ordinary moving object in Skate's
+// authoritative world collision collection. Passing an empty span removes
+// every multiplayer-owned collision object.
+void UpdateMultiplayerPlayerColliders(
+    PPCContext& ctx, std::uint8_t* base,
+    std::span<const MultiplayerPlayerCollider> colliders) noexcept;
 
 void AppendTelemetry(std::ostream& out);
 

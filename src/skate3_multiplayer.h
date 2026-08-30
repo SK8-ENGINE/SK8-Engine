@@ -58,6 +58,13 @@ struct AppearanceBlob {
 struct RemotePlayer {
   std::uint32_t role = 0;
   std::uint32_t session = 0;
+  // The receiving process and map generation that prepared this immutable
+  // presentation. These fields are local-only and let other presentation
+  // consumers reject a stale mailbox frame during role, session, or map
+  // transitions without changing the network protocol.
+  std::uint32_t receiver_role = 0;
+  std::uint32_t receiver_session = 0;
+  std::uint32_t presentation_map_hash = 0;
   RemotePose pose;
   AnimationPose animation;
   AppearanceBlob appearance;

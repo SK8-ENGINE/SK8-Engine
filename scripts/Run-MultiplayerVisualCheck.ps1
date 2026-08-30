@@ -8,6 +8,7 @@ param(
     [string]$CacAssetRoot = '',
     [switch]$NoDirectBoot,
     [switch]$PrepareOnly,
+    [switch]$PlayerCollisionCheck,
     [switch]$AppearanceRecoveryCheck,
     [switch]$RealtimePriorityCheck,
     [switch]$SmoothnessCheck,
@@ -56,8 +57,12 @@ if ($HighInterpolationCheck -and $Clients -ne 5) {
 if ($MinimumInterpolationCheck -and $Clients -ne 5) {
     throw 'The minimum-interpolation check requires exactly five clients.'
 }
+if ($PlayerCollisionCheck -and $Clients -ne 2) {
+    throw 'The player-collision check requires exactly two clients.'
+}
 $specializedChecks = @(
     @(
+        [bool]$PlayerCollisionCheck,
         [bool]$AppearanceRecoveryCheck,
         [bool]$RealtimePriorityCheck,
         [bool]$SmoothnessCheck,
@@ -593,6 +598,12 @@ try {
         incremental_appearance_install = $true
         appearance_install_ops_per_frame = 4
         appearance_install_budget_ms = 4.0
+        player_collision_check = [bool]$PlayerCollisionCheck
+        player_collision_spawn_spacing_m = if ($PlayerCollisionCheck) {
+            8.0
+        } else {
+            0.0
+        }
         appearance_recovery_check = [bool]$AppearanceRecoveryCheck
         realtime_priority_check = [bool]$RealtimePriorityCheck
         smoothness_check = [bool]$SmoothnessCheck
@@ -625,7 +636,8 @@ try {
             'skate3_multiplayer_render_cache_tests',
             'skate3_multiplayer_routing_tests',
             'skate3_multiplayer_scale_tests',
-            'skate3_multiplayer_protocol_v12_snappy_tests'
+            'skate3_multiplayer_protocol_v12_snappy_tests',
+            'skate3_multiplayer_player_collision_tests'
         )
     }
     $manifest | ConvertTo-Json -Depth 4 |
@@ -633,7 +645,33 @@ try {
             Join-Path $runRoot 'run-manifest.json'
         ) -Encoding UTF8
 
-    $instructions = if ($AppearanceRecoveryCheck) {
+    $instructions = if ($PlayerCollisionCheck) {
+        @"
+MULTIPLAYER PLAYER-COLLISION CHECK
+
+Run directory:
+$runRoot
+
+Clients: 2
+Transport: localhost UDP
+Initial setup: the two real local skaters are placed 8 metres apart and face
+one another once both clients have joined the same map/session.
+
+Visual scenario:
+1. Wait until both clients have loaded and each sees the other skater. They
+   should settle several metres apart, facing one another.
+2. Hold forward on both clients to ride directly into one another.
+3. First approach slowly and confirm the skaters block instead of overlapping.
+4. Repeat at speed and confirm bounded pushing with no explosive launch.
+5. Stand together and check for jitter, then respawn or teleport nearby.
+6. Disconnect and reconnect one client and confirm no invisible blocker
+   remains before the remote skater returns.
+7. Close both clients when finished.
+
+The facing placement is a launcher-only diagnostic option. It is disabled by
+default for normal multiplayer and offline play.
+"@
+    } elseif ($AppearanceRecoveryCheck) {
         @"
 MULTIPLAYER APPEARANCE RECOVERY CHECK
 
@@ -1071,6 +1109,11 @@ separately, then ask the agent to analyze this run directory.
                 '--skate3_multiplayer_test_drop_appearance_role=2'
             )
         }
+        if ($PlayerCollisionCheck) {
+            $arguments += (
+                '--skate3_multiplayer_player_collision_test_spawn=true'
+            )
+        }
         $arguments += (
             '--skate3_multiplayer_cac_asset_root={0}' -f
             $resolvedCacRoot
@@ -1133,7 +1176,9 @@ separately, then ask the agent to analyze this run directory.
     ) -Encoding UTF8
 
     Write-Host ''
-    if ($AppearanceRecoveryCheck) {
+    if ($PlayerCollisionCheck) {
+        Write-Host 'MULTIPLAYER PLAYER-COLLISION CHECK READY'
+    } elseif ($AppearanceRecoveryCheck) {
         Write-Host 'MULTIPLAYER APPEARANCE RECOVERY CHECK READY'
     } elseif ($MinimumInterpolationCheck) {
         Write-Host 'MULTIPLAYER MINIMUM-INTERPOLATION CHECK READY'
@@ -1149,7 +1194,8 @@ separately, then ask the agent to analyze this run directory.
     Write-Host "Run folder: $runRoot"
     Write-Host "Instructions: $(Join-Path $runRoot 'VISUAL-CHECK.txt')"
     Write-Host ''
-    if (-not $AppearanceRecoveryCheck -and
+    if (-not $PlayerCollisionCheck -and
+        -not $AppearanceRecoveryCheck -and
         -not $RealtimePriorityCheck -and
         -not $SmoothnessCheck -and
         -not $HighInterpolationCheck -and
