@@ -361,6 +361,8 @@ set(SKATE3_COMMON_SOURCES
     src/skate3_cac_gesture.cpp
     src/skate3_dlc_runtime.cpp
     src/skate3_custom_trick.cpp
+    src/skate3_custom_textures.cpp
+    src/skate3_custom_textures_dialog.cpp
     src/skate3_demo_path.cpp
     src/skate3_draw_distance.cpp
     src/skate3_drop_item_import.cpp
