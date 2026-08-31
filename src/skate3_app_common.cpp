@@ -1193,11 +1193,20 @@ void Skate3BaseApp::OnCreateDialogs(rex::ui::ImGuiDrawer *drawer) {
           drawer, std::move(poll_vanilla_ui_gamepad),
           std::move(vanilla_ui_visibility_changed),
           std::move(vanilla_ui_asset_cache));
+  // Custom Texture library: persists under the user data root, so the Edit
+  // Skater / Custom Textures section (F7) is reachable again after restarts.
+  custom_textures_dialog_ =
+      std::make_unique<skate3::CustomTexturesDialog>(drawer, user_data_root());
   rex::ui::RegisterBind(
       "bind_skate3_menu", "Escape", "Skate 3 settings", [this] {
         if (vanilla_ui_prototype_dialog_ &&
             vanilla_ui_prototype_dialog_->visible()) {
           vanilla_ui_prototype_dialog_->NavigateBack();
+          return;
+        }
+        if (custom_textures_dialog_ && custom_textures_dialog_->visible()) {
+          custom_textures_dialog_->Hide();
+          ApplyGameplayCursorMode();
           return;
         }
         // Escape backs out of the settings screen level by level (rows ->
@@ -1251,6 +1260,9 @@ void Skate3BaseApp::OnCreateDialogs(rex::ui::ImGuiDrawer *drawer) {
   rex::ui::RegisterBind("bind_skate3_native_debug", "F12",
                         "Native render debug menu",
                         [this] { ToggleNativeDebug(); });
+  rex::ui::RegisterBind("bind_skate3_custom_textures", "F7",
+                        "Edit Skater - custom textures",
+                        [this] { ToggleCustomTextures(); });
   rex::ui::RegisterBind(
       "bind_skate3_showcase", "Ctrl+Shift+B", "Graphics build-up showcase", [] {
         // A capture/recording tool, not a player feature:
@@ -1313,7 +1325,8 @@ void Skate3BaseApp::OnPostSetup() {
       const bool settings_visible =
           (simple_settings_dialog_ && simple_settings_dialog_->visible()) ||
           (vanilla_ui_prototype_dialog_ &&
-           vanilla_ui_prototype_dialog_->visible());
+           vanilla_ui_prototype_dialog_->visible()) ||
+          (custom_textures_dialog_ && custom_textures_dialog_->visible());
       const bool xam_ui_active = rex::kernel::xam::xeXamIsUIActive();
       // The drone cam owns the keyboard while flying: keep guest input off
       // so the fly keys don't also steer the skater.
@@ -1401,6 +1414,7 @@ void Skate3BaseApp::OnShutdown() {
   rex::ui::UnregisterBind("bind_skate3_log_debug_marker");
   rex::ui::UnregisterBind("bind_skate3_log_user_marker");
   rex::ui::UnregisterBind("bind_skate3_native_debug");
+  rex::ui::UnregisterBind("bind_skate3_custom_textures");
   rex::ui::UnregisterBind("bind_skate3_map_editor");
   rex::ui::UnregisterBind("bind_skate3_map_editor_spawn");
   ApplyGameplayCursorMode();
@@ -1412,6 +1426,7 @@ void Skate3BaseApp::OnShutdown() {
   simple_settings_dialog_.reset();
   release_updater_.reset();
   native_debug_dialog_.reset();
+  custom_textures_dialog_.reset();
   render_mode_indicator_.reset();
   map_editor_spawn_dialog_.reset();
 }
@@ -1708,6 +1723,19 @@ void Skate3BaseApp::ToggleNativeDebug() {
   } else {
     ApplySettingsCursorMode();
     native_debug_dialog_->Show();
+  }
+}
+
+void Skate3BaseApp::ToggleCustomTextures() {
+  if (!custom_textures_dialog_) {
+    return;
+  }
+  if (custom_textures_dialog_->visible()) {
+    custom_textures_dialog_->Hide();
+    ApplyGameplayCursorMode();
+  } else {
+    ApplySettingsCursorMode();
+    custom_textures_dialog_->Show();
   }
 }
 

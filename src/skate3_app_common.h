@@ -13,6 +13,7 @@
 #include <rex/rex_app.h>
 #include <rex/ui/overlay/simple_settings_overlay.h>
 
+#include "skate3_custom_textures_dialog.h"
 #include "skate3_native_debug_dialog.h"
 #include "skate3_map_editor_spawn_dialog.h"
 #include "skate3_release_updater.h"
@@ -44,6 +45,7 @@ class Skate3BaseApp : public rex::ReXApp {
   void ToggleSimpleSettings();
   void ToggleVanillaUiPrototype();
   void ToggleNativeDebug();
+  void ToggleCustomTextures();
   void ApplySettingsCursorMode();
   void ApplyGameplayCursorMode();
   void RestartGame();
@@ -67,6 +69,7 @@ class Skate3BaseApp : public rex::ReXApp {
       vanilla_ui_prototype_dialog_;
   std::unique_ptr<skate3::ReleaseUpdater> release_updater_;
   std::unique_ptr<skate3::NativeDebugDialog> native_debug_dialog_;
+  std::unique_ptr<skate3::CustomTexturesDialog> custom_textures_dialog_;
   std::unique_ptr<skate3::RenderModeIndicator> render_mode_indicator_;
   std::unique_ptr<skate3::MapEditorSpawnDialog>
       map_editor_spawn_dialog_;
